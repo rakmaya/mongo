@@ -27,177 +27,228 @@
  *    it in the license file.
  */
 
-#include "mongo/db/timeseries/hcindex/temporal_symbol_dictionary.h"
+#include "mongo/db/exec/timeseries/hcindex/temporal_symbol_dictionary.h"
+#include "mongo/db/exec/timeseries/hcindex/hcindex_writer.h"
 #include "mongo/unittest/unittest.h"
 
 namespace mongo::timeseries::hcindex {
+
+// Helper struct to hold both dictionary and writer for testing
+struct TestSymbolDictionaryContext {
+    std::unique_ptr<HCIndexWriter> writer;
+    SymbolDictionary* dict;
+};
+
+// Helper function to create a SymbolDictionary for testing
+// Creates a dictionary with a writer so it can be modified
+// Note: The caller must keep the returned context alive for the duration of the test
+TestSymbolDictionaryContext createTestSymbolDictionaryWithWriter() {
+    auto collectionUUID = UUID::gen();
+    Timestamp windowStart(1, 0);
+    Timestamp windowEnd(2, 0);
+    auto writer = std::make_unique<HCIndexWriter>(collectionUUID);
+    auto dict = new SymbolDictionary(DictionaryGranularity::HOURLY, windowStart, windowEnd, writer.get());
+    ASSERT_OK(dict->changeState(SymbolDictionaryState::ReadWrite));
+    return {std::move(writer), dict};
+}
 
 // ============================================================================
 // SymbolDictionary Tests
 // ============================================================================
 
 TEST(SymbolDictionaryTest, GetOrInsertSymbolReturnsNewIndex) {
-    SymbolDictionary dict;
+    auto ctx = createTestSymbolDictionaryWithWriter();
 
-    auto result = dict.getOrInsertSymbol("nyc-01");
+    auto result = ctx.dict->getOrInsertSymbol("nyc-01");
     ASSERT_TRUE(result.isOK());
     ASSERT_EQ(1u, result.getValue());
+    delete ctx.dict;
 }
 
 TEST(SymbolDictionaryTest, GetOrInsertSymbolReturnsSameIndexForSameWord) {
-    SymbolDictionary dict;
+    auto ctx = createTestSymbolDictionaryWithWriter();
 
-    auto result1 = dict.getOrInsertSymbol("nyc-01");
-    auto result2 = dict.getOrInsertSymbol("nyc-01");
+    auto result1 = ctx.dict->getOrInsertSymbol("nyc-01");
+    auto result2 = ctx.dict->getOrInsertSymbol("nyc-01");
 
     ASSERT_TRUE(result1.isOK());
     ASSERT_TRUE(result2.isOK());
     ASSERT_EQ(result1.getValue(), result2.getValue());
+    delete ctx.dict;
 }
 
 TEST(SymbolDictionaryTest, GetOrInsertSymbolAssignsSequentialIndices) {
-    SymbolDictionary dict;
+    auto ctx = createTestSymbolDictionaryWithWriter();
 
-    auto result1 = dict.getOrInsertSymbol("word1");
-    auto result2 = dict.getOrInsertSymbol("word2");
-    auto result3 = dict.getOrInsertSymbol("word3");
+    auto result1 = ctx.dict->getOrInsertSymbol("word1");
+    auto result2 = ctx.dict->getOrInsertSymbol("word2");
+    auto result3 = ctx.dict->getOrInsertSymbol("word3");
 
     ASSERT_EQ(1u, result1.getValue());
     ASSERT_EQ(2u, result2.getValue());
     ASSERT_EQ(3u, result3.getValue());
+    delete ctx.dict;
 }
 
 TEST(SymbolDictionaryTest, GetSymbolIndexReturnsIndexIfFound) {
-    SymbolDictionary dict;
+    auto ctx = createTestSymbolDictionaryWithWriter();
 
-    auto _ = dict.getOrInsertSymbol("nyc-01");
-    auto result = dict.getSymbolIndex("nyc-01");
+    auto _ = ctx.dict->getOrInsertSymbol("nyc-01");
+    auto result = ctx.dict->getSymbolIndex("nyc-01");
 
     ASSERT_TRUE(result);
     ASSERT_EQ(1u, result.value());
+    delete ctx.dict;
 }
 
 TEST(SymbolDictionaryTest, GetSymbolIndexReturnsNoneIfNotFound) {
-    SymbolDictionary dict;
+    auto ctx = createTestSymbolDictionaryWithWriter();
 
-    auto result = dict.getSymbolIndex("not-found");
+    auto result = ctx.dict->getSymbolIndex("not-found");
 
     ASSERT_FALSE(result);
+    delete ctx.dict;
 }
 
 TEST(SymbolDictionaryTest, GetSymbolReturnsWordIfFound) {
-    SymbolDictionary dict;
+    auto ctx = createTestSymbolDictionaryWithWriter();
 
-    auto _ = dict.getOrInsertSymbol("nyc-01");
-    auto result = dict.getSymbol(1);
+    auto _ = ctx.dict->getOrInsertSymbol("nyc-01");
+    auto result = ctx.dict->getSymbol(1);
 
     ASSERT_TRUE(result);
     ASSERT_EQ("nyc-01", result.value());
+    delete ctx.dict;
 }
 
 TEST(SymbolDictionaryTest, GetSymbolReturnsNoneForInvalidIndex) {
-    SymbolDictionary dict;
+    auto ctx = createTestSymbolDictionaryWithWriter();
 
-    auto result = dict.getSymbol(999);
+    auto result = ctx.dict->getSymbol(999);
 
     ASSERT_FALSE(result);
+    delete ctx.dict;
 }
 
 TEST(SymbolDictionaryTest, GetSymbolReturnsNoneForReservedZeroIndex) {
-    SymbolDictionary dict;
+    auto ctx = createTestSymbolDictionaryWithWriter();
 
-    auto result = dict.getSymbol(0);
+    auto result = ctx.dict->getSymbol(0);
 
     ASSERT_FALSE(result);
+    delete ctx.dict;
 }
 
 TEST(SymbolDictionaryTest, GetSymbolCountReturnsCorrectCount) {
-    SymbolDictionary dict;
+    auto ctx = createTestSymbolDictionaryWithWriter();
 
-    ASSERT_EQ(0u, dict.getSymbolCount());
+    ASSERT_EQ(0u, ctx.dict->getSymbolCount());
 
-    auto _ = dict.getOrInsertSymbol("word1");
-    ASSERT_EQ(1u, dict.getSymbolCount());
+    auto _ = ctx.dict->getOrInsertSymbol("word1");
+    ASSERT_EQ(1u, ctx.dict->getSymbolCount());
 
-    _ = dict.getOrInsertSymbol("word2");
-    ASSERT_EQ(2u, dict.getSymbolCount());
+    _ = ctx.dict->getOrInsertSymbol("word2");
+    ASSERT_EQ(2u, ctx.dict->getSymbolCount());
 
-    _ = dict.getOrInsertSymbol("word1");  // Duplicate
-    ASSERT_EQ(2u, dict.getSymbolCount());
+    _ = ctx.dict->getOrInsertSymbol("word1");  // Duplicate
+    ASSERT_EQ(2u, ctx.dict->getSymbolCount());
+    delete ctx.dict;
 }
 
 TEST(SymbolDictionaryTest, GetMemoryUsageBytesReturnsPositiveValue) {
-    SymbolDictionary dict;
+    auto ctx = createTestSymbolDictionaryWithWriter();
 
-    auto _ = dict.getOrInsertSymbol("nyc-01");
-    _ = dict.getOrInsertSymbol("api-server");
+    auto _ = ctx.dict->getOrInsertSymbol("nyc-01");
+    _ = ctx.dict->getOrInsertSymbol("api-server");
 
-    size_t memoryUsage = dict.getMemoryUsageBytes();
+    size_t memoryUsage = ctx.dict->getMemoryUsageBytes();
     ASSERT_GT(memoryUsage, 0u);
+    delete ctx.dict;
 }
 
 // ============================================================================
 // TemporalSymbolDictionary Tests
 // ============================================================================
 
+// Helper struct to hold both TemporalSymbolDictionary and writer for testing
+struct TestTemporalSymbolDictionaryContext {
+    std::unique_ptr<HCIndexWriter> writer;
+    TemporalSymbolDictionary* tempDict;
+};
+
+// Helper function to create a TemporalSymbolDictionary for testing
+TestTemporalSymbolDictionaryContext createTestTemporalSymbolDictionaryWithWriter() {
+    auto collectionUUID = UUID::gen();
+    auto writer = std::make_unique<HCIndexWriter>(collectionUUID);
+    auto tempDict = new TemporalSymbolDictionary(nullptr, collectionUUID, DictionaryGranularity::HOURLY, writer.get());
+    return {std::move(writer), tempDict};
+}
+
 TEST(TemporalSymbolDictionaryTest, EncodeSingleSymbol) {
-    TemporalSymbolDictionary tempDict(nullptr, UUID::gen(), DictionaryGranularity::HOURLY);
+    auto ctx = createTestTemporalSymbolDictionaryWithWriter();
     Timestamp ts(1000, 0);
 
-    auto result = tempDict.encodeSymbol("nyc-01", ts);
+    auto result = ctx.tempDict->encodeSymbol("nyc-01", ts);
 
     ASSERT_TRUE(result.isOK());
     ASSERT_EQ(1u, result.getValue());
+    delete ctx.tempDict;
 }
 
 TEST(TemporalSymbolDictionaryTest, EncodeSameSymbolReturnsSameIndex) {
-    TemporalSymbolDictionary tempDict(nullptr, UUID::gen(), DictionaryGranularity::HOURLY);
+    auto ctx = createTestTemporalSymbolDictionaryWithWriter();
     Timestamp ts(1000, 0);
 
-    auto result1 = tempDict.encodeSymbol("nyc-01", ts);
-    auto result2 = tempDict.encodeSymbol("nyc-01", ts);
+    auto result1 = ctx.tempDict->encodeSymbol("nyc-01", ts);
+    auto result2 = ctx.tempDict->encodeSymbol("nyc-01", ts);
 
     ASSERT_TRUE(result1.isOK());
     ASSERT_TRUE(result2.isOK());
     ASSERT_EQ(result1.getValue(), result2.getValue());
+    delete ctx.tempDict;
 }
 
 
 
 TEST(TemporalSymbolDictionaryTest, DecodeSymbol) {
-    TemporalSymbolDictionary tempDict(nullptr, UUID::gen(), DictionaryGranularity::HOURLY);
+    auto ctx = createTestTemporalSymbolDictionaryWithWriter();
     Timestamp ts(1000, 0);
 
-    auto _ = tempDict.encodeSymbol("nyc-01", ts);
-    auto result = tempDict.decodeSymbol(1, ts);
+    auto _ = ctx.tempDict->encodeSymbol("nyc-01", ts);
+    auto result = ctx.tempDict->decodeSymbol(1, ts);
 
     ASSERT_TRUE(result);
     ASSERT_EQ("nyc-01", result.value());
+    delete ctx.tempDict;
 }
 
 TEST(TemporalSymbolDictionaryTest, DecodeSymbolReturnsNoneForInvalidIndex) {
-    TemporalSymbolDictionary tempDict(nullptr, UUID::gen(), DictionaryGranularity::HOURLY);
+    auto ctx = createTestTemporalSymbolDictionaryWithWriter();
     Timestamp ts(1000, 0);
 
-    auto result = tempDict.decodeSymbol(999, ts);
+    auto result = ctx.tempDict->decodeSymbol(999, ts);
 
     ASSERT_FALSE(result);
+    delete ctx.tempDict;
 }
 
 
 
 TEST(TemporalSymbolDictionaryTest, GetWindowForTimestamp) {
-    TemporalSymbolDictionary tempDict(nullptr, UUID::gen(), DictionaryGranularity::HOURLY);
+    auto ctx = createTestTemporalSymbolDictionaryWithWriter();
     Timestamp ts(3661, 0);  // 1 hour + 1 second
 
-    auto [windowStart, windowEnd] = tempDict.getWindowForTimestamp(ts);
+    auto [windowStart, windowEnd] = ctx.tempDict->getWindowForTimestamp(ts);
 
     ASSERT_EQ(3600u, windowStart.getSecs());  // Start of hour
     ASSERT_EQ(7200u, windowEnd.getSecs());    // End of hour
+    delete ctx.tempDict;
 }
 
 TEST(TemporalSymbolDictionaryTest, GetWindowForTimestampDaily) {
-    TemporalSymbolDictionary tempDict(nullptr, UUID::gen(), DictionaryGranularity::DAILY);
+    auto collectionUUID = UUID::gen();
+    auto writer = std::make_unique<HCIndexWriter>(collectionUUID);
+    TemporalSymbolDictionary tempDict(nullptr, collectionUUID, DictionaryGranularity::DAILY, writer.get());
     Timestamp ts(86401, 0);  // 1 day + 1 second
 
     auto [windowStart, windowEnd] = tempDict.getWindowForTimestamp(ts);
@@ -207,21 +258,24 @@ TEST(TemporalSymbolDictionaryTest, GetWindowForTimestampDaily) {
 }
 
 TEST(TemporalSymbolDictionaryTest, GetStats) {
-    TemporalSymbolDictionary tempDict(nullptr, UUID::gen(), DictionaryGranularity::HOURLY);
+    auto ctx = createTestTemporalSymbolDictionaryWithWriter();
     Timestamp ts(1000, 0);
 
-    auto _ = tempDict.encodeSymbol("nyc-01", ts);
-    _ = tempDict.encodeSymbol("api-1", ts);
+    auto _ = ctx.tempDict->encodeSymbol("nyc-01", ts);
+    _ = ctx.tempDict->encodeSymbol("api-1", ts);
 
-    auto stats = tempDict.getStats();
+    auto stats = ctx.tempDict->getStats();
 
     ASSERT_EQ(1u, stats.totalDictionaries);
     ASSERT_EQ(2u, stats.totalSymbols);
     ASSERT_GT(stats.memoryUsageBytes, 0u);
+    delete ctx.tempDict;
 }
 
 TEST(TemporalSymbolDictionaryTest, CleanupOldDictionaries) {
-    TemporalSymbolDictionary tempDict(nullptr, UUID::gen(), DictionaryGranularity::HOURLY);
+    auto collectionUUID = UUID::gen();
+    HCIndexWriter writer(collectionUUID);
+    TemporalSymbolDictionary tempDict(nullptr, collectionUUID, DictionaryGranularity::HOURLY, &writer);
 
     // Create dictionaries for different time windows
     Timestamp ts1(1000, 0);   // Window: 0-3600
@@ -244,7 +298,9 @@ TEST(TemporalSymbolDictionaryTest, CleanupOldDictionaries) {
 }
 
 TEST(TemporalSymbolDictionaryTest, DifferentWindowsHaveSeparateDictionaries) {
-    TemporalSymbolDictionary tempDict(nullptr, UUID::gen(), DictionaryGranularity::HOURLY);
+    auto collectionUUID = UUID::gen();
+    HCIndexWriter writer(collectionUUID);
+    TemporalSymbolDictionary tempDict(nullptr, collectionUUID, DictionaryGranularity::HOURLY, &writer);
 
     Timestamp ts1(1000, 0);   // Window: 0-3600
     Timestamp ts2(5000, 0);   // Window: 3600-7200

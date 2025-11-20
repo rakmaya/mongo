@@ -298,6 +298,14 @@ void commitTimeseriesBucketsAtomically(
         std::vector<write_ops::UpdateCommandRequest> updateOps;
         auto& mainBucketCatalog =
             bucket_catalog::GlobalBucketCatalog::get(opCtx->getServiceContext());
+
+        // Get TimeseriesOptions for HCIndex support
+        TimeseriesOptions timeseriesOptions;
+        auto tsOptions = coll->getTimeseriesOptions();
+        if (tsOptions) {
+            timeseriesOptions = *tsOptions;
+        }
+
         for (auto batch : batchesToCommit) {
             auto prepareCommitStatus =
                 prepareCommit(sideBucketCatalog, batch, coll->getDefaultCollator());
@@ -307,7 +315,7 @@ void commitTimeseriesBucketsAtomically(
             }
 
             write_ops_utils::makeWriteRequestFromBatch(
-                opCtx, batch, bucketsNs, &insertOps, &updateOps);
+                opCtx, batch, bucketsNs, timeseriesOptions, &sideBucketCatalog, &insertOps, &updateOps);
 
             // Starts tracking the newly inserted bucket in the main bucket catalog as a direct
             // write to prevent other writers from modifying it.

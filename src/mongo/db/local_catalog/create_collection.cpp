@@ -83,6 +83,8 @@
 #include "mongo/db/timeseries/timeseries_options.h"
 #include "mongo/db/timeseries/timeseries_request_util.h"
 #include "mongo/db/timeseries/viewless_timeseries_collection_creation_helpers.h"
+#include "mongo/db/timeseries/bucket_catalog/global_bucket_catalog.h"
+#include "mongo/db/exec/timeseries/hcindex/hcindex_collection_manager.h"
 #include "mongo/idl/command_generic_argument.h"
 #include "mongo/logv2/log.h"
 #include "mongo/platform/compiler.h"
@@ -769,6 +771,31 @@ Status _createCollection(
             }
             uassertStatusOK(
                 timeseries::createDefaultTimeseriesIndex(opCtx, collWriter, validatedCollator));
+
+            // Initialize HCIndex if enabled for this timeseries collection
+            if (collectionOptions.timeseries->getUseHCIndex() &&
+                collectionOptions.timeseries->getUseHCIndex().value_or(false)) {
+                CollectionWriter collWriter(opCtx, nss);
+                auto collectionUUID = collWriter->uuid();
+
+                // Create and initialize HCIndexCollectionManager
+                auto hcindexMgr = std::make_shared<timeseries::hcindex::HCIndexCollectionManager>(
+                    opCtx, collectionUUID, timeseries::hcindex::DictionaryGranularity::HOURLY);
+
+                auto initStatus = hcindexMgr->initialize();
+                if (!initStatus.isOK()) {
+                    return initStatus;
+                }
+
+                // Store the manager in BucketCatalog
+                auto& bucketCatalog =
+                    timeseries::bucket_catalog::GlobalBucketCatalog::get(opCtx->getServiceContext());
+                auto setStatus = timeseries::bucket_catalog::setHCIndexManager(
+                    bucketCatalog, collectionUUID, hcindexMgr);
+                if (!setStatus.isOK()) {
+                    return setStatus;
+                }
+            }
         }
 
         wunit.commit();

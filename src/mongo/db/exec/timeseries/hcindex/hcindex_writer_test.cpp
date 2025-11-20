@@ -27,7 +27,7 @@
  *    it in the license file.
  */
 
-#include "mongo/db/timeseries/hcindex/hcindex_writer.h"
+#include "mongo/db/exec/timeseries/hcindex/hcindex_writer.h"
 #include "mongo/db/local_catalog/catalog_test_fixture.h"
 #include "mongo/unittest/unittest.h"
 
@@ -79,30 +79,30 @@ protected:
     }
 };
 
-TEST_F(HCIndexWriterTest, WriteSymbolInitCreatesValidDocument) {
-    auto opCtx = operationContext();
+TEST_F(HCIndexWriterTest, InitSymbolDictionaryAndFlushCreatesINITOperation) {
     auto collectionUUID = getTestCollectionUUID();
-    auto nss = getSymbolOpsNamespace(collectionUUID);
-    createOpsCollection(nss);
-
-    HCIndexWriter writer(opCtx, collectionUUID);
+    HCIndexWriter writer(collectionUUID);
 
     Timestamp windowStart(1, 0);
     Timestamp windowEnd(2, 0);
-    std::vector<std::pair<std::string, uint32_t>> symbols = {
-        {"nyc", 1},
-        {"us-east", 2},
-        {"prod", 3}
-    };
 
-    auto status = writer.writeSymbolInit(windowStart, windowEnd, DictionaryGranularity::HOURLY, symbols);
+    // Mark as INIT mode
+    ASSERT_OK(writer.initSymbolDictionary(windowStart, windowEnd));
+
+    // Add symbols incrementally
+    ASSERT_OK(writer.addSymbol(windowStart, windowEnd, "nyc", 1));
+    ASSERT_OK(writer.addSymbol(windowStart, windowEnd, "us-east", 2));
+    ASSERT_OK(writer.addSymbol(windowStart, windowEnd, "prod", 3));
+
+    // Flush accumulated symbols
+    auto status = writer.flush(windowStart, windowEnd, DictionaryGranularity::HOURLY, true);
     ASSERT_OK(status);
 
-    // Verify the document was written correctly
-    auto docs = readCollectionDocuments(nss);
-    ASSERT_EQ(docs.size(), 1);
+    // Verify the operation was accumulated
+    auto pendingOps = writer.getPendingSymbolOperations();
+    ASSERT_EQ(pendingOps.size(), 1);
 
-    auto doc = docs[0];
+    auto doc = pendingOps[0].doc;
     ASSERT(doc.hasField("_id"));
     ASSERT_EQ(doc.getStringField("op"), "INIT");
     ASSERT_EQ(doc.getField("windowStart").timestamp(), windowStart);
@@ -116,27 +116,34 @@ TEST_F(HCIndexWriterTest, WriteSymbolInitCreatesValidDocument) {
     ASSERT_EQ(symbolsObj.getIntField("prod"), 3);
 }
 
-TEST_F(HCIndexWriterTest, WriteAttributeInitCreatesValidDocument) {
-    auto opCtx = operationContext();
+TEST_F(HCIndexWriterTest, InitAttributeTableAndFlushCreatesINITOperation) {
     auto collectionUUID = getTestCollectionUUID();
-    auto nss = getAttributeOpsNamespace(collectionUUID);
-    createOpsCollection(nss);
-
-    HCIndexWriter writer(opCtx, collectionUUID);
+    HCIndexWriter writer(collectionUUID);
 
     Timestamp windowStart(1, 0);
     Timestamp windowEnd(2, 0);
-    std::vector<std::string> schema = {"cluster", "service", "pod"};
-    std::vector<std::vector<uint32_t>> rows = {{1, 2, 3}, {1, 0, 4}};
 
-    auto status = writer.writeAttributeInit(windowStart, windowEnd, DictionaryGranularity::HOURLY, schema, rows);
+    // Mark as INIT mode
+    ASSERT_OK(writer.initAttributeTable(windowStart, windowEnd));
+
+    // Add schema fields incrementally
+    ASSERT_OK(writer.addSchemaField(windowStart, windowEnd, "cluster"));
+    ASSERT_OK(writer.addSchemaField(windowStart, windowEnd, "service"));
+    ASSERT_OK(writer.addSchemaField(windowStart, windowEnd, "pod"));
+
+    // Add rows incrementally
+    ASSERT_OK(writer.addAttributeRow(windowStart, windowEnd, {1, 2, 3}));
+    ASSERT_OK(writer.addAttributeRow(windowStart, windowEnd, {1, 0, 4}));
+
+    // Flush accumulated attributes
+    auto status = writer.flush(windowStart, windowEnd, DictionaryGranularity::HOURLY, false);
     ASSERT_OK(status);
 
-    // Verify the document was written correctly
-    auto docs = readCollectionDocuments(nss);
-    ASSERT_EQ(docs.size(), 1);
+    // Verify the operation was accumulated
+    auto pendingOps = writer.getPendingAttributeOperations();
+    ASSERT_EQ(pendingOps.size(), 1);
 
-    auto doc = docs[0];
+    auto doc = pendingOps[0].doc;
     ASSERT(doc.hasField("_id"));
     ASSERT_EQ(doc.getStringField("op"), "INIT");
     ASSERT_EQ(doc.getField("windowStart").timestamp(), windowStart);
@@ -153,87 +160,94 @@ TEST_F(HCIndexWriterTest, WriteAttributeInitCreatesValidDocument) {
     ASSERT_EQ(rowsArr.nFields(), 2);
 }
 
-TEST_F(HCIndexWriterTest, WriteSymbolAddCreatesValidDocument) {
-    auto opCtx = operationContext();
+TEST_F(HCIndexWriterTest, InitThenAddCreatesINITThenopADDOperations) {
     auto collectionUUID = getTestCollectionUUID();
-    auto nss = getSymbolOpsNamespace(collectionUUID);
-    createOpsCollection(nss);
-
-    HCIndexWriter writer(opCtx, collectionUUID);
+    HCIndexWriter writer(collectionUUID);
 
     Timestamp windowStart(1, 0);
     Timestamp windowEnd(2, 0);
-    std::vector<std::pair<std::string, uint32_t>> symbols = {{"newSymbol", 4}};
 
-    auto status = writer.writeSymbolAdd(windowStart, windowEnd, DictionaryGranularity::HOURLY, symbols);
-    ASSERT_OK(status);
+    // First flush: INIT operation with initial symbols
+    ASSERT_OK(writer.initSymbolDictionary(windowStart, windowEnd));
+    ASSERT_OK(writer.addSymbol(windowStart, windowEnd, "nyc", 1));
+    ASSERT_OK(writer.addSymbol(windowStart, windowEnd, "us-east", 2));
+    auto status1 = writer.flush(windowStart, windowEnd, DictionaryGranularity::HOURLY, true);
+    ASSERT_OK(status1);
 
-    // Verify the document was written correctly
-    auto docs = readCollectionDocuments(nss);
-    ASSERT_EQ(docs.size(), 1);
+    // Second flush: opADD operation with additional symbols (no init call, defaults to ADD mode)
+    ASSERT_OK(writer.addSymbol(windowStart, windowEnd, "prod", 3));
+    auto status2 = writer.flush(windowStart, windowEnd, DictionaryGranularity::HOURLY, true);
+    ASSERT_OK(status2);
 
-    auto doc = docs[0];
-    ASSERT(doc.hasField("_id"));
-    ASSERT_EQ(doc.getStringField("op"), "opADD");
-    ASSERT_EQ(doc.getField("windowStart").timestamp(), windowStart);
-    ASSERT_EQ(doc.getField("windowEnd").timestamp(), windowEnd);
-    ASSERT_EQ(doc.getIntField("granularity"), static_cast<int>(DictionaryGranularity::HOURLY));
+    // Verify both operations were accumulated
+    auto pendingOps = writer.getPendingSymbolOperations();
+    ASSERT_EQ(pendingOps.size(), 2);
 
-    // Verify new symbol is present
-    auto symbolsObj = doc.getObjectField("symbols");
-    ASSERT_EQ(symbolsObj.getIntField("newSymbol"), 4);
+    // Verify first document is INIT
+    auto doc1 = pendingOps[0].doc;
+    ASSERT_EQ(doc1.getStringField("op"), "INIT");
+    auto symbolsObj1 = doc1.getObjectField("symbols");
+    ASSERT_EQ(symbolsObj1.getIntField("nyc"), 1);
+    ASSERT_EQ(symbolsObj1.getIntField("us-east"), 2);
+
+    // Verify second document is opADD
+    auto doc2 = pendingOps[1].doc;
+    ASSERT_EQ(doc2.getStringField("op"), "opADD");
+    auto symbolsObj2 = doc2.getObjectField("symbols");
+    ASSERT_EQ(symbolsObj2.getIntField("prod"), 3);
 }
 
-TEST_F(HCIndexWriterTest, WriteAttributeAddCreatesValidDocument) {
-    auto opCtx = operationContext();
+TEST_F(HCIndexWriterTest, InitAttributeThenAddCreatesINITThenopADDOperations) {
     auto collectionUUID = getTestCollectionUUID();
-    auto nss = getAttributeOpsNamespace(collectionUUID);
-    createOpsCollection(nss);
-
-    HCIndexWriter writer(opCtx, collectionUUID);
+    HCIndexWriter writer(collectionUUID);
 
     Timestamp windowStart(1, 0);
     Timestamp windowEnd(2, 0);
-    std::vector<std::pair<std::string, size_t>> attributes = {{"newField", 3}};
 
-    auto status = writer.writeAttributeAdd(windowStart, windowEnd, DictionaryGranularity::HOURLY, attributes);
-    ASSERT_OK(status);
+    // First flush: INIT operation with initial schema and rows
+    ASSERT_OK(writer.initAttributeTable(windowStart, windowEnd));
+    ASSERT_OK(writer.addSchemaField(windowStart, windowEnd, "cluster"));
+    ASSERT_OK(writer.addSchemaField(windowStart, windowEnd, "service"));
+    ASSERT_OK(writer.addAttributeRow(windowStart, windowEnd, {1, 2}));
+    auto status1 = writer.flush(windowStart, windowEnd, DictionaryGranularity::HOURLY, false);
+    ASSERT_OK(status1);
 
-    // Verify the document was written correctly
-    auto docs = readCollectionDocuments(nss);
-    ASSERT_EQ(docs.size(), 1);
+    // Second flush: opADD operation with additional attribute (no init call, defaults to ADD mode)
+    ASSERT_OK(writer.addAttribute(windowStart, windowEnd, "pod", 2));
+    auto status2 = writer.flush(windowStart, windowEnd, DictionaryGranularity::HOURLY, false);
+    ASSERT_OK(status2);
 
-    auto doc = docs[0];
-    ASSERT(doc.hasField("_id"));
-    ASSERT_EQ(doc.getStringField("op"), "opADD");
-    ASSERT_EQ(doc.getField("windowStart").timestamp(), windowStart);
-    ASSERT_EQ(doc.getField("windowEnd").timestamp(), windowEnd);
-    ASSERT_EQ(doc.getIntField("granularity"), static_cast<int>(DictionaryGranularity::HOURLY));
+    // Verify both operations were accumulated
+    auto pendingOps = writer.getPendingAttributeOperations();
+    ASSERT_EQ(pendingOps.size(), 2);
 
-    // Verify new attribute is present
-    auto attrsObj = doc.getObjectField("attributes");
-    ASSERT_EQ(attrsObj.getIntField("newField"), 3);
+    // Verify first document is INIT with schema and rows
+    auto doc1 = pendingOps[0].doc;
+    ASSERT_EQ(doc1.getStringField("op"), "INIT");
+    ASSERT(doc1.hasField("schema"));
+    ASSERT(doc1.hasField("rows"));
+
+    // Verify second document is opADD with attributes
+    auto doc2 = pendingOps[1].doc;
+    ASSERT_EQ(doc2.getStringField("op"), "opADD");
+    ASSERT(doc2.hasField("attributes"));
 }
 
-TEST_F(HCIndexWriterTest, WriteFinCreatesValidDocument) {
-    auto opCtx = operationContext();
+TEST_F(HCIndexWriterTest, BuildFinCreatesValidDocument) {
     auto collectionUUID = getTestCollectionUUID();
-    auto nss = getSymbolOpsNamespace(collectionUUID);
-    createOpsCollection(nss);
-
-    HCIndexWriter writer(opCtx, collectionUUID);
+    HCIndexWriter writer(collectionUUID);
 
     Timestamp windowStart(1, 0);
     Timestamp windowEnd(2, 0);
 
-    auto status = writer.writeFin(windowStart, windowEnd, DictionaryGranularity::HOURLY, true);
+    auto status = writer.buildFin(windowStart, windowEnd, DictionaryGranularity::HOURLY, true);
     ASSERT_OK(status);
 
-    // Verify the document was written correctly
-    auto docs = readCollectionDocuments(nss);
-    ASSERT_EQ(docs.size(), 1);
+    // Verify the operation was accumulated
+    auto pendingOps = writer.getPendingSymbolOperations();
+    ASSERT_EQ(pendingOps.size(), 1);
 
-    auto doc = docs[0];
+    auto doc = pendingOps[0].doc;
     ASSERT(doc.hasField("_id"));
     ASSERT_EQ(doc.getStringField("op"), "FIN");
     ASSERT_EQ(doc.getField("windowStart").timestamp(), windowStart);
@@ -243,26 +257,22 @@ TEST_F(HCIndexWriterTest, WriteFinCreatesValidDocument) {
     ASSERT_EQ(doc.getField("timestamp").timestamp(), windowEnd);
 }
 
-TEST_F(HCIndexWriterTest, WriteRefCreatesValidDocument) {
-    auto opCtx = operationContext();
+TEST_F(HCIndexWriterTest, BuildRefCreatesValidDocument) {
     auto collectionUUID = getTestCollectionUUID();
-    auto nss = getSymbolOpsNamespace(collectionUUID);
-    createOpsCollection(nss);
-
-    HCIndexWriter writer(opCtx, collectionUUID);
+    HCIndexWriter writer(collectionUUID);
 
     Timestamp windowStart(2, 0);
     Timestamp windowEnd(3, 0);
     Timestamp refWindowStart(1, 0);
 
-    auto status = writer.writeRef(windowStart, windowEnd, DictionaryGranularity::HOURLY, refWindowStart);
+    auto status = writer.buildRef(windowStart, windowEnd, DictionaryGranularity::HOURLY, refWindowStart);
     ASSERT_OK(status);
 
-    // Verify the document was written correctly
-    auto docs = readCollectionDocuments(nss);
-    ASSERT_EQ(docs.size(), 1);
+    // Verify the operation was accumulated
+    auto pendingOps = writer.getPendingSymbolOperations();
+    ASSERT_EQ(pendingOps.size(), 1);
 
-    auto doc = docs[0];
+    auto doc = pendingOps[0].doc;
     ASSERT(doc.hasField("_id"));
     ASSERT_EQ(doc.getStringField("op"), "REF");
     ASSERT_EQ(doc.getField("windowStart").timestamp(), windowStart);
@@ -273,38 +283,31 @@ TEST_F(HCIndexWriterTest, WriteRefCreatesValidDocument) {
 }
 
 TEST_F(HCIndexWriterTest, SymbolInitFollowedByAddCreatesSequence) {
-    auto opCtx = operationContext();
     auto collectionUUID = getTestCollectionUUID();
-    auto nss = getSymbolOpsNamespace(collectionUUID);
-    createOpsCollection(nss);
-
-    HCIndexWriter writer(opCtx, collectionUUID);
+    HCIndexWriter writer(collectionUUID);
 
     Timestamp windowStart(1, 0);
     Timestamp windowEnd(2, 0);
 
-    // Write INIT operation with initial symbols
-    std::vector<std::pair<std::string, uint32_t>> initSymbols = {
-        {"region", 1},
-        {"zone", 2}
-    };
-    auto initStatus = writer.writeSymbolInit(windowStart, windowEnd, DictionaryGranularity::HOURLY, initSymbols);
+    // First flush: INIT operation with initial symbols
+    ASSERT_OK(writer.initSymbolDictionary(windowStart, windowEnd));
+    ASSERT_OK(writer.addSymbol(windowStart, windowEnd, "region", 1));
+    ASSERT_OK(writer.addSymbol(windowStart, windowEnd, "zone", 2));
+    auto initStatus = writer.flush(windowStart, windowEnd, DictionaryGranularity::HOURLY, true);
     ASSERT_OK(initStatus);
 
-    // Write ADD operation with new symbols
-    std::vector<std::pair<std::string, uint32_t>> addSymbols = {
-        {"pod", 3},
-        {"instance", 4}
-    };
-    auto addStatus = writer.writeSymbolAdd(windowStart, windowEnd, DictionaryGranularity::HOURLY, addSymbols);
+    // Second flush: opADD operation with new symbols (no init call, defaults to ADD mode)
+    ASSERT_OK(writer.addSymbol(windowStart, windowEnd, "pod", 3));
+    ASSERT_OK(writer.addSymbol(windowStart, windowEnd, "instance", 4));
+    auto addStatus = writer.flush(windowStart, windowEnd, DictionaryGranularity::HOURLY, true);
     ASSERT_OK(addStatus);
 
-    // Verify both documents were written
-    auto docs = readCollectionDocuments(nss);
-    ASSERT_EQ(docs.size(), 2);
+    // Verify both operations were accumulated
+    auto pendingOps = writer.getPendingSymbolOperations();
+    ASSERT_EQ(pendingOps.size(), 2);
 
     // Verify INIT document (first)
-    auto initDoc = docs[0];
+    auto initDoc = pendingOps[0].doc;
     ASSERT_EQ(initDoc.getStringField("op"), "INIT");
     ASSERT_EQ(initDoc.getField("windowStart").timestamp(), windowStart);
     ASSERT_EQ(initDoc.getField("windowEnd").timestamp(), windowEnd);
@@ -313,7 +316,7 @@ TEST_F(HCIndexWriterTest, SymbolInitFollowedByAddCreatesSequence) {
     ASSERT_EQ(initSymbolsObj.getIntField("zone"), 2);
 
     // Verify ADD document (second)
-    auto addDoc = docs[1];
+    auto addDoc = pendingOps[1].doc;
     ASSERT_EQ(addDoc.getStringField("op"), "opADD");
     ASSERT_EQ(addDoc.getField("windowStart").timestamp(), windowStart);
     ASSERT_EQ(addDoc.getField("windowEnd").timestamp(), windowEnd);
@@ -323,33 +326,32 @@ TEST_F(HCIndexWriterTest, SymbolInitFollowedByAddCreatesSequence) {
 }
 
 TEST_F(HCIndexWriterTest, AttributeInitFollowedByAddCreatesSequence) {
-    auto opCtx = operationContext();
     auto collectionUUID = getTestCollectionUUID();
-    auto nss = getAttributeOpsNamespace(collectionUUID);
-    createOpsCollection(nss);
-
-    HCIndexWriter writer(opCtx, collectionUUID);
+    HCIndexWriter writer(collectionUUID);
 
     Timestamp windowStart(1, 0);
     Timestamp windowEnd(2, 0);
 
-    // Write INIT operation with initial schema and rows
-    std::vector<std::string> initSchema = {"cluster", "service"};
-    std::vector<std::vector<uint32_t>> initRows = {{1, 2}, {1, 3}};
-    auto initStatus = writer.writeAttributeInit(windowStart, windowEnd, DictionaryGranularity::HOURLY, initSchema, initRows);
+    // First flush: INIT operation with initial schema and rows
+    ASSERT_OK(writer.initAttributeTable(windowStart, windowEnd));
+    ASSERT_OK(writer.addSchemaField(windowStart, windowEnd, "cluster"));
+    ASSERT_OK(writer.addSchemaField(windowStart, windowEnd, "service"));
+    ASSERT_OK(writer.addAttributeRow(windowStart, windowEnd, {1, 2}));
+    ASSERT_OK(writer.addAttributeRow(windowStart, windowEnd, {1, 3}));
+    auto initStatus = writer.flush(windowStart, windowEnd, DictionaryGranularity::HOURLY, false);
     ASSERT_OK(initStatus);
 
-    // Write ADD operation with new attribute
-    std::vector<std::pair<std::string, size_t>> addAttributes = {{"pod", 2}};
-    auto addStatus = writer.writeAttributeAdd(windowStart, windowEnd, DictionaryGranularity::HOURLY, addAttributes);
+    // Second flush: opADD operation with new attribute (no init call, defaults to ADD mode)
+    ASSERT_OK(writer.addAttribute(windowStart, windowEnd, "pod", 2));
+    auto addStatus = writer.flush(windowStart, windowEnd, DictionaryGranularity::HOURLY, false);
     ASSERT_OK(addStatus);
 
-    // Verify both documents were written
-    auto docs = readCollectionDocuments(nss);
-    ASSERT_EQ(docs.size(), 2);
+    // Verify both operations were accumulated
+    auto pendingOps = writer.getPendingAttributeOperations();
+    ASSERT_EQ(pendingOps.size(), 2);
 
     // Verify INIT document (first)
-    auto initDoc = docs[0];
+    auto initDoc = pendingOps[0].doc;
     ASSERT_EQ(initDoc.getStringField("op"), "INIT");
     ASSERT_EQ(initDoc.getField("windowStart").timestamp(), windowStart);
     ASSERT_EQ(initDoc.getField("windowEnd").timestamp(), windowEnd);
@@ -360,7 +362,7 @@ TEST_F(HCIndexWriterTest, AttributeInitFollowedByAddCreatesSequence) {
     ASSERT_EQ(initRowsArr.nFields(), 2);
 
     // Verify ADD document (second)
-    auto addDoc = docs[1];
+    auto addDoc = pendingOps[1].doc;
     ASSERT_EQ(addDoc.getStringField("op"), "opADD");
     ASSERT_EQ(addDoc.getField("windowStart").timestamp(), windowStart);
     ASSERT_EQ(addDoc.getField("windowEnd").timestamp(), windowEnd);

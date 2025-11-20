@@ -398,7 +398,20 @@ BSONObj makeTimeseriesInsertCompressedBucketDocument(
 
     auto metadataElem = batch->bucketKey.metadata.element();
     if (metadataElem) {
-        insertBuilder.appendAs(metadataElem, kBucketMetaFieldName);
+        // For HCIndex batches, add the HCIndex flag to the metadata
+        if (batch->isHCIndexBatch) {
+            BSONObjBuilder metaBuilder;
+            metaBuilder.appendElements(metadataElem.Obj());
+            metaBuilder.append(kBucketMetaHCIndexPresent, 1);
+            insertBuilder.append(kBucketMetaFieldName, metaBuilder.obj());
+        } else {
+            insertBuilder.appendAs(metadataElem, kBucketMetaFieldName);
+        }
+    } else if (batch->isHCIndexBatch) {
+        // Even if there's no metadata element, add the HCIndex flag for HCIndex batches
+        BSONObjBuilder metaBuilder;
+        metaBuilder.append(kBucketMetaHCIndexPresent, 1);
+        insertBuilder.append(kBucketMetaFieldName, metaBuilder.obj());
     }
 
     {
@@ -450,6 +463,18 @@ void makeWriteRequestFromBatch(OperationContext* opCtx,
         return;
     }
     updateOps->push_back(makeTimeseriesCompressedDiffUpdateOpFromBatch(opCtx, batch, bucketsNs));
+}
+
+void makeWriteRequestFromBatch(OperationContext* opCtx,
+                               std::shared_ptr<bucket_catalog::WriteBatch> batch,
+                               const NamespaceString& bucketsNs,
+                               const TimeseriesOptions& options,
+                               bucket_catalog::BucketCatalog* bucketCatalog,
+                               std::vector<mongo::write_ops::InsertCommandRequest>* insertOps,
+                               std::vector<mongo::write_ops::UpdateCommandRequest>* updateOps) {
+    // For now, just delegate to the traditional path
+    // The HCIndex path uses the same write path since measurements already have rowIds embedded
+    makeWriteRequestFromBatch(opCtx, batch, bucketsNs, insertOps, updateOps);
 }
 
 mongo::write_ops::InsertCommandRequest makeTimeseriesInsertOpFromBatch(

@@ -31,8 +31,8 @@
 #include "mongo/base/status_with.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/timeseries/hcindex/temporal_symbol_dictionary.h"
-#include "mongo/db/timeseries/hcindex/temporal_attribute_table.h"
+#include "mongo/db/exec/timeseries/hcindex/temporal_symbol_dictionary.h"
+#include "mongo/db/exec/timeseries/hcindex/temporal_attribute_table.h"
 #include "mongo/util/uuid.h"
 
 #include <memory>

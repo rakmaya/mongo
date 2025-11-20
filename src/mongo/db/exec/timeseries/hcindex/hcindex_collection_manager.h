@@ -27,13 +27,17 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/timeseries/hcindex/temporal_symbol_dictionary.h"
-#include "mongo/db/timeseries/hcindex/temporal_attribute_table.h"
-#include "mongo/db/timeseries/hcindex/hcindex_writer.h"
-#include "mongo/db/timeseries/hcindex/hcindex_reader.h"
+#include "mongo/db/exec/timeseries/hcindex/temporal_symbol_dictionary.h"
+#include "mongo/db/exec/timeseries/hcindex/temporal_attribute_table.h"
+#include "mongo/db/exec/timeseries/hcindex/hcindex_writer.h"
+#include "mongo/db/exec/timeseries/hcindex/hcindex_reader.h"
+#include "mongo/db/repl/oplog.h"
 #include "mongo/util/uuid.h"
 
+#include <functional>
 #include <memory>
+#include <string>
+#include <vector>
 
 namespace mongo::timeseries::hcindex {
 
@@ -123,6 +127,28 @@ public:
         return granularity;
     }
 
+    /**
+     * Flush pending operations accumulated by the writer.
+     *
+     * This method retrieves all pending operations from the writer and invokes the
+     * provided callback for each collection type (symbol and attribute operations).
+     *
+     * The callback function receives:
+     * - collectionName: The target collection name (system.hcindex.ops.symbols.* or system.hcindex.ops.attributes.*)
+     * - operations: Vector of InsertStatement objects to be flushed
+     *
+     * The caller is responsible for implementing the actual database insert logic
+     * in the callback. This design allows maximum flexibility in how operations
+     * are persisted (e.g., batching, transaction handling, etc.).
+     *
+     * Callback signature:
+     *   std::function<Status(const std::string& collectionName, const std::vector<InsertStatement>& operations)>
+     *
+     * Returns Status::OK() on success, or an error status if flushing fails.
+     */
+    Status flushPendingOperations(
+        std::function<Status(const std::string&, const std::vector<InsertStatement>&)> flushCallback);
+
 private:
     // Operation context for database operations
     OperationContext* opCtx;
@@ -133,17 +159,17 @@ private:
     // Dictionary granularity for time-window scoping
     DictionaryGranularity granularity;
 
-    // Temporal symbol dictionary for encoding metadata values
-    std::unique_ptr<TemporalSymbolDictionary> symbolDictionary;
-
-    // Temporal attribute table for storing metadata rows
-    std::unique_ptr<TemporalAttributeTable> attributeTable;
-
     // Writer for operations
     std::unique_ptr<HCIndexWriter> writer;
 
     // Reader for operations
     std::unique_ptr<HCIndexReader> reader;
+
+    // Temporal symbol dictionary for encoding metadata values
+    std::unique_ptr<TemporalSymbolDictionary> symbolDictionary;
+
+    // Temporal attribute table for storing metadata rows
+    std::unique_ptr<TemporalAttributeTable> attributeTable;
 };
 
 }  // namespace mongo::timeseries::hcindex

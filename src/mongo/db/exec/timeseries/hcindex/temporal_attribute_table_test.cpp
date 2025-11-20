@@ -27,8 +27,9 @@
  *    it in the license file.
  */
 
-#include "mongo/db/timeseries/hcindex/temporal_attribute_table.h"
-#include "mongo/db/timeseries/hcindex/temporal_symbol_dictionary.h"
+#include "mongo/db/exec/timeseries/hcindex/temporal_attribute_table.h"
+#include "mongo/db/exec/timeseries/hcindex/temporal_symbol_dictionary.h"
+#include "mongo/db/exec/timeseries/hcindex/hcindex_writer.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/bson/bsonobjbuilder.h"
 
@@ -41,10 +42,17 @@ namespace mongo::timeseries::hcindex {
 class AttributeTableTest : public unittest::Test {
 protected:
     void setUp() override {
-        dict = std::make_unique<SymbolDictionary>();
-        table = std::make_unique<AttributeTable>(dict.get());
+        auto collectionUUID = UUID::gen();
+        writer = std::make_unique<HCIndexWriter>(collectionUUID);
+        Timestamp windowStart(1, 0);
+        Timestamp windowEnd(2, 0);
+        dict = std::make_unique<SymbolDictionary>(DictionaryGranularity::HOURLY, windowStart, windowEnd, writer.get());
+        ASSERT_OK(dict->changeState(SymbolDictionaryState::ReadWrite));
+        table = std::make_unique<AttributeTable>(dict.get(), writer.get(), windowStart, windowEnd);
+        ASSERT_OK(table->changeState(AttributeTableState::ReadWrite));
     }
 
+    std::unique_ptr<HCIndexWriter> writer;
     std::unique_ptr<SymbolDictionary> dict;
     std::unique_ptr<AttributeTable> table;
 };
@@ -58,7 +66,8 @@ TEST_F(AttributeTableTest, InsertRowWithMetadata) {
     auto result = table->insertRow(metadata);
 
     ASSERT_TRUE(result.isOK());
-    ASSERT_EQ(0, result.getValue());  // First row gets ID 0
+    ASSERT_EQ(0, result.getValue().rowId);  // First row gets ID 0
+    ASSERT_TRUE(result.getValue().isNewRow);  // Should be a new row
 }
 
 TEST_F(AttributeTableTest, InsertRowReturnsSequentialIds) {
@@ -72,8 +81,10 @@ TEST_F(AttributeTableTest, InsertRowReturnsSequentialIds) {
 
     ASSERT_TRUE(result1.isOK());
     ASSERT_TRUE(result2.isOK());
-    ASSERT_EQ(0, result1.getValue());
-    ASSERT_EQ(1, result2.getValue());
+    ASSERT_EQ(0, result1.getValue().rowId);
+    ASSERT_EQ(1, result2.getValue().rowId);
+    ASSERT_TRUE(result1.getValue().isNewRow);
+    ASSERT_TRUE(result2.getValue().isNewRow);
 }
 
 TEST_F(AttributeTableTest, InsertRowDeduplicatesSameMetadata) {
@@ -87,7 +98,9 @@ TEST_F(AttributeTableTest, InsertRowDeduplicatesSameMetadata) {
 
     ASSERT_TRUE(result1.isOK());
     ASSERT_TRUE(result2.isOK());
-    ASSERT_EQ(result1.getValue(), result2.getValue());
+    ASSERT_EQ(result1.getValue().rowId, result2.getValue().rowId);
+    ASSERT_TRUE(result1.getValue().isNewRow);  // First insert is new
+    ASSERT_FALSE(result2.getValue().isNewRow);  // Second insert is duplicate
 }
 
 TEST_F(AttributeTableTest, GetRowReturnsInsertedRow) {
@@ -99,7 +112,7 @@ TEST_F(AttributeTableTest, GetRowReturnsInsertedRow) {
     auto insertResult = table->insertRow(metadata);
     ASSERT_TRUE(insertResult.isOK());
 
-    auto getResult = table->getRow(insertResult.getValue());
+    auto getResult = table->getRow(insertResult.getValue().rowId);
 
     ASSERT_TRUE(getResult);
     ASSERT_EQ(2u, getResult.value().size());
@@ -119,6 +132,7 @@ TEST_F(AttributeTableTest, GetSchemaReturnsFieldNames) {
 
     auto result = table->insertRow(metadata);
     ASSERT_TRUE(result.isOK());
+    ASSERT_TRUE(result.getValue().isNewRow);
     auto schema = table->getSchema();
 
     ASSERT_EQ(2u, schema.size());
@@ -136,11 +150,13 @@ TEST_F(AttributeTableTest, SchemaEvolvesWithNewFields) {
 
     auto result1 = table->insertRow(metadata1);
     ASSERT_TRUE(result1.isOK());
+    ASSERT_TRUE(result1.getValue().isNewRow);
     auto schema1 = table->getSchema();
     ASSERT_EQ(1u, schema1.size());
 
     auto result2 = table->insertRow(metadata2);
     ASSERT_TRUE(result2.isOK());
+    ASSERT_TRUE(result2.getValue().isNewRow);
     auto schema2 = table->getSchema();
     ASSERT_EQ(2u, schema2.size());
 }
@@ -155,14 +171,17 @@ TEST_F(AttributeTableTest, GetRowCountReturnsCorrectCount) {
 
     auto r1 = table->insertRow(metadata1);
     ASSERT_TRUE(r1.isOK());
+    ASSERT_TRUE(r1.getValue().isNewRow);
     ASSERT_EQ(1u, table->getRowCount());
 
     auto r2 = table->insertRow(metadata2);
     ASSERT_TRUE(r2.isOK());
+    ASSERT_TRUE(r2.getValue().isNewRow);
     ASSERT_EQ(2u, table->getRowCount());
 
     auto r3 = table->insertRow(metadata1);  // Duplicate
     ASSERT_TRUE(r3.isOK());
+    ASSERT_FALSE(r3.getValue().isNewRow);
     ASSERT_EQ(2u, table->getRowCount());
 }
 
@@ -174,6 +193,7 @@ TEST_F(AttributeTableTest, GetMemoryUsageBytesReturnsPositiveValue) {
 
     auto result = table->insertRow(metadata);
     ASSERT_TRUE(result.isOK());
+    ASSERT_TRUE(result.getValue().isNewRow);
 
     size_t memoryUsage = table->getMemoryUsageBytes();
     ASSERT_GT(memoryUsage, 0u);
@@ -187,6 +207,7 @@ TEST_F(AttributeTableTest, InsertRowDirectWithVector) {
                             << "value2");
     auto insertResult = table->insertRow(metadata);
     ASSERT_TRUE(insertResult.isOK());
+    ASSERT_TRUE(insertResult.getValue().isNewRow);
 
     // Now insertRowDirect should work with a row matching the schema
     std::vector<uint32_t> row = {1, 2};
@@ -211,6 +232,8 @@ TEST_F(AttributeTableTest, QueryRowsWithPredicate) {
 
     ASSERT_TRUE(result1.isOK());
     ASSERT_TRUE(result2.isOK());
+    ASSERT_TRUE(result1.getValue().isNewRow);
+    ASSERT_TRUE(result2.getValue().isNewRow);
 
     // Query for rows with container = "api-1"
     AttributeTablePredicate predicate;
@@ -228,12 +251,15 @@ TEST_F(AttributeTableTest, QueryRowsWithPredicate) {
 class TemporalAttributeTableTest : public unittest::Test {
 protected:
     void setUp() override {
+        auto collectionUUID = UUID::gen();
+        writer = std::make_unique<HCIndexWriter>(collectionUUID);
         tempDict = std::make_unique<TemporalSymbolDictionary>(
-            nullptr, UUID::gen(), DictionaryGranularity::HOURLY);
+            nullptr, collectionUUID, DictionaryGranularity::HOURLY, writer.get());
         tempTable = std::make_unique<TemporalAttributeTable>(
-            nullptr, UUID::gen(), DictionaryGranularity::HOURLY, tempDict.get());
+            nullptr, collectionUUID, DictionaryGranularity::HOURLY, tempDict.get(), writer.get());
     }
 
+    std::unique_ptr<HCIndexWriter> writer;
     std::unique_ptr<TemporalSymbolDictionary> tempDict;
     std::unique_ptr<TemporalAttributeTable> tempTable;
 };
@@ -246,7 +272,8 @@ TEST_F(TemporalAttributeTableTest, InsertRowWithTimestamp) {
     auto result = tempTable->insertRow(metadata, ts);
 
     ASSERT_TRUE(result.isOK());
-    ASSERT_EQ(0, result.getValue());
+    ASSERT_EQ(0, result.getValue().rowId);
+    ASSERT_TRUE(result.getValue().isNewRow);
 }
 
 TEST_F(TemporalAttributeTableTest, InsertRowDeduplicatesInSameWindow) {
@@ -260,7 +287,9 @@ TEST_F(TemporalAttributeTableTest, InsertRowDeduplicatesInSameWindow) {
 
     ASSERT_TRUE(result1.isOK());
     ASSERT_TRUE(result2.isOK());
-    ASSERT_EQ(result1.getValue(), result2.getValue());
+    ASSERT_EQ(result1.getValue().rowId, result2.getValue().rowId);
+    ASSERT_TRUE(result1.getValue().isNewRow);
+    ASSERT_FALSE(result2.getValue().isNewRow);
 }
 
 TEST_F(TemporalAttributeTableTest, InsertRowCreatesNewRowInDifferentWindow) {
@@ -274,6 +303,8 @@ TEST_F(TemporalAttributeTableTest, InsertRowCreatesNewRowInDifferentWindow) {
 
     ASSERT_TRUE(result1.isOK());
     ASSERT_TRUE(result2.isOK());
+    ASSERT_TRUE(result1.getValue().isNewRow);
+    ASSERT_TRUE(result2.getValue().isNewRow);
     // Different windows may have different row IDs
 }
 
@@ -293,6 +324,7 @@ TEST_F(TemporalAttributeTableTest, GetStats) {
 
     auto result = tempTable->insertRow(metadata, ts);
     ASSERT_TRUE(result.isOK());
+    ASSERT_TRUE(result.getValue().isNewRow);
 
     auto stats = tempTable->getStats();
 
@@ -309,8 +341,10 @@ TEST_F(TemporalAttributeTableTest, CleanupOldTables) {
 
     auto r1 = tempTable->insertRow(metadata, ts1);
     ASSERT_TRUE(r1.isOK());
+    ASSERT_TRUE(r1.getValue().isNewRow);
     auto r2 = tempTable->insertRow(metadata, ts2);
     ASSERT_TRUE(r2.isOK());
+    ASSERT_TRUE(r2.getValue().isNewRow);
 
     auto statsBefore = tempTable->getStats();
     ASSERT_EQ(2u, statsBefore.totalTables);
@@ -330,8 +364,9 @@ TEST_F(TemporalAttributeTableTest, GetRowWithTimestamp) {
 
     auto insertResult = tempTable->insertRow(metadata, ts);
     ASSERT_TRUE(insertResult.isOK());
+    ASSERT_TRUE(insertResult.getValue().isNewRow);
 
-    auto getResult = tempTable->getRow(insertResult.getValue(), ts);
+    auto getResult = tempTable->getRow(insertResult.getValue().rowId, ts);
 
     ASSERT_TRUE(getResult);
 }
@@ -343,6 +378,7 @@ TEST_F(TemporalAttributeTableTest, QueryRowsWithTimestamp) {
 
     auto insertResult = tempTable->insertRow(metadata, ts);
     ASSERT_TRUE(insertResult.isOK());
+    ASSERT_TRUE(insertResult.getValue().isNewRow);
 
     AttributeTablePredicate predicate;
     auto queryResult = tempTable->queryRows(predicate, ts);

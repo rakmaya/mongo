@@ -27,8 +27,8 @@
  *    it in the license file.
  */
 
-#include "mongo/db/timeseries/hcindex/hcindex_reader.h"
-#include "mongo/db/timeseries/hcindex/hcindex_writer.h"
+#include "mongo/db/exec/timeseries/hcindex/hcindex_reader.h"
+#include "mongo/db/exec/timeseries/hcindex/hcindex_writer.h"
 #include "mongo/db/local_catalog/catalog_test_fixture.h"
 #include "mongo/unittest/unittest.h"
 
@@ -53,6 +53,26 @@ protected:
     void createOpsCollection(const NamespaceString& nss) {
         ASSERT_OK(storageInterface()->createCollection(operationContext(), nss, CollectionOptions()));
     }
+
+    void flushPendingOperations(HCIndexWriter& writer, const UUID& collectionUUID) {
+        auto opCtx = operationContext();
+
+        // Flush symbol operations
+        auto symbolOps = writer.getPendingSymbolOperations();
+        if (!symbolOps.empty()) {
+            auto symbolNss = getSymbolOpsNamespace(collectionUUID);
+            ASSERT_OK(storageInterface()->insertDocuments(opCtx, symbolNss, symbolOps));
+        }
+
+        // Flush attribute operations
+        auto attrOps = writer.getPendingAttributeOperations();
+        if (!attrOps.empty()) {
+            auto attrNss = getAttributeOpsNamespace(collectionUUID);
+            ASSERT_OK(storageInterface()->insertDocuments(opCtx, attrNss, attrOps));
+        }
+
+        writer.clearPendingOperations();
+    }
 };
 
 TEST_F(HCIndexReaderTest, ConstructSymbolDictionaryFromInit) {
@@ -61,18 +81,21 @@ TEST_F(HCIndexReaderTest, ConstructSymbolDictionaryFromInit) {
     auto nss = getSymbolOpsNamespace(collectionUUID);
     createOpsCollection(nss);
 
-    // Write initial symbols
-    HCIndexWriter writer(opCtx, collectionUUID);
+    // Build initial symbols
+    HCIndexWriter writer(collectionUUID);
     Timestamp windowStart(1, 0);
     Timestamp windowEnd(2, 0);
-    std::vector<std::pair<std::string, uint32_t>> symbols = {
-        {"region", 1},
-        {"zone", 2},
-        {"pod", 3}
-    };
 
-    auto writeStatus = writer.writeSymbolInit(windowStart, windowEnd, DictionaryGranularity::HOURLY, symbols);
-    ASSERT_OK(writeStatus);
+    // Initialize symbol dictionary and add symbols
+    ASSERT_OK(writer.initSymbolDictionary(windowStart, windowEnd));
+    ASSERT_OK(writer.addSymbol(windowStart, windowEnd, "region", 1));
+    ASSERT_OK(writer.addSymbol(windowStart, windowEnd, "zone", 2));
+    ASSERT_OK(writer.addSymbol(windowStart, windowEnd, "pod", 3));
+    auto buildStatus = writer.flush(windowStart, windowEnd, DictionaryGranularity::HOURLY, true);
+    ASSERT_OK(buildStatus);
+
+    // Flush pending operations to database
+    flushPendingOperations(writer, collectionUUID);
 
     // Construct dictionary
     HCIndexReader reader(opCtx, collectionUUID);
@@ -96,24 +119,26 @@ TEST_F(HCIndexReaderTest, ConstructSymbolDictionaryFromInitAndAdd) {
     auto nss = getSymbolOpsNamespace(collectionUUID);
     createOpsCollection(nss);
 
-    // Write INIT and ADD operations
-    HCIndexWriter writer(opCtx, collectionUUID);
+    // Build INIT and ADD operations
+    HCIndexWriter writer(collectionUUID);
     Timestamp windowStart(1, 0);
     Timestamp windowEnd(2, 0);
 
-    std::vector<std::pair<std::string, uint32_t>> initSymbols = {
-        {"region", 1},
-        {"zone", 2}
-    };
-    auto initStatus = writer.writeSymbolInit(windowStart, windowEnd, DictionaryGranularity::HOURLY, initSymbols);
+    // Initialize symbol dictionary and add initial symbols
+    ASSERT_OK(writer.initSymbolDictionary(windowStart, windowEnd));
+    ASSERT_OK(writer.addSymbol(windowStart, windowEnd, "region", 1));
+    ASSERT_OK(writer.addSymbol(windowStart, windowEnd, "zone", 2));
+    auto initStatus = writer.flush(windowStart, windowEnd, DictionaryGranularity::HOURLY, true);
     ASSERT_OK(initStatus);
 
-    std::vector<std::pair<std::string, uint32_t>> addSymbols = {
-        {"pod", 3},
-        {"instance", 4}
-    };
-    auto addStatus = writer.writeSymbolAdd(windowStart, windowEnd, DictionaryGranularity::HOURLY, addSymbols);
+    // Add more symbols (in ADD mode)
+    ASSERT_OK(writer.addSymbol(windowStart, windowEnd, "pod", 3));
+    ASSERT_OK(writer.addSymbol(windowStart, windowEnd, "instance", 4));
+    auto addStatus = writer.flush(windowStart, windowEnd, DictionaryGranularity::HOURLY, true);
     ASSERT_OK(addStatus);
+
+    // Flush pending operations to database
+    flushPendingOperations(writer, collectionUUID);
 
     // Construct dictionary
     HCIndexReader reader(opCtx, collectionUUID);

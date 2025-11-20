@@ -366,6 +366,7 @@ Status commitTimeseriesBucketsAtomically(OperationContext* opCtx,
         NamespaceString nss;
         const CollatorInterface* collator = nullptr;
 
+        TimeseriesOptions timeseriesOptions;
         try {
             // The associated collection must be acquired before we check for the presence of
             // buckets collection. This ensures that a potential ShardVersion mismatch can be
@@ -386,6 +387,12 @@ Status commitTimeseriesBucketsAtomically(OperationContext* opCtx,
 
             nss = bucketsAq.nss();
             collator = bucketsAq.getCollectionPtr()->getDefaultCollator();
+
+            // Get TimeseriesOptions for HCIndex support
+            auto tsOptions = bucketsAq.getCollectionPtr()->getTimeseriesOptions();
+            if (tsOptions) {
+                timeseriesOptions = *tsOptions;
+            }
         } catch (const DBException& ex) {
             if (ex.code() != ErrorCodes::StaleDbVersion &&
                 !ErrorCodes::isStaleShardVersionError(ex)) {
@@ -406,7 +413,8 @@ Status commitTimeseriesBucketsAtomically(OperationContext* opCtx,
                 return prepareCommitStatus;
             }
 
-            write_ops_utils::makeWriteRequestFromBatch(opCtx, batch, nss, &insertOps, &updateOps);
+            write_ops_utils::makeWriteRequestFromBatch(
+                opCtx, batch, nss, timeseriesOptions, &bucketCatalog, &insertOps, &updateOps);
         }
 
         hangTimeseriesInsertBeforeWrite.pauseWhileSet();

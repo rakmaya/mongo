@@ -28,6 +28,7 @@
  */
 
 #include "mongo/db/exec/timeseries/bucket_unpacker.h"
+#include "mongo/db/exec/timeseries/hcindex/hcindex_collection_manager.h"
 
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -512,6 +513,54 @@ void BucketUnpacker::reset(BSONObj&& bucket, bool bucketMatchedQuery) {
 
     _metaBSONElem = _bucket[kBucketMetaFieldName];
     _metaValue = Value{_metaBSONElem};
+
+    // HCIndex path: Check if this is an HCIndex-encoded bucket using the flag field
+    // HCIndex buckets have the kBucketMetaHCIndexPresent flag set in the metadata
+    if (_hcindexMgr && _spec.metaField() && !_metaValue.missing()) {
+        auto metaObj = _metaBSONElem.Obj();
+        auto hcindexFlagElem = metaObj[kBucketMetaHCIndexPresent];
+
+        if (hcindexFlagElem && hcindexFlagElem.type() == BSONType::numberInt &&
+            hcindexFlagElem.numberInt() == 1) {
+            // This is an HCIndex-encoded bucket - extract the rowId and decode it back to metadata
+
+            // Get the timestamp from the bucket's control field for partial reconstruction
+            auto controlField = _bucket[kBucketControlFieldName];
+            if (controlField && controlField.type() == BSONType::object) {
+                auto controlFieldObj = controlField.Obj();
+                auto minTimeElem = controlFieldObj[kBucketControlMinFieldName];
+                if (minTimeElem && minTimeElem.type() == BSONType::object) {
+                    auto minTimeObj = minTimeElem.Obj();
+                    auto timeElem = minTimeObj[_spec.timeField()];
+                    if (timeElem && timeElem.type() == BSONType::date) {
+                        // Use the minimum time as the timestamp for decoding
+                        Timestamp ts(timeElem.date().toMillisSinceEpoch() / 1000, 0);
+
+                        // Extract rowId from the metadata (it's stored as a field in the meta object)
+                        // For HCIndex buckets, the meta field contains: {windowStart, windowEnd, rowId, hcindex: 1}
+                        auto rowIdElem = metaObj["rowId"];
+                        if (rowIdElem && rowIdElem.type() == BSONType::numberLong) {
+                            int64_t rowId = rowIdElem.numberLong();
+
+                            // Decode the rowId back to metadata using the HCIndex manager
+                            if (_hcindexMgr) {
+                                auto decodedMetadataStatus = _hcindexMgr->decodeMetadata(rowId, ts);
+
+                                if (decodedMetadataStatus.isOK()) {
+                                    // Successfully decoded - use the decoded metadata
+                                    BSONObj decodedMetadata = decodedMetadataStatus.getValue();
+                                    _metaBSONElem = decodedMetadata.firstElement();
+                                    _metaValue = Value{_metaBSONElem};
+                                }
+                                // If decoding fails, fall back to using the window metadata as-is
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     if (_spec.metaField()) {
         // The spec indicates that there might be a metadata region. Missing metadata in
         // measurements is expressed with missing metadata in a bucket. But we disallow undefined

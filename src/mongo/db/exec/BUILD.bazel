@@ -97,6 +97,7 @@ mongo_cc_library(
         "//src/mongo/db:query_expressions",
         "//src/mongo/db/exec/document_value",
         "//src/mongo/db/query:bucket_predicate_generator",
+        "//src/mongo/db/exec/timeseries/hcindex",
     ],
 )
 
@@ -240,6 +241,7 @@ mongo_cc_unit_test(
         "//src/mongo/dbtests:mocklib",
         "//src/mongo/idl:server_parameter_test_controller",
         "//src/mongo/util:clock_source_mock",
+        "//src/mongo/db/exec/timeseries/hcindex",
     ],
 )
 

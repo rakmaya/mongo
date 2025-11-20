@@ -10,10 +10,6 @@ mongo_cc_library(
         "hcindex_writer.cpp",
         "hcindex_reader.cpp",
         "hcindex_collection_manager.cpp",
-        "hc_batch.cpp",
-        "hcindex_bucket_encoder.cpp",
-        "hcindex_bucket_decoder.cpp",
-        "hc_bucket_catalog.cpp",
     ],
     hdrs = [
         "temporal_symbol_dictionary.h",
@@ -21,19 +17,13 @@ mongo_cc_library(
         "hcindex_reader.h",
         "hcindex_writer.h",
         "hcindex_collection_manager.h",
-        "hc_batch.h",
-        "hcindex_bucket_encoder.h",
-        "hcindex_bucket_decoder.h",
-        "hc_bucket_catalog.h",
     ],
     deps = [
         "//src/mongo:base",
         "//src/mongo/bson:bson_validate",
         "//src/mongo/db:service_context",
         "//src/mongo/db:shard_role_api",
-        "//src/mongo/db/collection_crud",
-        "//src/mongo/db/storage:write_unit_of_work",
-        "//src/mongo/db/timeseries/write_ops:timeseries_write_ops_utils_internal",
+        "//src/mongo/db/timeseries:timeseries_options",
     ],
 )
 
@@ -44,8 +34,7 @@ mongo_cc_unit_test(
         "temporal_attribute_table_test.cpp",
         "hcindex_writer_test.cpp",
         "hcindex_reader_test.cpp",
-        "hcindex_integration_test.cpp",
-        "hc_bucket_catalog_test.cpp",
+        "hcindex_collection_manager_test.cpp",
     ],
     tags = ["mongo_unittest_first_group"],
     deps = [
@@ -56,6 +45,7 @@ mongo_cc_unit_test(
         "//src/mongo/db/local_catalog:catalog_test_fixture",
         "//src/mongo/db/storage:write_unit_of_work",
         "//src/mongo/unittest",
+        "//src/mongo/db/collection_crud",
     ],
 )
 

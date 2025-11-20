@@ -29,11 +29,8 @@
 
 #pragma once
 
-#include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobj.h"
-#include "mongo/bson/oid.h"
 #include "mongo/db/operation_id.h"
-#include "mongo/db/repl/optime.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/timeseries/bucket_catalog/bucket_identifiers.h"
 #include "mongo/db/timeseries/bucket_catalog/execution_stats.h"
@@ -109,6 +106,9 @@ struct WriteBatch {
     bool openedDueToMetadata =
         false;  // If true, bucket has been opened due to the inserted measurement having different
     // metadata than available buckets.
+
+    bool isHCIndexBatch = false;  // If true, this batch is from the HCIndex path and measurements
+                                   // contain rowIds and window metadata.
 
     const OperationId opId;
 

@@ -51,6 +51,9 @@ static constexpr StringData kControlMinFieldNamePrefix = "control.min."_sd;
 static constexpr StringData kDataFieldNamePrefix = "data."_sd;
 static constexpr StringData kControlFieldNamePrefix = "control."_sd;
 
+// HCIndex flag field in bucket metadata
+static constexpr StringData kBucketMetaHCIndexPresent = "hcindex"_sd;
+
 // These are hard-coded field names in create collection for time-series collections.
 static constexpr StringData kTimeFieldName = "timeField"_sd;
 static constexpr StringData kMetaFieldName = "metaField"_sd;

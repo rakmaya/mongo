@@ -26,10 +26,10 @@
  *      without specific prior written permission.
  */
 
-#include "mongo/db/timeseries/hcindex/hcindex_reader.h"
+#include "mongo/db/exec/timeseries/hcindex/hcindex_reader.h"
 
 #include "mongo/bson/bsonobj.h"
-#include "mongo/db/collection_crud/collection_write_path.h"
+//#include "mongo/db/collection_crud/collection_write_path.h"
 #include "mongo/db/local_catalog/shard_role_api/shard_role.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/util/str.h"
@@ -44,9 +44,15 @@ StatusWith<std::unique_ptr<SymbolDictionary>> HCIndexReader::constructSymbolDict
     const Timestamp& windowEnd,
     DictionaryGranularity granularity,
     const Timestamp& upToTimestamp) {
-    
-    auto dict = std::make_unique<SymbolDictionary>();
-    
+
+    auto dict = std::make_unique<SymbolDictionary>(granularity, windowStart, windowEnd, nullptr);
+
+    // Change state to Reconstruction for dictionaries being reconstructed by the reader
+    auto stateStatus = dict->changeState(SymbolDictionaryState::Reconstruction);
+    if (!stateStatus.isOK()) {
+        return stateStatus;
+    }
+
     // Construct namespace for symbol operations collection
     std::string collectionName = "system.hcindex.ops.symbols." + collectionUUID.toString();
     NamespaceString nss = NamespaceString::makeGlobalConfigCollection(StringData(collectionName));
@@ -98,7 +104,13 @@ StatusWith<std::unique_ptr<SymbolDictionary>> HCIndexReader::constructSymbolDict
             }
         }
     }
-    
+
+    // Set the dictionary to read-only after construction is complete
+    auto readOnlyStatus = dict->changeState(SymbolDictionaryState::ReadOnly);
+    if (!readOnlyStatus.isOK()) {
+        return readOnlyStatus;
+    }
+
     return std::move(dict);
 }
 
@@ -108,8 +120,14 @@ StatusWith<std::unique_ptr<AttributeTable>> HCIndexReader::constructAttributeTab
     DictionaryGranularity granularity,
     const Timestamp& upToTimestamp,
     SymbolDictionary* symbolDictionary) {
-    
-    auto table = std::make_unique<AttributeTable>(symbolDictionary);
+
+    auto table = std::make_unique<AttributeTable>(symbolDictionary, nullptr, windowStart, windowEnd);
+
+    // Change state to Reconstruction for tables being reconstructed by the reader
+    auto stateStatus = table->changeState(AttributeTableState::Reconstruction);
+    if (!stateStatus.isOK()) {
+        return stateStatus;
+    }
     
     // Construct namespace for attribute operations collection
     std::string collectionName = "system.hcindex.ops.attributes." + collectionUUID.toString();
@@ -170,7 +188,13 @@ StatusWith<std::unique_ptr<AttributeTable>> HCIndexReader::constructAttributeTab
             }
         }
     }
-    
+
+    // Set the table to read-only after construction is complete
+    auto readOnlyStatus = table->changeState(AttributeTableState::ReadOnly);
+    if (!readOnlyStatus.isOK()) {
+        return readOnlyStatus;
+    }
+
     return std::move(table);
 }
 

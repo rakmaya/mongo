@@ -44,6 +44,9 @@
 #include "mongo/db/timeseries/bucket_catalog/write_batch.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
 #include "mongo/stdx/mutex.h"
+
+#include <memory>
+#include <unordered_map>
 #include "mongo/util/tracking/btree_map.h"
 #include "mongo/util/tracking/flat_hash_set.h"
 #include "mongo/util/tracking/inlined_vector.h"
@@ -54,12 +57,17 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <unordered_map>
 #include <variant>
 
 #include <absl/container/inlined_vector.h>
 #include <boost/container/static_vector.hpp>
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
+
+namespace mongo::timeseries::hcindex {
+class HCIndexCollectionManager;
+}  // namespace mongo::timeseries::hcindex
 
 namespace mongo::timeseries::bucket_catalog {
 
@@ -92,6 +100,7 @@ struct BatchedInsertContext {
     const TimeseriesOptions& options;
     ExecutionStatsController stats;
     std::vector<BatchedInsertTuple> measurementsTimesAndIndices;
+    bool isHCIndexBatch = false;  // If true, this batch is from the HCIndex path
 
     BatchedInsertContext(BucketKey&,
                          StripeNumber,
@@ -188,6 +197,11 @@ public:
 
     // Memory usage threshold in bytes after which idle buckets will be expired.
     std::function<uint64_t()> memoryUsageThreshold;
+
+    // HCIndexCollectionManager instances per collection UUID for HCIndex-enabled collections.
+    // Protected by 'mutex'.
+    std::unordered_map<UUID, std::shared_ptr<hcindex::HCIndexCollectionManager>, UUID::Hash>
+        hcindexManagers;
 };
 
 /**
@@ -274,6 +288,28 @@ void drop(BucketCatalog& catalog, const UUID& collectionUUID);
  * asynchronously through the BucketStateRegistry.
  */
 void clear(BucketCatalog& catalog, const UUID& collectionUUID);
+
+/**
+ * Stores an HCIndexCollectionManager for a collection.
+ * The caller is responsible for creating and initializing the manager.
+ */
+Status setHCIndexManager(BucketCatalog& catalog,
+                         const UUID& collectionUUID,
+                         std::shared_ptr<hcindex::HCIndexCollectionManager> hcindexMgr);
+
+/**
+ * Retrieves the HCIndexCollectionManager for a collection.
+ * Returns nullptr if the collection does not have HCIndex enabled.
+ */
+std::shared_ptr<hcindex::HCIndexCollectionManager> getHCIndexManager(
+    BucketCatalog& catalog,
+    const UUID& collectionUUID);
+
+/**
+ * Cleans up HCIndex structures when a collection is dropped.
+ * Removes the HCIndexCollectionManager for the collection.
+ */
+void cleanupHCIndex(BucketCatalog& catalog, const UUID& collectionUUID);
 
 /**
  * Freezes the given bucket in the registry so that this bucket will never be used in the future.
@@ -542,6 +578,24 @@ std::vector<BatchedInsertContext> buildBatchedInsertContexts(
     std::vector<WriteStageErrorAndIndex>& errorsAndIndices);
 
 /**
+ * HCIndex version of buildBatchedInsertContexts().
+ * Groups measurements by time window only (not by metadata) and transforms the BSON documents.
+ * For each measurement, rewrites the timeField to windowStart and metaField to contain window info.
+ * Flushes pending HCIndex operations before returning.
+ * Returns a vector of BatchedInsertContext with transformed measurements.
+ */
+std::vector<BatchedInsertContext> buildBatchedHCInsertContexts(
+    OperationContext* opCtx,
+    BucketCatalog& bucketCatalog,
+    const UUID& collectionUUID,
+    const TimeseriesOptions& timeseriesOptions,
+    const std::vector<BSONObj>& userMeasurementsBatch,
+    size_t startIndex,
+    size_t numDocsToStage,
+    const std::vector<size_t>& indices,
+    std::vector<WriteStageErrorAndIndex>& errorsAndIndices);
+
+/**
  * Given a BatchedInsertContext, will stage writes to eligible buckets until all measurements have
  * been staged into an eligible bucket. When there is any RolloverReason that isn't kNone when
  * attempting to stage a measurement into a bucket, the function will find another eligible
@@ -582,6 +636,8 @@ StatusWith<TimeseriesWriteBatches> prepareInsertsToBuckets(
     const std::vector<size_t>& indices,
     AllowQueryBasedReopening allowQueryBasedReopening,
     std::vector<WriteStageErrorAndIndex>& errorsAndIndices);
+
+
 
 /**
  * Extracts the information from the input 'doc' that is used to map the document to a bucket.

@@ -240,6 +240,12 @@ structs:
                 validator: {gte: 1, lte: 31536000}
                 stability: stable
                 query_shape: literal
+            useHCIndex:
+                description: "Enable High Cardinality Index (HCIndex) for efficient metadata indexing in timeseries collections."
+                type: safeBool
+                optional: true
+                stability: unstable
+                query_shape: literal
 
     CollModTimeseries:
         description: "A type representing the adjustable options on timeseries collections"

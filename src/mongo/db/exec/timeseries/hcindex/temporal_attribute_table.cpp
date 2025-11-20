@@ -27,8 +27,9 @@
  *    it in the license file.
  */
 
-#include "mongo/db/timeseries/hcindex/temporal_attribute_table.h"
-#include "mongo/db/timeseries/hcindex/temporal_symbol_dictionary.h"
+#include "mongo/db/exec/timeseries/hcindex/temporal_attribute_table.h"
+#include "mongo/db/exec/timeseries/hcindex/temporal_symbol_dictionary.h"
+#include "mongo/db/exec/timeseries/hcindex/hcindex_writer.h"
 #include "mongo/base/error_codes.h"
 
 namespace mongo::timeseries::hcindex {
@@ -37,11 +38,46 @@ namespace mongo::timeseries::hcindex {
 // AttributeTable Implementation
 // ============================================================================
 
-AttributeTable::AttributeTable(SymbolDictionary* symbolDictionary)
-    : symbolDictionary(symbolDictionary) {
+AttributeTable::AttributeTable(SymbolDictionary* symbolDictionary,
+                               HCIndexWriter* writer,
+                               const Timestamp& windowStart,
+                               const Timestamp& windowEnd)
+    : symbolDictionary(symbolDictionary)
+    , writer(writer)
+    , _windowStart(windowStart)
+    , _windowEnd(windowEnd)
+    , _isDirty(false)
+{
 }
 
-StatusWith<int64_t> AttributeTable::insertRow(const BSONObj& metadata) {
+Status AttributeTable::changeState(AttributeTableState newState) {
+    std::unique_lock<std::shared_mutex> lock(mutex);
+
+    // Once in ReadOnly state, no transitions are allowed
+    if (_state == AttributeTableState::ReadOnly) {
+        return Status(ErrorCodes::InternalError, "Cannot change state of read-only table");
+    }
+
+    // Validate state transitions
+    if (_state == AttributeTableState::NOP) {
+        if (newState != AttributeTableState::Reconstruction &&
+            newState != AttributeTableState::ReadWrite) {
+            return Status(ErrorCodes::InternalError,
+                "Invalid state transition from NOP to " + std::to_string(static_cast<int>(newState)));
+        }
+    } else if (_state == AttributeTableState::Reconstruction ||
+               _state == AttributeTableState::ReadWrite) {
+        if (newState != AttributeTableState::ReadOnly) {
+            return Status(ErrorCodes::InternalError,
+                "Invalid state transition from current state to " + std::to_string(static_cast<int>(newState)));
+        }
+    }
+
+    _state = newState;
+    return Status::OK();
+}
+
+StatusWith<InsertRowResult> AttributeTable::insertRow(const BSONObj& metadata) {
     std::unique_lock<std::shared_mutex> lock(mutex);
 
     // Convert metadata to row vector
@@ -55,11 +91,16 @@ StatusWith<int64_t> AttributeTable::insertRow(const BSONObj& metadata) {
     // Check for duplicate row
     auto duplicateRowId = findDuplicateRow(row);
     if (duplicateRowId) {
-        return duplicateRowId.value();
+        return InsertRowResult{duplicateRowId.value(), false};
     }
 
     // Insert new row (note: insertRowDirect does not acquire lock, caller must hold it)
-    return insertRowDirect(row);
+    auto insertResult = insertRowDirect(row);
+    if (!insertResult.isOK()) {
+        return insertResult.getStatus();
+    }
+
+    return InsertRowResult{insertResult.getValue(), true};
 }
 
 StatusWith<int64_t> AttributeTable::insertRowDirect(const std::vector<uint32_t>& row) {
@@ -77,6 +118,7 @@ StatusWith<int64_t> AttributeTable::insertRowDirect(const std::vector<uint32_t>&
         return Status(ErrorCodes::BadValue,
                       "Row has more columns than schema");
     }
+
 
     // Store row and assign ID
     rows.push_back(paddedRow);
@@ -164,6 +206,23 @@ Status AttributeTable::addColumn(StringData fieldName) {
     return Status::OK();
 }
 
+void AttributeTable::flush()
+{
+    std::unique_lock<std::shared_mutex> lock(mutex);
+
+    if (!_isDirty || writer == nullptr) {
+        return;  // Nothing to flush
+    }
+
+    // Flush pending operations via the writer
+    auto status = writer->flush(_windowStart, _windowEnd, symbolDictionary->getGranularity(), false);
+    if (!status.isOK()) {
+        return;  // Could not flush
+    }
+
+    _isDirty = false;
+}
+
 const std::vector<std::string>& AttributeTable::getSchema() const {
     std::shared_lock<std::shared_mutex> lock(mutex);
     return schema;
@@ -220,6 +279,12 @@ StatusWith<std::vector<uint32_t>> AttributeTable::metadataToRow(
             fieldToColumnIndex[fieldName] = schema.size();
             schema.push_back(fieldName);
 
+            // Write the schema
+            auto schemaStatus = writeSchema(fieldName, schema.size() - 1);
+            if (!schemaStatus.isOK()) {
+                return schemaStatus;
+            }
+
             // Extend existing rows with 0
             for (auto& existingRow : rows) {
                 existingRow.push_back(0);
@@ -248,6 +313,12 @@ StatusWith<std::vector<uint32_t>> AttributeTable::metadataToRow(
         }
     }
 
+    // Write the row
+    auto rowStatus = writeRow(row);
+    if (!rowStatus.isOK()) {
+        return rowStatus;
+    }
+
     return row;
 }
 
@@ -263,6 +334,74 @@ boost::optional<int64_t> AttributeTable::findDuplicateRow(
     return boost::none;
 }
 
+Status AttributeTable::writeSchema(const std::string& fieldName, size_t columnIndex)
+{
+    // Check state: modifications only allowed in Reconstruction or ReadWrite modes
+    if (_state == AttributeTableState::NOP) {
+        return Status(ErrorCodes::InternalError, "Table is in NOP state, cannot add schema");
+    }
+    if (_state == AttributeTableState::ReadOnly) {
+        return Status(ErrorCodes::InternalError, "Table is read-only, cannot add schema");
+    }
+
+    // In ReadWrite mode, writer must be set for modifications
+    if (_state == AttributeTableState::ReadWrite && writer == nullptr) {
+        return Status(ErrorCodes::InternalError, "Table in ReadWrite mode requires a writer");
+    }
+
+    // In Reconstruction mode, we don't need a writer
+    // In ReadWrite mode, we need to call the writer
+
+    if (_state == AttributeTableState::ReadWrite) {
+        // If this is the first schema field, we need to initialize the attribute table.
+        if (schema.empty()) {
+            auto stat = writer->initAttributeTable(_windowStart, _windowEnd);
+            if (!stat.isOK()) {
+                return stat;
+            }
+        }
+
+        auto stat = writer->addSchemaField(_windowStart, _windowEnd, fieldName);
+        if (!stat.isOK()) {
+            return stat;
+        }
+
+        _isDirty = true;
+
+        auto attrStat = writer->addAttribute(_windowStart, _windowEnd, fieldName, columnIndex);
+        if (!attrStat.isOK()) {
+            return attrStat;
+        }
+    }
+
+    return Status::OK();
+}
+
+Status AttributeTable::writeRow(const std::vector<uint32_t>& row)
+{
+    // Check state: modifications only allowed in Reconstruction or ReadWrite modes
+    if (_state == AttributeTableState::NOP) {
+        return Status(ErrorCodes::InternalError, "Table is in NOP state, cannot add row");
+    }
+    if (_state == AttributeTableState::ReadOnly) {
+        return Status(ErrorCodes::InternalError, "Table is read-only, cannot add row");
+    }
+
+    // In ReadWrite mode, writer must be set for modifications
+    if (_state == AttributeTableState::ReadWrite && writer == nullptr) {
+        return Status(ErrorCodes::InternalError, "Table in ReadWrite mode requires a writer");
+    }
+
+    // In ReadWrite mode, notify writer of the new row
+    if (_state == AttributeTableState::ReadWrite) {
+        _isDirty = true;
+        return writer->addAttributeRow(_windowStart, _windowEnd, row);
+    }
+
+    return Status::OK();
+}
+
+
 // ============================================================================
 // TemporalAttributeTable Implementation
 // ============================================================================
@@ -270,11 +409,13 @@ boost::optional<int64_t> AttributeTable::findDuplicateRow(
 TemporalAttributeTable::TemporalAttributeTable(OperationContext* opCtx,
                                                const UUID& collectionUUID,
                                                DictionaryGranularity granularity,
-                                               TemporalSymbolDictionary* symbolDictionary)
+                                               TemporalSymbolDictionary* symbolDictionary,
+                                               HCIndexWriter* writer)
     : collectionUUID(collectionUUID),
       granularity(granularity),
       opCtx(opCtx),
-      temporalSymbolDictionary(symbolDictionary) {}
+      temporalSymbolDictionary(symbolDictionary),
+      writer(writer) {}
 
 StatusWith<AttributeTable*> TemporalAttributeTable::getOrCreateTableForTimestamp(
     const Timestamp& timestamp) {
@@ -297,8 +438,8 @@ StatusWith<AttributeTable*> TemporalAttributeTable::getTableForTimestamp(
     return it->second.get();
 }
 
-StatusWith<int64_t> TemporalAttributeTable::insertRow(const BSONObj& metadata,
-                                                      const Timestamp& timestamp) {
+StatusWith<InsertRowResult> TemporalAttributeTable::insertRow(const BSONObj& metadata,
+                                                              const Timestamp& timestamp) {
     auto tableResult = getOrCreateTableForTimestamp(timestamp);
     if (!tableResult.isOK()) {
         return tableResult.getStatus();
@@ -363,6 +504,18 @@ Status TemporalAttributeTable::cleanupOldTables(const Timestamp& beforeTimestamp
     return Status::OK();
 }
 
+
+void TemporalAttributeTable::flush()
+{
+    std::unique_lock<std::shared_mutex> lock(mutex);
+
+    // Flush all tables
+    for (auto& [windowStart, table] : tables) {
+        // Flush the table
+        table->flush();
+    }
+}
+
 TemporalAttributeTable::Stats TemporalAttributeTable::getStats() const {
     std::shared_lock<std::shared_mutex> lock(mutex);
 
@@ -393,7 +546,15 @@ StatusWith<AttributeTable*> TemporalAttributeTable::getOrCreateTable(
     }
 
     // Create new table with the symbol dictionary for this window
-    auto table = std::make_unique<AttributeTable>(dictResult.getValue());
+    Timestamp windowEnd = calculateWindowEnd(windowStart);
+    auto table = std::make_unique<AttributeTable>(dictResult.getValue(), writer, windowStart, windowEnd);
+
+    // Change state to ReadWrite for new tables created by TemporalAttributeTable
+    auto stateStatus = table->changeState(AttributeTableState::ReadWrite);
+    if (!stateStatus.isOK()) {
+        return stateStatus;
+    }
+
     auto* tablePtr = table.get();
     tables[windowStart] = std::move(table);
 

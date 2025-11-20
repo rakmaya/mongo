@@ -44,6 +44,11 @@
 
 namespace mongo::timeseries::hcindex {
 
+//- FORWARD DECLARATIONS
+class HCIndexReader;
+class HCIndexWriter;
+
+
 /**
  * Granularity level of the dictionary
  * TODO. Add AUTO to let the system decide the best granularity based on the
@@ -59,6 +64,27 @@ enum class DictionaryGranularity {
 };
 
 /**
+ * State machine for SymbolDictionary lifecycle:
+ * - NOP: Initial state, no operations allowed
+ * - Reconstruction: Dictionary is being reconstructed from stored operations
+ * - ReadWrite: Dictionary is in normal write mode (new symbols can be added)
+ * - ReadOnly: Dictionary is locked, no modifications allowed
+ *
+ * State transitions:
+ * - NOP -> Reconstruction (via changeState)
+ * - NOP -> ReadWrite (via changeState)
+ * - Reconstruction -> ReadOnly (via changeState)
+ * - ReadWrite -> ReadOnly (via changeState)
+ * - ReadOnly -> (no transitions allowed)
+ */
+enum class SymbolDictionaryState {
+    NOP,
+    Reconstruction,
+    ReadWrite,
+    ReadOnly
+};
+
+/**
  * Represents a single symbol dictionary for a specific time window.
  *
  * Symbols are encoded as 32-bit unsigned integers (uint32_t):
@@ -71,7 +97,20 @@ enum class DictionaryGranularity {
  * - Thread-safe: Uses shared_mutex for concurrent access
  */
 class SymbolDictionary {
+
 public:
+
+    /**
+     * Create a new symbol dictionary with the specified 'writer'.
+     * The dictionary starts in NOP state. Use changeState() to transition to
+     * Reconstruction, ReadWrite, or ReadOnly states.
+     */
+    SymbolDictionary(
+        DictionaryGranularity granularity,
+        Timestamp windowStart,
+        Timestamp windowEnd,
+        HCIndexWriter *writer);
+
     /**
      * Return the symbol index for the specified 'word'. If the word is not
      * found, it is inserted and assigned a new index. Insertion will fail if the
@@ -79,6 +118,36 @@ public:
      * reserved to represent missing values in fetch requests.
      */
     StatusWith<uint32_t> getOrInsertSymbol(StringData word);
+
+    /**
+     * Insert a symbol directly with the specified index. This is used during
+     * reconstruction from stored operations and does not require a writer.
+     * Returns an error if the word already exists or if the index is invalid.
+     */
+    Status insertSymbol(StringData word, uint32_t index);
+
+    /**
+     * Change the state of this dictionary. Transitions are restricted:
+     * - From NOP: can transition to Reconstruction or ReadWrite
+     * - From Reconstruction: can transition to ReadOnly
+     * - From ReadWrite: can transition to ReadOnly
+     * - From ReadOnly: no transitions allowed
+     * Returns an error if the transition is invalid.
+     */
+    Status changeState(SymbolDictionaryState newState);
+
+    /**
+     * Set the writer for this dictionary. This allows a dictionary
+     * to be updated later.
+     */
+    void setWriter(HCIndexWriter* writer) {
+        _writer = writer;
+    }
+
+    /**
+     * Flush any pending operations to the database via the writer.
+     */   
+    void flush();
 
     /**
      * Return the symbol index for the specified 'word' if found. Otherwise,
@@ -102,16 +171,39 @@ public:
      */
     size_t getMemoryUsageBytes() const;
 
+    /**
+     * Return the granularity of this dictionary.
+     */
+    DictionaryGranularity getGranularity() const {
+        return _granularity;
+    }
+
 private:
     // Bidirectional mapping for symbols
-    std::unordered_map<std::string, uint32_t> wordToIndex;
-    std::vector<std::string> indexToWord;
+    std::unordered_map<std::string, uint32_t> _wordToIndex;
+    std::vector<std::string> _indexToWord;
 
     // Next symbol index to assign (starts at 1, 0 is reserved)
-    uint32_t nextSymbolIndex = 1;
+    uint32_t _nextSymbolIndex = 1;
+
+    // Granularity
+    DictionaryGranularity _granularity;
+
+    // Range that we cover
+    Timestamp _windowStart;
+    Timestamp _windowEnd;
+
+    // Writer
+    HCIndexWriter *_writer = nullptr;
+
+    // Current state of the dictionary
+    SymbolDictionaryState _state = SymbolDictionaryState::NOP;
+
+    // Whether there are any pending operations
+    bool _isDirty = false;
 
     // Synchronization
-    mutable std::shared_mutex mutex;
+    mutable std::shared_mutex _mutex;
 };
 
 /**
@@ -134,11 +226,13 @@ public:
      * dictionaries for timeseries collections having the specified
      * 'collectionUUID' with the given 'granularity'. Behavior is undefined
      * unless 'opCtx' and the 'collectionUUID' is valid through the lifetime of
-     * this object.
+     * this object. The 'writer' can be nullptr if this dictionary is being
+     * constructed by a reader (in which case no new operations will be written).
      */
     TemporalSymbolDictionary(OperationContext* opCtx,
                              const UUID& collectionUUID,
-                             DictionaryGranularity granularity);
+                             DictionaryGranularity granularity,
+                             HCIndexWriter *writer);
 
     /**
      * Returns a pointer to the symbol dictionary covering the time window that
@@ -201,6 +295,11 @@ public:
      */
     Stats getStats() const;
 
+    /**
+     * Flush all pending operations to the database.
+     */
+    void flush();
+
 private:
     /**
      * Create or Fetch the dictionary for the time window that starts at the
@@ -224,19 +323,22 @@ private:
     // We want to clean up older dictionaries.
     // TODO: In future, we can create a projection of this map to an LRU
     // iterator to eject unused dictionaries.
-    std::map<Timestamp, std::unique_ptr<SymbolDictionary>> dictionaries;
+    std::map<Timestamp, std::unique_ptr<SymbolDictionary>> _dictionaries;
 
     // Collection UUID for this temporal dictionary
-    UUID collectionUUID;
+    UUID _collectionUUID;
 
     // Granularity level
-    DictionaryGranularity granularity;
+    DictionaryGranularity _granularity;
 
     // Context
-    OperationContext* opCtx;
+    OperationContext* _opCtx;
+
+    // Writer (can be nullptr if constructed by reader)
+    HCIndexWriter *_writer = nullptr;
 
     // Synchronization
-    mutable std::shared_mutex mutex;
+    mutable std::shared_mutex _mutex;
 };
 
 }  // namespace mongo::timeseries::hcindex

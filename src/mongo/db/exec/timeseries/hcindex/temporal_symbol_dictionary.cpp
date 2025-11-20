@@ -27,7 +27,8 @@
  *    it in the license file.
  */
 
-#include "mongo/db/timeseries/hcindex/temporal_symbol_dictionary.h"
+#include "mongo/db/exec/timeseries/hcindex/temporal_symbol_dictionary.h"
+#include "mongo/db/exec/timeseries/hcindex/hcindex_writer.h"
 #include "mongo/base/error_codes.h"
 
 namespace mongo::timeseries::hcindex {
@@ -36,35 +37,130 @@ namespace mongo::timeseries::hcindex {
 // SymbolDictionary Implementation
 // ============================================================================
 
+SymbolDictionary::SymbolDictionary(
+    DictionaryGranularity granularity,
+    Timestamp windowStart,
+    Timestamp windowEnd,
+    HCIndexWriter *writer)
+    : _nextSymbolIndex(1)
+    , _granularity(granularity)
+    , _windowStart(windowStart)
+    , _windowEnd(windowEnd)
+    , _writer(writer)
+    , _isDirty(false)
+{
+}
+
+Status SymbolDictionary::changeState(SymbolDictionaryState newState) {
+    std::unique_lock<std::shared_mutex> lock(_mutex);
+
+    // Once in ReadOnly state, no transitions are allowed
+    if (_state == SymbolDictionaryState::ReadOnly) {
+        return Status(ErrorCodes::InternalError, "Cannot change state of read-only dictionary");
+    }
+
+    // Validate state transitions
+    if (_state == SymbolDictionaryState::NOP) {
+        if (newState != SymbolDictionaryState::Reconstruction &&
+            newState != SymbolDictionaryState::ReadWrite) {
+            return Status(ErrorCodes::InternalError,
+                "Invalid state transition from NOP to " + std::to_string(static_cast<int>(newState)));
+        }
+    } else if (_state == SymbolDictionaryState::Reconstruction ||
+               _state == SymbolDictionaryState::ReadWrite) {
+        if (newState != SymbolDictionaryState::ReadOnly) {
+            return Status(ErrorCodes::InternalError,
+                "Invalid state transition from current state to " + std::to_string(static_cast<int>(newState)));
+        }
+    }
+
+    _state = newState;
+    return Status::OK();
+}
+
 StatusWith<uint32_t> SymbolDictionary::getOrInsertSymbol(StringData word) {
-    std::unique_lock<std::shared_mutex> lock(mutex);
+    std::unique_lock<std::shared_mutex> lock(_mutex);
 
     std::string wordStr = std::string(word);
 
     // Check if word already exists
-    auto it = wordToIndex.find(wordStr);
-    if (it != wordToIndex.end()) {
+    auto it = _wordToIndex.find(wordStr);
+    if (it != _wordToIndex.end()) {
         return it->second;
     }
 
+    // Check state: modifications only allowed in Reconstruction or ReadWrite modes
+    if (_state == SymbolDictionaryState::NOP) {
+        return Status(ErrorCodes::InternalError, "Dictionary is in NOP state, cannot insert symbols");
+    }
+    if (_state == SymbolDictionaryState::ReadOnly) {
+        return Status(ErrorCodes::InternalError, "Dictionary is read-only, cannot insert symbols");
+    }
+
     // Check if dictionary is full (max uint32_t is 2^32 - 1, but 0 is reserved)
-    if (nextSymbolIndex == 0) {
+    if (_nextSymbolIndex == 0) {
         return Status(ErrorCodes::BadValue, "Symbol dictionary is full");
     }
 
-    // Insert new symbol
-    uint32_t symbolIndex = nextSymbolIndex++;
-    wordToIndex[wordStr] = symbolIndex;
-    indexToWord.push_back(wordStr);
+    // In ReadWrite mode, writer must be set for modifications
+    if (_state == SymbolDictionaryState::ReadWrite && _writer == nullptr) {
+        return Status(ErrorCodes::InternalError, "Dictionary in ReadWrite mode requires a writer");
+    }
 
-    return symbolIndex;
+    // In Reconstruction mode, we don't need a writer
+    // In ReadWrite mode, we need to call the writer
+
+    if (_state == SymbolDictionaryState::ReadWrite) {
+        // If this is an empty dictionary, we need to do an INIT operation
+        if (_indexToWord.empty()) {
+            if (!_writer->initSymbolDictionary(_windowStart, _windowEnd).isOK()) {
+                return Status(ErrorCodes::InternalError, "Could not initialize symbol dictionary");
+            }
+        }
+
+        _isDirty = true;
+
+        // Insert new symbol
+        uint32_t symbolIndex = _nextSymbolIndex++;
+        _wordToIndex[wordStr] = symbolIndex;
+        _indexToWord.push_back(wordStr);
+
+        // Add the symbol to the writer
+        if (!_writer->addSymbol(_windowStart, _windowEnd, wordStr, symbolIndex).isOK()) {
+            return Status(ErrorCodes::InternalError, "Could not add symbol to writer");
+        }
+
+        return symbolIndex;
+    } else {
+        // Reconstruction mode: just insert without writer
+        uint32_t symbolIndex = _nextSymbolIndex++;
+        _wordToIndex[wordStr] = symbolIndex;
+        _indexToWord.push_back(wordStr);
+        return symbolIndex;
+    }
+}
+
+void SymbolDictionary::flush()
+{
+    std::unique_lock<std::shared_mutex> lock(_mutex);
+
+    if (!_isDirty || _writer == nullptr) {
+        return;  // Nothing to flush
+    }
+
+    // Flush pending operations via the writer
+    if (!_writer->flush(_windowStart, _windowEnd, _granularity, true).isOK()) {
+        return;  // Could not flush
+    }
+
+    _isDirty = false;
 }
 
 boost::optional<uint32_t> SymbolDictionary::getSymbolIndex(StringData word) const {
-    std::shared_lock<std::shared_mutex> lock(mutex);
+    std::shared_lock<std::shared_mutex> lock(_mutex);
 
-    auto it = wordToIndex.find(std::string(word));
-    if (it != wordToIndex.end()) {
+    auto it = _wordToIndex.find(std::string(word));
+    if (it != _wordToIndex.end()) {
         return it->second;
     }
 
@@ -72,37 +168,37 @@ boost::optional<uint32_t> SymbolDictionary::getSymbolIndex(StringData word) cons
 }
 
 boost::optional<StringData> SymbolDictionary::getSymbol(uint32_t index) const {
-    std::shared_lock<std::shared_mutex> lock(mutex);
+    std::shared_lock<std::shared_mutex> lock(_mutex);
 
     // Index 0 is reserved for missing values
-    if (index == 0 || index > indexToWord.size()) {
+    if (index == 0 || index > _indexToWord.size()) {
         return boost::none;
     }
 
     // indexToWord is 0-indexed, but symbols start from 1
-    return StringData(indexToWord[index - 1]);
+    return StringData(_indexToWord[index - 1]);
 }
 
 size_t SymbolDictionary::getSymbolCount() const {
-    std::shared_lock<std::shared_mutex> lock(mutex);
-    return indexToWord.size();
+    std::shared_lock<std::shared_mutex> lock(_mutex);
+    return _indexToWord.size();
 }
 
 size_t SymbolDictionary::getMemoryUsageBytes() const {
-    std::shared_lock<std::shared_mutex> lock(mutex);
+    std::shared_lock<std::shared_mutex> lock(_mutex);
 
     size_t totalBytes = 0;
 
     // Memory for wordToIndex map
-    for (const auto& [word, index] : wordToIndex) {
+    for (const auto& [word, index] : _wordToIndex) {
         totalBytes += word.size() + sizeof(uint32_t);
     }
 
     // Memory for indexToWord vector
-    for (const auto& word : indexToWord) {
+    for (const auto& word : _indexToWord) {
         totalBytes += word.size();
     }
-    totalBytes += indexToWord.capacity() * sizeof(std::string);
+    totalBytes += _indexToWord.capacity() * sizeof(std::string);
 
     return totalBytes;
 }
@@ -113,8 +209,14 @@ size_t SymbolDictionary::getMemoryUsageBytes() const {
 
 TemporalSymbolDictionary::TemporalSymbolDictionary(OperationContext* opCtx,
                                                    const UUID& collectionUUID,
-                                                   DictionaryGranularity granularity)
-    : collectionUUID(collectionUUID), granularity(granularity), opCtx(opCtx) {}
+                                                   DictionaryGranularity granularity,
+                                                   HCIndexWriter* writer)
+    : _collectionUUID(collectionUUID)
+    , _granularity(granularity)
+    , _opCtx(opCtx)
+    , _writer(writer)
+{
+}
 
 StatusWith<SymbolDictionary*> TemporalSymbolDictionary::getOrCreateDictionaryForTimestamp(
     const Timestamp& ts) {
@@ -124,12 +226,12 @@ StatusWith<SymbolDictionary*> TemporalSymbolDictionary::getOrCreateDictionaryFor
 
 StatusWith<SymbolDictionary*> TemporalSymbolDictionary::getDictionaryForTimestamp(
     const Timestamp& ts) const {
-    std::shared_lock<std::shared_mutex> lock(mutex);
+    std::shared_lock<std::shared_mutex> lock(_mutex);
 
     Timestamp windowStart = calculateWindowStart(ts);
-    auto it = dictionaries.find(windowStart);
+    auto it = _dictionaries.find(windowStart);
 
-    if (it == dictionaries.end()) {
+    if (it == _dictionaries.end()) {
         return Status(ErrorCodes::NoSuchKey, "Dictionary not found for timestamp");
     }
 
@@ -168,13 +270,13 @@ std::pair<Timestamp, Timestamp> TemporalSymbolDictionary::getWindowForTimestamp(
 }
 
 Status TemporalSymbolDictionary::cleanupOldDictionaries(const Timestamp& beforeTimestamp) {
-    std::unique_lock<std::shared_mutex> lock(mutex);
+    std::unique_lock<std::shared_mutex> lock(_mutex);
 
-    auto it = dictionaries.begin();
-    while (it != dictionaries.end()) {
+    auto it = _dictionaries.begin();
+    while (it != _dictionaries.end()) {
         Timestamp windowEnd = calculateWindowEnd(it->first);
         if (windowEnd <= beforeTimestamp) {
-            it = dictionaries.erase(it);
+            it = _dictionaries.erase(it);
         } else {
             ++it;
         }
@@ -183,12 +285,22 @@ Status TemporalSymbolDictionary::cleanupOldDictionaries(const Timestamp& beforeT
     return Status::OK();
 }
 
+void TemporalSymbolDictionary::flush() {
+    std::unique_lock<std::shared_mutex> lock(_mutex);
+
+    // Flush all dictionaries
+    for (auto& [windowStart, dict] : _dictionaries) {
+        // Flush the dictionary
+        dict->flush();
+    }
+}
+
 TemporalSymbolDictionary::Stats TemporalSymbolDictionary::getStats() const {
-    std::shared_lock<std::shared_mutex> lock(mutex);
+    std::shared_lock<std::shared_mutex> lock(_mutex);
 
     Stats stats{0, 0, 0};
 
-    for (const auto& [windowStart, dict] : dictionaries) {
+    for (const auto& [windowStart, dict] : _dictionaries) {
         stats.totalDictionaries++;
         stats.totalSymbols += dict->getSymbolCount();
         stats.memoryUsageBytes += dict->getMemoryUsageBytes();
@@ -199,17 +311,26 @@ TemporalSymbolDictionary::Stats TemporalSymbolDictionary::getStats() const {
 
 StatusWith<SymbolDictionary*> TemporalSymbolDictionary::getOrCreateDictionary(
     const Timestamp& windowStart) {
-    std::unique_lock<std::shared_mutex> lock(mutex);
+    std::unique_lock<std::shared_mutex> lock(_mutex);
 
-    auto it = dictionaries.find(windowStart);
-    if (it != dictionaries.end()) {
+    auto it = _dictionaries.find(windowStart);
+    if (it != _dictionaries.end()) {
         return it->second.get();
     }
 
     // Create new dictionary
-    auto dict = std::make_unique<SymbolDictionary>();
+    auto windowEnd = calculateWindowEnd(windowStart);
+    auto dict = std::make_unique<SymbolDictionary>(
+        _granularity, windowStart, windowEnd, _writer);
+
+    // Change state to ReadWrite for new dictionaries created by TemporalSymbolDictionary
+    auto stateStatus = dict->changeState(SymbolDictionaryState::ReadWrite);
+    if (!stateStatus.isOK()) {
+        return stateStatus;
+    }
+
     auto* dictPtr = dict.get();
-    dictionaries[windowStart] = std::move(dict);
+    _dictionaries[windowStart] = std::move(dict);
 
     return dictPtr;
 }
@@ -218,7 +339,7 @@ Timestamp TemporalSymbolDictionary::calculateWindowStart(const Timestamp& timest
     uint32_t seconds = timestamp.getSecs();
     uint32_t windowSizeSeconds = 0;
 
-    switch (granularity) {
+    switch (_granularity) {
         case DictionaryGranularity::DAILY:
             windowSizeSeconds = 24 * 60 * 60;  // 86400 seconds
             break;
@@ -248,7 +369,7 @@ Timestamp TemporalSymbolDictionary::calculateWindowEnd(const Timestamp& windowSt
     uint32_t seconds = windowStart.getSecs();
     uint32_t windowSizeSeconds = 0;
 
-    switch (granularity) {
+    switch (_granularity) {
         case DictionaryGranularity::DAILY:
             windowSizeSeconds = 24 * 60 * 60;
             break;

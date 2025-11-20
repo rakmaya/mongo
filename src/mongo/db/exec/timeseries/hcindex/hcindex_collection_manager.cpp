@@ -20,7 +20,7 @@
  * the Server Side Public License, version 1, as published by MongoDB, Inc.
  */
 
-#include "mongo/db/timeseries/hcindex/hcindex_collection_manager.h"
+#include "mongo/db/exec/timeseries/hcindex/hcindex_collection_manager.h"
 
 #include "mongo/util/str.h"
 
@@ -32,10 +32,10 @@ HCIndexCollectionManager::HCIndexCollectionManager(OperationContext* opCtx,
     : opCtx(opCtx),
       collectionUUID(collectionUUID),
       granularity(granularity),
-      symbolDictionary(std::make_unique<TemporalSymbolDictionary>(opCtx, collectionUUID, granularity)),
-      attributeTable(std::make_unique<TemporalAttributeTable>(opCtx, collectionUUID, granularity, symbolDictionary.get())),
-      writer(std::make_unique<HCIndexWriter>(opCtx, collectionUUID)),
-      reader(std::make_unique<HCIndexReader>(opCtx, collectionUUID)) {}
+      writer(std::make_unique<HCIndexWriter>(collectionUUID)),
+      reader(std::make_unique<HCIndexReader>(opCtx, collectionUUID)),
+      symbolDictionary(std::make_unique<TemporalSymbolDictionary>(opCtx, collectionUUID, granularity, writer.get())),
+      attributeTable(std::make_unique<TemporalAttributeTable>(opCtx, collectionUUID, granularity, symbolDictionary.get(), writer.get())) {}
 
 Status HCIndexCollectionManager::initialize() {
     // The structures are already initialized in the constructor
@@ -55,7 +55,18 @@ StatusWith<int64_t> HCIndexCollectionManager::encodeMetadata(const BSONObj& meta
         return rowIdStatus.getStatus();
     }
 
-    return rowIdStatus.getValue();
+    // Extract the result - we get both the rowId and whether it's a new row
+    auto insertResult = rowIdStatus.getValue();
+    int64_t rowId = insertResult.rowId;
+    bool isNewRow = insertResult.isNewRow;
+
+    // TODO: Use isNewRow flag to track which rows are new so we can build
+    // appropriate ADD operations when flushPendingOperations is called.
+    // For now, we just return the rowId. The caller can use this information
+    // to decide whether to add operations to the writer.
+    (void)isNewRow;  // Suppress unused variable warning
+
+    return rowId;
 }
 
 StatusWith<BSONObj> HCIndexCollectionManager::decodeMetadata(int64_t rowId,
@@ -105,6 +116,50 @@ StatusWith<BSONObj> HCIndexCollectionManager::decodeMetadata(int64_t rowId,
     }
 
     return builder.obj();
+}
+
+Status HCIndexCollectionManager::flushPendingOperations(
+    std::function<Status(const std::string&, const std::vector<InsertStatement>&)> flushCallback) {
+    if (!writer) {
+        return Status(ErrorCodes::InternalError, "HCIndex writer not initialized");
+    }
+
+    if (!flushCallback) {
+        return Status(ErrorCodes::BadValue, "Flush callback cannot be null");
+    }
+
+    // Flush the writer.
+    symbolDictionary->flush();
+    attributeTable->flush();
+
+    auto pendingSymbolOps = writer->getPendingSymbolOperations();
+    auto pendingAttributeOps = writer->getPendingAttributeOperations();
+
+    if (pendingSymbolOps.empty() && pendingAttributeOps.empty()) {
+        return Status::OK();  // Nothing to flush
+    }
+
+    // Flush symbol operations if any
+    if (!pendingSymbolOps.empty()) {
+        auto symbolCollName = writer->getSymbolOperationsCollectionName();
+        auto status = flushCallback(symbolCollName, pendingSymbolOps);
+        if (!status.isOK()) {
+            return status;
+        }
+    }
+
+    // Flush attribute operations if any
+    if (!pendingAttributeOps.empty()) {
+        auto attributeCollName = writer->getAttributeOperationsCollectionName();
+        auto status = flushCallback(attributeCollName, pendingAttributeOps);
+        if (!status.isOK()) {
+            return status;
+        }
+    }
+
+    // Clear pending operations after successful flush
+    writer->clearPendingOperations();
+    return Status::OK();
 }
 
 Status HCIndexCollectionManager::cleanup() {

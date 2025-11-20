@@ -48,6 +48,38 @@ namespace mongo::timeseries::hcindex {
 // FORWARD DECLARATIONS
 enum class DictionaryGranularity;
 class SymbolDictionary;
+class HCIndexReader;
+class HCIndexWriter;
+
+/**
+ * Result of inserting a row into an attribute table. Contains the row ID and
+ * a flag indicating whether this is a new row (true) or a duplicate (false).
+ */
+struct InsertRowResult {
+    int64_t rowId;
+    bool isNewRow;
+};
+
+/**
+ * State machine for AttributeTable lifecycle:
+ * - NOP: Initial state, no operations allowed
+ * - Reconstruction: Table is being reconstructed from stored operations
+ * - ReadWrite: Table is in normal write mode (new rows can be added)
+ * - ReadOnly: Table is locked, no modifications allowed
+ *
+ * State transitions:
+ * - NOP -> Reconstruction (via changeState)
+ * - NOP -> ReadWrite (via changeState)
+ * - Reconstruction -> ReadOnly (via changeState)
+ * - ReadWrite -> ReadOnly (via changeState)
+ * - ReadOnly -> (no transitions allowed)
+ */
+enum class AttributeTableState {
+    NOP,
+    Reconstruction,
+    ReadWrite,
+    ReadOnly
+};
 
 /**
  * Represents a query predicate for filtering rows in an attribute table. The
@@ -81,21 +113,27 @@ class AttributeTable {
 public:
     /**
      * Construct an AttributeTable that uses the specified symbolDictionary to
-     * convert metadata values to symbol indices. The symbolDictionary must remain
-     * valid for the lifetime of this AttributeTable.
+     * convert metadata values to symbol indices. The symbolDictionary and writer
+     * must remain valid for the lifetime of this AttributeTable.
+     * The table starts in NOP state. Use changeState() to transition to
+     * Reconstruction, ReadWrite, or ReadOnly states.
      */
-    explicit AttributeTable(SymbolDictionary* symbolDictionary);
+    AttributeTable(SymbolDictionary* symbolDictionary,
+                   HCIndexWriter* writer,
+                   const Timestamp& windowStart = Timestamp(),
+                   const Timestamp& windowEnd = Timestamp());
 
     /**
      * Insert a new row into the attribute table with the specified metadata and
-     * return a stable row ID. The metadata parameter is a BSON object containing
-     * field names and their corresponding string values. The method looks up each
-     * value in the symbol dictionary to get its index, automatically evolves the
-     * schema if new fields appear in the metadata, and returns the existing row ID
-     * if a row with the exact same metadata already exists. Returns an error if the
-     * row cannot be inserted or if any value lookup fails.
+     * return a stable row ID along with a flag indicating if it's a new row.
+     * The metadata parameter is a BSON object containing field names and their
+     * corresponding string values. The method looks up each value in the symbol
+     * dictionary to get its index, automatically evolves the schema if new fields
+     * appear in the metadata, and returns the existing row ID if a row with the
+     * exact same metadata already exists (with isNewRow=false). Returns an error
+     * if the row cannot be inserted or if any value lookup fails.
      */
-    StatusWith<int64_t> insertRow(const BSONObj& metadata);
+    StatusWith<InsertRowResult> insertRow(const BSONObj& metadata);
 
     /**
      * Insert a new row with the specified symbol indices and return a stable row
@@ -131,6 +169,28 @@ public:
     Status addColumn(StringData fieldName);
 
     /**
+     * Change the state of this table. Transitions are restricted:
+     * - From NOP: can transition to Reconstruction or ReadWrite
+     * - From Reconstruction: can transition to ReadOnly
+     * - From ReadWrite: can transition to ReadOnly
+     * - From ReadOnly: no transitions allowed
+     * Returns an error if the transition is invalid.
+     */
+    Status changeState(AttributeTableState newState);
+
+    /**
+     * Set the writer for this table. This allows a table to be updated later.
+     */
+    void setWriter(HCIndexWriter* w) {
+        writer = w;
+    }
+
+    /**
+     * Flush any pending operations to the database via the writer.
+     */
+    void flush();
+
+    /**
      * Return the current schema as a vector of column names in order.
      */
     const std::vector<std::string>& getSchema() const;
@@ -161,9 +221,33 @@ private:
      */
     boost::optional<int64_t> findDuplicateRow(const std::vector<uint32_t>& row) const;
 
+    /**
+     * Internal method to write a schema field to the writer.
+     */
+    Status writeSchema(const std::string& fieldName, size_t columnIndex);
+
+    /**
+     * Internal method to write a row to the writer.
+     */
+    Status writeRow(const std::vector<uint32_t>& row);
+
     // Symbol dictionary for converting metadata values to indices
     // Must remain valid for the lifetime of this AttributeTable
     SymbolDictionary* symbolDictionary;
+
+    // Writer for writing new attribute operations
+    // Must remain valid for the lifetime of this AttributeTable
+    HCIndexWriter* writer;
+
+    // Current state of the table
+    AttributeTableState _state = AttributeTableState::NOP;
+
+    // Whether there are pending changes to flush
+    bool _isDirty = false;
+
+    // Window boundaries for this attribute table
+    Timestamp _windowStart;
+    Timestamp _windowEnd;
 
     // Rows stored as vectors of symbol indices
     // Each row has the same number of columns as the schema
@@ -201,14 +285,19 @@ public:
      * Create a new temporal attribute table manager for managing attribute tables
      * for timeseries collections having the specified 'collectionUUID' with the
      * given 'granularity'. The symbolDictionary is used to convert metadata values
-     * to symbol indices and must remain valid for the lifetime of this object.
-     * Behavior is undefined unless 'opCtx', 'collectionUUID', and 'symbolDictionary'
-     * are valid through the lifetime of this object.
+     * to symbol indices, the reader is used to read existing attribute operations,
+     * and the writer is used to write new attribute operations. All parameters must
+     * remain valid for the lifetime of this object.
+     * Behavior is undefined unless 'opCtx', 'collectionUUID', 'symbolDictionary',
+     * and 'writer' are valid through the lifetime of this object.
+     * The 'writer' can be nullptr if this table is being constructed by a reader
+     * (in which case no new operations will be written).
      */
     TemporalAttributeTable(OperationContext* opCtx,
                            const UUID& collectionUUID,
                            DictionaryGranularity granularity,
-                           class TemporalSymbolDictionary* symbolDictionary);
+                           class TemporalSymbolDictionary* symbolDictionary,
+                           class HCIndexWriter* writer);
 
     /**
      * Returns a pointer to the attribute table covering the time window that
@@ -231,15 +320,16 @@ public:
     /**
      * Insert a new row with the specified metadata into the attribute table for
      * the time window that includes the specified 'timestamp' and return a stable
-     * row ID. The metadata parameter is a BSON object containing field names and
-     * their corresponding string values. The method looks up each value in the
-     * symbol dictionary to get its index, automatically evolves the schema if new
-     * fields appear in the metadata, and returns the existing row ID if a row with
-     * the exact same metadata already exists. Returns an error if the row cannot be
-     * inserted or if any value lookup fails.
+     * row ID along with a flag indicating if it's a new row. The metadata parameter
+     * is a BSON object containing field names and their corresponding string values.
+     * The method looks up each value in the symbol dictionary to get its index,
+     * automatically evolves the schema if new fields appear in the metadata, and
+     * returns the existing row ID if a row with the exact same metadata already
+     * exists (with isNewRow=false). Returns an error if the row cannot be inserted
+     * or if any value lookup fails.
      */
-    StatusWith<int64_t> insertRow(const BSONObj& metadata,
-                                  const Timestamp& timestamp);
+    StatusWith<InsertRowResult> insertRow(const BSONObj& metadata,
+                                          const Timestamp& timestamp);
 
     /**
      * Insert a new row with the specified symbol indices into the attribute
@@ -279,6 +369,11 @@ public:
      * tables.
      */
     Status cleanupOldTables(const Timestamp& beforeTimestamp);
+
+    /**
+     * Flush all pending operations to the database.
+     */
+    void flush();
 
     /**
      * Statistics about this temporal attribute table.
@@ -332,6 +427,9 @@ private:
 
     // Temporal symbol dictionary for encoding metadata values
     class TemporalSymbolDictionary* temporalSymbolDictionary;
+
+    // Writer for writing new attribute operations (can be nullptr if constructed by reader)
+    class HCIndexWriter* writer;
 
     // Synchronization
     mutable std::shared_mutex mutex;

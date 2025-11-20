@@ -32,15 +32,20 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/oid.h"
+#include "mongo/db/collection_crud/collection_write_path.h"
+#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
+#include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/storage/exceptions.h"
+#include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/timeseries/bucket_catalog/bucket_catalog_helpers.h"
 #include "mongo/db/timeseries/bucket_catalog/bucket_catalog_internal.h"
 #include "mongo/db/timeseries/bucket_catalog/bucket_metadata.h"
 #include "mongo/db/timeseries/bucket_catalog/global_bucket_catalog.h"
 #include "mongo/db/timeseries/bucket_catalog/rollover.h"
 #include "mongo/db/timeseries/bucket_compression.h"
-#include "mongo/db/timeseries/bucket_compression_failure.h"
+#include "mongo/db/exec/timeseries/hcindex/hcindex_collection_manager.h"
 #include "mongo/db/timeseries/timeseries_constants.h"
+#include "mongo/logv2/log.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/tracking/context.h"
@@ -1205,6 +1210,7 @@ TimeseriesWriteBatches stageInsertBatch(
         std::shared_ptr<WriteBatch> writeBatch = activeBatch(
             bucketCatalog.trackingContexts, eligibleBucket, opId, batch.stripeNumber, batch.stats);
         writeBatch->openedDueToMetadata = bucketOpenedDueToMetadata;
+        writeBatch->isHCIndexBatch = batch.isHCIndexBatch;  // Propagate HCIndex flag
         internal::StageInsertBatchResult result =
             internal::stageInsertBatchIntoEligibleBucket(bucketCatalog,
                                                          opId,
@@ -1252,14 +1258,30 @@ StatusWith<TimeseriesWriteBatches> prepareInsertsToBuckets(
     const std::vector<size_t>& indices,
     const AllowQueryBasedReopening allowQueryBasedReopening,
     std::vector<WriteStageErrorAndIndex>& errorsAndIndices) {
-    auto batchedInsertContexts = buildBatchedInsertContexts(bucketCatalog,
-                                                            bucketsColl->uuid(),
-                                                            timeseriesOptions,
-                                                            userMeasurementsBatch,
-                                                            startIndex,
-                                                            numDocsToStage,
-                                                            indices,
-                                                            errorsAndIndices);
+    // Fork: If HCIndex is enabled, use the HCIndex path that groups by time window only
+    std::vector<BatchedInsertContext> batchedInsertContexts;
+    if (timeseriesOptions.getUseHCIndex().get_value_or(false)) {
+        // HCIndex path: Groups by time window, transforms BSON with window info
+        batchedInsertContexts = buildBatchedHCInsertContexts(opCtx,
+                                                             bucketCatalog,
+                                                             bucketsColl->uuid(),
+                                                             timeseriesOptions,
+                                                             userMeasurementsBatch,
+                                                             startIndex,
+                                                             numDocsToStage,
+                                                             indices,
+                                                             errorsAndIndices);
+    } else {
+        // Traditional path: Group by metadata
+        batchedInsertContexts = buildBatchedInsertContexts(bucketCatalog,
+                                                           bucketsColl->uuid(),
+                                                           timeseriesOptions,
+                                                           userMeasurementsBatch,
+                                                           startIndex,
+                                                           numDocsToStage,
+                                                           indices,
+                                                           errorsAndIndices);
+    }
 
     if (earlyReturnOnError && !errorsAndIndices.empty()) {
         // Any errors in the user batch will early-exit and be attempted one-at-a-time.
@@ -1285,6 +1307,209 @@ StatusWith<TimeseriesWriteBatches> prepareInsertsToBuckets(
     }
 
     return results;
+}
+
+std::vector<BatchedInsertContext> buildBatchedHCInsertContexts(
+    OperationContext* opCtx,
+    BucketCatalog& bucketCatalog,
+    const UUID& collectionUUID,
+    const TimeseriesOptions& timeseriesOptions,
+    const std::vector<BSONObj>& userMeasurementsBatch,
+    size_t startIndex,
+    size_t numDocsToStage,
+    const std::vector<size_t>& indices,
+    std::vector<WriteStageErrorAndIndex>& errorsAndIndices) {
+
+    // Get HCIndexCollectionManager for this collection
+    auto hcindexMgr = getHCIndexManager(bucketCatalog, collectionUUID);
+    if (!hcindexMgr) {
+        // If no HCIndex manager, fall back to traditional path
+        return buildBatchedInsertContexts(bucketCatalog,
+                                         collectionUUID,
+                                         timeseriesOptions,
+                                         userMeasurementsBatch,
+                                         startIndex,
+                                         numDocsToStage,
+                                         indices,
+                                         errorsAndIndices);
+    }
+
+    auto timeField = timeseriesOptions.getTimeField();
+    auto metaField = timeseriesOptions.getMetaField();
+
+    // Map from time window start to vector of (measurement, time, index, rowId)
+    std::map<Timestamp, std::vector<std::tuple<BSONObj, Date_t, size_t, int64_t>>>
+        timeWindowToMeasurements;
+
+    auto processMeasurement = [&](size_t index) -> Status {
+        invariant(index < userMeasurementsBatch.size());
+        const auto& measurement = userMeasurementsBatch[index];
+
+        // Extract time
+        auto swTime = extractTime(measurement, timeField);
+        if (!swTime.isOK()) {
+            errorsAndIndices.push_back(
+                WriteStageErrorAndIndex{std::move(swTime.getStatus()), index});
+            return swTime.getStatus();
+        }
+        auto time = swTime.getValue();
+
+        // Extract metadata and encode to rowId
+        int64_t rowId = 0;
+        if (metaField) {
+            auto swTimeAndMeta = extractTimeAndMeta(measurement, timeField, *metaField);
+            if (!swTimeAndMeta.isOK()) {
+                errorsAndIndices.push_back(
+                    WriteStageErrorAndIndex{std::move(swTimeAndMeta.getStatus()), index});
+                return swTimeAndMeta.getStatus();
+            }
+            auto meta = std::get<BSONElement>(swTimeAndMeta.getValue());
+
+            // Convert Date_t to Timestamp for HCIndex
+            uint32_t seconds = time.toMillisSinceEpoch() / 1000;
+            Timestamp ts(seconds, 0);
+
+            // Encode metadata to rowId
+            auto swRowId = hcindexMgr->encodeMetadata(meta.Obj(), ts);
+            if (!swRowId.isOK()) {
+                errorsAndIndices.push_back(
+                    WriteStageErrorAndIndex{std::move(swRowId.getStatus()), index});
+                return swRowId.getStatus();
+            }
+            rowId = swRowId.getValue();
+        }
+
+        // Calculate time window start
+        // For now, use HOURLY granularity (3600 seconds)
+        uint32_t windowSizeSeconds = 60 * 60;  // HOURLY
+        uint32_t seconds = time.toMillisSinceEpoch() / 1000;
+        uint32_t windowStartSeconds = (seconds / windowSizeSeconds) * windowSizeSeconds;
+        Timestamp windowStart(windowStartSeconds, 0);
+
+        timeWindowToMeasurements[windowStart].emplace_back(
+            measurement, time, index, rowId);
+
+        return Status::OK();
+    };
+
+    // Process all measurements
+    if (!indices.empty()) {
+        for (size_t idx : indices) {
+            auto status = processMeasurement(idx);
+            if (!status.isOK()) {
+                // Continue processing even on error to collect all errors
+            }
+        }
+    } else {
+        for (size_t i = startIndex; i < startIndex + numDocsToStage; i++) {
+            auto status = processMeasurement(i);
+            if (!status.isOK()) {
+                // Continue processing even on error to collect all errors
+            }
+        }
+    }
+
+    // Transform measurements for HCIndex path and create BatchedInsertContexts
+    std::vector<BatchedInsertContext> batchedInsertContexts;
+    auto& trackingContext =
+        getTrackingContext(bucketCatalog.trackingContexts, TrackingScope::kMeasurementBatching);
+    auto stats = internal::getOrInitializeExecutionStats(bucketCatalog, collectionUUID);
+
+    for (auto& [windowStart, measurements] : timeWindowToMeasurements) {
+        // Calculate window end (start + 1 hour for HOURLY granularity)
+        Timestamp windowEnd(windowStart.getSecs() + 3600, 0);
+
+        // Build window metadata BSON for BucketKey
+        BSONObjBuilder windowMetaBuilder;
+        windowMetaBuilder.append("windowStart", windowStart);
+        windowMetaBuilder.append("windowEnd", windowEnd);
+        BSONObj windowMetadata = windowMetaBuilder.obj();
+
+        // Transform measurements: rewrite timeField and metaField
+        std::vector<BatchedInsertTuple> transformedTuples;
+
+        for (const auto& [measurement, time, index, rowId] : measurements) {
+            // Build transformed measurement BSON
+            BSONObjBuilder transformedBuilder;
+
+            // Iterate through original measurement fields
+            for (const auto& elem : measurement) {
+                StringData fieldName = elem.fieldNameStringData();
+
+                if (fieldName == timeField) {
+                    // Replace timeField with windowStart
+                    transformedBuilder.append(fieldName, windowStart);
+                } else if (metaField && fieldName == *metaField) {
+                    // Replace metaField with window information
+                    BSONObjBuilder metaBuilder;
+                    metaBuilder.append("windowStart", windowStart);
+                    metaBuilder.append("windowEnd", windowEnd);
+                    transformedBuilder.append(fieldName, metaBuilder.obj());
+                } else {
+                    // Keep other fields as-is
+                    transformedBuilder.append(elem);
+                }
+            }
+
+            // Add rowId to the transformed measurement
+            transformedBuilder.append("rowId", rowId);
+
+            BSONObj transformedMeasurement = transformedBuilder.obj();
+            transformedTuples.emplace_back(transformedMeasurement, time, index);
+        }
+
+        // Create BucketMetadata with window information for HCIndex path
+        BSONElement windowMetadataElement = windowMetadata.firstElement();
+        BucketKey bucketKey{collectionUUID,
+                            BucketMetadata{trackingContext, windowMetadataElement, boost::none}};
+        auto stripeNumber = internal::getStripeNumber(bucketCatalog, bucketKey);
+
+        // Create BatchedInsertContext with transformed measurements
+        auto context = BatchedInsertContext(
+            bucketKey, stripeNumber, timeseriesOptions, stats, transformedTuples);
+        context.isHCIndexBatch = true;  // Mark as HCIndex batch
+        batchedInsertContexts.emplace_back(std::move(context));
+    }
+
+    // Flush pending HCIndex operations before returning
+    auto flushStatus = hcindexMgr->flushPendingOperations(
+        [opCtx](const std::string& collName, const std::vector<InsertStatement>& ops) -> Status {
+            // Parse collection name to NamespaceString
+            // Collection name format: "system.hcindex.ops.symbols.<uuid>" or "system.hcindex.ops.attributes.<uuid>"
+            auto nss = NamespaceString::createNamespaceString_forTest(collName);
+
+            // Acquire the operations collection with write lock
+            CollectionAcquisitionRequest request{
+                nss,
+                PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                repl::ReadConcernArgs::kLocal,
+                AcquisitionPrerequisites::kWrite};
+            auto collection = acquireCollection(opCtx, request, MODE_IX);
+
+            if (!collection.exists()) {
+                return Status(ErrorCodes::NamespaceNotFound,
+                             str::stream() << "HCIndex operations collection not found: " << collName);
+            }
+
+            // Wrap in WriteUnitOfWork for transactional consistency
+            WriteUnitOfWork wuow(opCtx);
+            auto insertStatus = collection_internal::insertDocuments(
+                opCtx, collection.getCollectionPtr(), ops.begin(), ops.end(), nullptr, false);
+            if (!insertStatus.isOK()) {
+                return insertStatus;
+            }
+            wuow.commit();
+            return Status::OK();
+        });
+
+    if (!flushStatus.isOK()) {
+        // Log error but don't fail the entire operation
+        LOGV2_WARNING(7654323,
+                      "Failed to flush HCIndex pending operations",
+                      "error"_attr = flushStatus);
+    }
+
+    return batchedInsertContexts;
 }
 
 StatusWith<std::pair<BucketKey, Date_t>> extractBucketingParameters(
@@ -1317,5 +1542,41 @@ StatusWith<std::pair<BucketKey, Date_t>> extractBucketingParameters(
                          BucketMetadata{trackingContext, metadata, options.getMetaField()}};
 
     return {std::make_pair(std::move(key), time)};
+}
+
+Status setHCIndexManager(BucketCatalog& catalog,
+                         const UUID& collectionUUID,
+                         std::shared_ptr<hcindex::HCIndexCollectionManager> hcindexMgr) {
+    stdx::lock_guard lock{catalog.mutex};
+
+    if (!hcindexMgr) {
+        return Status(ErrorCodes::BadValue, "HCIndexCollectionManager cannot be null");
+    }
+
+    // Store the manager
+    catalog.hcindexManagers[collectionUUID] = hcindexMgr;
+    return Status::OK();
+}
+
+std::shared_ptr<hcindex::HCIndexCollectionManager> getHCIndexManager(
+    BucketCatalog& catalog,
+    const UUID& collectionUUID) {
+    stdx::lock_guard lock{catalog.mutex};
+
+    auto it = catalog.hcindexManagers.find(collectionUUID);
+    if (it != catalog.hcindexManagers.end()) {
+        return it->second;
+    }
+
+    return nullptr;
+}
+
+void cleanupHCIndex(BucketCatalog& catalog, const UUID& collectionUUID) {
+    stdx::lock_guard lock{catalog.mutex};
+
+    auto it = catalog.hcindexManagers.find(collectionUUID);
+    if (it != catalog.hcindexManagers.end()) {
+        catalog.hcindexManagers.erase(it);
+    }
 }
 }  // namespace mongo::timeseries::bucket_catalog

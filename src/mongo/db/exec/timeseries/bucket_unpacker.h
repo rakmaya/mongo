@@ -52,6 +52,10 @@
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
 
+namespace mongo::timeseries::hcindex {
+class HCIndexCollectionManager;
+}
+
 namespace mongo::timeseries {
 // A table that is useful for interpolations between the number of measurements in a bucket and
 // the byte size of a bucket's data section timestamp column. Each table entry is a pair (b_i,
@@ -295,6 +299,14 @@ public:
     // unpacking. Only calculates the list the first time it is called.
     const std::set<std::string>& fieldsToIncludeExcludeDuringUnpack();
 
+    /**
+     * Sets the HCIndexCollectionManager for decoding HCIndex-encoded metadata.
+     * This is optional and only needed when unpacking HCIndex-encoded buckets.
+     */
+    void setHCIndexCollectionManager(hcindex::HCIndexCollectionManager* hcindexMgr) {
+        _hcindexMgr = hcindexMgr;
+    }
+
     class UnpackingImpl;
 
 private:
@@ -368,5 +380,9 @@ private:
     // Final list of fields to include/exclude during unpacking. This is computed once during the
     // first doGetNext call so we don't have to recalculate every time we reach a new bucket.
     boost::optional<std::set<std::string>> _unpackFieldsToIncludeExclude = boost::none;
+
+    // HCIndexCollectionManager for decoding HCIndex-encoded metadata.
+    // Optional - only set when unpacking HCIndex-encoded buckets.
+    hcindex::HCIndexCollectionManager* _hcindexMgr = nullptr;
 };
 }  // namespace mongo::timeseries

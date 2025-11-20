@@ -737,5 +737,106 @@ TEST_F(CreateVirtualCollectionTest, InvalidVirtualCollectionOptions) {
                            stdx::to_underlying(kInvalidFileTypeEnum));
     }
 }
+
+TEST_F(CreateCollectionTest, CreateTimeseriesCollectionWithHCIndexEnabled) {
+    NamespaceString newNss = NamespaceString::createNamespaceString_forTest("test.timeseries_hc");
+
+    auto opCtx = makeOpCtx();
+    ASSERT_FALSE(collectionExists(opCtx.get(), newNss));
+
+    auto uuid = UUID::gen();
+    Lock::DBLock lock(opCtx.get(), newNss.dbName(), MODE_IX);
+
+    // Create timeseries collection with useHCIndex enabled
+    ASSERT_OK(createCollectionForApplyOps(opCtx.get(),
+                                          newNss.dbName(),
+                                          uuid,
+                                          BSON("create" << newNss.coll() << "timeseries"
+                                                        << BSON("timeField"
+                                                                << "ts"
+                                                                << "metaField"
+                                                                << "meta"
+                                                                << "useHCIndex" << true)),
+                                          /*allowRenameOutOfTheWay*/ false));
+
+    ASSERT_TRUE(collectionExists(opCtx.get(), newNss));
+
+    // Verify the collection has timeseries options with useHCIndex enabled
+    auto collOptions = getCollectionOptions(opCtx.get(), newNss);
+    ASSERT_TRUE(collOptions.timeseries);
+    ASSERT_EQ(collOptions.timeseries->getTimeField(), "ts");
+    ASSERT_TRUE(collOptions.timeseries->getMetaField());
+    ASSERT_EQ(collOptions.timeseries->getMetaField().value_or(""), "meta");
+    // Verify useHCIndex is set to true
+    auto useHCIndex = collOptions.timeseries->getUseHCIndex();
+    ASSERT_TRUE(useHCIndex);
+    ASSERT_TRUE(useHCIndex.value_or(false));
+}
+
+TEST_F(CreateCollectionTest, CreateTimeseriesCollectionWithHCIndexDisabled) {
+    NamespaceString newNss = NamespaceString::createNamespaceString_forTest("test.timeseries_no_hc");
+
+    auto opCtx = makeOpCtx();
+    ASSERT_FALSE(collectionExists(opCtx.get(), newNss));
+
+    auto uuid = UUID::gen();
+    Lock::DBLock lock(opCtx.get(), newNss.dbName(), MODE_IX);
+
+    // Create timeseries collection with useHCIndex disabled (default)
+    ASSERT_OK(createCollectionForApplyOps(opCtx.get(),
+                                          newNss.dbName(),
+                                          uuid,
+                                          BSON("create" << newNss.coll() << "timeseries"
+                                                        << BSON("timeField"
+                                                                << "ts"
+                                                                << "metaField"
+                                                                << "meta"
+                                                                << "useHCIndex" << false)),
+                                          /*allowRenameOutOfTheWay*/ false));
+
+    ASSERT_TRUE(collectionExists(opCtx.get(), newNss));
+
+    // Verify the collection has timeseries options with useHCIndex disabled
+    auto collOptions = getCollectionOptions(opCtx.get(), newNss);
+    ASSERT_TRUE(collOptions.timeseries);
+    ASSERT_EQ(collOptions.timeseries->getTimeField(), "ts");
+    ASSERT_TRUE(collOptions.timeseries->getMetaField());
+    ASSERT_EQ(collOptions.timeseries->getMetaField().value_or(""), "meta");
+    ASSERT_TRUE(collOptions.timeseries->getUseHCIndex());
+    ASSERT_FALSE(collOptions.timeseries->getUseHCIndex().value_or(true));
+}
+
+TEST_F(CreateCollectionTest, CreateTimeseriesCollectionWithHCIndexDefaultValue) {
+    NamespaceString newNss = NamespaceString::createNamespaceString_forTest("test.timeseries_default");
+
+    auto opCtx = makeOpCtx();
+    ASSERT_FALSE(collectionExists(opCtx.get(), newNss));
+
+    auto uuid = UUID::gen();
+    Lock::DBLock lock(opCtx.get(), newNss.dbName(), MODE_IX);
+
+    // Create timeseries collection without specifying useHCIndex (should default to false)
+    ASSERT_OK(createCollectionForApplyOps(opCtx.get(),
+                                          newNss.dbName(),
+                                          uuid,
+                                          BSON("create" << newNss.coll() << "timeseries"
+                                                        << BSON("timeField"
+                                                                << "ts"
+                                                                << "metaField"
+                                                                << "meta")),
+                                          /*allowRenameOutOfTheWay*/ false));
+
+    ASSERT_TRUE(collectionExists(opCtx.get(), newNss));
+
+    // Verify the collection has timeseries options with useHCIndex defaulting to false
+    auto collOptions = getCollectionOptions(opCtx.get(), newNss);
+    ASSERT_TRUE(collOptions.timeseries);
+    ASSERT_EQ(collOptions.timeseries->getTimeField(), "ts");
+    ASSERT_TRUE(collOptions.timeseries->getMetaField());
+    ASSERT_EQ(collOptions.timeseries->getMetaField().value_or(""), "meta");
+    // useHCIndex should not be set (boost::none) when not specified
+    ASSERT_FALSE(collOptions.timeseries->getUseHCIndex());
+}
+/**/
 }  // namespace
 }  // namespace mongo
