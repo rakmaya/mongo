@@ -30,6 +30,7 @@
 
 #include "mongo/base/status.h"
 #include "mongo/bson/timestamp.h"
+#include "mongo/db/database_name.h"
 #include "mongo/db/exec/timeseries/hcindex/temporal_symbol_dictionary.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/util/uuid.h"
@@ -46,9 +47,9 @@ namespace mongo::timeseries::hcindex {
  * Builds operations for the time-parametrized index structure timeseries collections.
  * Accumulates INIT, opADD, FIN, and REF operations as InsertStatements.
  *
- * Operations are stored in two separate timeseries collections:
- * - Symbol operations: system.hcindex.ops.symbols.<collectionUUID>
- * - Attribute operations: system.hcindex.ops.attributes.<collectionUUID>
+ * Operations are stored in two separate collections in the same database as the timeseries collection:
+ * - Symbol operations: hcindex.ops.symbols.<collectionUUID>
+ * - Attribute operations: hcindex.ops.attributes.<collectionUUID>
  *
  * This class does NOT perform actual inserts. Instead, it builds InsertStatement objects
  * that can be flushed by the caller through HCIndexCollectionManager. This design avoids
@@ -66,8 +67,12 @@ public:
 
     /**
      * Create a new operations writer for the specified collection.
+     *
+     * Parameters:
+     * - collectionUUID: UUID of the timeseries collection
+     * - dbName: Database name where the timeseries collection resides
      */
-    HCIndexWriter(const UUID& collectionUUID);
+    HCIndexWriter(const UUID& collectionUUID, const DatabaseName& dbName);
 
     /**
      * Mark the beginning of symbol dictionary initialization for the specified window.
@@ -172,13 +177,13 @@ public:
 
     /**
      * Get the namespace string for symbol operations collection.
-     * Format: system.hcindex.ops.symbols.<collectionUUID>
+     * Format: hcindex.ops.symbols.<collectionUUID>
      */
     std::string getSymbolOperationsCollectionName() const;
 
     /**
      * Get the namespace string for attribute operations collection.
-     * Format: system.hcindex.ops.attributes.<collectionUUID>
+     * Format: hcindex.ops.attributes.<collectionUUID>
      */
     std::string getAttributeOperationsCollectionName() const;
 
@@ -208,6 +213,7 @@ private:
                             DictionaryGranularity granularity);
 
     UUID collectionUUID;
+    DatabaseName dbName;
     std::vector<InsertStatement> pendingSymbolOperations;
     std::vector<InsertStatement> pendingAttributeOperations;
 

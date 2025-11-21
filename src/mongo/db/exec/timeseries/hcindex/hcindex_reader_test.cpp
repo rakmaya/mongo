@@ -41,13 +41,13 @@ protected:
     }
 
     NamespaceString getSymbolOpsNamespace(const UUID& collectionUUID) {
-        std::string collName = "system.hcindex.ops.symbols." + collectionUUID.toString();
-        return NamespaceString::createNamespaceString_forTest("config", collName);
+        std::string collName = "hcindex.ops.symbols." + collectionUUID.toString();
+        return NamespaceString::createNamespaceString_forTest("test", collName);
     }
 
     NamespaceString getAttributeOpsNamespace(const UUID& collectionUUID) {
-        std::string collName = "system.hcindex.ops.attributes." + collectionUUID.toString();
-        return NamespaceString::createNamespaceString_forTest("config", collName);
+        std::string collName = "hcindex.ops.attributes." + collectionUUID.toString();
+        return NamespaceString::createNamespaceString_forTest("test", collName);
     }
 
     void createOpsCollection(const NamespaceString& nss) {
@@ -82,7 +82,8 @@ TEST_F(HCIndexReaderTest, ConstructSymbolDictionaryFromInit) {
     createOpsCollection(nss);
 
     // Build initial symbols
-    HCIndexWriter writer(collectionUUID);
+    DatabaseName dbName = DatabaseName::createDatabaseName_forTest(boost::none, "test");
+    HCIndexWriter writer(collectionUUID, dbName);
     Timestamp windowStart(1, 0);
     Timestamp windowEnd(2, 0);
 
@@ -98,7 +99,7 @@ TEST_F(HCIndexReaderTest, ConstructSymbolDictionaryFromInit) {
     flushPendingOperations(writer, collectionUUID);
 
     // Construct dictionary
-    HCIndexReader reader(opCtx, collectionUUID);
+    HCIndexReader reader(opCtx, dbName, collectionUUID);
     auto dictStatus = reader.constructSymbolDictionary(
         windowStart, windowEnd, DictionaryGranularity::HOURLY, windowEnd);
     ASSERT_OK(dictStatus);
@@ -120,7 +121,8 @@ TEST_F(HCIndexReaderTest, ConstructSymbolDictionaryFromInitAndAdd) {
     createOpsCollection(nss);
 
     // Build INIT and ADD operations
-    HCIndexWriter writer(collectionUUID);
+    DatabaseName dbName2 = DatabaseName::createDatabaseName_forTest(boost::none, "test");
+    HCIndexWriter writer(collectionUUID, dbName2);
     Timestamp windowStart(1, 0);
     Timestamp windowEnd(2, 0);
 
@@ -141,7 +143,8 @@ TEST_F(HCIndexReaderTest, ConstructSymbolDictionaryFromInitAndAdd) {
     flushPendingOperations(writer, collectionUUID);
 
     // Construct dictionary
-    HCIndexReader reader(opCtx, collectionUUID);
+    DatabaseName dbName = DatabaseName::createDatabaseName_forTest(boost::none, "test");
+    HCIndexReader reader(opCtx, dbName, collectionUUID);
     auto dictStatus = reader.constructSymbolDictionary(
         windowStart, windowEnd, DictionaryGranularity::HOURLY, windowEnd);
     ASSERT_OK(dictStatus);

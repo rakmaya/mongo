@@ -30,11 +30,12 @@
 
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/oid.h"
+#include "mongo/util/str.h"
 
 namespace mongo::timeseries::hcindex {
 
-HCIndexWriter::HCIndexWriter(const UUID& collectionUUID)
-    : collectionUUID(collectionUUID) {}
+HCIndexWriter::HCIndexWriter(const UUID& collectionUUID, const DatabaseName& dbName)
+    : collectionUUID(collectionUUID), dbName(dbName) {}
 
 Status HCIndexWriter::initSymbolDictionary(const Timestamp& windowStart, const Timestamp& windowEnd) {
     WindowKey key = std::make_pair(windowStart, windowEnd);
@@ -249,11 +250,11 @@ void HCIndexWriter::clearPendingOperations() {
 }
 
 std::string HCIndexWriter::getSymbolOperationsCollectionName() const {
-    return std::string("system.hcindex.ops.symbols.") + collectionUUID.toString();
+    return str::stream() << dbName.toStringForErrorMsg() << ".hcindex.ops.symbols." << collectionUUID.toString();
 }
 
 std::string HCIndexWriter::getAttributeOperationsCollectionName() const {
-    return std::string("system.hcindex.ops.attributes.") + collectionUUID.toString();
+    return str::stream() << dbName.toStringForErrorMsg() << ".hcindex.ops.attributes." << collectionUUID.toString();
 }
 
 void HCIndexWriter::_addPendingOperation(const BSONObj& doc, bool isSymbolOps) {

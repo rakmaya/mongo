@@ -638,6 +638,44 @@ Status _createLegacyTimeseries(
 
         uassertStatusOK(
             timeseries::createDefaultTimeseriesIndex(opCtx, collectionWriter, validatedCollator));
+
+        // Initialize HCIndex if enabled for this timeseries collection
+        if (options.timeseries && options.timeseries->getUseHCIndex() &&
+            options.timeseries->getUseHCIndex().value_or(false)) {
+            LOGV2(9999999, "HCIndex initialization started for collection", "ns"_attr = ns);
+
+            auto collectionUUID = collectionWriter->uuid();
+
+            // Create the necessary operations collections for HCIndex
+            auto opsCollStatus = createHCIndexCollections(opCtx, ns.dbName(), collectionUUID);
+            if (!opsCollStatus.isOK()) {
+                LOGV2(9999998, "HCIndex operations collections creation failed", "error"_attr = opsCollStatus);
+                return opsCollStatus;
+            }
+
+            // Create and initialize HCIndexCollectionManager
+            auto hcindexMgr = std::make_shared<timeseries::hcindex::HCIndexCollectionManager>(
+                opCtx, ns.dbName(), collectionUUID, timeseries::hcindex::DictionaryGranularity::HOURLY);
+
+            auto initStatus = hcindexMgr->initialize();
+            if (!initStatus.isOK()) {
+                LOGV2(9999998, "HCIndex initialization failed", "error"_attr = initStatus);
+                return initStatus;
+            }
+
+            // Store the manager in BucketCatalog
+            auto& bucketCatalog =
+                timeseries::bucket_catalog::GlobalBucketCatalog::get(opCtx->getServiceContext());
+            auto setStatus = timeseries::bucket_catalog::setHCIndexManager(
+                bucketCatalog, collectionUUID, hcindexMgr);
+            if (!setStatus.isOK()) {
+                LOGV2(9999997, "Failed to store HCIndex manager in BucketCatalog", "error"_attr = setStatus);
+                return setStatus;
+            }
+
+            LOGV2(9999996, "HCIndex initialization completed successfully", "ns"_attr = ns);
+        }
+
         wuow.commit();
         return Status::OK();
     });
@@ -754,46 +792,64 @@ Status _createCollection(
         // We create the index on time and meta, which is used for query-based reopening, here for
         // viewless time-series collections if we are creating the collection on a primary. This is
         // done within the same WUOW as the collection creation.
-        if (collectionOptions.timeseries && !nss.isTimeseriesBucketsCollection() &&
-            opCtx->writesAreReplicated()) {
-            CollectionWriter collWriter(opCtx, nss);
-            invariant(collWriter->isNewTimeseriesWithoutView());
+        if (collectionOptions.timeseries && !nss.isTimeseriesBucketsCollection()) {
+            LOGV2(9999995, "Creating timeseries collection",
+                  "ns"_attr = nss,
+                  "writesAreReplicated"_attr = opCtx->writesAreReplicated(),
+                  "useHCIndex"_attr = collectionOptions.timeseries->getUseHCIndex().value_or(false));
 
-            auto validatedCollator = collectionOptions.collation;
-            if (!collectionOptions.collation.isEmpty()) {
-                auto tmpOptions = collectionOptions;
-                auto swCollator = db->validateCollator(opCtx, tmpOptions);
-
-                // The userCreateNS already has a uassertStatusOK and validateCollator is called in
-                // it, so we should have the case that the status of the swCollator is ok.
-                invariant(swCollator.getStatus());
-                validatedCollator = swCollator.getValue()->getSpec().toBSON();
-            }
-            uassertStatusOK(
-                timeseries::createDefaultTimeseriesIndex(opCtx, collWriter, validatedCollator));
-
-            // Initialize HCIndex if enabled for this timeseries collection
-            if (collectionOptions.timeseries->getUseHCIndex() &&
-                collectionOptions.timeseries->getUseHCIndex().value_or(false)) {
+            if (opCtx->writesAreReplicated()) {
                 CollectionWriter collWriter(opCtx, nss);
-                auto collectionUUID = collWriter->uuid();
+                invariant(collWriter->isNewTimeseriesWithoutView());
 
-                // Create and initialize HCIndexCollectionManager
-                auto hcindexMgr = std::make_shared<timeseries::hcindex::HCIndexCollectionManager>(
-                    opCtx, collectionUUID, timeseries::hcindex::DictionaryGranularity::HOURLY);
+                auto validatedCollator = collectionOptions.collation;
+                if (!collectionOptions.collation.isEmpty()) {
+                    auto tmpOptions = collectionOptions;
+                    auto swCollator = db->validateCollator(opCtx, tmpOptions);
 
-                auto initStatus = hcindexMgr->initialize();
-                if (!initStatus.isOK()) {
-                    return initStatus;
+                    // The userCreateNS already has a uassertStatusOK and validateCollator is called in
+                    // it, so we should have the case that the status of the swCollator is ok.
+                    invariant(swCollator.getStatus());
+                    validatedCollator = swCollator.getValue()->getSpec().toBSON();
                 }
+                uassertStatusOK(
+                    timeseries::createDefaultTimeseriesIndex(opCtx, collWriter, validatedCollator));
 
-                // Store the manager in BucketCatalog
-                auto& bucketCatalog =
-                    timeseries::bucket_catalog::GlobalBucketCatalog::get(opCtx->getServiceContext());
-                auto setStatus = timeseries::bucket_catalog::setHCIndexManager(
-                    bucketCatalog, collectionUUID, hcindexMgr);
-                if (!setStatus.isOK()) {
-                    return setStatus;
+                // Initialize HCIndex if enabled for this timeseries collection
+                if (collectionOptions.timeseries && collectionOptions.timeseries->getUseHCIndex() &&
+                    collectionOptions.timeseries->getUseHCIndex().value_or(false)) {
+                    LOGV2(9999999, "HCIndex initialization started for collection", "ns"_attr = nss);
+
+                    auto collectionUUID = collWriter->uuid();
+
+                    // Create the necessary operations collections for HCIndex
+                    auto opsCollStatus = createHCIndexCollections(opCtx, nss.dbName(), collectionUUID);
+                    if (!opsCollStatus.isOK()) {
+                        LOGV2(9999998, "HCIndex operations collections creation failed", "error"_attr = opsCollStatus);
+                        return opsCollStatus;
+                    }
+
+                    // Create and initialize HCIndexCollectionManager
+                    auto hcindexMgr = std::make_shared<timeseries::hcindex::HCIndexCollectionManager>(
+                        opCtx, nss.dbName(), collectionUUID, timeseries::hcindex::DictionaryGranularity::HOURLY);
+
+                    auto initStatus = hcindexMgr->initialize();
+                    if (!initStatus.isOK()) {
+                        LOGV2(9999998, "HCIndex initialization failed", "error"_attr = initStatus);
+                        return initStatus;
+                    }
+
+                    // Store the manager in BucketCatalog
+                    auto& bucketCatalog =
+                        timeseries::bucket_catalog::GlobalBucketCatalog::get(opCtx->getServiceContext());
+                    auto setStatus = timeseries::bucket_catalog::setHCIndexManager(
+                        bucketCatalog, collectionUUID, hcindexMgr);
+                    if (!setStatus.isOK()) {
+                        LOGV2(9999997, "Failed to store HCIndex manager in BucketCatalog", "error"_attr = setStatus);
+                        return setStatus;
+                    }
+
+                    LOGV2(9999996, "HCIndex initialization completed successfully", "ns"_attr = nss);
                 }
             }
         }
@@ -1069,6 +1125,30 @@ Status createVirtualCollection(OperationContext* opCtx,
     options.setNoIdIndex();
     return _createCollection(
         opCtx, ns, options, boost::none, vopts, /*catalogIdentifier=*/boost::none);
+}
+
+Status createHCIndexCollections(OperationContext* opCtx, const DatabaseName& dbName, const UUID& collectionUUID) {
+    // Get the namespaces for the HCIndex operations collections
+    auto symbolNss = timeseries::hcindex::HCIndexCollectionManager::getSymbolOperationsNamespace(dbName, collectionUUID);
+    auto attributeNss = timeseries::hcindex::HCIndexCollectionManager::getAttributeOperationsNamespace(dbName, collectionUUID);
+
+    // Create symbol operations collection
+    CollectionOptions symbolOptions;
+    auto symbolStatus = createCollection(opCtx, symbolNss, symbolOptions, boost::none);
+    if (!symbolStatus.isOK()) {
+        return symbolStatus.withContext(
+            str::stream() << "Failed to create symbol operations collection: " << symbolNss.toStringForErrorMsg());
+    }
+
+    // Create attribute operations collection
+    CollectionOptions attributeOptions;
+    auto attributeStatus = createCollection(opCtx, attributeNss, attributeOptions, boost::none);
+    if (!attributeStatus.isOK()) {
+        return attributeStatus.withContext(
+            str::stream() << "Failed to create attribute operations collection: " << attributeNss.toStringForErrorMsg());
+    }
+
+    return Status::OK();
 }
 
 CollectionOptions translateOptionsIfClusterByDefault(const NamespaceString& nss,

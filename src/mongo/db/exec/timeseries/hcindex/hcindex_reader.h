@@ -30,6 +30,7 @@
 
 #include "mongo/base/status_with.h"
 #include "mongo/bson/timestamp.h"
+#include "mongo/db/database_name.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/exec/timeseries/hcindex/temporal_symbol_dictionary.h"
 #include "mongo/db/exec/timeseries/hcindex/temporal_attribute_table.h"
@@ -47,16 +48,21 @@ namespace mongo::timeseries::hcindex {
  * up to 09:25 are replayed. No need to wait for FIN at 09:59:59. This enables efficient
  * streaming queries on partial time ranges.
  *
- * Operations are read from two separate timeseries collections:
- * - Symbol operations: system.hcindex.ops.symbols.<collectionUUID>
- * - Attribute operations: system.hcindex.ops.attributes.<collectionUUID>
+ * Operations are read from two separate collections in the same database as the timeseries collection:
+ * - Symbol operations: hcindex.ops.symbols.<collectionUUID>
+ * - Attribute operations: hcindex.ops.attributes.<collectionUUID>
  */
 class HCIndexReader {
 public:
     /**
      * Create a new operations reader for the specified collection.
+     *
+     * Parameters:
+     * - opCtx: Operation context for database operations
+     * - dbName: Database name where the timeseries collection resides
+     * - collectionUUID: UUID of the timeseries collection
      */
-    HCIndexReader(OperationContext* opCtx, const UUID& collectionUUID);
+    HCIndexReader(OperationContext* opCtx, const DatabaseName& dbName, const UUID& collectionUUID);
 
     /**
      * Construct a SymbolDictionary by replaying operations up to the specified timestamp.
@@ -90,6 +96,7 @@ public:
 
 private:
     OperationContext* opCtx;
+    DatabaseName dbName;
     UUID collectionUUID;
 };
 

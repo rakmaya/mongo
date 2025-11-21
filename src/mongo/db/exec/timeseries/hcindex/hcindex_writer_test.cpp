@@ -40,13 +40,13 @@ protected:
     }
 
     NamespaceString getSymbolOpsNamespace(const UUID& collectionUUID) {
-        std::string collName = "system.hcindex.ops.symbols." + collectionUUID.toString();
-        return NamespaceString::createNamespaceString_forTest("config", collName);
+        std::string collName = "hcindex.ops.symbols." + collectionUUID.toString();
+        return NamespaceString::createNamespaceString_forTest("test", collName);
     }
 
     NamespaceString getAttributeOpsNamespace(const UUID& collectionUUID) {
-        std::string collName = "system.hcindex.ops.attributes." + collectionUUID.toString();
-        return NamespaceString::createNamespaceString_forTest("config", collName);
+        std::string collName = "hcindex.ops.attributes." + collectionUUID.toString();
+        return NamespaceString::createNamespaceString_forTest("test", collName);
     }
 
     void createOpsCollection(const NamespaceString& nss) {
@@ -81,7 +81,8 @@ protected:
 
 TEST_F(HCIndexWriterTest, InitSymbolDictionaryAndFlushCreatesINITOperation) {
     auto collectionUUID = getTestCollectionUUID();
-    HCIndexWriter writer(collectionUUID);
+    DatabaseName dbName = DatabaseName::createDatabaseName_forTest(boost::none, "test");
+    HCIndexWriter writer(collectionUUID, dbName);
 
     Timestamp windowStart(1, 0);
     Timestamp windowEnd(2, 0);
@@ -118,7 +119,8 @@ TEST_F(HCIndexWriterTest, InitSymbolDictionaryAndFlushCreatesINITOperation) {
 
 TEST_F(HCIndexWriterTest, InitAttributeTableAndFlushCreatesINITOperation) {
     auto collectionUUID = getTestCollectionUUID();
-    HCIndexWriter writer(collectionUUID);
+    DatabaseName dbName = DatabaseName::createDatabaseName_forTest(boost::none, "test");
+    HCIndexWriter writer(collectionUUID, dbName);
 
     Timestamp windowStart(1, 0);
     Timestamp windowEnd(2, 0);
@@ -162,7 +164,8 @@ TEST_F(HCIndexWriterTest, InitAttributeTableAndFlushCreatesINITOperation) {
 
 TEST_F(HCIndexWriterTest, InitThenAddCreatesINITThenopADDOperations) {
     auto collectionUUID = getTestCollectionUUID();
-    HCIndexWriter writer(collectionUUID);
+    DatabaseName dbName = DatabaseName::createDatabaseName_forTest(boost::none, "test");
+    HCIndexWriter writer(collectionUUID, dbName);
 
     Timestamp windowStart(1, 0);
     Timestamp windowEnd(2, 0);
@@ -199,7 +202,8 @@ TEST_F(HCIndexWriterTest, InitThenAddCreatesINITThenopADDOperations) {
 
 TEST_F(HCIndexWriterTest, InitAttributeThenAddCreatesINITThenopADDOperations) {
     auto collectionUUID = getTestCollectionUUID();
-    HCIndexWriter writer(collectionUUID);
+    DatabaseName dbName = DatabaseName::createDatabaseName_forTest(boost::none, "test");
+    HCIndexWriter writer(collectionUUID, dbName);
 
     Timestamp windowStart(1, 0);
     Timestamp windowEnd(2, 0);
@@ -235,7 +239,8 @@ TEST_F(HCIndexWriterTest, InitAttributeThenAddCreatesINITThenopADDOperations) {
 
 TEST_F(HCIndexWriterTest, BuildFinCreatesValidDocument) {
     auto collectionUUID = getTestCollectionUUID();
-    HCIndexWriter writer(collectionUUID);
+    DatabaseName dbName = DatabaseName::createDatabaseName_forTest(boost::none, "test");
+    HCIndexWriter writer(collectionUUID, dbName);
 
     Timestamp windowStart(1, 0);
     Timestamp windowEnd(2, 0);
@@ -259,7 +264,8 @@ TEST_F(HCIndexWriterTest, BuildFinCreatesValidDocument) {
 
 TEST_F(HCIndexWriterTest, BuildRefCreatesValidDocument) {
     auto collectionUUID = getTestCollectionUUID();
-    HCIndexWriter writer(collectionUUID);
+    DatabaseName dbName = DatabaseName::createDatabaseName_forTest(boost::none, "test");
+    HCIndexWriter writer(collectionUUID, dbName);
 
     Timestamp windowStart(2, 0);
     Timestamp windowEnd(3, 0);
@@ -284,7 +290,8 @@ TEST_F(HCIndexWriterTest, BuildRefCreatesValidDocument) {
 
 TEST_F(HCIndexWriterTest, SymbolInitFollowedByAddCreatesSequence) {
     auto collectionUUID = getTestCollectionUUID();
-    HCIndexWriter writer(collectionUUID);
+    DatabaseName dbName = DatabaseName::createDatabaseName_forTest(boost::none, "test");
+    HCIndexWriter writer(collectionUUID, dbName);
 
     Timestamp windowStart(1, 0);
     Timestamp windowEnd(2, 0);
@@ -327,7 +334,8 @@ TEST_F(HCIndexWriterTest, SymbolInitFollowedByAddCreatesSequence) {
 
 TEST_F(HCIndexWriterTest, AttributeInitFollowedByAddCreatesSequence) {
     auto collectionUUID = getTestCollectionUUID();
-    HCIndexWriter writer(collectionUUID);
+    DatabaseName dbName = DatabaseName::createDatabaseName_forTest(boost::none, "test");
+    HCIndexWriter writer(collectionUUID, dbName);
 
     Timestamp windowStart(1, 0);
     Timestamp windowEnd(2, 0);

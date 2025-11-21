@@ -29,6 +29,7 @@
 #include "mongo/db/exec/timeseries/hcindex/hcindex_reader.h"
 
 #include "mongo/bson/bsonobj.h"
+#include "mongo/db/exec/timeseries/hcindex/hcindex_collection_manager.h"
 //#include "mongo/db/collection_crud/collection_write_path.h"
 #include "mongo/db/local_catalog/shard_role_api/shard_role.h"
 #include "mongo/db/namespace_string.h"
@@ -36,8 +37,8 @@
 
 namespace mongo::timeseries::hcindex {
 
-HCIndexReader::HCIndexReader(OperationContext* opCtx, const UUID& collectionUUID)
-    : opCtx(opCtx), collectionUUID(collectionUUID) {}
+HCIndexReader::HCIndexReader(OperationContext* opCtx, const DatabaseName& dbName, const UUID& collectionUUID)
+    : opCtx(opCtx), dbName(dbName), collectionUUID(collectionUUID) {}
 
 StatusWith<std::unique_ptr<SymbolDictionary>> HCIndexReader::constructSymbolDictionary(
     const Timestamp& windowStart,
@@ -53,19 +54,18 @@ StatusWith<std::unique_ptr<SymbolDictionary>> HCIndexReader::constructSymbolDict
         return stateStatus;
     }
 
-    // Construct namespace for symbol operations collection
-    std::string collectionName = "system.hcindex.ops.symbols." + collectionUUID.toString();
-    NamespaceString nss = NamespaceString::makeGlobalConfigCollection(StringData(collectionName));
-    
+    // Get namespace for symbol operations collection using HCIndexCollectionManager
+    auto nss = HCIndexCollectionManager::getSymbolOperationsNamespace(dbName, collectionUUID);
+
     // Acquire collection with read lock
     CollectionAcquisitionRequest acquisitionRequest(
         nss,
         PlacementConcern::kPretendUnsharded,
         repl::ReadConcernArgs::get(opCtx),
         AcquisitionPrerequisites::kRead);
-    
+
     auto collection = acquireCollection(opCtx, acquisitionRequest, MODE_IS);
-    
+
     if (!collection.exists()) {
         return Status(ErrorCodes::NamespaceNotFound,
                       str::stream() << "Symbol operations collection not found: " << nss.toStringForErrorMsg());
@@ -128,20 +128,19 @@ StatusWith<std::unique_ptr<AttributeTable>> HCIndexReader::constructAttributeTab
     if (!stateStatus.isOK()) {
         return stateStatus;
     }
-    
-    // Construct namespace for attribute operations collection
-    std::string collectionName = "system.hcindex.ops.attributes." + collectionUUID.toString();
-    NamespaceString nss = NamespaceString::makeGlobalConfigCollection(StringData(collectionName));
-    
+
+    // Get namespace for attribute operations collection using HCIndexCollectionManager
+    auto nss = HCIndexCollectionManager::getAttributeOperationsNamespace(dbName, collectionUUID);
+
     // Acquire collection with read lock
     CollectionAcquisitionRequest acquisitionRequest(
         nss,
         PlacementConcern::kPretendUnsharded,
         repl::ReadConcernArgs::get(opCtx),
         AcquisitionPrerequisites::kRead);
-    
+
     auto collection = acquireCollection(opCtx, acquisitionRequest, MODE_IS);
-    
+
     if (!collection.exists()) {
         return Status(ErrorCodes::NamespaceNotFound,
                       str::stream() << "Attribute operations collection not found: " << nss.toStringForErrorMsg());

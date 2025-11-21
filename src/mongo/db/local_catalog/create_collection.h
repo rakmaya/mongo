@@ -107,4 +107,22 @@ CollectionOptions translateOptionsIfClusterByDefault(
     CollectionOptions collectionOptions,
     const boost::optional<BSONObj>& idIndex = boost::none);
 
+/**
+ * Creates the necessary HCIndex operations collections for a timeseries collection.
+ *
+ * This function creates two collections in the same database as the timeseries collection:
+ * - <db>.hcindex.ops.symbols.<collectionUUID>
+ * - <db>.hcindex.ops.attributes.<collectionUUID>
+ *
+ * These collections store the operations (INIT, ADD, FIN, REF) for the HCIndex structures.
+ *
+ * Parameters:
+ * - opCtx: Operation context for database operations
+ * - dbName: Database name where the timeseries collection resides
+ * - collectionUUID: UUID of the timeseries collection
+ *
+ * Returns Status::OK() on success, or an error status if collection creation fails.
+ */
+Status createHCIndexCollections(OperationContext* opCtx, const DatabaseName& dbName, const UUID& collectionUUID);
+
 }  // namespace mongo

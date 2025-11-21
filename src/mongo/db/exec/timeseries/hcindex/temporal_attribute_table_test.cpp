@@ -43,7 +43,8 @@ class AttributeTableTest : public unittest::Test {
 protected:
     void setUp() override {
         auto collectionUUID = UUID::gen();
-        writer = std::make_unique<HCIndexWriter>(collectionUUID);
+        DatabaseName dbName = DatabaseName::createDatabaseName_forTest(boost::none, "test");
+        writer = std::make_unique<HCIndexWriter>(collectionUUID, dbName);
         Timestamp windowStart(1, 0);
         Timestamp windowEnd(2, 0);
         dict = std::make_unique<SymbolDictionary>(DictionaryGranularity::HOURLY, windowStart, windowEnd, writer.get());
@@ -252,7 +253,8 @@ class TemporalAttributeTableTest : public unittest::Test {
 protected:
     void setUp() override {
         auto collectionUUID = UUID::gen();
-        writer = std::make_unique<HCIndexWriter>(collectionUUID);
+        DatabaseName dbName = DatabaseName::createDatabaseName_forTest(boost::none, "test");
+        writer = std::make_unique<HCIndexWriter>(collectionUUID, dbName);
         tempDict = std::make_unique<TemporalSymbolDictionary>(
             nullptr, collectionUUID, DictionaryGranularity::HOURLY, writer.get());
         tempTable = std::make_unique<TemporalAttributeTable>(

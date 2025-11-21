@@ -1420,12 +1420,13 @@ std::vector<BatchedInsertContext> buildBatchedHCInsertContexts(
         Timestamp windowEnd(windowStart.getSecs() + 3600, 0);
 
         // Build window metadata BSON for BucketKey
+        // This groups buckets by time window, not by metadata cardinality
         BSONObjBuilder windowMetaBuilder;
         windowMetaBuilder.append("windowStart", windowStart);
         windowMetaBuilder.append("windowEnd", windowEnd);
         BSONObj windowMetadata = windowMetaBuilder.obj();
 
-        // Transform measurements: rewrite timeField and metaField
+        // Transform measurements: keep original fields, add rowId
         std::vector<BatchedInsertTuple> transformedTuples;
 
         for (const auto& [measurement, time, index, rowId] : measurements) {
@@ -1436,11 +1437,8 @@ std::vector<BatchedInsertContext> buildBatchedHCInsertContexts(
             for (const auto& elem : measurement) {
                 StringData fieldName = elem.fieldNameStringData();
 
-                if (fieldName == timeField) {
-                    // Replace timeField with windowStart
-                    transformedBuilder.append(fieldName, windowStart);
-                } else if (metaField && fieldName == *metaField) {
-                    // Replace metaField with window information
+                if (metaField && fieldName == *metaField) {
+                    // Replace metaField with window metadata {windowStart, windowEnd}
                     BSONObjBuilder metaBuilder;
                     metaBuilder.append("windowStart", windowStart);
                     metaBuilder.append("windowEnd", windowEnd);
@@ -1451,15 +1449,20 @@ std::vector<BatchedInsertContext> buildBatchedHCInsertContexts(
                 }
             }
 
-            // Add rowId to the transformed measurement
+            // Add rowId as a separate field (outside metaField) for HCIndex encoding
             transformedBuilder.append("rowId", rowId);
 
             BSONObj transformedMeasurement = transformedBuilder.obj();
             transformedTuples.emplace_back(transformedMeasurement, time, index);
         }
 
-        // Create BucketMetadata with window information for HCIndex path
-        BSONElement windowMetadataElement = windowMetadata.firstElement();
+        // Create BucketKey using window metadata
+        // This groups buckets by time window, avoiding high cardinality metadata grouping
+        // Wrap the entire windowMetadata object as a field element (e.g., "meta: {windowStart, windowEnd}")
+        StringData metaFieldName = metaField ? *metaField : kBucketMetaFieldName;
+        BSONObjBuilder windowMetaFieldBuilder;
+        windowMetaFieldBuilder.append(metaFieldName, windowMetadata);
+        BSONElement windowMetadataElement = windowMetaFieldBuilder.obj().firstElement();
         BucketKey bucketKey{collectionUUID,
                             BucketMetadata{trackingContext, windowMetadataElement, boost::none}};
         auto stripeNumber = internal::getStripeNumber(bucketCatalog, bucketKey);
@@ -1475,8 +1478,8 @@ std::vector<BatchedInsertContext> buildBatchedHCInsertContexts(
     auto flushStatus = hcindexMgr->flushPendingOperations(
         [opCtx](const std::string& collName, const std::vector<InsertStatement>& ops) -> Status {
             // Parse collection name to NamespaceString
-            // Collection name format: "system.hcindex.ops.symbols.<uuid>" or "system.hcindex.ops.attributes.<uuid>"
-            auto nss = NamespaceString::createNamespaceString_forTest(collName);
+            // Collection name format: "database.hcindex.ops.symbols.<uuid>" or "database.hcindex.ops.attributes.<uuid>"
+            auto nss = NamespaceString::createNamespaceString_forTest(boost::none, collName);
 
             // Acquire the operations collection with write lock
             CollectionAcquisitionRequest request{

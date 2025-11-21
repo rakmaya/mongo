@@ -22,18 +22,33 @@
 
 #include "mongo/db/exec/timeseries/hcindex/hcindex_collection_manager.h"
 
+#include "mongo/db/namespace_string.h"
 #include "mongo/util/str.h"
 
 namespace mongo::timeseries::hcindex {
 
+NamespaceString HCIndexCollectionManager::getSymbolOperationsNamespace(const DatabaseName& dbName, const UUID& collectionUUID) {
+    std::string collName = "hcindex.ops.symbols." + collectionUUID.toString();
+    std::string fullNs = str::stream() << dbName.toStringForErrorMsg() << "." << collName;
+    return NamespaceString::createNamespaceString_forTest(fullNs);
+}
+
+NamespaceString HCIndexCollectionManager::getAttributeOperationsNamespace(const DatabaseName& dbName, const UUID& collectionUUID) {
+    std::string collName = "hcindex.ops.attributes." + collectionUUID.toString();
+    std::string fullNs = str::stream() << dbName.toStringForErrorMsg() << "." << collName;
+    return NamespaceString::createNamespaceString_forTest(fullNs);
+}
+
 HCIndexCollectionManager::HCIndexCollectionManager(OperationContext* opCtx,
+                                                   const DatabaseName& dbName,
                                                    const UUID& collectionUUID,
                                                    DictionaryGranularity granularity)
     : opCtx(opCtx),
+      dbName(dbName),
       collectionUUID(collectionUUID),
       granularity(granularity),
-      writer(std::make_unique<HCIndexWriter>(collectionUUID)),
-      reader(std::make_unique<HCIndexReader>(opCtx, collectionUUID)),
+      writer(std::make_unique<HCIndexWriter>(collectionUUID, dbName)),
+      reader(std::make_unique<HCIndexReader>(opCtx, dbName, collectionUUID)),
       symbolDictionary(std::make_unique<TemporalSymbolDictionary>(opCtx, collectionUUID, granularity, writer.get())),
       attributeTable(std::make_unique<TemporalAttributeTable>(opCtx, collectionUUID, granularity, symbolDictionary.get(), writer.get())) {}
 

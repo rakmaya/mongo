@@ -40,13 +40,13 @@ protected:
     }
 
     NamespaceString getSymbolOpsNamespace(const UUID& collectionUUID) {
-        std::string collName = "system.hcindex.ops.symbols." + collectionUUID.toString();
-        return NamespaceString::createNamespaceString_forTest("config", collName);
+        std::string collName = "hcindex.ops.symbols." + collectionUUID.toString();
+        return NamespaceString::createNamespaceString_forTest("test", collName);
     }
 
     NamespaceString getAttributeOpsNamespace(const UUID& collectionUUID) {
-        std::string collName = "system.hcindex.ops.attributes." + collectionUUID.toString();
-        return NamespaceString::createNamespaceString_forTest("config", collName);
+        std::string collName = "hcindex.ops.attributes." + collectionUUID.toString();
+        return NamespaceString::createNamespaceString_forTest("test", collName);
     }
 
     void createOpsCollections(const UUID& collectionUUID) {
@@ -62,7 +62,8 @@ TEST_F(HCIndexCollectionManagerTest, Initialize) {
     auto collectionUUID = getTestCollectionUUID();
     createOpsCollections(collectionUUID);
 
-    HCIndexCollectionManager manager(opCtx, collectionUUID, DictionaryGranularity::HOURLY);
+    DatabaseName dbName = DatabaseName::createDatabaseName_forTest(boost::none, "test");
+    HCIndexCollectionManager manager(opCtx, dbName, collectionUUID, DictionaryGranularity::HOURLY);
     auto status = manager.initialize();
     ASSERT_OK(status);
 }
@@ -72,7 +73,8 @@ TEST_F(HCIndexCollectionManagerTest, EncodeMetadata) {
     auto collectionUUID = getTestCollectionUUID();
     createOpsCollections(collectionUUID);
 
-    HCIndexCollectionManager manager(opCtx, collectionUUID, DictionaryGranularity::HOURLY);
+    DatabaseName dbName = DatabaseName::createDatabaseName_forTest(boost::none, "test");
+    HCIndexCollectionManager manager(opCtx, dbName, collectionUUID, DictionaryGranularity::HOURLY);
     ASSERT_OK(manager.initialize());
 
     BSONObj metadata = BSON("region" << "us-east" << "env" << "prod");
@@ -89,7 +91,8 @@ TEST_F(HCIndexCollectionManagerTest, Deduplication) {
     auto collectionUUID = getTestCollectionUUID();
     createOpsCollections(collectionUUID);
 
-    HCIndexCollectionManager manager(opCtx, collectionUUID, DictionaryGranularity::HOURLY);
+    DatabaseName dbName = DatabaseName::createDatabaseName_forTest(boost::none, "test");
+    HCIndexCollectionManager manager(opCtx, dbName, collectionUUID, DictionaryGranularity::HOURLY);
     ASSERT_OK(manager.initialize());
 
     BSONObj metadata = BSON("region" << "us-east" << "env" << "prod");

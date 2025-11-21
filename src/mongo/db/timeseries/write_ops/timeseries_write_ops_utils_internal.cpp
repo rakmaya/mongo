@@ -501,7 +501,8 @@ mongo::write_ops::InsertCommandRequest makeTimeseriesInsertOpFromBatch(
     // Extra verification that the insert op decompresses to the same values put in.
     // We use a PseudoRandom to test frequency of checks, this is not cryptographically
     // secure, but good enough for simple rate limiting on verifications.
-    if (gPerformTimeseriesCompressionIntermediateDataIntegrityCheckOnInsert.load() &&
+    // Skip verification for HCIndex batches since they use window metadata instead of measurement metadata.
+    if (!batch->isHCIndexBatch && gPerformTimeseriesCompressionIntermediateDataIntegrityCheckOnInsert.load() &&
         (opCtx->getClient()->getPrng().nextInt32() % 100) <
             gPerformTimeseriesCompressionIntermediateDataIntegrityCheckOnInsertFrequency.load()) {
         auto verifierFunction = makeVerifierFunction(batch, OperationSource::kTimeseriesInsert);
@@ -597,11 +598,13 @@ mongo::write_ops::UpdateOpEntry makeTimeseriesCompressedDiffEntry(
     // We use a PseudoRandom to test frequency of checks, this is not cryptographically
     // secure, but good enough for simple rate limiting on verifications.
     doc_diff::VerifierFunc verifierFunction = nullptr;
-    if ((gPerformTimeseriesCompressionIntermediateDataIntegrityCheckOnInsert.load() &&
+    // Skip verification for HCIndex batches since they use window metadata instead of measurement metadata.
+    if (!batch->isHCIndexBatch &&
+        ((gPerformTimeseriesCompressionIntermediateDataIntegrityCheckOnInsert.load() &&
          (opCtx->getClient()->getPrng().nextInt32() % 100) <
              gPerformTimeseriesCompressionIntermediateDataIntegrityCheckOnInsertFrequency.load()) ||
         (gPerformTimeseriesCompressionIntermediateDataIntegrityCheckOnReopening.load() &&
-         batch->isReopened)) {
+         batch->isReopened))) {
         verifierFunction = makeVerifierFunction(batch, OperationSource::kTimeseriesUpdate);
     }
 

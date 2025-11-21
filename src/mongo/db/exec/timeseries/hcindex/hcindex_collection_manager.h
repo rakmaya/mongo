@@ -26,6 +26,7 @@
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/timestamp.h"
+#include "mongo/db/database_name.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/exec/timeseries/hcindex/temporal_symbol_dictionary.h"
 #include "mongo/db/exec/timeseries/hcindex/temporal_attribute_table.h"
@@ -61,12 +62,35 @@ namespace mongo::timeseries::hcindex {
 class HCIndexCollectionManager {
 public:
     /**
+     * Get the namespace for the symbol operations collection.
+     *
+     * Returns the NamespaceString for the symbol operations collection that should be created
+     * for the given collection UUID in the specified database.
+     */
+    static NamespaceString getSymbolOperationsNamespace(const DatabaseName& dbName, const UUID& collectionUUID);
+
+    /**
+     * Get the namespace for the attribute operations collection.
+     *
+     * Returns the NamespaceString for the attribute operations collection that should be created
+     * for the given collection UUID in the specified database.
+     */
+    static NamespaceString getAttributeOperationsNamespace(const DatabaseName& dbName, const UUID& collectionUUID);
+
+    /**
      * Create a new HCIndex manager for the specified collection.
      *
      * The manager will manage HCIndex structures for the collection identified by
-     * collectionUUID, using the specified granularity for time-window scoping.
+     * collectionUUID in the specified database, using the specified granularity for time-window scoping.
+     *
+     * Parameters:
+     * - opCtx: Operation context for database operations
+     * - dbName: Database name where the timeseries collection resides
+     * - collectionUUID: UUID of the timeseries collection
+     * - granularity: Time-window granularity for the HCIndex structures
      */
     HCIndexCollectionManager(OperationContext* opCtx,
+                            const DatabaseName& dbName,
                             const UUID& collectionUUID,
                             DictionaryGranularity granularity);
 
@@ -134,7 +158,7 @@ public:
      * provided callback for each collection type (symbol and attribute operations).
      *
      * The callback function receives:
-     * - collectionName: The target collection name (system.hcindex.ops.symbols.* or system.hcindex.ops.attributes.*)
+     * - collectionName: The target collection name (hcindex.ops.symbols.* or hcindex.ops.attributes.*)
      * - operations: Vector of InsertStatement objects to be flushed
      *
      * The caller is responsible for implementing the actual database insert logic
@@ -152,6 +176,9 @@ public:
 private:
     // Operation context for database operations
     OperationContext* opCtx;
+
+    // Database name where the timeseries collection resides
+    DatabaseName dbName;
 
     // Collection UUID for this manager
     UUID collectionUUID;
