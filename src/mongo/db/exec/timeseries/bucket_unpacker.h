@@ -307,6 +307,13 @@ public:
         _hcindexMgr = hcindexMgr;
     }
 
+    /**
+     * Gets the decoded metadata for an HCIndex-encoded measurement at the given index.
+     * Returns the decoded metadata BSONObj, or an empty BSONObj if decoding fails or this is not
+     * an HCIndex bucket.
+     */
+    BSONObj getDecodedMetadataForMeasurement(int measurementIndex);
+
     class UnpackingImpl;
 
 private:
@@ -384,5 +391,18 @@ private:
     // HCIndexCollectionManager for decoding HCIndex-encoded metadata.
     // Optional - only set when unpacking HCIndex-encoded buckets.
     hcindex::HCIndexCollectionManager* _hcindexMgr = nullptr;
+
+    // Flag indicating whether this bucket is HCIndex-encoded.
+    // When true, each measurement has its own rowId that needs to be decoded.
+    bool _isHCIndexBucket = false;
+
+    // Counter for tracking the current measurement index during unpacking.
+    // Used for HCIndex buckets to decode the correct rowId for each measurement.
+    int32_t _currentMeasurementIndex = 0;
+
+    // Cached rowId column for HCIndex buckets.
+    // Initialized during reset() if this is an HCIndex bucket.
+    boost::optional<BSONColumn> _rowIdColumn;
+    boost::optional<BSONColumn::Iterator> _rowIdColumnIterator;
 };
 }  // namespace mongo::timeseries

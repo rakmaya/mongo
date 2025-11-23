@@ -876,6 +876,7 @@ mongo_cc_library(
         "//src/mongo/db/timeseries:catalog_helper",
         "//src/mongo/db/timeseries:timeseries_conversion_util",
         "//src/mongo/db/timeseries:timeseries_options",
+        "//src/mongo/db/timeseries/bucket_catalog",
         "//src/mongo/db/update:update_document_diff",
         "//src/mongo/db/views:resolved_view",
         "//src/mongo/executor:task_executor_cursor",

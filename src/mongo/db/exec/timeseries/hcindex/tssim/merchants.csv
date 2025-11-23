@@ -1,0 +1,52 @@
+merchant_id,chain_id,city
+NYC001,MC,New York
+NYC002,MC,New York
+NYC003,MC,New York
+NYC004,MC,New York
+SF001,MC,San Francisco
+CHI001,MC,Chicago
+LA001,MC,Los Angeles
+SEA001,MC,Seattle
+DAL001,MC,Dallas
+MIA001,MC,Miami
+NYC101,SB,New York
+NYC102,SB,New York
+SF101,SB,San Francisco
+SF102,SB,San Francisco
+CHI101,SB,Chicago
+SEA101,SB,Seattle
+LA101,SB,Los Angeles
+DAL101,SB,Dallas
+MIA101,SB,Miami
+BOS101,SB,Boston
+NYC201,BK,New York
+CHI201,BK,Chicago
+CHI202,BK,Chicago
+LA201,BK,Los Angeles
+SEA201,BK,Seattle
+SF201,BK,San Francisco
+DAL201,BK,Dallas
+MIA201,BK,Miami
+PHI201,BK,Philadelphia
+ATL201,BK,Atlanta
+NYC301,KFC,New York
+LA301,KFC,Los Angeles
+SEA301,KFC,Seattle
+SF301,KFC,San Francisco
+CHI301,KFC,Chicago
+DAL301,KFC,Dallas
+MIA301,KFC,Miami
+HOU301,KFC,Houston
+PHO301,KFC,Phoenix
+DEN301,KFC,Denver
+NYC401,CHP,New York
+LA401,CHP,Los Angeles
+SF401,CHP,San Francisco
+SEA401,CHP,Seattle
+CHI401,CHP,Chicago
+DAL401,CHP,Dallas
+MIA401,CHP,Miami
+PHI401,CHP,Philadelphia
+BOS401,CHP,Boston
+ATL401,CHP,Atlanta
+

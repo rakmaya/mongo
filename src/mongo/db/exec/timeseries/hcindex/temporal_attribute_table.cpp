@@ -195,12 +195,20 @@ Status AttributeTable::addColumn(StringData fieldName) {
 
     // Add to schema
     std::string fieldNameStr = std::string(fieldName);
-    fieldToColumnIndex[fieldNameStr] = schema.size();
+    size_t columnIndex = schema.size();
+    fieldToColumnIndex[fieldNameStr] = columnIndex;
     schema.push_back(fieldNameStr);
 
     // Extend all existing rows with 0 (missing value)
     for (auto& row : rows) {
         row.push_back(0);
+    }
+
+    // Notify writer of the new schema field (must be done after schema is updated)
+    // Note: writeSchema will check state and call writer->addSchemaField if in ReadWrite mode
+    auto status = writeSchema(fieldNameStr, columnIndex);
+    if (!status.isOK()) {
+        return status;
     }
 
     return Status::OK();
@@ -354,7 +362,8 @@ Status AttributeTable::writeSchema(const std::string& fieldName, size_t columnIn
 
     if (_state == AttributeTableState::ReadWrite) {
         // If this is the first schema field, we need to initialize the attribute table.
-        if (schema.empty()) {
+        // Check if schema had any fields BEFORE this one was added (columnIndex == 0 means first field)
+        if (columnIndex == 0) {
             auto stat = writer->initAttributeTable(_windowStart, _windowEnd);
             if (!stat.isOK()) {
                 return stat;
@@ -394,6 +403,14 @@ Status AttributeTable::writeRow(const std::vector<uint32_t>& row)
 
     // In ReadWrite mode, notify writer of the new row
     if (_state == AttributeTableState::ReadWrite) {
+        // If this is the first schema field, we need to initialize the attribute table.
+        if (schema.empty() && rows.empty()) {
+            auto stat = writer->initAttributeTable(_windowStart, _windowEnd);
+            if (!stat.isOK()) {
+                return stat;
+            }
+        }
+
         _isDirty = true;
         return writer->addAttributeRow(_windowStart, _windowEnd, row);
     }

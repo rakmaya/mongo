@@ -33,6 +33,7 @@
 #include "mongo/db/exec/matcher/matcher.h"
 #include "mongo/db/pipeline/document_path_support.h"
 #include "mongo/db/pipeline/document_source_internal_unpack_bucket.h"
+#include "mongo/db/timeseries/bucket_catalog/global_bucket_catalog.h"
 
 namespace mongo {
 
@@ -86,6 +87,19 @@ GetNextResult InternalUnpackBucketStage::doGetNext() {
         auto bucket = nextResult.getDocument().toBson();
         auto bucketMatchedQuery = _sharedState->_wholeBucketFilter &&
             exec::matcher::matchesBSON(_sharedState->_wholeBucketFilter.get(), bucket);
+
+        // Set HCIndexCollectionManager if this is an HCIndex-enabled collection
+        auto collUUID = pExpCtx->getUUID();
+        if (collUUID) {
+            auto& bucketCatalog = timeseries::bucket_catalog::GlobalBucketCatalog::get(
+                pExpCtx->getOperationContext()->getServiceContext());
+            auto hcindexMgr = timeseries::bucket_catalog::getHCIndexManager(
+                bucketCatalog, *collUUID);
+            if (hcindexMgr) {
+                _sharedState->_bucketUnpacker.setHCIndexCollectionManager(hcindexMgr.get());
+            }
+        }
+
         _sharedState->_bucketUnpacker.reset(std::move(bucket), bucketMatchedQuery);
 
         uassert(

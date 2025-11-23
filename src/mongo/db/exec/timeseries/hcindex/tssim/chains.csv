@@ -1,0 +1,7 @@
+chain_id,chain_name,traffic_weight
+MC,McDonalds,1.0
+SB,Starbucks,0.9
+BK,Burger King,0.6
+KFC,KFC,0.5
+CHP,Chipotle,0.7
+

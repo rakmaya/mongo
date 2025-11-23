@@ -1426,10 +1426,19 @@ std::vector<BatchedInsertContext> buildBatchedHCInsertContexts(
         windowMetaBuilder.append("windowEnd", windowEnd);
         BSONObj windowMetadata = windowMetaBuilder.obj();
 
+        // Sort measurements by time (same as traditional path)
+        auto sortedMeasurements = measurements;
+        std::sort(sortedMeasurements.begin(),
+                  sortedMeasurements.end(),
+                  [](const auto& lhs, const auto& rhs) {
+                      // Sort by time field (second element in tuple)
+                      return std::get<Date_t>(lhs) < std::get<Date_t>(rhs);
+                  });
+
         // Transform measurements: keep original fields, add rowId
         std::vector<BatchedInsertTuple> transformedTuples;
 
-        for (const auto& [measurement, time, index, rowId] : measurements) {
+        for (const auto& [measurement, time, index, rowId] : sortedMeasurements) {
             // Build transformed measurement BSON
             BSONObjBuilder transformedBuilder;
 

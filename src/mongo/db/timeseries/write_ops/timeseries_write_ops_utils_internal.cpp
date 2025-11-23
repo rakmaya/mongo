@@ -442,6 +442,11 @@ mongo::write_ops::WriteCommandRequestBase makeTimeseriesWriteOpBase(std::vector<
 }
 
 void isMeasurementsSortedOnTime(std::shared_ptr<bucket_catalog::WriteBatch> batch) {
+    // Skip this check for HCIndex batches since they use rowIds instead of actual measurements
+    if (batch->isHCIndexBatch) {
+        return;
+    }
+
     std::vector<BSONElement> measurementTimestamps;
     for (const auto& measurement : batch->measurements) {
         measurementTimestamps.push_back(measurement[batch->timeField]);

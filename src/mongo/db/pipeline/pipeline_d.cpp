@@ -113,6 +113,8 @@
 #include "mongo/db/server_parameter_with_storage.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/sorted_data_interface.h"
+#include "mongo/db/timeseries/bucket_catalog/bucket_catalog.h"
+#include "mongo/db/timeseries/bucket_catalog/global_bucket_catalog.h"
 #include "mongo/db/timeseries/timeseries_constants.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
 #include "mongo/platform/compiler.h"
@@ -525,6 +527,18 @@ StatusWith<unique_ptr<PlanExecutor, PlanExecutor::Deleter>> PipelineD::createRan
 
         auto topkSortPlan = std::make_unique<UnpackTimeseriesBucket>(
             expCtx.get(), ws.get(), std::move(collScanPlan), bucketUnpacker->copy());
+
+        // Set HCIndexCollectionManager if this is an HCIndex-enabled collection
+        auto collUUID = expCtx->getUUID();
+        if (collUUID) {
+            auto& bucketCatalog = timeseries::bucket_catalog::GlobalBucketCatalog::get(
+                expCtx->getOperationContext()->getServiceContext());
+            auto hcindexMgr = timeseries::bucket_catalog::getHCIndexManager(
+                bucketCatalog, *collUUID);
+            if (hcindexMgr) {
+                topkSortPlan->setHCIndexCollectionManager(hcindexMgr.get());
+            }
+        }
 
         // In a sharded collection we need to preserve the $sample source in order to provide the
         // AsyncResultsMerger with $sortKeys it can use to merge samples from multiple shards.

@@ -70,6 +70,14 @@ public:
 
     PlanStage::StageState doWork(WorkingSetID* id) override;
 
+    /**
+     * Sets the HCIndexCollectionManager for decoding HCIndex-encoded metadata.
+     * This is optional and only needed when unpacking HCIndex-encoded buckets.
+     */
+    void setHCIndexCollectionManager(timeseries::hcindex::HCIndexCollectionManager* hcindexMgr) {
+        _bucketUnpacker.setHCIndexCollectionManager(hcindexMgr);
+    }
+
 private:
     WorkingSet& _ws;
     timeseries::BucketUnpacker _bucketUnpacker;
