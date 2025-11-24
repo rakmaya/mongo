@@ -34,6 +34,9 @@
 #include "mongo/db/pipeline/document_path_support.h"
 #include "mongo/db/pipeline/document_source_internal_unpack_bucket.h"
 #include "mongo/db/timeseries/bucket_catalog/global_bucket_catalog.h"
+#include "mongo/logv2/log.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
 namespace mongo {
 
@@ -88,7 +91,7 @@ GetNextResult InternalUnpackBucketStage::doGetNext() {
         auto bucketMatchedQuery = _sharedState->_wholeBucketFilter &&
             exec::matcher::matchesBSON(_sharedState->_wholeBucketFilter.get(), bucket);
 
-        // Set HCIndexCollectionManager if this is an HCIndex-enabled collection
+        // Set HCIndexCollectionManager and OperationContext if this is an HCIndex-enabled collection
         auto collUUID = pExpCtx->getUUID();
         if (collUUID) {
             auto& bucketCatalog = timeseries::bucket_catalog::GlobalBucketCatalog::get(
@@ -97,6 +100,7 @@ GetNextResult InternalUnpackBucketStage::doGetNext() {
                 bucketCatalog, *collUUID);
             if (hcindexMgr) {
                 _sharedState->_bucketUnpacker.setHCIndexCollectionManager(hcindexMgr.get());
+                _sharedState->_bucketUnpacker.setOperationContext(pExpCtx->getOperationContext());
             }
         }
 

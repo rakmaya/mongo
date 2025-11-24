@@ -115,10 +115,15 @@ public:
      * If the same metadata is encoded multiple times, the same rowId is returned
      * (deduplication).
      *
+     * Parameters:
+     * - opCtx: Operation context for database operations
+     * - metadata: The metadata BSONObj to encode
+     * - timestamp: The timestamp for this operation
+     *
      * Returns StatusWith<int64_t> containing the rowId on success, or an error
      * status if encoding fails.
      */
-    StatusWith<int64_t> encodeMetadata(const BSONObj& metadata, const Timestamp& timestamp);
+    StatusWith<int64_t> encodeMetadata(OperationContext* opCtx, const BSONObj& metadata, const Timestamp& timestamp);
 
     /**
      * Decode a rowId back to full metadata.
@@ -127,10 +132,15 @@ public:
      * operations up to the specified timestamp, then retrieves the metadata for
      * the given rowId.
      *
+     * Parameters:
+     * - opCtx: Operation context for database operations
+     * - rowId: The rowId to decode
+     * - timestamp: The timestamp for this operation
+     *
      * Returns StatusWith<BSONObj> containing the decoded metadata on success, or
      * an error status if decoding fails.
      */
-    StatusWith<BSONObj> decodeMetadata(int64_t rowId, const Timestamp& timestamp);
+    StatusWith<BSONObj> decodeMetadata(OperationContext* opCtx, int64_t rowId, const Timestamp& timestamp);
 
     /**
      * Clean up HCIndex structures for this collection.
@@ -174,9 +184,6 @@ public:
         std::function<Status(const std::string&, const std::vector<InsertStatement>&)> flushCallback);
 
 private:
-    // Operation context for database operations
-    OperationContext* opCtx;
-
     // Database name where the timeseries collection resides
     DatabaseName dbName;
 

@@ -256,9 +256,9 @@ protected:
         DatabaseName dbName = DatabaseName::createDatabaseName_forTest(boost::none, "test");
         writer = std::make_unique<HCIndexWriter>(collectionUUID, dbName);
         tempDict = std::make_unique<TemporalSymbolDictionary>(
-            nullptr, collectionUUID, DictionaryGranularity::HOURLY, writer.get());
+            collectionUUID, DictionaryGranularity::HOURLY, writer.get());
         tempTable = std::make_unique<TemporalAttributeTable>(
-            nullptr, collectionUUID, DictionaryGranularity::HOURLY, tempDict.get(), writer.get());
+            collectionUUID, DictionaryGranularity::HOURLY, tempDict.get(), writer.get());
     }
 
     std::unique_ptr<HCIndexWriter> writer;

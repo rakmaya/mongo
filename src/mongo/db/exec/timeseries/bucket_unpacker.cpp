@@ -568,8 +568,9 @@ void BucketUnpacker::reset(BSONObj&& bucket, bool bucketMatchedQuery) {
     _metaBSONElem = _bucket[kBucketMetaFieldName];
     _metaValue = Value{_metaBSONElem};
 
-    // HCIndex path: Check if this is an HCIndex-encoded bucket using the flag field
-    // HCIndex buckets have the kBucketMetaHCIndexPresent flag set in the metadata
+    // If we have valid HCIndex manager and the meta field is present, then we
+    // need to parse it. Set the iterators so we can decode the metadata for
+    // each measurement later.
     if (_hcindexMgr && _spec.metaField() && !_metaValue.missing()) {
         auto metaObj = _metaBSONElem.Obj();
         auto hcindexFlagElem = metaObj[kBucketMetaHCIndexPresent];
@@ -798,6 +799,7 @@ const std::set<StringData> BucketUnpacker::reservedBucketFieldNames = {
     kBucketIdFieldName, kBucketDataFieldName, kBucketMetaFieldName, kBucketControlFieldName};
 
 BSONObj BucketUnpacker::getDecodedMetadataForMeasurement(int measurementIndex) {
+
     // If this is not an HCIndex bucket or we don't have a manager, return empty
     if (!_isHCIndexBucket || !_hcindexMgr || !_rowIdColumnIterator) {
         return BSONObj();
@@ -841,7 +843,7 @@ BSONObj BucketUnpacker::getDecodedMetadataForMeasurement(int measurementIndex) {
     Timestamp ts(seconds, 0);
 
     // Decode the rowId back to metadata
-    auto decodedMetadataStatus = _hcindexMgr->decodeMetadata(rowId, ts);
+    auto decodedMetadataStatus = _hcindexMgr->decodeMetadata(_opCtx, rowId, ts);
     if (!decodedMetadataStatus.isOK()) {
         return BSONObj();
     }

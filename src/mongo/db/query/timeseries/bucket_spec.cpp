@@ -154,6 +154,14 @@ BucketSpec::BucketPredicate BucketSpec::createPredicatesOnBucketLevelField(
         (matchExprPath == bucketSpec.metaField().value() ||
          expression::isPathPrefixOf(bucketSpec.metaField().value(), matchExprPath))) {
 
+        // For HCIndex buckets, metadata predicates cannot be pushed down to the bucket level
+        // because the bucket's metadata field contains only window metadata (windowStart, windowEnd),
+        // not the original metadata. Metadata predicates must be applied as event filters after
+        // unpacking and decoding the rowIds back to original metadata.
+        if (bucketSpec.useHCIndex()) {
+            return handleIneligible(policy, matchExpr, "cannot push down metadata predicates for HCIndex buckets");
+        }
+
         if (haveComputedMetaField)
             return handleIneligible(policy, matchExpr, "can't handle a computed meta field");
 
@@ -455,6 +463,7 @@ BucketSpec::SplitPredicates BucketSpec::getPushdownPredicates(
             // to the buckets before unpacking. So we can use default values
             // for the rest of the arguments.
         };
+
         auto bucketPredicate =
             createPredicatesOnBucketLevelField(residualPred.get(),
                                                bucketSpec,
@@ -512,7 +521,8 @@ BucketSpec::BucketSpec(const BucketSpec& other)
       _timeField(other._timeField),
       _timeFieldHashed(HashedFieldName{_timeField, other._timeFieldHashed->hash()}),
       _metaField(other._metaField),
-      _usesExtendedRange(other._usesExtendedRange) {
+      _usesExtendedRange(other._usesExtendedRange),
+      _useHCIndex(other._useHCIndex) {
     if (_metaField) {
         _metaFieldHashed = HashedFieldName{*_metaField, other._metaFieldHashed->hash()};
     }
@@ -525,7 +535,8 @@ BucketSpec::BucketSpec(BucketSpec&& other)
       _timeField(std::move(other._timeField)),
       _timeFieldHashed(HashedFieldName{_timeField, other._timeFieldHashed->hash()}),
       _metaField(std::move(other._metaField)),
-      _usesExtendedRange(other._usesExtendedRange) {
+      _usesExtendedRange(other._usesExtendedRange),
+      _useHCIndex(other._useHCIndex) {
     if (_metaField) {
         _metaFieldHashed = HashedFieldName{*_metaField, other._metaFieldHashed->hash()};
     }
@@ -535,7 +546,8 @@ BucketSpec::BucketSpec(const TimeseriesOptions& tsOptions)
     : BucketSpec(std::string{tsOptions.getTimeField()},
                  tsOptions.getMetaField()
                      ? boost::optional<string>(std::string{*tsOptions.getMetaField()})
-                     : boost::none) {}
+                     : boost::none) {
+}
 
 BucketSpec& BucketSpec::operator=(const BucketSpec& other) {
     if (&other != this) {
@@ -549,6 +561,7 @@ BucketSpec& BucketSpec::operator=(const BucketSpec& other) {
             _metaFieldHashed = HashedFieldName{*_metaField, other._metaFieldHashed->hash()};
         }
         _usesExtendedRange = other._usesExtendedRange;
+        _useHCIndex = other._useHCIndex;
     }
     return *this;
 }
@@ -564,6 +577,7 @@ BucketSpec& BucketSpec::operator=(BucketSpec&& other) {
         _metaFieldHashed = HashedFieldName{*_metaField, other._metaFieldHashed->hash()};
     }
     _usesExtendedRange = other._usesExtendedRange;
+    _useHCIndex = other._useHCIndex;
     return *this;
 }
 

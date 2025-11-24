@@ -33,14 +33,16 @@
 //#include "mongo/db/collection_crud/collection_write_path.h"
 #include "mongo/db/local_catalog/shard_role_api/shard_role.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/util/str.h"
+#include "mongo/logv2/log.h"
+
 
 namespace mongo::timeseries::hcindex {
 
-HCIndexReader::HCIndexReader(OperationContext* opCtx, const DatabaseName& dbName, const UUID& collectionUUID)
-    : opCtx(opCtx), dbName(dbName), collectionUUID(collectionUUID) {}
+HCIndexReader::HCIndexReader(const DatabaseName& dbName, const UUID& collectionUUID)
+    : dbName(dbName), collectionUUID(collectionUUID) {}
 
 StatusWith<std::unique_ptr<SymbolDictionary>> HCIndexReader::constructSymbolDictionary(
+    OperationContext* opCtx,
     const Timestamp& windowStart,
     const Timestamp& windowEnd,
     DictionaryGranularity granularity,
@@ -57,22 +59,38 @@ StatusWith<std::unique_ptr<SymbolDictionary>> HCIndexReader::constructSymbolDict
     // Get namespace for symbol operations collection using HCIndexCollectionManager
     auto nss = HCIndexCollectionManager::getSymbolOperationsNamespace(dbName, collectionUUID);
 
-    // Acquire collection with read lock
+    // Try to acquire collection with read lock
     CollectionAcquisitionRequest acquisitionRequest(
         nss,
         PlacementConcern::kPretendUnsharded,
-        repl::ReadConcernArgs::get(opCtx),
+        repl::ReadConcernArgs::kImplicitDefault,
         AcquisitionPrerequisites::kRead);
 
-    auto collection = acquireCollection(opCtx, acquisitionRequest, MODE_IS);
-
-    if (!collection.exists()) {
-        return Status(ErrorCodes::NamespaceNotFound,
-                      str::stream() << "Symbol operations collection not found: " << nss.toStringForErrorMsg());
+    boost::optional<CollectionAcquisition> collection;
+    try {
+        collection = acquireCollection(opCtx, acquisitionRequest, MODE_IS);
+    } catch (const std::exception& e) {
+        // Operations collection doesn't exist yet - this is expected on first load after restart
+        // Return an empty dictionary
+        auto readOnlyStatus = dict->changeState(SymbolDictionaryState::ReadOnly);
+        if (!readOnlyStatus.isOK()) {
+            return readOnlyStatus;
+        }
+        return std::move(dict);
     }
-    
+
+    if (!collection || !collection->exists()) {
+        // Operations collection doesn't exist yet - this is expected on first load after restart
+        // Return an empty dictionary
+        auto readOnlyStatus = dict->changeState(SymbolDictionaryState::ReadOnly);
+        if (!readOnlyStatus.isOK()) {
+            return readOnlyStatus;
+        }
+        return std::move(dict);
+    }
+
     // Read and replay operations
-    auto cursor = collection.getCollectionPtr()->getCursor(opCtx);
+    auto cursor = collection->getCollectionPtr()->getCursor(opCtx);
     while (auto record = cursor->next()) {
         BSONObj doc = record->data.toBson();
 
@@ -115,6 +133,7 @@ StatusWith<std::unique_ptr<SymbolDictionary>> HCIndexReader::constructSymbolDict
 }
 
 StatusWith<std::unique_ptr<AttributeTable>> HCIndexReader::constructAttributeTable(
+    OperationContext* opCtx,
     const Timestamp& windowStart,
     const Timestamp& windowEnd,
     DictionaryGranularity granularity,
@@ -132,22 +151,38 @@ StatusWith<std::unique_ptr<AttributeTable>> HCIndexReader::constructAttributeTab
     // Get namespace for attribute operations collection using HCIndexCollectionManager
     auto nss = HCIndexCollectionManager::getAttributeOperationsNamespace(dbName, collectionUUID);
 
-    // Acquire collection with read lock
+    // Try to acquire collection with read lock
     CollectionAcquisitionRequest acquisitionRequest(
         nss,
         PlacementConcern::kPretendUnsharded,
-        repl::ReadConcernArgs::get(opCtx),
+        repl::ReadConcernArgs::kImplicitDefault,
         AcquisitionPrerequisites::kRead);
 
-    auto collection = acquireCollection(opCtx, acquisitionRequest, MODE_IS);
-
-    if (!collection.exists()) {
-        return Status(ErrorCodes::NamespaceNotFound,
-                      str::stream() << "Attribute operations collection not found: " << nss.toStringForErrorMsg());
+    boost::optional<CollectionAcquisition> collection;
+    try {
+        collection = acquireCollection(opCtx, acquisitionRequest, MODE_IS);
+    } catch (const std::exception& e) {
+        // Operations collection doesn't exist yet - this is expected on first load after restart
+        // Return an empty table
+        auto readOnlyStatus = table->changeState(AttributeTableState::ReadOnly);
+        if (!readOnlyStatus.isOK()) {
+            return readOnlyStatus;
+        }
+        return std::move(table);
     }
-    
+
+    if (!collection || !collection->exists()) {
+        // Operations collection doesn't exist yet - this is expected on first load after restart
+        // Return an empty table
+        auto readOnlyStatus = table->changeState(AttributeTableState::ReadOnly);
+        if (!readOnlyStatus.isOK()) {
+            return readOnlyStatus;
+        }
+        return std::move(table);
+    }
+
     // Read and replay operations
-    auto cursor = collection.getCollectionPtr()->getCursor(opCtx);
+    auto cursor = collection->getCollectionPtr()->getCursor(opCtx);
     while (auto record = cursor->next()) {
         BSONObj doc = record->data.toBson();
 
@@ -164,6 +199,7 @@ StatusWith<std::unique_ptr<AttributeTable>> HCIndexReader::constructAttributeTab
         }
 
         StringData op = doc.getStringField("op");
+        Timestamp docTimestamp = doc.getField("timestamp").timestamp();
 
         if (op == "INIT") {
             // Extract schema and rows from INIT operation
@@ -175,6 +211,26 @@ StatusWith<std::unique_ptr<AttributeTable>> HCIndexReader::constructAttributeTab
                     return status;
                 }
             }
+
+            // Extract and insert rows from INIT operation
+            BSONElement rowsElem = doc.getField("rows");
+            if (rowsElem && rowsElem.type() == BSONType::array) {
+                auto rowsArray = rowsElem.Array();
+                for (const auto& rowElem : rowsArray) {
+                    if (rowElem.type() == BSONType::array) {
+                        auto row = rowElem.Array();
+                        std::vector<uint32_t> indices;
+                        for (const auto& indexElem : row) {
+                            indices.push_back(static_cast<uint32_t>(indexElem.numberInt()));
+                        }
+                        // Insert the row into the attribute table
+                        auto insertStatus = table->insertRowDirect(indices);
+                        if (!insertStatus.isOK()) {
+                            return insertStatus.getStatus();
+                        }
+                    }
+                }
+            }
         } else if (op == "opADD") {
             // Extract attributes from ADD operation
             BSONObj attrsObj = doc.getObjectField("attributes");
@@ -183,6 +239,26 @@ StatusWith<std::unique_ptr<AttributeTable>> HCIndexReader::constructAttributeTab
                 auto status = table->addColumn(StringData(fieldName));
                 if (!status.isOK()) {
                     return status;
+                }
+            }
+
+            // Extract and insert rows from opADD operation
+            BSONElement rowsElem = doc.getField("rows");
+            if (rowsElem && rowsElem.type() == BSONType::array) {
+                auto rowsArray = rowsElem.Array();
+                for (const auto& rowElem : rowsArray) {
+                    if (rowElem.type() == BSONType::array) {
+                        auto row = rowElem.Array();
+                        std::vector<uint32_t> indices;
+                        for (const auto& indexElem : row) {
+                            indices.push_back(static_cast<uint32_t>(indexElem.numberInt()));
+                        }
+                        // Insert the row into the attribute table
+                        auto insertStatus = table->insertRowDirect(indices);
+                        if (!insertStatus.isOK()) {
+                            return insertStatus.getStatus();
+                        }
+                    }
                 }
             }
         }

@@ -308,6 +308,14 @@ public:
     }
 
     /**
+     * Sets the OperationContext for HCIndex operations.
+     * This is required when using HCIndex-encoded buckets.
+     */
+    void setOperationContext(OperationContext* opCtx) {
+        _opCtx = opCtx;
+    }
+
+    /**
      * Gets the decoded metadata for an HCIndex-encoded measurement at the given index.
      * Returns the decoded metadata BSONObj, or an empty BSONObj if decoding fails or this is not
      * an HCIndex bucket.
@@ -391,6 +399,10 @@ private:
     // HCIndexCollectionManager for decoding HCIndex-encoded metadata.
     // Optional - only set when unpacking HCIndex-encoded buckets.
     hcindex::HCIndexCollectionManager* _hcindexMgr = nullptr;
+
+    // OperationContext for HCIndex operations.
+    // Required when using HCIndex-encoded buckets.
+    OperationContext* _opCtx = nullptr;
 
     // Flag indicating whether this bucket is HCIndex-encoded.
     // When true, each measurement has its own rowId that needs to be decoded.

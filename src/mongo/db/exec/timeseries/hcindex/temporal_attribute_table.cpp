@@ -30,7 +30,9 @@
 #include "mongo/db/exec/timeseries/hcindex/temporal_attribute_table.h"
 #include "mongo/db/exec/timeseries/hcindex/temporal_symbol_dictionary.h"
 #include "mongo/db/exec/timeseries/hcindex/hcindex_writer.h"
+#include "mongo/db/exec/timeseries/hcindex/hcindex_reader.h"
 #include "mongo/base/error_codes.h"
+
 
 namespace mongo::timeseries::hcindex {
 
@@ -423,22 +425,16 @@ Status AttributeTable::writeRow(const std::vector<uint32_t>& row)
 // TemporalAttributeTable Implementation
 // ============================================================================
 
-TemporalAttributeTable::TemporalAttributeTable(OperationContext* opCtx,
-                                               const UUID& collectionUUID,
+TemporalAttributeTable::TemporalAttributeTable(const UUID& collectionUUID,
                                                DictionaryGranularity granularity,
                                                TemporalSymbolDictionary* symbolDictionary,
-                                               HCIndexWriter* writer)
+                                               HCIndexWriter* writer,
+                                               HCIndexReader* reader)
     : collectionUUID(collectionUUID),
       granularity(granularity),
-      opCtx(opCtx),
       temporalSymbolDictionary(symbolDictionary),
-      writer(writer) {}
-
-StatusWith<AttributeTable*> TemporalAttributeTable::getOrCreateTableForTimestamp(
-    const Timestamp& timestamp) {
-    Timestamp windowStart = calculateWindowStart(timestamp);
-    return getOrCreateTable(windowStart);
-}
+      writer(writer),
+      reader(reader) {}
 
 StatusWith<AttributeTable*> TemporalAttributeTable::getTableForTimestamp(
     const Timestamp& timestamp) const {
@@ -455,9 +451,61 @@ StatusWith<AttributeTable*> TemporalAttributeTable::getTableForTimestamp(
     return it->second.get();
 }
 
-StatusWith<InsertRowResult> TemporalAttributeTable::insertRow(const BSONObj& metadata,
+bool TemporalAttributeTable::tableExists(const Timestamp& timestamp) const {
+    std::shared_lock<std::shared_mutex> lock(mutex);
+
+    Timestamp windowStart = calculateWindowStart(timestamp);
+    return tables.find(windowStart) != tables.end();
+}
+
+StatusWith<AttributeTable*> TemporalAttributeTable::getOrCreateTableForTimestamp(
+    OperationContext* opCtx,
+    const Timestamp& timestamp) {
+    Timestamp windowStart = calculateWindowStart(timestamp);
+    Timestamp windowEnd = calculateWindowEnd(windowStart);
+
+    // Check if table already exists
+    {
+        std::shared_lock<std::shared_mutex> lock(mutex);
+        auto it = tables.find(windowStart);
+        if (it != tables.end()) {
+            return it->second.get();
+        }
+    }
+
+    // Table doesn't exist in memory. Try to reconstruct from disk if reader is available.
+    if (!reader) {
+        // No reader available, create a new empty table
+        return getOrCreateTable(opCtx, windowStart);
+    }
+
+    // Try to reconstruct the table from disk
+    // First, get or create the symbol dictionary for this window
+    auto dictResult = temporalSymbolDictionary->getOrCreateDictionaryForTimestamp(opCtx, timestamp);
+    if (!dictResult.isOK()) {
+        return dictResult.getStatus();
+    }
+    auto* dictPtr = dictResult.getValue();
+
+    // Reconstruct the attribute table from disk
+    auto tableResult = reader->constructAttributeTable(
+        opCtx, windowStart, windowEnd, granularity, timestamp, dictPtr);
+    if (!tableResult.isOK()) {
+        return tableResult.getStatus();
+    }
+
+    // Store the reconstructed table in memory for future use
+    std::unique_lock<std::shared_mutex> writeLock(mutex);
+    auto* tablePtr = tableResult.getValue().get();
+    tables[windowStart] = std::move(tableResult.getValue());
+
+    return tablePtr;
+}
+
+StatusWith<InsertRowResult> TemporalAttributeTable::insertRow(OperationContext* opCtx,
+                                                              const BSONObj& metadata,
                                                               const Timestamp& timestamp) {
-    auto tableResult = getOrCreateTableForTimestamp(timestamp);
+    auto tableResult = getOrCreateTableForTimestamp(opCtx, timestamp);
     if (!tableResult.isOK()) {
         return tableResult.getStatus();
     }
@@ -466,9 +514,10 @@ StatusWith<InsertRowResult> TemporalAttributeTable::insertRow(const BSONObj& met
 }
 
 StatusWith<int64_t> TemporalAttributeTable::insertRowDirect(
+    OperationContext* opCtx,
     const std::vector<uint32_t>& row,
     const Timestamp& timestamp) {
-    auto tableResult = getOrCreateTableForTimestamp(timestamp);
+    auto tableResult = getOrCreateTableForTimestamp(opCtx, timestamp);
     if (!tableResult.isOK()) {
         return tableResult.getStatus();
     }
@@ -548,6 +597,7 @@ TemporalAttributeTable::Stats TemporalAttributeTable::getStats() const {
 }
 
 StatusWith<AttributeTable*> TemporalAttributeTable::getOrCreateTable(
+    OperationContext* opCtx,
     const Timestamp& windowStart) {
     std::unique_lock<std::shared_mutex> lock(mutex);
 
@@ -557,7 +607,7 @@ StatusWith<AttributeTable*> TemporalAttributeTable::getOrCreateTable(
     }
 
     // Get or create the symbol dictionary for this window
-    auto dictResult = temporalSymbolDictionary->getOrCreateDictionaryForTimestamp(windowStart);
+    auto dictResult = temporalSymbolDictionary->getOrCreateDictionaryForTimestamp(opCtx, windowStart);
     if (!dictResult.isOK()) {
         return dictResult.getStatus();
     }

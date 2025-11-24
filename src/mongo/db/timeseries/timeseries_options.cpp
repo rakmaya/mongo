@@ -320,17 +320,21 @@ BSONObj generateViewPipeline(const TimeseriesOptions& options, bool asArray) {
         options.getBucketMaxSpanSeconds().get_value_or(getMaxSpanSecondsFromGranularity(
             options.getGranularity().get_value_or(BucketGranularityEnum::Seconds)));
 
+    BSONObjBuilder bob;
+    bob.append("timeField", options.getTimeField());
     if (options.getMetaField()) {
-        return wrapInArrayIf(
-            asArray,
-            BSON("$_internalUnpackBucket" << BSON(
-                     "timeField" << options.getTimeField() << "metaField" << *options.getMetaField()
-                                 << "bucketMaxSpanSeconds" << maxSpanSeconds)));
+        bob.append("metaField", *options.getMetaField());
     }
-    return wrapInArrayIf(asArray,
-                         BSON("$_internalUnpackBucket"
-                              << BSON("timeField" << options.getTimeField()
-                                                  << "bucketMaxSpanSeconds" << maxSpanSeconds)));
+    bob.append("bucketMaxSpanSeconds", maxSpanSeconds);
+
+    // Add useHCIndex flag if enabled
+    if (options.getUseHCIndex().value_or(false)) {
+        bob.append("useHCIndex", true);
+    }
+
+    return wrapInArrayIf(
+        asArray,
+        BSON("$_internalUnpackBucket" << bob.obj()));
 }
 
 bool optionsAreEqual(const TimeseriesOptions& option1, const TimeseriesOptions& option2) {

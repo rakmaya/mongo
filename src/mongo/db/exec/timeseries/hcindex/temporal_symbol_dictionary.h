@@ -225,14 +225,15 @@ public:
      * Create a new temporal symbol dictionary manager for managing symbol
      * dictionaries for timeseries collections having the specified
      * 'collectionUUID' with the given 'granularity'. Behavior is undefined
-     * unless 'opCtx' and the 'collectionUUID' is valid through the lifetime of
-     * this object. The 'writer' can be nullptr if this dictionary is being
-     * constructed by a reader (in which case no new operations will be written).
+     * unless the 'collectionUUID' is valid through the lifetime of this object.
+     * The 'writer' can be nullptr if this dictionary is being constructed by a
+     * reader (in which case no new operations will be written).
+     * The 'reader' can be nullptr if reconstruction from disk is not needed.
      */
-    TemporalSymbolDictionary(OperationContext* opCtx,
-                             const UUID& collectionUUID,
+    TemporalSymbolDictionary(const UUID& collectionUUID,
                              DictionaryGranularity granularity,
-                             HCIndexWriter *writer);
+                             HCIndexWriter *writer,
+                             class HCIndexReader *reader = nullptr);
 
     /**
      * Returns a pointer to the symbol dictionary covering the time window that
@@ -241,9 +242,11 @@ public:
      * pointer to that dictionary. Note that the returned pointer is valid for
      * the lifetime of this TemporalSymbolDictionary. Returns an error if the
      * dictionary for the time window covering the 'timestamp' cannot be
-     * created.
+     * created. opCtx is required for reconstruction from disk if the dictionary
+     * is not in memory.
      */
-    StatusWith<SymbolDictionary*> getOrCreateDictionaryForTimestamp(const Timestamp& ts);
+    StatusWith<SymbolDictionary*> getOrCreateDictionaryForTimestamp(OperationContext* opCtx,
+                                                                     const Timestamp& ts);
 
     /**
      * Returns a pointer to the symbol dictionary covering the time window
@@ -303,9 +306,11 @@ public:
 private:
     /**
      * Create or Fetch the dictionary for the time window that starts at the
-     * specified 'windowStart' timestamp.
+     * specified 'windowStart' timestamp. opCtx is required for reconstruction
+     * from disk if the dictionary is not in memory.
      */
-    StatusWith<SymbolDictionary*> getOrCreateDictionary(const Timestamp& windowStart);
+    StatusWith<SymbolDictionary*> getOrCreateDictionary(OperationContext* opCtx,
+                                                        const Timestamp& windowStart);
 
     /**
      * Return the window start timestamp for the time window that includes the
@@ -331,11 +336,11 @@ private:
     // Granularity level
     DictionaryGranularity _granularity;
 
-    // Context
-    OperationContext* _opCtx;
-
     // Writer (can be nullptr if constructed by reader)
     HCIndexWriter *_writer = nullptr;
+
+    // Reader (can be nullptr if reconstruction from disk is not needed)
+    HCIndexReader *_reader = nullptr;
 
     // Synchronization
     mutable std::shared_mutex _mutex;

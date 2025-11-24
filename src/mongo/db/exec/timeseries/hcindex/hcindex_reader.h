@@ -58,11 +58,10 @@ public:
      * Create a new operations reader for the specified collection.
      *
      * Parameters:
-     * - opCtx: Operation context for database operations
      * - dbName: Database name where the timeseries collection resides
      * - collectionUUID: UUID of the timeseries collection
      */
-    HCIndexReader(OperationContext* opCtx, const DatabaseName& dbName, const UUID& collectionUUID);
+    HCIndexReader(const DatabaseName& dbName, const UUID& collectionUUID);
 
     /**
      * Construct a SymbolDictionary by replaying operations up to the specified timestamp.
@@ -70,8 +69,12 @@ public:
      *
      * This allows efficient queries on partial time ranges without waiting for window
      * completion (FIN operation).
+     *
+     * Parameters:
+     * - opCtx: Operation context for database operations
      */
     StatusWith<std::unique_ptr<SymbolDictionary>> constructSymbolDictionary(
+        OperationContext* opCtx,
         const Timestamp& windowStart,
         const Timestamp& windowEnd,
         DictionaryGranularity granularity,
@@ -86,8 +89,12 @@ public:
      *
      * The symbolDictionary parameter is required to convert string values to symbol indices
      * during construction.
+     *
+     * Parameters:
+     * - opCtx: Operation context for database operations
      */
     StatusWith<std::unique_ptr<AttributeTable>> constructAttributeTable(
+        OperationContext* opCtx,
         const Timestamp& windowStart,
         const Timestamp& windowEnd,
         DictionaryGranularity granularity,
@@ -95,7 +102,6 @@ public:
         SymbolDictionary* symbolDictionary);
 
 private:
-    OperationContext* opCtx;
     DatabaseName dbName;
     UUID collectionUUID;
 };

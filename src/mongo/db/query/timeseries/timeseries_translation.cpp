@@ -121,6 +121,11 @@ void prependUnpackStageToPipeline(const boost::intrusive_ptr<ExpressionContext>&
                 bucketMaxSpanSeconds);
         tsOptsBob.append(DocumentSourceInternalUnpackBucket::kBucketMaxSpanSeconds,
                          *bucketMaxSpanSeconds);
+
+        // Add useHCIndex flag if enabled
+        if (params.tsOptions.getUseHCIndex().value_or(false)) {
+            tsOptsBob.append("useHCIndex", true);
+        }
     }
 
     // Add the unpack stage to the front of the pipeline.

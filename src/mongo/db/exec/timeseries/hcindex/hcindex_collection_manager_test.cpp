@@ -80,7 +80,7 @@ TEST_F(HCIndexCollectionManagerTest, EncodeMetadata) {
     BSONObj metadata = BSON("region" << "us-east" << "env" << "prod");
     Timestamp ts(1, 0);
 
-    auto result = manager.encodeMetadata(metadata, ts);
+    auto result = manager.encodeMetadata(opCtx, metadata, ts);
     ASSERT_OK(result.getStatus());
     // rowId should be >= 0 (0 is reserved for missing values, but implementation may return 0 as placeholder)
     ASSERT(result.getValue() >= 0);
@@ -98,8 +98,8 @@ TEST_F(HCIndexCollectionManagerTest, Deduplication) {
     BSONObj metadata = BSON("region" << "us-east" << "env" << "prod");
     Timestamp ts(1, 0);
 
-    auto result1 = manager.encodeMetadata(metadata, ts);
-    auto result2 = manager.encodeMetadata(metadata, ts);
+    auto result1 = manager.encodeMetadata(opCtx, metadata, ts);
+    auto result2 = manager.encodeMetadata(opCtx, metadata, ts);
 
     ASSERT_OK(result1.getStatus());
     ASSERT_OK(result2.getStatus());

@@ -144,9 +144,9 @@ TEST_F(HCIndexReaderTest, ConstructSymbolDictionaryFromInitAndAdd) {
 
     // Construct dictionary
     DatabaseName dbName = DatabaseName::createDatabaseName_forTest(boost::none, "test");
-    HCIndexReader reader(opCtx, dbName, collectionUUID);
+    HCIndexReader reader(dbName, collectionUUID);
     auto dictStatus = reader.constructSymbolDictionary(
-        windowStart, windowEnd, DictionaryGranularity::HOURLY, windowEnd);
+        opCtx, windowStart, windowEnd, DictionaryGranularity::HOURLY, windowEnd);
     ASSERT_OK(dictStatus);
 
     auto dict = std::move(dictStatus.getValue());

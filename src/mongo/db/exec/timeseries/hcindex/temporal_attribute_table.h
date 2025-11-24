@@ -288,16 +288,16 @@ public:
      * to symbol indices, the reader is used to read existing attribute operations,
      * and the writer is used to write new attribute operations. All parameters must
      * remain valid for the lifetime of this object.
-     * Behavior is undefined unless 'opCtx', 'collectionUUID', 'symbolDictionary',
+     * Behavior is undefined unless 'collectionUUID', 'symbolDictionary',
      * and 'writer' are valid through the lifetime of this object.
      * The 'writer' can be nullptr if this table is being constructed by a reader
      * (in which case no new operations will be written).
      */
-    TemporalAttributeTable(OperationContext* opCtx,
-                           const UUID& collectionUUID,
+    TemporalAttributeTable(const UUID& collectionUUID,
                            DictionaryGranularity granularity,
                            class TemporalSymbolDictionary* symbolDictionary,
-                           class HCIndexWriter* writer);
+                           class HCIndexWriter* writer,
+                           class HCIndexReader* reader = nullptr);
 
     /**
      * Returns a pointer to the attribute table covering the time window that
@@ -305,17 +305,33 @@ public:
      * table for the time window covering the 'timestamp' and return a pointer
      * to that table. Note that the returned pointer is valid for the lifetime
      * of this TemporalAttributeTable. Returns an error if the table for the
-     * time window covering the 'timestamp' cannot be created.
+     * time window covering the 'timestamp' cannot be created. opCtx is required
+     * for reconstruction from disk if the table is not in memory.
      */
-    StatusWith<AttributeTable*> getOrCreateTableForTimestamp(const Timestamp& timestamp);
+    StatusWith<AttributeTable*> getOrCreateTableForTimestamp(OperationContext* opCtx,
+                                                             const Timestamp& timestamp);
 
     /**
      * Returns a pointer to the attribute table covering the time window that
      * includes the specified 'timestamp' if found. Otherwise, return an error.
      * Note that the returned pointer is valid for the lifetime of this
-     * TemporalAttributeTable.
+     * TemporalAttributeTable. This method does not attempt reconstruction from disk.
      */
     StatusWith<AttributeTable*> getTableForTimestamp(const Timestamp& timestamp) const;
+
+    /**
+     * Check if an attribute table exists for the time window that includes
+     * the specified 'timestamp'.
+     */
+    bool tableExists(const Timestamp& timestamp) const;
+
+    /**
+     * Create or reconstruct an attribute table for the time window that includes
+     * the specified 'timestamp'. If the table already exists in memory, return it.
+     * Otherwise, try to reconstruct it from disk using the reader if available.
+     * Returns an error if the table cannot be created or reconstructed.
+     */
+    StatusWith<AttributeTable*> createTableForTimestamp(const Timestamp& timestamp);
 
     /**
      * Insert a new row with the specified metadata into the attribute table for
@@ -326,18 +342,22 @@ public:
      * automatically evolves the schema if new fields appear in the metadata, and
      * returns the existing row ID if a row with the exact same metadata already
      * exists (with isNewRow=false). Returns an error if the row cannot be inserted
-     * or if any value lookup fails.
+     * or if any value lookup fails. opCtx is required for reconstruction from disk
+     * if the table is not in memory.
      */
-    StatusWith<InsertRowResult> insertRow(const BSONObj& metadata,
+    StatusWith<InsertRowResult> insertRow(OperationContext* opCtx,
+                                          const BSONObj& metadata,
                                           const Timestamp& timestamp);
 
     /**
      * Insert a new row with the specified symbol indices into the attribute
      * table for the time window that includes the specified 'timestamp' and
      * return a stable row ID. This is a lower-level method primarily used
-     * internally. Returns an error if the row cannot be inserted.
+     * internally. Returns an error if the row cannot be inserted. opCtx is
+     * required for reconstruction from disk if the table is not in memory.
      */
-    StatusWith<int64_t> insertRowDirect(const std::vector<uint32_t>& row,
+    StatusWith<int64_t> insertRowDirect(OperationContext* opCtx,
+                                        const std::vector<uint32_t>& row,
                                         const Timestamp& timestamp);
 
     /**
@@ -394,9 +414,11 @@ public:
 private:
     /**
      * Create or fetch the attribute table for the time window that starts at
-     * the specified 'windowStart' timestamp.
+     * the specified 'windowStart' timestamp. opCtx is required for reconstruction
+     * from disk if the table is not in memory.
      */
-    StatusWith<AttributeTable*> getOrCreateTable(const Timestamp& windowStart);
+    StatusWith<AttributeTable*> getOrCreateTable(OperationContext* opCtx,
+                                                 const Timestamp& windowStart);
 
     /**
      * Return the window start timestamp for the time window that includes the
@@ -422,14 +444,14 @@ private:
     // Granularity level
     DictionaryGranularity granularity;
 
-    // Context
-    OperationContext* opCtx;
-
     // Temporal symbol dictionary for encoding metadata values
     class TemporalSymbolDictionary* temporalSymbolDictionary;
 
     // Writer for writing new attribute operations (can be nullptr if constructed by reader)
     class HCIndexWriter* writer;
+
+    // Reader for reconstructing attribute operations from disk (can be nullptr)
+    class HCIndexReader* reader;
 
     // Synchronization
     mutable std::shared_mutex mutex;

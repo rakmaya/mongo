@@ -182,7 +182,7 @@ TestTemporalSymbolDictionaryContext createTestTemporalSymbolDictionaryWithWriter
     auto collectionUUID = UUID::gen();
     DatabaseName dbName = DatabaseName::createDatabaseName_forTest(boost::none, "test");
     auto writer = std::make_unique<HCIndexWriter>(collectionUUID, dbName);
-    auto tempDict = new TemporalSymbolDictionary(nullptr, collectionUUID, DictionaryGranularity::HOURLY, writer.get());
+    auto tempDict = new TemporalSymbolDictionary(collectionUUID, DictionaryGranularity::HOURLY, writer.get());
     return {std::move(writer), tempDict};
 }
 
@@ -251,7 +251,7 @@ TEST(TemporalSymbolDictionaryTest, GetWindowForTimestampDaily) {
     auto collectionUUID = UUID::gen();
     DatabaseName dbName = DatabaseName::createDatabaseName_forTest(boost::none, "test");
     auto writer = std::make_unique<HCIndexWriter>(collectionUUID, dbName);
-    TemporalSymbolDictionary tempDict(nullptr, collectionUUID, DictionaryGranularity::DAILY, writer.get());
+    TemporalSymbolDictionary tempDict(collectionUUID, DictionaryGranularity::DAILY, writer.get());
     Timestamp ts(86401, 0);  // 1 day + 1 second
 
     auto [windowStart, windowEnd] = tempDict.getWindowForTimestamp(ts);

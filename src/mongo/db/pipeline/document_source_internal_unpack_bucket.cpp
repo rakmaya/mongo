@@ -687,6 +687,7 @@ boost::intrusive_ptr<DocumentSource> DocumentSourceInternalUnpackBucket::createF
     auto bucketMaxSpanSeconds = 0;
     auto assumeClean = false;
     bool fixedBuckets = false;
+    bool useHCIndex = false;
     boost::optional<bool> sbeCompatible = boost::none;
     std::vector<std::string> computedMetaProjFields;
     boost::optional<BSONObj> eventFilterBson;
@@ -823,6 +824,11 @@ boost::intrusive_ptr<DocumentSource> DocumentSourceInternalUnpackBucket::createF
                 expCtx->setSbeCompatibility(SbeCompatibility::notCompatible);
                 sbeCompatible = false;
             }
+        } else if (fieldName == "useHCIndex") {
+            uassert(9999999,
+                    str::stream() << "useHCIndex field must be a bool, got: " << elem.type(),
+                    elem.type() == BSONType::boolean);
+            useHCIndex = elem.boolean();
         } else {
             uasserted(5346506,
                       str::stream()
@@ -836,6 +842,9 @@ boost::intrusive_ptr<DocumentSource> DocumentSourceInternalUnpackBucket::createF
     uassert(5510602,
             "The $_internalUnpackBucket stage requires a bucketMaxSpanSeconds parameter",
             hasBucketMaxSpanSeconds);
+
+    // Set the HCIndex flag on the BucketSpec
+    bucketSpec.setUseHCIndex(useHCIndex);
 
     return make_intrusive<DocumentSourceInternalUnpackBucket>(expCtx,
                                                               BucketUnpacker{std::move(bucketSpec)},

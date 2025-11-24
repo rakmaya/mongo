@@ -98,6 +98,8 @@
 #include "mongo/db/timeseries/timeseries_index_schema_conversion_functions.h"
 #include "mongo/db/timeseries/timeseries_options.h"
 #include "mongo/db/timeseries/viewless_timeseries_collection_creation_helpers.h"
+#include "mongo/db/timeseries/bucket_catalog/global_bucket_catalog.h"
+#include "mongo/db/exec/timeseries/hcindex/hcindex_collection_manager.h"
 #include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/db/ttl/ttl_collection_cache.h"
 #include "mongo/db/version_context.h"
@@ -346,7 +348,47 @@ void CollectionImpl::init(OperationContext* opCtx) {
         }
     }
 
+
+
     getIndexCatalog()->init(opCtx, this);
+
+    // Initialize HCIndex if this is an HCIndex-enabled timeseries collection
+    if (collectionOptions.timeseries && collectionOptions.timeseries->getUseHCIndex().value_or(false)) {
+        auto uuid = *collectionOptions.uuid;
+        auto svcCtx = opCtx->getServiceContext();
+        if (svcCtx) {
+            auto& bucketCatalog = timeseries::bucket_catalog::GlobalBucketCatalog::get(svcCtx);
+
+            // Check if HCIndexCollectionManager already exists
+            auto existingMgr = timeseries::bucket_catalog::getHCIndexManager(bucketCatalog, uuid);
+            if (!existingMgr) {
+                try {
+
+                    // Create HCIndexCollectionManager for this collection
+                    auto hcindexMgr = std::make_shared<timeseries::hcindex::HCIndexCollectionManager>(
+                        opCtx, ns().dbName(), uuid, timeseries::hcindex::DictionaryGranularity::HOURLY);
+
+                    // Initialize the manager
+                    auto initStatus = hcindexMgr->initialize();
+                    if (!initStatus.isOK()) {
+                    }
+
+                    // Store the manager in BucketCatalog
+                    auto setStatus = timeseries::bucket_catalog::setHCIndexManager(
+                        bucketCatalog, uuid, hcindexMgr);
+                    if (!setStatus.isOK()) {
+                        LOGV2(9999988, "HCIndex: [INIT COLLECTION] Failed to store manager during collection init for {ns}: {error}",
+                              "ns"_attr = ns().toStringForErrorMsg(), "error"_attr = setStatus);
+                    }
+                } catch (const std::exception& e) {
+                    // Don't fail collection initialization if HCIndex manager creation fails
+                }
+            }
+        } else {
+            LOGV2(9999990, "HCIndex: [INIT COLLECTION] Failed to get service context during collection init", logAttrs(ns()));
+        }
+    }
+
     _initialized = true;
 }
 

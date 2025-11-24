@@ -1370,7 +1370,7 @@ std::vector<BatchedInsertContext> buildBatchedHCInsertContexts(
             Timestamp ts(seconds, 0);
 
             // Encode metadata to rowId
-            auto swRowId = hcindexMgr->encodeMetadata(meta.Obj(), ts);
+            auto swRowId = hcindexMgr->encodeMetadata(opCtx, meta.Obj(), ts);
             if (!swRowId.isOK()) {
                 errorsAndIndices.push_back(
                     WriteStageErrorAndIndex{std::move(swRowId.getStatus()), index});
@@ -1469,11 +1469,19 @@ std::vector<BatchedInsertContext> buildBatchedHCInsertContexts(
         // This groups buckets by time window, avoiding high cardinality metadata grouping
         // Wrap the entire windowMetadata object as a field element (e.g., "meta: {windowStart, windowEnd}")
         StringData metaFieldName = metaField ? *metaField : kBucketMetaFieldName;
+
+        // Build the metadata element with window metadata
+        // We need to keep the BSON object alive for the BucketMetadata constructor
         BSONObjBuilder windowMetaFieldBuilder;
         windowMetaFieldBuilder.append(metaFieldName, windowMetadata);
-        BSONElement windowMetadataElement = windowMetaFieldBuilder.obj().firstElement();
+        BSONObj windowMetaFieldObj = windowMetaFieldBuilder.obj();
+
+        // Create a copy of the metadata element to ensure it's valid
+        BSONElement windowMetadataElement = windowMetaFieldObj.firstElement();
+
+        // Create BucketKey with the window metadata
         BucketKey bucketKey{collectionUUID,
-                            BucketMetadata{trackingContext, windowMetadataElement, boost::none}};
+                            BucketMetadata{trackingContext, windowMetadataElement, metaFieldName}};
         auto stripeNumber = internal::getStripeNumber(bucketCatalog, bucketKey);
 
         // Create BatchedInsertContext with transformed measurements

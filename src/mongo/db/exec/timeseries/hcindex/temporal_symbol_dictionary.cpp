@@ -29,7 +29,9 @@
 
 #include "mongo/db/exec/timeseries/hcindex/temporal_symbol_dictionary.h"
 #include "mongo/db/exec/timeseries/hcindex/hcindex_writer.h"
+#include "mongo/db/exec/timeseries/hcindex/hcindex_reader.h"
 #include "mongo/base/error_codes.h"
+
 
 namespace mongo::timeseries::hcindex {
 
@@ -207,21 +209,22 @@ size_t SymbolDictionary::getMemoryUsageBytes() const {
 // TemporalSymbolDictionary Implementation
 // ============================================================================
 
-TemporalSymbolDictionary::TemporalSymbolDictionary(OperationContext* opCtx,
-                                                   const UUID& collectionUUID,
+TemporalSymbolDictionary::TemporalSymbolDictionary(const UUID& collectionUUID,
                                                    DictionaryGranularity granularity,
-                                                   HCIndexWriter* writer)
+                                                   HCIndexWriter* writer,
+                                                   HCIndexReader* reader)
     : _collectionUUID(collectionUUID)
     , _granularity(granularity)
-    , _opCtx(opCtx)
     , _writer(writer)
+    , _reader(reader)
 {
 }
 
 StatusWith<SymbolDictionary*> TemporalSymbolDictionary::getOrCreateDictionaryForTimestamp(
+    OperationContext* opCtx,
     const Timestamp& ts) {
     Timestamp windowStart = calculateWindowStart(ts);
-    return getOrCreateDictionary(windowStart);
+    return getOrCreateDictionary(opCtx, windowStart);
 }
 
 StatusWith<SymbolDictionary*> TemporalSymbolDictionary::getDictionaryForTimestamp(
@@ -240,7 +243,10 @@ StatusWith<SymbolDictionary*> TemporalSymbolDictionary::getDictionaryForTimestam
 
 StatusWith<uint32_t> TemporalSymbolDictionary::encodeSymbol(StringData word,
                                                             const Timestamp& timestamp) {
-    auto dictResult = getOrCreateDictionaryForTimestamp(timestamp);
+    // Note: encodeSymbol is called during write operations where opCtx should be available
+    // For now, we pass nullptr and rely on the dictionary being in memory
+    // TODO: Update callers to pass opCtx
+    auto dictResult = getOrCreateDictionaryForTimestamp(nullptr, timestamp);
     if (!dictResult.isOK()) {
         return dictResult.getStatus();
     }
@@ -310,12 +316,28 @@ TemporalSymbolDictionary::Stats TemporalSymbolDictionary::getStats() const {
 }
 
 StatusWith<SymbolDictionary*> TemporalSymbolDictionary::getOrCreateDictionary(
+    OperationContext* opCtx,
     const Timestamp& windowStart) {
     std::unique_lock<std::shared_mutex> lock(_mutex);
 
     auto it = _dictionaries.find(windowStart);
     if (it != _dictionaries.end()) {
         return it->second.get();
+    }
+
+    // Try to reconstruct from disk if reader is available
+    if (_reader) {
+        auto windowEnd = calculateWindowEnd(windowStart);
+        auto reconstructResult = _reader->constructSymbolDictionary(
+            opCtx, windowStart, windowEnd, _granularity, windowStart);
+        if (reconstructResult.isOK()) {
+            auto* dictPtr = reconstructResult.getValue().get();
+            _dictionaries[windowStart] = std::move(reconstructResult.getValue());
+            return dictPtr;
+        }
+        // If reconstruction fails, fall through to create a new dictionary This
+        // is not so great.  TODO: Add some flags so we can detect between lack
+        // of data and missing data.
     }
 
     // Create new dictionary

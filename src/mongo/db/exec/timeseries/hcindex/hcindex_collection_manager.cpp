@@ -43,14 +43,13 @@ HCIndexCollectionManager::HCIndexCollectionManager(OperationContext* opCtx,
                                                    const DatabaseName& dbName,
                                                    const UUID& collectionUUID,
                                                    DictionaryGranularity granularity)
-    : opCtx(opCtx),
-      dbName(dbName),
+    : dbName(dbName),
       collectionUUID(collectionUUID),
       granularity(granularity),
       writer(std::make_unique<HCIndexWriter>(collectionUUID, dbName)),
-      reader(std::make_unique<HCIndexReader>(opCtx, dbName, collectionUUID)),
-      symbolDictionary(std::make_unique<TemporalSymbolDictionary>(opCtx, collectionUUID, granularity, writer.get())),
-      attributeTable(std::make_unique<TemporalAttributeTable>(opCtx, collectionUUID, granularity, symbolDictionary.get(), writer.get())) {}
+      reader(std::make_unique<HCIndexReader>(dbName, collectionUUID)),
+      symbolDictionary(std::make_unique<TemporalSymbolDictionary>(collectionUUID, granularity, writer.get(), reader.get())),
+      attributeTable(std::make_unique<TemporalAttributeTable>(collectionUUID, granularity, symbolDictionary.get(), writer.get(), reader.get())) {}
 
 Status HCIndexCollectionManager::initialize() {
     // The structures are already initialized in the constructor
@@ -58,14 +57,15 @@ Status HCIndexCollectionManager::initialize() {
     return Status::OK();
 }
 
-StatusWith<int64_t> HCIndexCollectionManager::encodeMetadata(const BSONObj& metadata,
+StatusWith<int64_t> HCIndexCollectionManager::encodeMetadata(OperationContext* opCtx,
+                                                             const BSONObj& metadata,
                                                              const Timestamp& timestamp) {
     if (!symbolDictionary || !attributeTable) {
         return Status(ErrorCodes::InternalError, "HCIndex structures not initialized");
     }
 
     // Insert the metadata row into the attribute table
-    auto rowIdStatus = attributeTable->insertRow(metadata, timestamp);
+    auto rowIdStatus = attributeTable->insertRow(opCtx, metadata, timestamp);
     if (!rowIdStatus.isOK()) {
         return rowIdStatus.getStatus();
     }
@@ -84,7 +84,8 @@ StatusWith<int64_t> HCIndexCollectionManager::encodeMetadata(const BSONObj& meta
     return rowId;
 }
 
-StatusWith<BSONObj> HCIndexCollectionManager::decodeMetadata(int64_t rowId,
+StatusWith<BSONObj> HCIndexCollectionManager::decodeMetadata(OperationContext* opCtx,
+                                                             int64_t rowId,
                                                              const Timestamp& timestamp) {
     if (!symbolDictionary || !attributeTable) {
         return Status(ErrorCodes::InternalError, "HCIndex structures not initialized");
@@ -93,7 +94,12 @@ StatusWith<BSONObj> HCIndexCollectionManager::decodeMetadata(int64_t rowId,
     // Get the attribute table for this timestamp
     auto tableResult = attributeTable->getTableForTimestamp(timestamp);
     if (!tableResult.isOK()) {
-        return tableResult.getStatus();
+        // Table doesn't exist in memory. Try to create/reconstruct it from disk.
+        auto createResult = attributeTable->getOrCreateTableForTimestamp(opCtx, timestamp);
+        if (!createResult.isOK()) {
+            return createResult.getStatus();
+        }
+        tableResult = createResult;
     }
     auto* table = tableResult.getValue();
 

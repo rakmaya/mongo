@@ -339,6 +339,14 @@ public:
     bool includeMinTimeAsMetadata = false;
     bool includeMaxTimeAsMetadata = false;
 
+    void setUseHCIndex(bool useHCIndex) {
+        _useHCIndex = useHCIndex;
+    }
+
+    bool useHCIndex() const {
+        return _useHCIndex;
+    }
+
 private:
     // The set of field names in the data region that should be included or excluded.
     std::set<std::string> _fieldSet;
@@ -354,6 +362,7 @@ private:
     boost::optional<std::string> _metaField = boost::none;
     boost::optional<HashedFieldName> _metaFieldHashed = boost::none;
     bool _usesExtendedRange = false;
+    bool _useHCIndex = false;
 };
 
 /**
