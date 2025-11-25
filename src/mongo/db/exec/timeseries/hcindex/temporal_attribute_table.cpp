@@ -67,11 +67,18 @@ Status AttributeTable::changeState(AttributeTableState newState) {
             return Status(ErrorCodes::InternalError,
                 "Invalid state transition from NOP to " + std::to_string(static_cast<int>(newState)));
         }
-    } else if (_state == AttributeTableState::Reconstruction ||
-               _state == AttributeTableState::ReadWrite) {
+    } else if (_state == AttributeTableState::Reconstruction) {
+        // From Reconstruction, can transition to ReadWrite (to accept new data) or ReadOnly
+        if (newState != AttributeTableState::ReadWrite &&
+            newState != AttributeTableState::ReadOnly) {
+            return Status(ErrorCodes::InternalError,
+                "Invalid state transition from Reconstruction to " + std::to_string(static_cast<int>(newState)));
+        }
+    } else if (_state == AttributeTableState::ReadWrite) {
+        // From ReadWrite, can only transition to ReadOnly
         if (newState != AttributeTableState::ReadOnly) {
             return Status(ErrorCodes::InternalError,
-                "Invalid state transition from current state to " + std::to_string(static_cast<int>(newState)));
+                "Invalid state transition from ReadWrite to " + std::to_string(static_cast<int>(newState)));
         }
     }
 
@@ -497,6 +504,12 @@ StatusWith<AttributeTable*> TemporalAttributeTable::getOrCreateTableForTimestamp
     // Store the reconstructed table in memory for future use
     std::unique_lock<std::shared_mutex> writeLock(mutex);
     auto* tablePtr = tableResult.getValue().get();
+
+    // Set the writer on the reconstructed table so it can accept new data
+    if (writer) {
+        tablePtr->setWriter(writer);
+    }
+
     tables[windowStart] = std::move(tableResult.getValue());
 
     return tablePtr;

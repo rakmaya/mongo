@@ -123,10 +123,13 @@ StatusWith<std::unique_ptr<SymbolDictionary>> HCIndexReader::constructSymbolDict
         }
     }
 
-    // Set the dictionary to read-only after construction is complete
-    auto readOnlyStatus = dict->changeState(SymbolDictionaryState::ReadOnly);
-    if (!readOnlyStatus.isOK()) {
-        return readOnlyStatus;
+    // Transition the dictionary to ReadWrite after reconstruction is complete.
+    // This allows the dictionary to accept new symbols as the timeseries collection continues to
+    // receive new measurements with new metadata values. The dictionary was in Reconstruction mode
+    // during the replay of operations, and now it's ready to accept new writes.
+    auto readWriteStatus = dict->changeState(SymbolDictionaryState::ReadWrite);
+    if (!readWriteStatus.isOK()) {
+        return readWriteStatus;
     }
 
     return std::move(dict);
@@ -264,10 +267,13 @@ StatusWith<std::unique_ptr<AttributeTable>> HCIndexReader::constructAttributeTab
         }
     }
 
-    // Set the table to read-only after construction is complete
-    auto readOnlyStatus = table->changeState(AttributeTableState::ReadOnly);
-    if (!readOnlyStatus.isOK()) {
-        return readOnlyStatus;
+    // Transition the table to ReadWrite after reconstruction is complete.
+    // This allows the table to accept new data as the timeseries collection continues to receive
+    // new measurements. The table was in Reconstruction mode during the replay of operations,
+    // and now it's ready to accept new writes.
+    auto readWriteStatus = table->changeState(AttributeTableState::ReadWrite);
+    if (!readWriteStatus.isOK()) {
+        return readWriteStatus;
     }
 
     return std::move(table);

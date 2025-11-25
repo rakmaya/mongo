@@ -70,6 +70,7 @@ struct InsertRowResult {
  * State transitions:
  * - NOP -> Reconstruction (via changeState)
  * - NOP -> ReadWrite (via changeState)
+ * - Reconstruction -> ReadWrite (via changeState) - allows accepting new data after reconstruction
  * - Reconstruction -> ReadOnly (via changeState)
  * - ReadWrite -> ReadOnly (via changeState)
  * - ReadOnly -> (no transitions allowed)
@@ -171,7 +172,7 @@ public:
     /**
      * Change the state of this table. Transitions are restricted:
      * - From NOP: can transition to Reconstruction or ReadWrite
-     * - From Reconstruction: can transition to ReadOnly
+     * - From Reconstruction: can transition to ReadWrite (to accept new data) or ReadOnly
      * - From ReadWrite: can transition to ReadOnly
      * - From ReadOnly: no transitions allowed
      * Returns an error if the transition is invalid.

@@ -1907,10 +1907,74 @@ DocumentSourceContainer::iterator DocumentSourceInternalUnpackBucket::doOptimize
     }
 
     if (!_sharedState->_eventFilter) {
-        // Check if we can avoid unpacking if we have a group stage with min/max/count aggregates.
-        auto [success, result] = rewriteGroupStage(itr, container);
-        if (success) {
-            return result;
+        // For HCIndex collections, don't rewrite the group stage if there's a metadata predicate
+        // in a $match stage before this unpack bucket stage, because the metadata predicate needs
+        // to be applied as an event filter after unpacking and decoding the rowIds back to original metadata.
+        bool shouldSkipGroupRewrite = false;
+        if (_sharedState->_bucketUnpacker.bucketSpec().useHCIndex()) {
+            // Check if there's a $match stage before this unpack bucket stage
+            if (itr != container->begin()) {
+                auto prevItr = std::prev(itr);
+                if (auto prevMatch = dynamic_cast<DocumentSourceMatch*>(prevItr->get())) {
+                    // Check if the match expression contains metadata predicates
+                    auto predicates = createPredicatesOnBucketLevelField(prevMatch->getMatchExpression());
+                    // If there's a metadata predicate (rewriteProvidesExactMatchPredicate is false),
+                    // we need to skip the group rewrite
+                    if (!predicates.rewriteProvidesExactMatchPredicate) {
+                        shouldSkipGroupRewrite = true;
+                    }
+                }
+            }
+        }
+
+        if (!shouldSkipGroupRewrite) {
+            // Check if we can avoid unpacking if we have a group stage with min/max/count aggregates.
+            auto [success, result] = rewriteGroupStage(itr, container);
+            if (success) {
+                return result;
+            }
+        }
+    }
+
+    // For HCIndex collections, handle $match stages that come BEFORE this unpack bucket stage.
+    // These $match stages may contain metadata predicates that need to be applied as event filters
+    // after unpacking, not at the bucket level.
+    if (_sharedState->_bucketUnpacker.bucketSpec().useHCIndex() && itr != container->begin()) {
+        auto prevItr = std::prev(itr);
+        if (auto prevMatch = dynamic_cast<DocumentSourceMatch*>(prevItr->get())) {
+            auto predicates = createPredicatesOnBucketLevelField(prevMatch->getMatchExpression());
+            // If there's a metadata predicate (rewriteProvidesExactMatchPredicate is false),
+            // we need to move it to an event filter and remove it from the bucket-level filter
+            if (!predicates.rewriteProvidesExactMatchPredicate) {
+                // The query has been transformed to use "meta" instead of the original metadata field name.
+                // We need to reverse this transformation so the event filter uses the original field names
+                // that match the measurement document field names.
+                auto metaField = _sharedState->_bucketUnpacker.bucketSpec().metaField();
+                BSONObj eventFilterBson = prevMatch->getQuery();
+                if (metaField) {
+                    // Rename "meta" back to the original metadata field name
+                    auto renameMap = StringMap<std::string>{
+                        {std::string{timeseries::kBucketMetaFieldName}, std::string{*metaField}}};
+                    auto renamedExpr = expression::copyExpressionAndApplyRenames(
+                        prevMatch->getMatchExpression(), renameMap);
+                    if (renamedExpr) {
+                        eventFilterBson = renamedExpr->serialize();
+                    }
+                }
+
+                // Set the event filter with the renamed match expression
+                setEventFilter(eventFilterBson, true /* shouldOptimize */);
+                // Remove the $match stage since its predicates are now applied as event filters
+                container->erase(prevItr);
+                // Adjust iterator since we removed the previous stage
+                itr = std::next(container->begin());
+                for (auto it = container->begin(); it != container->end(); ++it) {
+                    if (it->get() == this) {
+                        itr = it;
+                        break;
+                    }
+                }
+            }
         }
     }
 

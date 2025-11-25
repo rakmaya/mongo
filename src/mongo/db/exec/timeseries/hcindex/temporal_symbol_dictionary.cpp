@@ -68,11 +68,18 @@ Status SymbolDictionary::changeState(SymbolDictionaryState newState) {
             return Status(ErrorCodes::InternalError,
                 "Invalid state transition from NOP to " + std::to_string(static_cast<int>(newState)));
         }
-    } else if (_state == SymbolDictionaryState::Reconstruction ||
-               _state == SymbolDictionaryState::ReadWrite) {
+    } else if (_state == SymbolDictionaryState::Reconstruction) {
+        // From Reconstruction, can transition to ReadWrite (to accept new symbols) or ReadOnly
+        if (newState != SymbolDictionaryState::ReadWrite &&
+            newState != SymbolDictionaryState::ReadOnly) {
+            return Status(ErrorCodes::InternalError,
+                "Invalid state transition from Reconstruction to " + std::to_string(static_cast<int>(newState)));
+        }
+    } else if (_state == SymbolDictionaryState::ReadWrite) {
+        // From ReadWrite, can only transition to ReadOnly
         if (newState != SymbolDictionaryState::ReadOnly) {
             return Status(ErrorCodes::InternalError,
-                "Invalid state transition from current state to " + std::to_string(static_cast<int>(newState)));
+                "Invalid state transition from ReadWrite to " + std::to_string(static_cast<int>(newState)));
         }
     }
 
@@ -332,6 +339,12 @@ StatusWith<SymbolDictionary*> TemporalSymbolDictionary::getOrCreateDictionary(
             opCtx, windowStart, windowEnd, _granularity, windowStart);
         if (reconstructResult.isOK()) {
             auto* dictPtr = reconstructResult.getValue().get();
+
+            // Set the writer on the reconstructed dictionary so it can accept new symbols
+            if (_writer) {
+                dictPtr->setWriter(_writer);
+            }
+
             _dictionaries[windowStart] = std::move(reconstructResult.getValue());
             return dictPtr;
         }

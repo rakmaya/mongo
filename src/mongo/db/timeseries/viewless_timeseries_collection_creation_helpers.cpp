@@ -166,6 +166,14 @@ Status createDefaultTimeseriesIndex(OperationContext* opCtx,
         return Status::OK();
     }
 
+    // Skip creating the default metadata index for HCIndex collections.
+    // HCIndex stores encoded metadata (rowIds) in the bucket's meta field, not the original
+    // metadata values. The default index on the metadata field would be useless and would
+    // cause queries with metadata predicates to fail because the index would not match.
+    if (tsOptions->getUseHCIndex() && tsOptions->getUseHCIndex().value_or(false)) {
+        return Status::OK();
+    }
+
     StatusWith<BSONObj> swBucketsSpec = timeseries::createBucketsIndexSpecFromTimeseriesIndexSpec(
         *tsOptions, BSON(*tsOptions->getMetaField() << 1 << tsOptions->getTimeField() << 1));
     if (!swBucketsSpec.isOK()) {

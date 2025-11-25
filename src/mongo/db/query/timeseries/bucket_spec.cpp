@@ -451,7 +451,18 @@ BucketSpec::SplitPredicates BucketSpec::getPushdownPredicates(
         MatchExpressionParser::parse(predicate, expCtx, ExtensionsCallbackNoop(), allowedFeatures));
 
     auto metaField = haveComputedMetaField ? boost::none : tsOptions.getMetaField();
-    auto [metaOnlyPred, residualPred] = splitOutMetaOnlyPredicate(std::move(matchExpr), metaField);
+
+    // For HCIndex collections, don't split out metadata predicates - they must be applied
+    // as event filters after unpacking and decoding the rowIds back to original metadata
+    std::unique_ptr<MatchExpression> metaOnlyPred = nullptr;
+    std::unique_ptr<MatchExpression> residualPred = std::move(matchExpr);
+
+    if (!tsOptions.getUseHCIndex().value_or(false)) {
+        // For non-HCIndex collections, split out metadata predicates for bucket-level filtering
+        auto [metaPred, residual] = splitOutMetaOnlyPredicate(std::move(residualPred), metaField);
+        metaOnlyPred = std::move(metaPred);
+        residualPred = std::move(residual);
+    }
 
     std::unique_ptr<MatchExpression> bucketMetricPred = nullptr;
     if (residualPred) {
@@ -463,6 +474,10 @@ BucketSpec::SplitPredicates BucketSpec::getPushdownPredicates(
             // to the buckets before unpacking. So we can use default values
             // for the rest of the arguments.
         };
+        // Set the HCIndex flag if enabled for this collection
+        if (tsOptions.getUseHCIndex().value_or(false)) {
+            bucketSpec.setUseHCIndex(true);
+        }
 
         auto bucketPredicate =
             createPredicatesOnBucketLevelField(residualPred.get(),

@@ -35,6 +35,7 @@
 #include "mongo/db/pipeline/document_source_internal_unpack_bucket.h"
 #include "mongo/db/timeseries/bucket_catalog/global_bucket_catalog.h"
 #include "mongo/logv2/log.h"
+#include "mongo/util/stacktrace.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
@@ -86,6 +87,7 @@ GetNextResult InternalUnpackBucketStage::doGetNext() {
     }
 
     auto nextResult = pSource->getNext();
+    LOGV2(9999998, "pSource->getNext() returned", "isAdvanced"_attr = nextResult.isAdvanced());
     while (nextResult.isAdvanced()) {
         auto bucket = nextResult.getDocument().toBson();
         auto bucketMatchedQuery = _sharedState->_wholeBucketFilter &&
@@ -123,12 +125,15 @@ GetNextResult InternalUnpackBucketStage::doGetNext() {
 }
 
 boost::optional<Document> InternalUnpackBucketStage::getNextMatchingMeasure() {
+    int measurementCount = 0;
+    int matchedCount = 0;
     while (_sharedState->_bucketUnpacker.hasNext()) {
         if (_sharedState->_eventFilter) {
             if (_unpackToBson) {
                 auto measure = _sharedState->_bucketUnpacker.getNextBson();
-                if (_sharedState->_bucketUnpacker.bucketMatchedQuery() ||
-                    exec::matcher::matchesBSON(_sharedState->_eventFilter.get(), measure)) {
+                bool matches = _sharedState->_bucketUnpacker.bucketMatchedQuery() ||
+                    exec::matcher::matchesBSON(_sharedState->_eventFilter.get(), measure);
+                if (matches) {
                     return Document(measure);
                 }
             } else {
@@ -139,8 +144,9 @@ boost::optional<Document> InternalUnpackBucketStage::getNextMatchingMeasure() {
                     ? measure.toBson()
                     : document_path_support::documentToBsonWithPaths(measure,
                                                                      _eventFilterDeps.fields);
-                if (_sharedState->_bucketUnpacker.bucketMatchedQuery() ||
-                    exec::matcher::matchesBSON(_sharedState->_eventFilter.get(), measureBson)) {
+                bool matches = _sharedState->_bucketUnpacker.bucketMatchedQuery() ||
+                    exec::matcher::matchesBSON(_sharedState->_eventFilter.get(), measureBson);
+                if (matches) {
                     return measure;
                 }
             }
