@@ -337,18 +337,35 @@ using copyExpressionAndApplyRenames()
 - Remove the $match stage since its predicates are now applied as event filters
 after unpacking
 
-**What we need to do instead**: Once HCIndex's bucket-level inverted index is
-implemented, we can use that instead of the event filter. We can teach the
-query planner about HCIndex and don't rename metadata fields. Pushdown metadata
-predicates to the bucket level using the inverted index.
+**Query Pipeline Optimization: Match Stage Swapping Disabled for HCIndex**
 
-**Query Pipeline rewrite**
-MongoDB's query planner optimizes the query pipeline in certain cases where if
-the first two stages are ($_internalUnpackBucket, $match) it rewrites the
-pipeline to ($match, $_internalUnpackBucket). This won't work for HCIndex since
-the metadata is encoded in the data section and not in the meta field. For now
-this optimization is disabled for HCIndex collections. Later we can add the
-necessary logic to the query planner to handle HCIndex collections correctly.
+MongoDB's query planner normally optimizes pipelines by pushing `$match` stages
+before `$_internalUnpackBucket` to filter buckets early. However, this optimization
+is **disabled for HCIndex collections** because:
+
+- HCIndex metadata is encoded as rowIds in the bucket's data section, not in the
+  bucket-level `meta` field
+- The query planner cannot evaluate metadata predicates at the bucket level without
+  first decoding the rowIds
+- Pushing `$match` before unpacking would filter out valid buckets
+
+**Current Short-Circuit**: The `canSwapWithMatch` constraint is set to `false` for
+HCIndex collections, preventing the query planner from reordering stages. Metadata
+predicates are instead applied as event filters after unpacking and decoding.
+
+**Future Optimization**: Once HCIndex's bucket-level inverted index is implemented,
+we can enable true bucket-level filtering:
+
+1. Build per-bucket inverted indexes on frequently-queried metadata fields
+2. Teach the query planner to recognize HCIndex collections
+3. Replace the `$match` stage with a custom `$_internalHCIndexScan` stage that:
+   - Uses the bucket-level inverted index to identify matching buckets
+   - Returns bucket IDs without unpacking
+4. Follow the scan with `$_internalUnpackBucket` to unpack only matching buckets
+5. Apply remaining predicates as event filters if needed
+
+This approach combines bucket-level filtering (via inverted indexes) with event-level
+filtering (via event filters) for optimal performance.
 
  In this case, it combines
 the two stages into a single stage0 = $_internalUnpackBucket. This causes the
