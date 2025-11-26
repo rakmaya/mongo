@@ -29,6 +29,10 @@
 
 #include "mongo/db/pipeline/optimization/optimize.h"
 
+#include "mongo/logv2/log.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
+
 namespace mongo::pipeline_optimization {
 
 MONGO_FAIL_POINT_DEFINE(disablePipelineOptimization);
@@ -44,8 +48,29 @@ void optimizePipeline(Pipeline& pipeline) {
     if (MONGO_unlikely(disablePipelineOptimization.shouldFail())) {
         return;
     }
+
+    LOGV2(9999996, "optimizePipeline called",
+          "pipelineSize"_attr = pipeline.getSources().size());
+    int idx = 0;
+    for (auto& source : pipeline.getSources()) {
+        LOGV2(9999997, "Pipeline stage before optimization",
+              "index"_attr = idx,
+              "stageName"_attr = source->getSourceName());
+        idx++;
+    }
+
     optimizeContainer(&pipeline.getSources());
     optimizeEachStage(&pipeline.getSources());
+
+    LOGV2(9999998, "optimizePipeline completed",
+          "pipelineSize"_attr = pipeline.getSources().size());
+    idx = 0;
+    for (auto& source : pipeline.getSources()) {
+        LOGV2(9999999, "Pipeline stage after optimization",
+              "index"_attr = idx,
+              "stageName"_attr = source->getSourceName());
+        idx++;
+    }
 }
 
 /**

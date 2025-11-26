@@ -1939,13 +1939,32 @@ DocumentSourceContainer::iterator DocumentSourceInternalUnpackBucket::doOptimize
     // For HCIndex collections, handle $match stages that come BEFORE this unpack bucket stage.
     // These $match stages may contain metadata predicates that need to be applied as event filters
     // after unpacking, not at the bucket level.
+    LOGV2(9999990, "Checking for HCIndex metadata predicates",
+          "useHCIndex"_attr = _sharedState->_bucketUnpacker.bucketSpec().useHCIndex(),
+          "itrAtBegin"_attr = (itr == container->begin()),
+          "containerSize"_attr = std::distance(container->begin(), container->end()));
+
+    // Log the pipeline stages
+    int stageIdx = 0;
+    for (auto it = container->begin(); it != container->end(); ++it) {
+        LOGV2(9999995, "Pipeline stage",
+              "index"_attr = stageIdx,
+              "stageName"_attr = (*it)->getSourceName(),
+              "isCurrentStage"_attr = (it == itr));
+        stageIdx++;
+    }
+
     if (_sharedState->_bucketUnpacker.bucketSpec().useHCIndex() && itr != container->begin()) {
         auto prevItr = std::prev(itr);
         if (auto prevMatch = dynamic_cast<DocumentSourceMatch*>(prevItr->get())) {
+            LOGV2(9999991, "Found $match stage before unpack bucket");
             auto predicates = createPredicatesOnBucketLevelField(prevMatch->getMatchExpression());
+            LOGV2(9999992, "Predicates created",
+                  "rewriteProvidesExactMatchPredicate"_attr = predicates.rewriteProvidesExactMatchPredicate);
             // If there's a metadata predicate (rewriteProvidesExactMatchPredicate is false),
             // we need to move it to an event filter and remove it from the bucket-level filter
             if (!predicates.rewriteProvidesExactMatchPredicate) {
+                LOGV2(9999993, "Setting event filter for metadata predicate");
                 // The query has been transformed to use "meta" instead of the original metadata field name.
                 // We need to reverse this transformation so the event filter uses the original field names
                 // that match the measurement document field names.

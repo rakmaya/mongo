@@ -342,6 +342,18 @@ implemented, we can use that instead of the event filter. We can teach the
 query planner about HCIndex and don't rename metadata fields. Pushdown metadata
 predicates to the bucket level using the inverted index.
 
+**Query Pipeline rewrite**
+MongoDB's query planner optimizes the query pipeline in certain cases where if
+the first two stages are ($_internalUnpackBucket, $match) it rewrites the
+pipeline to ($match, $_internalUnpackBucket). This won't work for HCIndex since
+the metadata is encoded in the data section and not in the meta field. For now
+this optimization is disabled for HCIndex collections. Later we can add the
+necessary logic to the query planner to handle HCIndex collections correctly.
+
+ In this case, it combines
+the two stages into a single stage0 = $_internalUnpackBucket. This causes the
+event filter hack to fail since there is no longer a separate $match stage.
+
 ### TODO: Make Verify Function Work with HCIndex
 **Issue**: The metadata verifier in `timeseries_write_ops_utils_internal.cpp` currently skips HCIndex batches entirely.
 **Current Workaround**: Added `!batch->isHCIndexBatch &&` checks to skip verification

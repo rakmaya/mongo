@@ -151,7 +151,10 @@ public:
                                      LookupRequirement::kAllowed,
                                      UnionRequirement::kAllowed,
                                      ChangeStreamRequirement::kDenylist};
-        constraints.canSwapWithMatch = true;
+        // For HCIndex collections, we cannot swap $match stages before the unpack bucket stage
+        // because metadata predicates need to be applied as event filters after unpacking and
+        // decoding the rowIds back to original metadata.
+        constraints.canSwapWithMatch = !_sharedState->_bucketUnpacker.bucketSpec().useHCIndex();
         // The user cannot specify multiple $unpackBucket stages in the pipeline.
         constraints.canAppearOnlyOnceInPipeline = true;
         // This stage only reads raw timeseries bucket documents.

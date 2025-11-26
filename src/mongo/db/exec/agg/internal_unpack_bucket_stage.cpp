@@ -127,12 +127,18 @@ GetNextResult InternalUnpackBucketStage::doGetNext() {
 boost::optional<Document> InternalUnpackBucketStage::getNextMatchingMeasure() {
     int measurementCount = 0;
     int matchedCount = 0;
+    LOGV2(9999984, "getNextMatchingMeasure called",
+          "hasEventFilter"_attr = (_sharedState->_eventFilter != nullptr),
+          "unpackToBson"_attr = _unpackToBson);
     while (_sharedState->_bucketUnpacker.hasNext()) {
         if (_sharedState->_eventFilter) {
             if (_unpackToBson) {
                 auto measure = _sharedState->_bucketUnpacker.getNextBson();
                 bool matches = _sharedState->_bucketUnpacker.bucketMatchedQuery() ||
                     exec::matcher::matchesBSON(_sharedState->_eventFilter.get(), measure);
+                LOGV2(9999985, "Checked measurement (BSON)",
+                      "matches"_attr = matches,
+                      "bucketMatched"_attr = _sharedState->_bucketUnpacker.bucketMatchedQuery());
                 if (matches) {
                     return Document(measure);
                 }
@@ -146,14 +152,22 @@ boost::optional<Document> InternalUnpackBucketStage::getNextMatchingMeasure() {
                                                                      _eventFilterDeps.fields);
                 bool matches = _sharedState->_bucketUnpacker.bucketMatchedQuery() ||
                     exec::matcher::matchesBSON(_sharedState->_eventFilter.get(), measureBson);
+                LOGV2(9999986, "Checked measurement (Document)",
+                      "matches"_attr = matches,
+                      "bucketMatched"_attr = _sharedState->_bucketUnpacker.bucketMatchedQuery(),
+                      "measureBson"_attr = measureBson);
                 if (matches) {
+                    LOGV2(9999987, "Returning matched measurement",
+                          "measure"_attr = measure.toBson());
                     return measure;
                 }
             }
         } else {
+            LOGV2(9999988, "No event filter, returning measurement");
             return _sharedState->_bucketUnpacker.getNext();
         }
     }
+    LOGV2(9999989, "No more measurements");
     return {};
 }
 
