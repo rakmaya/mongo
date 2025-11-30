@@ -447,6 +447,9 @@ Document BucketUnpacker::getNext() {
         if (!decodedMetadata.isEmpty()) {
             metaValueToUse = Value{decodedMetadata};
         }
+    } else if (_isHCIndexBucket) {
+        // Advance the iterator for the next measurement
+        ++(*_rowIdColumnIterator);
     }
 
     // For HCIndex buckets, don't include the original metadata in the unpacker
@@ -812,6 +815,40 @@ const std::set<std::string>& BucketUnpacker::fieldsToIncludeExcludeDuringUnpack(
 
 const std::set<StringData> BucketUnpacker::reservedBucketFieldNames = {
     kBucketIdFieldName, kBucketDataFieldName, kBucketMetaFieldName, kBucketControlFieldName};
+
+int64_t BucketUnpacker::getCurrentRowId() const {
+    // If this is not an HCIndex bucket or we don't have a rowId column iterator, return -1
+    if (!_isHCIndexBucket || !_rowIdColumnIterator) {
+        return -1;
+    }
+
+    // Get the current rowId from the cached iterator
+    if (!_rowIdColumnIterator->more()) {
+        return -1;
+    }
+
+    const BSONElement& rowIdElem = **_rowIdColumnIterator;
+    if (rowIdElem.eoo() || rowIdElem.type() != BSONType::numberLong) {
+        return -1;
+    }
+
+    return rowIdElem.numberLong();
+}
+
+void BucketUnpacker::skipRow() {
+    // If this is not an HCIndex bucket or we don't have a rowId column iterator, do nothing
+    if (!_isHCIndexBucket || !_rowIdColumnIterator) {
+        return;
+    }
+
+    // Advance the rowId iterator
+    if (_rowIdColumnIterator->more()) {
+        ++(*_rowIdColumnIterator);
+    }
+
+    // Increment measurement index for consistency with getNext()
+    _currentMeasurementIndex++;
+}
 
 BSONObj BucketUnpacker::getDecodedMetadataForMeasurement(int measurementIndex) {
 

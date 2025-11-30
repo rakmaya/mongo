@@ -162,6 +162,24 @@ public:
     }
 
     /**
+     * Query the attribute table for rows matching a predicate at a given timestamp.
+     *
+     * This method converts a MatchExpression to an AttributeTablePredicate and queries
+     * the attribute table for the time window containing the specified timestamp.
+     *
+     * Parameters:
+     * - opCtx: Operation context for database operations
+     * - matchExpr: The MatchExpression predicate to match (can be null for empty predicate)
+     * - timestamp: The timestamp for determining which time window to query
+     *
+     * Returns StatusWith<std::vector<int64_t>> containing the matching rowIds on success,
+     * or an error status if the query fails.
+     */
+    StatusWith<std::vector<int64_t>> queryRows(OperationContext* opCtx,
+                                               const ::mongo::MatchExpression* matchExpr,
+                                               const Timestamp& timestamp);
+
+    /**
      * Flush pending operations accumulated by the writer.
      *
      * This method retrieves all pending operations from the writer and invokes the

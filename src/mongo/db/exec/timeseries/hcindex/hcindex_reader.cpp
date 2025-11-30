@@ -35,6 +35,7 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/logv2/log.h"
 
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 namespace mongo::timeseries::hcindex {
 
@@ -185,7 +186,13 @@ StatusWith<std::unique_ptr<AttributeTable>> HCIndexReader::constructAttributeTab
     }
 
     // Read and replay operations
+    LOGV2(9999920, "HCIndexReader::constructAttributeTable - starting reconstruction",
+          "windowStart"_attr = windowStart,
+          "windowEnd"_attr = windowEnd,
+          "upToTimestamp"_attr = upToTimestamp);
+
     auto cursor = collection->getCollectionPtr()->getCursor(opCtx);
+    int operationCount = 0;
     while (auto record = cursor->next()) {
         BSONObj doc = record->data.toBson();
 
@@ -204,11 +211,20 @@ StatusWith<std::unique_ptr<AttributeTable>> HCIndexReader::constructAttributeTab
         StringData op = doc.getStringField("op");
         Timestamp docTimestamp = doc.getField("timestamp").timestamp();
 
+        LOGV2(9999921, "Processing operation",
+              "op"_attr = op,
+              "timestamp"_attr = docTimestamp);
+
         if (op == "INIT") {
             // Extract schema and rows from INIT operation
             BSONObj schemaObj = doc.getObjectField("schema");
+            LOGV2(9999922, "Processing INIT operation",
+                  "schemaFieldCount"_attr = schemaObj.nFields());
+
             for (const auto& elem : schemaObj) {
                 std::string fieldName = elem.String();
+                LOGV2(9999923, "Adding column",
+                      "fieldName"_attr = fieldName);
                 auto status = table->addColumn(StringData(fieldName));
                 if (!status.isOK()) {
                     return status;
@@ -219,6 +235,9 @@ StatusWith<std::unique_ptr<AttributeTable>> HCIndexReader::constructAttributeTab
             BSONElement rowsElem = doc.getField("rows");
             if (rowsElem && rowsElem.type() == BSONType::array) {
                 auto rowsArray = rowsElem.Array();
+                LOGV2(9999924, "Inserting rows",
+                      "rowCount"_attr = rowsArray.size());
+
                 for (const auto& rowElem : rowsArray) {
                     if (rowElem.type() == BSONType::array) {
                         auto row = rowElem.Array();
@@ -234,6 +253,7 @@ StatusWith<std::unique_ptr<AttributeTable>> HCIndexReader::constructAttributeTab
                     }
                 }
             }
+            operationCount++;
         } else if (op == "opADD") {
             // Extract attributes from ADD operation
             BSONObj attrsObj = doc.getObjectField("attributes");

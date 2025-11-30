@@ -31,6 +31,7 @@
 
 #include "mongo/db/exec/agg/stage.h"
 #include "mongo/db/exec/timeseries/bucket_unpacker.h"
+#include "mongo/db/matcher/expression.h"
 #include "mongo/db/pipeline/document_source_internal_unpack_bucket.h"
 #include "mongo/util/modules.h"
 
@@ -51,6 +52,14 @@ public:
 
     ~InternalUnpackBucketStage() override {}
 
+    /**
+     * Sets the HCIndex metadata filter to be applied during unpacking.
+     * This filter will be used to check if measurements match the metadata predicate.
+     */
+    void setHCIndexMetadataFilter(std::unique_ptr<MatchExpression> filter) {
+        _hcindexMetadataFilter = std::move(filter);
+    }
+
 private:
     boost::optional<Document> getNextMatchingMeasure();
 
@@ -60,6 +69,11 @@ private:
     const std::shared_ptr<InternalUnpackBucketSharedState> _sharedState;
     const bool _unpackToBson;
     const boost::optional<long long> _sampleSize;
+
+    // HCIndex metadata filtering
+    std::unique_ptr<MatchExpression> _hcindexMetadataFilter;
+    std::set<int64_t> _hcindexMatchingRowIds;
+    bool _hcindexRowIdsInitialized = false;
 };
 
 }  // namespace agg

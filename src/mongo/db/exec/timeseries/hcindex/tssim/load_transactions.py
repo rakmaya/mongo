@@ -25,7 +25,7 @@ def parse_args():
     parser.add_argument("--collection", default=None, help="Collection name (default: transactions_hc or transactions_no_hc)")
     parser.add_argument("--uri", default="mongodb://127.0.0.1:27017", help="MongoDB connection URI")
     parser.add_argument("--csv", default="transactions.csv", help="Path to transactions.csv")
-    parser.add_argument("--rows", type=int, default=3, help="Number of rows to load (default: 100, 0 = all rows)")
+    parser.add_argument("--rows", type=int, default=10, help="Number of rows to load (default: 100, 0 = all rows)")
     args = parser.parse_args()
 
     # Set default collection name based on hcindex flag

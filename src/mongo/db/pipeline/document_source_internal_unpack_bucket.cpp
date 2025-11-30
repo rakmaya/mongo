@@ -96,6 +96,33 @@
 
 namespace mongo {
 
+/**
+ * Helper function to extract metadata-only predicates from a MatchExpression.
+ * Returns a pair of (metadataOnlyExpr, residualExpr) where:
+ * - metadataOnlyExpr contains only predicates on the metadata field
+ * - residualExpr contains the remaining predicates
+ */
+std::pair<std::unique_ptr<MatchExpression>, std::unique_ptr<MatchExpression>>
+extractMetadataPredicates(std::unique_ptr<MatchExpression> expr,
+                          boost::optional<StringData> metaField) {
+    if (!metaField || !expr) {
+        return {nullptr, std::move(expr)};
+    }
+
+    // The predicate uses user-facing field names (e.g., "metadata"), but splitOutMetaOnlyPredicate
+    // expects bucket-level field names (e.g., "meta"). We need to rename the field before splitting.
+    StringMap<std::string> renames;
+    renames[std::string{*metaField}] = std::string{timeseries::kBucketMetaFieldName};
+
+    auto result = expression::splitMatchExpressionBy(
+        std::move(expr),
+        {std::string{timeseries::kBucketMetaFieldName}},  // Use "meta" not "metadata"
+        renames,
+        expression::isOnlyDependentOn);
+
+    return result;
+}
+
 /*
  * $_internalUnpackBucket is an internal stage for materializing time-series measurements from
  * time-series collections. It should never be used anywhere outside the MongoDB server.
@@ -1764,6 +1791,106 @@ DocumentSourceContainer::iterator DocumentSourceInternalUnpackBucket::doOptimize
         }
     }
 
+    // For HCIndex collections, handle metadata predicate extraction and filtering
+    if (_sharedState->_bucketUnpacker.bucketSpec().useHCIndex()) {
+        LOGV2(9999990, "HCIndex: doOptimizeAt called for HCIndex collection");
+        auto metaFieldOpt = _sharedState->_bucketUnpacker.bucketSpec().metaField();
+        boost::optional<StringData> metaField;
+        if (metaFieldOpt) {
+            metaField = StringData(*metaFieldOpt);
+            LOGV2(9999996, "HCIndex: metaField", "metaField"_attr = *metaField);
+        }
+
+        // Log the pipeline before optimization
+        LOGV2(9999995, "HCIndex: Pipeline before optimization");
+        size_t idx = 0;
+        for (auto& stage : *container) {
+            LOGV2(9999995, "HCIndex: Pipeline stage", "index"_attr = idx, "stageName"_attr = stage->getSourceName());
+            if (auto matchStage = dynamic_cast<DocumentSourceMatch*>(stage.get())) {
+                LOGV2(9999995, "HCIndex: Match stage expression", "expr"_attr = matchStage->getMatchExpression()->serialize());
+            }
+            ++idx;
+        }
+
+        // Case 1: $match stage BEFORE this unpack bucket stage
+        if (itr != container->begin()) {
+            LOGV2(9999991, "HCIndex: Checking previous stage");
+            if (auto prevMatch = dynamic_cast<DocumentSourceMatch*>(std::prev(itr)->get()); prevMatch) {
+                LOGV2(9999992, "HCIndex: Found $match stage before unpack bucket");
+                auto matchExpr = prevMatch->getMatchExpression()->clone();
+                LOGV2(9999993, "HCIndex: Match expression", "expr"_attr = matchExpr->serialize());
+                auto [metadataExpr, residualExpr] = extractMetadataPredicates(std::move(matchExpr), metaField);
+
+                if (metadataExpr) {
+                    LOGV2(9999994, "HCIndex: Extracted metadata predicates", "expr"_attr = metadataExpr->serialize());
+                    // Store the metadata filter BSON for use during unpacking
+                    // We store BSON instead of MatchExpression to ensure the buffer is owned and valid
+                    _hcindexMetadataFilterBSON = metadataExpr->serialize().getOwned();
+
+                    // Update the $match stage to remove metadata predicates so they're not applied at bucket level
+                    if (residualExpr) {
+                        // There are non-metadata predicates, rebuild the $match with only those
+                        // Normalize the residual expression to ensure it's valid
+                        residualExpr = normalizeMatchExpression(std::move(residualExpr));
+                        BSONObj residualBson = residualExpr->serialize();
+                        LOGV2(9999993, "HCIndex: Rebuilding $match with residual predicates", "residual"_attr = residualBson);
+                        prevMatch->rebuild(residualBson);
+                    } else {
+                        // All predicates were metadata-only, remove the $match stage entirely
+                        LOGV2(9999993, "HCIndex: Removing $match stage entirely (all predicates were metadata-only)");
+                        // BREAKPOINT: Set breakpoint here to see the call stack
+                        container->erase(std::prev(itr));
+                        // DO NOT adjust itr - it should still point to the unpack bucket stage
+                    }
+
+                    // Insert HCIndexHighDensityFilterStage before the $match (or before unpack if match was removed)
+                    // For now, this is a placeholder that will be implemented in the future
+                    // auto filterStage = DocumentSourceHCIndexHighDensityFilter::create(getExpCtx(), _hcindexMetadataFilter.get());
+                    // container->insert(itr, filterStage);
+                }
+            }
+        }
+
+        // Case 2: $match stage AFTER this unpack bucket stage
+        if (std::next(itr) != container->end()) {
+            if (auto nextMatch = dynamic_cast<DocumentSourceMatch*>(std::next(itr)->get()); nextMatch) {
+                auto matchExpr = nextMatch->getMatchExpression()->clone();
+                auto [metadataExpr, residualExpr] = extractMetadataPredicates(std::move(matchExpr), metaField);
+
+                if (metadataExpr) {
+                    // Store the metadata filter BSON for use during unpacking
+                    // We store BSON instead of MatchExpression to ensure the buffer is owned and valid
+                    _hcindexMetadataFilterBSON = metadataExpr->serialize().getOwned();
+
+                    // Update the $match stage to remove metadata predicates
+                    if (residualExpr) {
+                        BSONObj residualBson = residualExpr->serialize();
+                        nextMatch->rebuild(residualBson);
+                    } else {
+                        // If no residual predicates, remove the $match stage entirely
+                        container->erase(std::next(itr));
+                    }
+
+                    // Insert HCIndexHighDensityFilterStage before the unpack bucket
+                    // For now, this is a placeholder that will be implemented in the future
+                    // auto filterStage = DocumentSourceHCIndexHighDensityFilter::create(getExpCtx(), _hcindexMetadataFilter.get());
+                    // container->insert(itr, filterStage);
+                }
+            }
+        }
+
+        // Log the pipeline after HCIndex optimization
+        LOGV2(9999994, "HCIndex: Pipeline after HCIndex optimization");
+        idx = 0;
+        for (auto& stage : *container) {
+            LOGV2(9999994, "HCIndex: Pipeline stage", "index"_attr = idx, "stageName"_attr = stage->getSourceName());
+            if (auto matchStage = dynamic_cast<DocumentSourceMatch*>(stage.get())) {
+                LOGV2(9999994, "HCIndex: Match stage expression", "expr"_attr = matchStage->getMatchExpression()->serialize());
+            }
+            ++idx;
+        }
+    }
+
     if (std::next(itr) == container->end()) {
         return container->end();
     }
@@ -1912,8 +2039,12 @@ DocumentSourceContainer::iterator DocumentSourceInternalUnpackBucket::doOptimize
         // to be applied as an event filter after unpacking and decoding the rowIds back to original metadata.
         bool shouldSkipGroupRewrite = false;
         if (_sharedState->_bucketUnpacker.bucketSpec().useHCIndex()) {
-            // Check if there's a $match stage before this unpack bucket stage
-            if (itr != container->begin()) {
+            // Check if we have extracted metadata predicates (indicated by _hcindexMetadataFilterBSON being set)
+            if (!_hcindexMetadataFilterBSON.isEmpty()) {
+                LOGV2(9999988, "HCIndex: Skipping group rewrite because metadata filter is set");
+                shouldSkipGroupRewrite = true;
+            } else if (itr != container->begin()) {
+                // Also check if there's a $match stage before this unpack bucket stage
                 auto prevItr = std::prev(itr);
                 if (auto prevMatch = dynamic_cast<DocumentSourceMatch*>(prevItr->get())) {
                     // Check if the match expression contains metadata predicates
@@ -1936,66 +2067,8 @@ DocumentSourceContainer::iterator DocumentSourceInternalUnpackBucket::doOptimize
         }
     }
 
-    // For HCIndex collections, handle $match stages that come BEFORE this unpack bucket stage.
-    // These $match stages may contain metadata predicates that need to be applied as event filters
-    // after unpacking, not at the bucket level.
-    LOGV2(9999990, "Checking for HCIndex metadata predicates",
-          "useHCIndex"_attr = _sharedState->_bucketUnpacker.bucketSpec().useHCIndex(),
-          "itrAtBegin"_attr = (itr == container->begin()),
-          "containerSize"_attr = std::distance(container->begin(), container->end()));
-
-    // Log the pipeline stages
-    int stageIdx = 0;
-    for (auto it = container->begin(); it != container->end(); ++it) {
-        LOGV2(9999995, "Pipeline stage",
-              "index"_attr = stageIdx,
-              "stageName"_attr = (*it)->getSourceName(),
-              "isCurrentStage"_attr = (it == itr));
-        stageIdx++;
-    }
-
-    if (_sharedState->_bucketUnpacker.bucketSpec().useHCIndex() && itr != container->begin()) {
-        auto prevItr = std::prev(itr);
-        if (auto prevMatch = dynamic_cast<DocumentSourceMatch*>(prevItr->get())) {
-            LOGV2(9999991, "Found $match stage before unpack bucket");
-            auto predicates = createPredicatesOnBucketLevelField(prevMatch->getMatchExpression());
-            LOGV2(9999992, "Predicates created",
-                  "rewriteProvidesExactMatchPredicate"_attr = predicates.rewriteProvidesExactMatchPredicate);
-            // If there's a metadata predicate (rewriteProvidesExactMatchPredicate is false),
-            // we need to move it to an event filter and remove it from the bucket-level filter
-            if (!predicates.rewriteProvidesExactMatchPredicate) {
-                LOGV2(9999993, "Setting event filter for metadata predicate");
-                // The query has been transformed to use "meta" instead of the original metadata field name.
-                // We need to reverse this transformation so the event filter uses the original field names
-                // that match the measurement document field names.
-                auto metaField = _sharedState->_bucketUnpacker.bucketSpec().metaField();
-                BSONObj eventFilterBson = prevMatch->getQuery();
-                if (metaField) {
-                    // Rename "meta" back to the original metadata field name
-                    auto renameMap = StringMap<std::string>{
-                        {std::string{timeseries::kBucketMetaFieldName}, std::string{*metaField}}};
-                    auto renamedExpr = expression::copyExpressionAndApplyRenames(
-                        prevMatch->getMatchExpression(), renameMap);
-                    if (renamedExpr) {
-                        eventFilterBson = renamedExpr->serialize();
-                    }
-                }
-
-                // Set the event filter with the renamed match expression
-                setEventFilter(eventFilterBson, true /* shouldOptimize */);
-                // Remove the $match stage since its predicates are now applied as event filters
-                container->erase(prevItr);
-                // Adjust iterator since we removed the previous stage
-                itr = std::next(container->begin());
-                for (auto it = container->begin(); it != container->end(); ++it) {
-                    if (it->get() == this) {
-                        itr = it;
-                        break;
-                    }
-                }
-            }
-        }
-    }
+    // HCIndex metadata filtering is now handled during execution in InternalUnpackBucketStage
+    // where we have access to the bucket timestamp for proper window calculation.
 
     //
     // If a field is overwritten through computed projection/addFields, or project out using a

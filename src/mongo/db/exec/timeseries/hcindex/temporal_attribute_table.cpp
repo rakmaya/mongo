@@ -32,7 +32,11 @@
 #include "mongo/db/exec/timeseries/hcindex/hcindex_writer.h"
 #include "mongo/db/exec/timeseries/hcindex/hcindex_reader.h"
 #include "mongo/base/error_codes.h"
+#include "mongo/db/matcher/expression.h"
+#include "mongo/db/update/path_support.h"
+#include "mongo/logv2/log.h"
 
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 namespace mongo::timeseries::hcindex {
 
@@ -152,34 +156,34 @@ std::vector<int64_t> AttributeTable::queryRows(
 
     std::vector<int64_t> matchingRowIds;
 
+    // If refRowVec is empty, no predicates to match
+    if (predicate.refRowVec.empty()) {
+        return matchingRowIds;
+    }
+
     // Iterate through all rows
     for (size_t rowIdx = 0; rowIdx < rows.size(); ++rowIdx) {
         const auto& row = rows[rowIdx];
-        bool matches = true;
 
-        // Check column-based predicates
-        for (const auto& [colIdx, symbolIdx] : predicate.columnMatches) {
-            if (colIdx >= row.size() || row[colIdx] != symbolIdx) {
-                matches = false;
-                break;
-            }
-        }
-
-        if (!matches) {
+        // Skip rows that have fewer elements than refRowVec
+        // (schema may have evolved, so older rows may be shorter)
+        if (row.size() < predicate.refRowVec.size()) {
             continue;
         }
 
-        // Check field-based predicates
-        for (const auto& [fieldName, symbolIdx] : predicate.fieldMatches) {
-            auto it = fieldToColumnIndex.find(fieldName);
-            if (it == fieldToColumnIndex.end()) {
-                // Field not in schema
-                matches = false;
-                break;
+        bool matches = true;
+
+        // Check each non-zero entry in refRowVec
+        for (size_t colIdx = 0; colIdx < predicate.refRowVec.size(); ++colIdx) {
+            uint32_t expectedSymbol = predicate.refRowVec[colIdx];
+
+            // 0 means this field is not part of the predicate, skip it
+            if (expectedSymbol == 0) {
+                continue;
             }
 
-            size_t colIdx = it->second;
-            if (colIdx >= row.size() || row[colIdx] != symbolIdx) {
+            // Check if the row's symbol at this column matches
+            if (row[colIdx] != expectedSymbol) {
                 matches = false;
                 break;
             }
@@ -191,6 +195,134 @@ std::vector<int64_t> AttributeTable::queryRows(
     }
 
     return matchingRowIds;
+}
+
+StatusWith<AttributeTablePredicate> AttributeTable::convertMatchExpressionToPredicate(
+    const ::mongo::MatchExpression* matchExpr) const {
+
+    if (!matchExpr) {
+        return Status(ErrorCodes::BadValue, "matchExpr cannot be null");
+    }
+
+    // Extract equality matches from the MatchExpression
+    mongo::pathsupport::EqualityMatches equalities;
+    auto status = mongo::pathsupport::extractEqualityMatches(*matchExpr, &equalities);
+    if (!status.isOK()) {
+        return status;
+    }
+
+    LOGV2(9999900, "HCIndex: convertMatchExpressionToPredicate",
+          "equalitiesCount"_attr = equalities.size(),
+          "schemaSize"_attr = schema.size(),
+          "matchExprType"_attr = matchExpr->matchType());
+
+    // Log the equalities we extracted
+    for (const auto& [fieldPath, eqExpr] : equalities) {
+        LOGV2(9999908, "HCIndex: Extracted equality",
+              "fieldPath"_attr = fieldPath,
+              "exprType"_attr = eqExpr->matchType());
+    }
+
+    // Build reference row vector: symbol indices in schema order
+    // 0 means field is not part of predicate, non-zero means match this symbol
+    std::vector<uint32_t> refRowVec;
+    size_t maxColumnIndex = 0;
+
+    // First pass: find the maximum column index needed
+    for (const auto& [fieldPath, eqExpr] : equalities) {
+        // Strip the metadata field prefix if present
+        // The schema only contains the field names without the metadata prefix
+        std::string schemaFieldPath = std::string(fieldPath);
+        if (schemaFieldPath.find("metadata.") == 0) {
+            schemaFieldPath = schemaFieldPath.substr(9);  // Remove "metadata." prefix
+        }
+
+        auto it = fieldToColumnIndex.find(schemaFieldPath);
+        LOGV2(9999901, "HCIndex: Processing field",
+              "fieldPath"_attr = fieldPath,
+              "schemaFieldPath"_attr = schemaFieldPath,
+              "found"_attr = (it != fieldToColumnIndex.end()));
+        if (it != fieldToColumnIndex.end()) {
+            maxColumnIndex = std::max(maxColumnIndex, it->second);
+        }
+    }
+
+    // Initialize refRowVec with 0s up to maxColumnIndex
+    refRowVec.resize(maxColumnIndex + 1, 0);
+
+    // Second pass: fill in the symbol indices for matching fields
+    for (const auto& [fieldPath, eqExpr] : equalities) {
+        // Strip the metadata field prefix if present
+        std::string schemaFieldPath = std::string(fieldPath);
+        if (schemaFieldPath.find("metadata.") == 0) {
+            schemaFieldPath = schemaFieldPath.substr(9);  // Remove "metadata." prefix
+        }
+
+        auto fieldIt = fieldToColumnIndex.find(schemaFieldPath);
+        if (fieldIt == fieldToColumnIndex.end()) {
+            // Field not in schema - no rows will match
+            LOGV2(9999902, "HCIndex: Field not in schema, returning empty predicate",
+                  "fieldPath"_attr = fieldPath,
+                  "schemaFieldPath"_attr = schemaFieldPath);
+            return AttributeTablePredicate();
+        }
+
+        // Get the symbol value from the BSON element
+        const BSONElement& data = eqExpr->getData();
+
+        LOGV2(9999907, "HCIndex: Got data element",
+              "fieldPath"_attr = fieldPath,
+              "dataType"_attr = typeName(data.type()),
+              "dataEOO"_attr = data.eoo());
+
+        if (data.eoo()) {
+            // Element is EOO (end of object), which means it's invalid
+            return Status(ErrorCodes::BadValue,
+                          "HCIndex: Predicate value for field '" + std::string(fieldPath) +
+                              "' is invalid (EOO element)");
+        }
+
+        if (data.type() != mongo::BSONType::string) {
+            return Status(ErrorCodes::BadValue,
+                          "HCIndex: Predicate value for field '" + std::string(fieldPath) +
+                              "' must be a string, got: " + typeName(data.type()));
+        }
+
+        StringData value = data.valueStringData();
+
+        // Look up the symbol index in the dictionary
+        auto symbolIndex = symbolDictionary->getSymbolIndex(value);
+        LOGV2(9999903, "HCIndex: Symbol lookup",
+              "fieldPath"_attr = fieldPath,
+              "value"_attr = value,
+              "symbolIndex"_attr = (symbolIndex ? *symbolIndex : 0),
+              "found"_attr = symbolIndex.has_value());
+
+        if (!symbolIndex) {
+            // Symbol not found in dictionary - this field value doesn't exist in this table
+            // Return empty predicate (no rows will match)
+            LOGV2(9999904, "HCIndex: Symbol not found in dictionary, returning empty predicate",
+                  "fieldPath"_attr = fieldPath,
+                  "value"_attr = value);
+            return AttributeTablePredicate();
+        }
+
+        // Set the symbol index at the appropriate column position
+        refRowVec[fieldIt->second] = *symbolIndex;
+        LOGV2(9999905, "HCIndex: Set refRowVec",
+              "columnIndex"_attr = fieldIt->second,
+              "symbolIndex"_attr = *symbolIndex);
+    }
+
+    // Trim trailing zeros from refRowVec (don't pad at the end)
+    while (!refRowVec.empty() && refRowVec.back() == 0) {
+        refRowVec.pop_back();
+    }
+
+    LOGV2(9999906, "HCIndex: Final refRowVec",
+          "size"_attr = refRowVec.size());
+
+    return AttributeTablePredicate{refRowVec};
 }
 
 Status AttributeTable::addColumn(StringData fieldName) {

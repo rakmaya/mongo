@@ -31,6 +31,9 @@
 
 #include "mongo/db/exec/agg/document_source_to_stage_registry.h"
 #include "mongo/db/pipeline/pipeline.h"
+#include "mongo/logv2/log.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
 namespace mongo::exec::agg {
 
@@ -41,6 +44,11 @@ std::unique_ptr<exec::agg::Pipeline> buildPipeline(const mongo::Pipeline& pipeli
         10706500, "expecting pipeline frozen for modifications as an input", pipeline.isFrozen());
     Pipeline::StageContainer stages;
     const auto& documentSources = pipeline.getSources();
+
+    LOGV2(9999982, "HCIndex: buildPipeline called", "numSources"_attr = documentSources.size());
+    for (const auto& source : documentSources) {
+        LOGV2(9999983, "HCIndex: DocumentSource in pipeline", "stageName"_attr = source->getSourceName());
+    }
 
     try {
         if (MONGO_likely(!documentSources.empty())) {

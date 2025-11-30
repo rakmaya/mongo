@@ -60,7 +60,28 @@ void optimizePipeline(Pipeline& pipeline) {
     }
 
     optimizeContainer(&pipeline.getSources());
+
+    LOGV2(9999998, "optimizePipeline after optimizeContainer called",
+          "pipelineSize"_attr = pipeline.getSources().size());
+    idx = 0;
+    for (auto& source : pipeline.getSources()) {
+        LOGV2(9999999, "Pipeline stage after optimizeContainer",
+              "index"_attr = idx,
+              "stageName"_attr = source->getSourceName());
+        idx++;
+    }
+
     optimizeEachStage(&pipeline.getSources());
+
+    LOGV2(9999998, "optimizePipeline after optimizeEachStage called",
+          "pipelineSize"_attr = pipeline.getSources().size());
+    idx = 0;
+    for (auto& source : pipeline.getSources()) {
+        LOGV2(9999999, "Pipeline stage after optimizeEachStage",
+              "index"_attr = idx,
+              "stageName"_attr = source->getSourceName());
+        idx++;
+    }
 
     LOGV2(9999998, "optimizePipeline completed",
           "pipelineSize"_attr = pipeline.getSources().size());

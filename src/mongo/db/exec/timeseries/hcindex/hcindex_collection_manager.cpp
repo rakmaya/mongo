@@ -24,6 +24,9 @@
 
 #include "mongo/db/namespace_string.h"
 #include "mongo/util/str.h"
+#include "mongo/logv2/log.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 namespace mongo::timeseries::hcindex {
 
@@ -181,6 +184,57 @@ Status HCIndexCollectionManager::flushPendingOperations(
     // Clear pending operations after successful flush
     writer->clearPendingOperations();
     return Status::OK();
+}
+
+StatusWith<std::vector<int64_t>> HCIndexCollectionManager::queryRows(
+    OperationContext* opCtx,
+    const ::mongo::MatchExpression* matchExpr,
+    const Timestamp& timestamp) {
+    LOGV2(9999910, "HCIndexCollectionManager::queryRows called");
+
+    if (!attributeTable) {
+        LOGV2(9999911, "HCIndex attribute table not initialized");
+        return Status(ErrorCodes::InternalError, "HCIndex attribute table not initialized");
+    }
+
+    LOGV2(9999912, "Getting attribute table for timestamp",
+          "timestamp"_attr = timestamp);
+
+    // Get the attribute table for this timestamp
+    auto tableResult = attributeTable->getTableForTimestamp(timestamp);
+    if (!tableResult.isOK()) {
+        LOGV2(9999913, "Table not in memory, trying to create/reconstruct from disk");
+        // Table doesn't exist in memory. Try to create/reconstruct it from disk.
+        auto createResult = attributeTable->getOrCreateTableForTimestamp(opCtx, timestamp);
+        if (!createResult.isOK()) {
+            LOGV2(9999914, "Failed to create/reconstruct table",
+                  "error"_attr = createResult.getStatus());
+            return createResult.getStatus();
+        }
+        tableResult = createResult;
+    }
+
+    auto table = tableResult.getValue();
+    LOGV2(9999915, "Got attribute table",
+          "rowCount"_attr = table->getRowCount());
+
+    // Convert the MatchExpression to an AttributeTablePredicate
+    auto predicateResult = table->convertMatchExpressionToPredicate(matchExpr);
+    if (!predicateResult.isOK()) {
+        LOGV2(9999916, "Failed to convert match expression to predicate",
+              "error"_attr = predicateResult.getStatus());
+        return predicateResult.getStatus();
+    }
+
+    LOGV2(9999917, "Converted match expression to predicate",
+          "refRowVecSize"_attr = predicateResult.getValue().refRowVec.size());
+
+    // Query the table for matching rows
+    auto matchingRowIds = table->queryRows(predicateResult.getValue());
+    LOGV2(9999918, "Query completed",
+          "matchingRowCount"_attr = matchingRowIds.size());
+
+    return matchingRowIds;
 }
 
 Status HCIndexCollectionManager::cleanup() {

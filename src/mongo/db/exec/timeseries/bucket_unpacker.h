@@ -322,6 +322,19 @@ public:
      */
     BSONObj getDecodedMetadataForMeasurement(int measurementIndex);
 
+    /**
+     * Gets the rowId for the current measurement being unpacked.
+     * Returns the rowId as an int64_t, or -1 if this is not an HCIndex bucket or rowId is unavailable.
+     */
+    int64_t getCurrentRowId() const;
+
+    /**
+     * Skips the current measurement without unpacking it.
+     * This advances the internal iterators to the next measurement.
+     * Used for HCIndex filtering to skip measurements that don't match the metadata predicate.
+     */
+    void skipRow();
+
     class UnpackingImpl;
 
 private:

@@ -279,7 +279,7 @@ TEST(TemporalSymbolDictionaryTest, CleanupOldDictionaries) {
     auto collectionUUID = UUID::gen();
     DatabaseName dbName = DatabaseName::createDatabaseName_forTest(boost::none, "test");
     HCIndexWriter writer(collectionUUID, dbName);
-    TemporalSymbolDictionary tempDict(nullptr, collectionUUID, DictionaryGranularity::HOURLY, &writer);
+    TemporalSymbolDictionary tempDict(collectionUUID, DictionaryGranularity::HOURLY, &writer);
 
     // Create dictionaries for different time windows
     Timestamp ts1(1000, 0);   // Window: 0-3600
@@ -305,7 +305,7 @@ TEST(TemporalSymbolDictionaryTest, DifferentWindowsHaveSeparateDictionaries) {
     auto collectionUUID = UUID::gen();
     DatabaseName dbName = DatabaseName::createDatabaseName_forTest(boost::none, "test");
     HCIndexWriter writer(collectionUUID, dbName);
-    TemporalSymbolDictionary tempDict(nullptr, collectionUUID, DictionaryGranularity::HOURLY, &writer);
+    TemporalSymbolDictionary tempDict(collectionUUID, DictionaryGranularity::HOURLY, &writer);
 
     Timestamp ts1(1000, 0);   // Window: 0-3600
     Timestamp ts2(5000, 0);   // Window: 3600-7200

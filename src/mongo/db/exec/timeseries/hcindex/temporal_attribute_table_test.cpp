@@ -30,6 +30,7 @@
 #include "mongo/db/exec/timeseries/hcindex/temporal_attribute_table.h"
 #include "mongo/db/exec/timeseries/hcindex/temporal_symbol_dictionary.h"
 #include "mongo/db/exec/timeseries/hcindex/hcindex_writer.h"
+#include "mongo/db/service_context_test_fixture.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/bson/bsonobjbuilder.h"
 
@@ -249,9 +250,11 @@ TEST_F(AttributeTableTest, QueryRowsWithPredicate) {
 // TemporalAttributeTable Tests
 // ============================================================================
 
-class TemporalAttributeTableTest : public unittest::Test {
+class TemporalAttributeTableTest : public ServiceContextTest {
 protected:
     void setUp() override {
+        ServiceContextTest::setUp();
+        _opCtx = makeOperationContext();
         auto collectionUUID = UUID::gen();
         DatabaseName dbName = DatabaseName::createDatabaseName_forTest(boost::none, "test");
         writer = std::make_unique<HCIndexWriter>(collectionUUID, dbName);
@@ -261,6 +264,11 @@ protected:
             collectionUUID, DictionaryGranularity::HOURLY, tempDict.get(), writer.get());
     }
 
+    OperationContext* getOpCtx() {
+        return _opCtx.get();
+    }
+
+    ServiceContext::UniqueOperationContext _opCtx;
     std::unique_ptr<HCIndexWriter> writer;
     std::unique_ptr<TemporalSymbolDictionary> tempDict;
     std::unique_ptr<TemporalAttributeTable> tempTable;
@@ -271,7 +279,7 @@ TEST_F(TemporalAttributeTableTest, InsertRowWithTimestamp) {
                             << "nyc-01");
     Timestamp ts(1000, 0);
 
-    auto result = tempTable->insertRow(metadata, ts);
+    auto result = tempTable->insertRow(getOpCtx(), metadata, ts);
 
     ASSERT_TRUE(result.isOK());
     ASSERT_EQ(0, result.getValue().rowId);
@@ -284,8 +292,8 @@ TEST_F(TemporalAttributeTableTest, InsertRowDeduplicatesInSameWindow) {
     Timestamp ts1(1000, 0);
     Timestamp ts2(2000, 0);  // Same window (0-3600)
 
-    auto result1 = tempTable->insertRow(metadata, ts1);
-    auto result2 = tempTable->insertRow(metadata, ts2);
+    auto result1 = tempTable->insertRow(getOpCtx(), metadata, ts1);
+    auto result2 = tempTable->insertRow(getOpCtx(), metadata, ts2);
 
     ASSERT_TRUE(result1.isOK());
     ASSERT_TRUE(result2.isOK());
@@ -300,8 +308,8 @@ TEST_F(TemporalAttributeTableTest, InsertRowCreatesNewRowInDifferentWindow) {
     Timestamp ts1(1000, 0);      // Window: 0-3600
     Timestamp ts2(5000, 0);      // Window: 3600-7200
 
-    auto result1 = tempTable->insertRow(metadata, ts1);
-    auto result2 = tempTable->insertRow(metadata, ts2);
+    auto result1 = tempTable->insertRow(getOpCtx(), metadata, ts1);
+    auto result2 = tempTable->insertRow(getOpCtx(), metadata, ts2);
 
     ASSERT_TRUE(result1.isOK());
     ASSERT_TRUE(result2.isOK());
@@ -324,7 +332,7 @@ TEST_F(TemporalAttributeTableTest, GetStats) {
                             << "nyc-01");
     Timestamp ts(1000, 0);
 
-    auto result = tempTable->insertRow(metadata, ts);
+    auto result = tempTable->insertRow(getOpCtx(), metadata, ts);
     ASSERT_TRUE(result.isOK());
     ASSERT_TRUE(result.getValue().isNewRow);
 
@@ -341,10 +349,10 @@ TEST_F(TemporalAttributeTableTest, CleanupOldTables) {
     Timestamp ts1(1000, 0);   // Window: 0-3600
     Timestamp ts2(5000, 0);   // Window: 3600-7200
 
-    auto r1 = tempTable->insertRow(metadata, ts1);
+    auto r1 = tempTable->insertRow(getOpCtx(), metadata, ts1);
     ASSERT_TRUE(r1.isOK());
     ASSERT_TRUE(r1.getValue().isNewRow);
-    auto r2 = tempTable->insertRow(metadata, ts2);
+    auto r2 = tempTable->insertRow(getOpCtx(), metadata, ts2);
     ASSERT_TRUE(r2.isOK());
     ASSERT_TRUE(r2.getValue().isNewRow);
 
@@ -364,7 +372,7 @@ TEST_F(TemporalAttributeTableTest, GetRowWithTimestamp) {
                             << "nyc-01");
     Timestamp ts(1000, 0);
 
-    auto insertResult = tempTable->insertRow(metadata, ts);
+    auto insertResult = tempTable->insertRow(getOpCtx(), metadata, ts);
     ASSERT_TRUE(insertResult.isOK());
     ASSERT_TRUE(insertResult.getValue().isNewRow);
 
@@ -378,7 +386,7 @@ TEST_F(TemporalAttributeTableTest, QueryRowsWithTimestamp) {
                             << "nyc-01");
     Timestamp ts(1000, 0);
 
-    auto insertResult = tempTable->insertRow(metadata, ts);
+    auto insertResult = tempTable->insertRow(getOpCtx(), metadata, ts);
     ASSERT_TRUE(insertResult.isOK());
     ASSERT_TRUE(insertResult.getValue().isNewRow);
 

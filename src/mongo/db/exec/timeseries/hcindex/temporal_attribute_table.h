@@ -43,6 +43,11 @@
 #include <vector>
 #include <shared_mutex>
 
+// Forward declaration from mongo namespace
+namespace mongo {
+class MatchExpression;
+}  // namespace mongo
+
 namespace mongo::timeseries::hcindex {
 
 // FORWARD DECLARATIONS
@@ -83,19 +88,21 @@ enum class AttributeTableState {
 };
 
 /**
- * Represents a query predicate for filtering rows in an attribute table. The
- * predicate can be specified either by column index (for internal use) or by
- * field name (for external use). A row matches the predicate if all specified
- * columns have the matching symbol indices.
+ * Represents a query predicate for filtering rows in an attribute table.
+ * Uses a reference row vector approach where:
+ * - refRowVec is a vector of symbol indices in schema order
+ * - 0 in refRowVec means that field is not part of the predicate
+ * - Non-zero values are the symbol indices to match
+ * - refRowVec size is only as large as necessary to encode the predicate
+ *   (no padding with 0s at the end)
+ *
+ * A row matches the predicate if for all non-zero entries in refRowVec,
+ * the corresponding column in the row has the same symbol index.
  */
 struct AttributeTablePredicate {
-    // Map: column index -> symbol index to match
-    // If a column is not in this map, it is not part of the predicate
-    std::map<size_t, uint32_t> columnMatches;
-
-    // Map: field name -> symbol index to match
-    // Used when constructing predicates from metadata
-    std::map<std::string, uint32_t> fieldMatches;
+    // Reference row vector: symbol indices in schema order
+    // 0 means field is not part of predicate, non-zero means match this symbol
+    std::vector<uint32_t> refRowVec;
 };
 
 /**
@@ -160,6 +167,16 @@ public:
      * columns have the matching indices.
      */
     std::vector<int64_t> queryRows(const AttributeTablePredicate& predicate) const;
+
+    /**
+     * Convert a MatchExpression with equality predicates to an AttributeTablePredicate.
+     * This method extracts equality matches from the MatchExpression, looks up the
+     * symbol indices in the symbol dictionary, and maps field names to column indices.
+     * Returns an error if the MatchExpression contains non-equality predicates or if
+     * any symbol lookup fails.
+     */
+    StatusWith<AttributeTablePredicate> convertMatchExpressionToPredicate(
+        const ::mongo::MatchExpression* matchExpr) const;
 
     /**
      * Add a new column to the schema with the specified fieldName. All existing
