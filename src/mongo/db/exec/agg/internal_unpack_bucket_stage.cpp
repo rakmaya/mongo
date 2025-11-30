@@ -275,9 +275,9 @@ boost::optional<Document> InternalUnpackBucketStage::getNextMatchingMeasure() {
                   "isInSet"_attr = (rowId >= 0 && _hcindexMatchingRowIds.find(rowId) != _hcindexMatchingRowIds.end()));
             if (rowId >= 0 && _hcindexMatchingRowIds.find(rowId) == _hcindexMatchingRowIds.end()) {
                 // This measurement's rowId doesn't match the metadata predicate, skip it
-                //_sharedState->_bucketUnpacker.skipRow();  // Skip without unpacking
+                _sharedState->_bucketUnpacker.skipRow();  // Skip without unpacking
                 // We need to read the measurement to advance the row iterator
-                auto _ = _sharedState->_bucketUnpacker.getNext();
+                //auto _ = _sharedState->_bucketUnpacker.getNext();
                 continue;
             }
         }

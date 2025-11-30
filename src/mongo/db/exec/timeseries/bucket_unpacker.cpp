@@ -75,6 +75,7 @@ public:
                          const BSONElement& metaValue,
                          bool includeTimeField,
                          bool includeMetaField) = 0;
+    virtual bool skipToNext() = 0;
     virtual void extractSingleMeasurement(MutableDocument& measurement,
                                           int j,
                                           const BucketSpec& spec,
@@ -110,6 +111,7 @@ public:
                  const BSONElement& metaValue,
                  bool includeTimeField,
                  bool includeMetaField) override;
+    bool skipToNext() override;
     void extractSingleMeasurement(MutableDocument& measurement,
                                   int j,
                                   const BucketSpec& spec,
@@ -192,6 +194,15 @@ bool BucketUnpackerV1::getNext(BSONObjBuilder& builder,
     return _timeFieldIter.more();
 }
 
+bool BucketUnpackerV1::skipToNext()
+{
+    ++_timeFieldIter;
+    for (auto&& [colName, colIter] : _fieldIters) {
+        ++colIter;
+    }
+    return _timeFieldIter.more();
+}
+
 void BucketUnpackerV1::extractSingleMeasurement(
     MutableDocument& measurement,
     int j,
@@ -244,6 +255,7 @@ public:
                  const BSONElement& metaValue,
                  bool includeTimeField,
                  bool includeMetaField) override;
+    bool skipToNext() override;
     void extractSingleMeasurement(MutableDocument& measurement,
                                   int j,
                                   const BucketSpec& spec,
@@ -354,6 +366,15 @@ bool BucketUnpackerV2::getNext(BSONObjBuilder& builder,
         ++fieldColumn.it;
     }
 
+    return _timeColumn.it.more();
+}
+
+bool BucketUnpackerV2::skipToNext()
+{
+    ++_timeColumn.it;
+    for (auto& fieldColumn : _fieldColumns) {
+        ++fieldColumn.it;
+    }
     return _timeColumn.it.more();
 }
 
@@ -848,6 +869,9 @@ void BucketUnpacker::skipRow() {
 
     // Increment measurement index for consistency with getNext()
     _currentMeasurementIndex++;
+
+    // Advance the unpacking iterator
+    _hasNext = _unpackingImpl->skipToNext();
 }
 
 BSONObj BucketUnpacker::getDecodedMetadataForMeasurement(int measurementIndex) {
