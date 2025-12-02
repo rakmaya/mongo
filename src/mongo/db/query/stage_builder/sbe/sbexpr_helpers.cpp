@@ -55,10 +55,14 @@
 #include "mongo/db/query/stage_builder/sbe/abt_lower.h"
 #include "mongo/db/query/stage_builder/sbe/builder_data.h"
 #include "mongo/db/query/stage_builder/sbe/sbexpr.h"
+#include "mongo/db/timeseries/bucket_catalog/global_bucket_catalog.h"
+#include "mongo/db/exec/timeseries/hcindex/hcindex_collection_manager.h"
 #include "mongo/util/overloaded_visitor.h"
 
 #include <memory>
 #include <variant>
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 namespace mongo::stage_builder {
 namespace {
@@ -916,7 +920,9 @@ std::tuple<SbStage, SbSlot, SbSlotVector, SbSlotVector> SbBuilder::makeTsBucketT
     SbSlot bucketSlot,
     const std::vector<sbe::value::PathRequest>& topLevelReqs,
     const std::vector<sbe::value::PathRequest>& traverseReqs,
-    const std::string& timeField) {
+    const std::string& timeField,
+    std::unique_ptr<MatchExpression> hcindexFilter,
+    boost::optional<UUID> collectionUUID) {
     const auto bitmapSlot = SbSlot{_state.slotId()};
 
     SbSlotVector topLevelSlots;
@@ -953,7 +959,7 @@ std::tuple<SbStage, SbSlot, SbSlotVector, SbSlotVector> SbBuilder::makeTsBucketT
         allCellSlots.push_back(slot.getId());
     }
 
-    stage = std::make_unique<sbe::TsBucketToCellBlockStage>(std::move(stage),
+    auto tsBucketStage = std::make_unique<sbe::TsBucketToCellBlockStage>(std::move(stage),
                                                             lower(bucketSlot),
                                                             allReqs,
                                                             std::move(allCellSlots),
@@ -962,6 +968,25 @@ std::tuple<SbStage, SbSlot, SbSlotVector, SbSlotVector> SbBuilder::makeTsBucketT
                                                             timeField,
                                                             _nodeId);
 
+    // Set HCIndex metadata filter if provided
+    if (hcindexFilter && collectionUUID) {
+        tsBucketStage->setHCIndexMetadataFilter(std::move(hcindexFilter));
+        tsBucketStage->setCollectionUUID(*collectionUUID);
+
+        // Get the HCIndexCollectionManager from the bucket catalog
+        auto& bucketCatalog = timeseries::bucket_catalog::GlobalBucketCatalog::get(
+            _state.opCtx->getServiceContext());
+        auto hcindexMgr = timeseries::bucket_catalog::getHCIndexManager(
+            bucketCatalog, *collectionUUID);
+        if (hcindexMgr) {
+            // Do NOT initialize the manager here. Initialization will happen lazily
+            // when the manager is first used during query execution (e.g., in queryRows())
+            // to avoid issues with stashed transaction resources during pipeline cleanup.
+            tsBucketStage->setHCIndexCollectionManager(hcindexMgr.get());
+        }
+    }
+
+    stage = std::move(tsBucketStage);
     return {std::move(stage), bitmapSlot, std::move(topLevelSlots), std::move(traverseSlots)};
 }
 

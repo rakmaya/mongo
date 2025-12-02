@@ -42,6 +42,59 @@ namespace mongo::timeseries::hcindex {
 HCIndexReader::HCIndexReader(const DatabaseName& dbName, const UUID& collectionUUID)
     : dbName(dbName), collectionUUID(collectionUUID) {}
 
+Status HCIndexReader::initializeCollections(OperationContext* opCtx) {
+    // Check if already initialized to avoid re-acquiring collections
+    if (collectionsInitialized) {
+        LOGV2(9999999, "HCIndexReader::initializeCollections - already initialized, skipping");
+        return Status::OK();
+    }
+
+    LOGV2(9999999, "HCIndexReader::initializeCollections - acquiring ops collections (lock-free)");
+
+    // Acquire symbol operations collection WITHOUT acquiring locks
+    // This is safe because we're just getting a snapshot of the catalog
+    auto symbolNss = HCIndexCollectionManager::getSymbolOperationsNamespace(dbName, collectionUUID);
+    CollectionAcquisitionRequest symbolAcquisitionRequest(
+        symbolNss,
+        PlacementConcern::kPretendUnsharded,
+        repl::ReadConcernArgs::kImplicitDefault,
+        AcquisitionPrerequisites::kRead);
+
+    try {
+        symbolOpsCollection = acquireCollectionMaybeLockFree(opCtx, symbolAcquisitionRequest);
+        LOGV2(9999999, "HCIndexReader::initializeCollections - acquired symbol ops collection");
+    } catch (const std::exception& e) {
+        LOGV2(9999999,
+              "HCIndexReader::initializeCollections - symbol ops collection doesn't exist yet",
+              "error"_attr = e.what());
+        // Symbol ops collection doesn't exist yet - this is expected on first load
+        // We'll handle this gracefully in constructSymbolDictionary
+    }
+
+    // Acquire attribute operations collection WITHOUT acquiring locks
+    // This is safe because we're just getting a snapshot of the catalog
+    auto attributeNss = HCIndexCollectionManager::getAttributeOperationsNamespace(dbName, collectionUUID);
+    CollectionAcquisitionRequest attributeAcquisitionRequest(
+        attributeNss,
+        PlacementConcern::kPretendUnsharded,
+        repl::ReadConcernArgs::kImplicitDefault,
+        AcquisitionPrerequisites::kRead);
+
+    try {
+        attributeOpsCollection = acquireCollectionMaybeLockFree(opCtx, attributeAcquisitionRequest);
+        LOGV2(9999999, "HCIndexReader::initializeCollections - acquired attribute ops collection");
+    } catch (const std::exception& e) {
+        LOGV2(9999999,
+              "HCIndexReader::initializeCollections - attribute ops collection doesn't exist yet",
+              "error"_attr = e.what());
+        // Attribute ops collection doesn't exist yet - this is expected on first load
+        // We'll handle this gracefully in constructAttributeTable
+    }
+
+    collectionsInitialized = true;
+    return Status::OK();
+}
+
 StatusWith<std::unique_ptr<SymbolDictionary>> HCIndexReader::constructSymbolDictionary(
     OperationContext* opCtx,
     const Timestamp& windowStart,
@@ -57,30 +110,9 @@ StatusWith<std::unique_ptr<SymbolDictionary>> HCIndexReader::constructSymbolDict
         return stateStatus;
     }
 
-    // Get namespace for symbol operations collection using HCIndexCollectionManager
-    auto nss = HCIndexCollectionManager::getSymbolOperationsNamespace(dbName, collectionUUID);
-
-    // Try to acquire collection with read lock
-    CollectionAcquisitionRequest acquisitionRequest(
-        nss,
-        PlacementConcern::kPretendUnsharded,
-        repl::ReadConcernArgs::kImplicitDefault,
-        AcquisitionPrerequisites::kRead);
-
-    boost::optional<CollectionAcquisition> collection;
-    try {
-        collection = acquireCollection(opCtx, acquisitionRequest, MODE_IS);
-    } catch (const std::exception& e) {
-        // Operations collection doesn't exist yet - this is expected on first load after restart
-        // Return an empty dictionary
-        auto readOnlyStatus = dict->changeState(SymbolDictionaryState::ReadOnly);
-        if (!readOnlyStatus.isOK()) {
-            return readOnlyStatus;
-        }
-        return std::move(dict);
-    }
-
-    if (!collection || !collection->exists()) {
+    // Use the cached collection acquisition instead of acquiring again
+    // This avoids lock cycles during query execution
+    if (!symbolOpsCollection || !symbolOpsCollection->exists()) {
         // Operations collection doesn't exist yet - this is expected on first load after restart
         // Return an empty dictionary
         auto readOnlyStatus = dict->changeState(SymbolDictionaryState::ReadOnly);
@@ -91,7 +123,7 @@ StatusWith<std::unique_ptr<SymbolDictionary>> HCIndexReader::constructSymbolDict
     }
 
     // Read and replay operations
-    auto cursor = collection->getCollectionPtr()->getCursor(opCtx);
+    auto cursor = symbolOpsCollection->getCollectionPtr()->getCursor(opCtx);
     while (auto record = cursor->next()) {
         BSONObj doc = record->data.toBson();
 
@@ -152,30 +184,9 @@ StatusWith<std::unique_ptr<AttributeTable>> HCIndexReader::constructAttributeTab
         return stateStatus;
     }
 
-    // Get namespace for attribute operations collection using HCIndexCollectionManager
-    auto nss = HCIndexCollectionManager::getAttributeOperationsNamespace(dbName, collectionUUID);
-
-    // Try to acquire collection with read lock
-    CollectionAcquisitionRequest acquisitionRequest(
-        nss,
-        PlacementConcern::kPretendUnsharded,
-        repl::ReadConcernArgs::kImplicitDefault,
-        AcquisitionPrerequisites::kRead);
-
-    boost::optional<CollectionAcquisition> collection;
-    try {
-        collection = acquireCollection(opCtx, acquisitionRequest, MODE_IS);
-    } catch (const std::exception& e) {
-        // Operations collection doesn't exist yet - this is expected on first load after restart
-        // Return an empty table
-        auto readOnlyStatus = table->changeState(AttributeTableState::ReadOnly);
-        if (!readOnlyStatus.isOK()) {
-            return readOnlyStatus;
-        }
-        return std::move(table);
-    }
-
-    if (!collection || !collection->exists()) {
+    // Use the cached collection acquisition instead of acquiring again
+    // This avoids lock cycles during query execution
+    if (!attributeOpsCollection || !attributeOpsCollection->exists()) {
         // Operations collection doesn't exist yet - this is expected on first load after restart
         // Return an empty table
         auto readOnlyStatus = table->changeState(AttributeTableState::ReadOnly);
@@ -191,7 +202,7 @@ StatusWith<std::unique_ptr<AttributeTable>> HCIndexReader::constructAttributeTab
           "windowEnd"_attr = windowEnd,
           "upToTimestamp"_attr = upToTimestamp);
 
-    auto cursor = collection->getCollectionPtr()->getCursor(opCtx);
+    auto cursor = attributeOpsCollection->getCollectionPtr()->getCursor(opCtx);
     int operationCount = 0;
     while (auto record = cursor->next()) {
         BSONObj doc = record->data.toBson();
@@ -297,6 +308,13 @@ StatusWith<std::unique_ptr<AttributeTable>> HCIndexReader::constructAttributeTab
     }
 
     return std::move(table);
+}
+
+void HCIndexReader::close()
+{
+    symbolOpsCollection.reset();
+    attributeOpsCollection.reset();
+    collectionsInitialized = false;
 }
 
 }  // namespace mongo::timeseries::hcindex

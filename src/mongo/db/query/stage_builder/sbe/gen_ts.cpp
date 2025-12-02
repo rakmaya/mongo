@@ -337,12 +337,28 @@ std::pair<SbStage, PlanStageSlots> SlotBasedStageBuilder::buildUnpackTsBucket(
     // Add a TsBucketToCellBlock stage. Among other things, this stage generates a "default" bitmap
     // of all 1s in to this slot. The bitmap represents which documents are present (1) and which
     // have been filtered (0). This bitmap is carried around until the block_to_row stage.
+    // Prepare HCIndex metadata filter if available
+    std::unique_ptr<MatchExpression> hcindexFilter;
+    boost::optional<UUID> collectionUUID;
+
+    if (unpackNode->eventFilter) {
+        // Clone the event filter for HCIndex filtering
+        hcindexFilter = unpackNode->eventFilter->clone();
+
+        // Set the collection UUID if available
+        if (_cq.getExpCtx()->getUUID()) {
+            collectionUUID = *_cq.getExpCtx()->getUUID();
+        }
+    }
+
     auto [stage, bitmapSlot, topLevelSlots, traverseSlots] =
         b.makeTsBucketToCellBlock(std::move(childStage),
                                   bucketSlot,
                                   topLevelReqs,
                                   traverseReqs,
-                                  unpackNode->bucketSpec.timeField());
+                                  unpackNode->bucketSpec.timeField(),
+                                  std::move(hcindexFilter),
+                                  collectionUUID);
 
     printPlan(*stage);
 
@@ -362,12 +378,20 @@ std::pair<SbStage, PlanStageSlots> SlotBasedStageBuilder::buildUnpackTsBucket(
 
     MatchExpression* eventFilter = unpackNode->eventFilter.get();
 
+    // If the eventFilter was already applied via HCIndex filtering, skip applying it again
+    if (unpackNode->eventFilterAppliedByHCIndex) {
+        LOGV2(9999995, "HCIndex: Skipping eventFilter application (already applied via HCIndex)");
+        eventFilter = nullptr;
+    }
+
     // It's possible for the event filter to be applied on fields that aren't being unpacked (the
     // simplest case of such pipeline: [{$project: {x: 1}},{$match: {y: 42}}]). We'll stub out the
     // non-produced fields with the 'Nothing' slot.
     {
         DepsTracker eventFilterDeps;
-        dependency_analysis::addDependencies(eventFilter, &eventFilterDeps);
+        if (eventFilter) {
+            dependency_analysis::addDependencies(eventFilter, &eventFilterDeps);
+        }
         for (const std::string& eventFilterPath : eventFilterDeps.fields) {
             if (eventFilterPath.empty()) {
                 continue;

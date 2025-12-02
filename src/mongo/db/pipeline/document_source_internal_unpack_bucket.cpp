@@ -1826,12 +1826,51 @@ DocumentSourceContainer::iterator DocumentSourceInternalUnpackBucket::doOptimize
                     // Store the metadata filter BSON for use during unpacking
                     // We store BSON instead of MatchExpression to ensure the buffer is owned and valid
                     _hcindexMetadataFilterBSON = metadataExpr->serialize().getOwned();
+                    LOGV2(9999995, "HCIndex: Set metadata filter BSON", "filter"_attr = _hcindexMetadataFilterBSON);
+
+                    // For HCIndex, we need to set the eventFilter to the metadata predicates
+                    // so that the SBE stage can apply HCIndex filtering
+                    // First, rename the field names from "meta" back to the original metadata field name
+                    StringMap<std::string> renames;
+                    renames[timeseries::kBucketMetaFieldName] = std::string(*metaField);
+                    auto renamedExpr = expression::copyExpressionAndApplyRenames(metadataExpr.get(), renames);
+
+                    if (!renamedExpr) {
+                        LOGV2(9999996, "HCIndex: Failed to rename metadata filter fields");
+                        // Fall back to using the original metadata expression
+                        renamedExpr = std::move(metadataExpr);
+                    }
+
+                    // Store the renamed metadata filter BSON with owned buffer
+                    _eventFilterBson = renamedExpr->serialize().getOwned();
+
+                    // Re-parse the metadata expression from the owned BSON to ensure valid BSONElements
+                    auto statusWithMatchExpr = MatchExpressionParser::parse(
+                        _eventFilterBson, getExpCtx());
+                    if (!statusWithMatchExpr.isOK()) {
+                        LOGV2(9999997, "HCIndex: Failed to parse renamed metadata filter",
+                              "error"_attr = statusWithMatchExpr.getStatus().reason());
+                        // Fall back to using the renamed expression
+                        _sharedState->_eventFilter = std::move(renamedExpr);
+                    } else {
+                        _sharedState->_eventFilter = std::move(statusWithMatchExpr.getValue());
+                    }
+
+                    _eventFilterDeps = DepsTracker();
+                    dependency_analysis::addDependencies(_sharedState->_eventFilter.get(), &_eventFilterDeps);
+
+                    // Set SBE compatibility for the eventFilter
+                    _isEventFilterSbeCompatible.emplace(getExpCtx()->getSbeCompatibility());
+
+                    LOGV2(9999995, "HCIndex: Set eventFilter to metadata predicates for HCIndex",
+                          "filter"_attr = _eventFilterBson);
 
                     // Update the $match stage to remove metadata predicates so they're not applied at bucket level
                     if (residualExpr) {
                         // There are non-metadata predicates, rebuild the $match with only those
                         // Normalize the residual expression to ensure it's valid
                         residualExpr = normalizeMatchExpression(std::move(residualExpr));
+
                         BSONObj residualBson = residualExpr->serialize();
                         LOGV2(9999993, "HCIndex: Rebuilding $match with residual predicates", "residual"_attr = residualBson);
                         prevMatch->rebuild(residualBson);
@@ -1861,6 +1900,44 @@ DocumentSourceContainer::iterator DocumentSourceInternalUnpackBucket::doOptimize
                     // Store the metadata filter BSON for use during unpacking
                     // We store BSON instead of MatchExpression to ensure the buffer is owned and valid
                     _hcindexMetadataFilterBSON = metadataExpr->serialize().getOwned();
+                    LOGV2(9999995, "HCIndex: Set metadata filter BSON (Case 2)", "filter"_attr = _hcindexMetadataFilterBSON);
+
+                    // For HCIndex, we need to set the eventFilter to the metadata predicates
+                    // so that the SBE stage can apply HCIndex filtering
+                    // First, rename the field names from "meta" back to the original metadata field name
+                    StringMap<std::string> renames;
+                    renames[timeseries::kBucketMetaFieldName] = std::string(*metaField);
+                    auto renamedExpr = expression::copyExpressionAndApplyRenames(metadataExpr.get(), renames);
+
+                    if (!renamedExpr) {
+                        LOGV2(9999996, "HCIndex: Failed to rename metadata filter fields (Case 2)");
+                        // Fall back to using the original metadata expression
+                        renamedExpr = std::move(metadataExpr);
+                    }
+
+                    // Store the renamed metadata filter BSON with owned buffer
+                    _eventFilterBson = renamedExpr->serialize().getOwned();
+
+                    // Re-parse the metadata expression from the owned BSON to ensure valid BSONElements
+                    auto statusWithMatchExpr = MatchExpressionParser::parse(
+                        _eventFilterBson, getExpCtx());
+                    if (!statusWithMatchExpr.isOK()) {
+                        LOGV2(9999997, "HCIndex: Failed to parse renamed metadata filter (Case 2)",
+                              "error"_attr = statusWithMatchExpr.getStatus().reason());
+                        // Fall back to using the renamed expression
+                        _sharedState->_eventFilter = std::move(renamedExpr);
+                    } else {
+                        _sharedState->_eventFilter = std::move(statusWithMatchExpr.getValue());
+                    }
+
+                    _eventFilterDeps = DepsTracker();
+                    dependency_analysis::addDependencies(_sharedState->_eventFilter.get(), &_eventFilterDeps);
+
+                    // Set SBE compatibility for the eventFilter
+                    _isEventFilterSbeCompatible.emplace(getExpCtx()->getSbeCompatibility());
+
+                    LOGV2(9999995, "HCIndex: Set eventFilter to metadata predicates for HCIndex (Case 2)",
+                          "filter"_attr = _eventFilterBson);
 
                     // Update the $match stage to remove metadata predicates
                     if (residualExpr) {
@@ -1868,6 +1945,7 @@ DocumentSourceContainer::iterator DocumentSourceInternalUnpackBucket::doOptimize
                         nextMatch->rebuild(residualBson);
                     } else {
                         // If no residual predicates, remove the $match stage entirely
+                        LOGV2(9999995, "HCIndex: No residual predicates, removing $match stage entirely (Case 2)");
                         container->erase(std::next(itr));
                     }
 

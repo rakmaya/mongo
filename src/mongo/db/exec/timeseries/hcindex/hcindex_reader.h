@@ -34,6 +34,7 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/exec/timeseries/hcindex/temporal_symbol_dictionary.h"
 #include "mongo/db/exec/timeseries/hcindex/temporal_attribute_table.h"
+#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
 #include "mongo/util/uuid.h"
 
 #include <memory>
@@ -62,6 +63,19 @@ public:
      * - collectionUUID: UUID of the timeseries collection
      */
     HCIndexReader(const DatabaseName& dbName, const UUID& collectionUUID);
+
+    /**
+     * Initialize the reader by acquiring collections for symbol and attribute operations.
+     * This must be called once before calling constructSymbolDictionary or constructAttributeTable.
+     * This acquires locks on the ops collections, which are then reused for all subsequent
+     * reconstruction operations, avoiding lock cycles during query execution.
+     *
+     * Parameters:
+     * - opCtx: Operation context for database operations
+     *
+     * Returns OK if initialization succeeds, or an error status if collection acquisition fails.
+     */
+    Status initializeCollections(OperationContext* opCtx);
 
     /**
      * Construct a SymbolDictionary by replaying operations up to the specified timestamp.
@@ -101,9 +115,19 @@ public:
         const Timestamp& upToTimestamp,
         SymbolDictionary* symbolDictionary);
 
+    
+    /**
+     * Release acquired collections to allow lock release and prevent stashed transaction resource
+     * issues during pipeline cleanup.
+     */
+    void close();
+
 private:
     DatabaseName dbName;
     UUID collectionUUID;
+    boost::optional<CollectionAcquisition> symbolOpsCollection;
+    boost::optional<CollectionAcquisition> attributeOpsCollection;
+    bool collectionsInitialized = false;
 };
 
 }  // namespace mongo::timeseries::hcindex

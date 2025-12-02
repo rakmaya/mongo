@@ -95,12 +95,17 @@ GetNextResult ScanAttributeIndexStage::doGetNext() {
             return GetNextResult::makeEOF();
         }
 
+        // Note: HCIndex manager initialization is done lazily during queryRows()
+        // to avoid issues with stashed transaction resources during pipeline cleanup.
+        // Do NOT initialize the manager here.
+
         // Get current timestamp for window calculation
         Timestamp currentTimestamp(Date_t::now());
 
         LOGV2(9999985, "ScanAttributeIndexStage::doGetNext - calling queryRows");
 
         // Query the attribute table for matching rowIds
+        // The manager will initialize lazily on first use
         auto queryResult = hcindexMgr->queryRows(opCtx, _matchExpr.get(), currentTimestamp);
         if (!queryResult.isOK()) {
             LOGV2(9999999,

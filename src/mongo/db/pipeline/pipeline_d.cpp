@@ -115,6 +115,7 @@
 #include "mongo/db/storage/sorted_data_interface.h"
 #include "mongo/db/timeseries/bucket_catalog/bucket_catalog.h"
 #include "mongo/db/timeseries/bucket_catalog/global_bucket_catalog.h"
+#include "mongo/db/exec/timeseries/hcindex/hcindex_collection_manager.h"
 #include "mongo/db/timeseries/timeseries_constants.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
 #include "mongo/platform/compiler.h"
@@ -536,6 +537,9 @@ StatusWith<unique_ptr<PlanExecutor, PlanExecutor::Deleter>> PipelineD::createRan
             auto hcindexMgr = timeseries::bucket_catalog::getHCIndexManager(
                 bucketCatalog, *collUUID);
             if (hcindexMgr) {
+                // Do NOT initialize the manager here. Initialization will happen lazily
+                // when the manager is first used during query execution to avoid issues with
+                // stashed transaction resources during pipeline cleanup.
                 topkSortPlan->setHCIndexCollectionManager(hcindexMgr.get());
             }
         }

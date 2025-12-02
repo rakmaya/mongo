@@ -368,10 +368,9 @@ void CollectionImpl::init(OperationContext* opCtx) {
                     auto hcindexMgr = std::make_shared<timeseries::hcindex::HCIndexCollectionManager>(
                         opCtx, ns().dbName(), uuid, timeseries::hcindex::DictionaryGranularity::HOURLY);
 
-                    // Initialize the manager
-                    auto initStatus = hcindexMgr->initialize();
-                    if (!initStatus.isOK()) {
-                    }
+                    // Note: Do NOT initialize the manager here. Initialization will happen lazily
+                    // when the manager is first used during query execution to avoid lock cycles
+                    // during startup.
 
                     // Store the manager in BucketCatalog
                     auto setStatus = timeseries::bucket_catalog::setHCIndexManager(

@@ -64,7 +64,7 @@ TEST_F(HCIndexCollectionManagerTest, Initialize) {
 
     DatabaseName dbName = DatabaseName::createDatabaseName_forTest(boost::none, "test");
     HCIndexCollectionManager manager(opCtx, dbName, collectionUUID, DictionaryGranularity::HOURLY);
-    auto status = manager.initialize();
+    auto status = manager.initialize(opCtx);
     ASSERT_OK(status);
 }
 
@@ -75,7 +75,7 @@ TEST_F(HCIndexCollectionManagerTest, EncodeMetadata) {
 
     DatabaseName dbName = DatabaseName::createDatabaseName_forTest(boost::none, "test");
     HCIndexCollectionManager manager(opCtx, dbName, collectionUUID, DictionaryGranularity::HOURLY);
-    ASSERT_OK(manager.initialize());
+    ASSERT_OK(manager.initialize(opCtx));
 
     BSONObj metadata = BSON("region" << "us-east" << "env" << "prod");
     Timestamp ts(1, 0);
@@ -93,7 +93,7 @@ TEST_F(HCIndexCollectionManagerTest, Deduplication) {
 
     DatabaseName dbName = DatabaseName::createDatabaseName_forTest(boost::none, "test");
     HCIndexCollectionManager manager(opCtx, dbName, collectionUUID, DictionaryGranularity::HOURLY);
-    ASSERT_OK(manager.initialize());
+    ASSERT_OK(manager.initialize(opCtx));
 
     BSONObj metadata = BSON("region" << "us-east" << "env" << "prod");
     Timestamp ts(1, 0);

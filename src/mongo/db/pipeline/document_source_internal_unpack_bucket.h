@@ -337,6 +337,14 @@ public:
         return _sharedState->_wholeBucketFilter.get();
     }
 
+    /**
+     * Returns true if the eventFilter was already applied via HCIndex filtering.
+     * This is used to determine if the eventFilter should be applied again in the SBE stage.
+     */
+    bool isEventFilterAppliedByHCIndex() const {
+        return !_hcindexMetadataFilterBSON.isEmpty();
+    }
+
     bool isSbeCompatible();
 
 private:

@@ -92,6 +92,10 @@ boost::intrusive_ptr<exec::agg::Stage> documentSourceInternalUnpackBucketToStage
 
     LOGV2(9999980, "HCIndex: Creating InternalUnpackBucketStage from DocumentSource", "hasMetadataFilter"_attr = (!dsInternalUnpackBucket->_hcindexMetadataFilterBSON.isEmpty()));
 
+    // Note: HCIndex manager initialization is done lazily during query execution
+    // (e.g., in queryRows()) to avoid issues with stashed transaction resources
+    // during pipeline cleanup. Do NOT initialize the manager here.
+
     auto stage = make_intrusive<exec::agg::InternalUnpackBucketStage>(
         dsInternalUnpackBucket->kStageNameInternal,
         dsInternalUnpackBucket->getExpCtx(),

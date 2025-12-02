@@ -95,15 +95,29 @@ public:
                             DictionaryGranularity granularity);
 
     /**
-     * Initialize HCIndex structures for this collection.
+     * Initialize the reader for read operations by acquiring collections.
      *
-     * This creates the necessary operations collections and initializes the
-     * TemporalSymbolDictionary and TemporalAttributeTable. Must be called
-     * before any encode/decode operations.
+     * This acquires collections for symbol and attribute operations and caches them
+     * for reuse in all subsequent reconstruction operations, avoiding lock cycles during
+     * query execution.
+     *
+     * This is called lazily on first use (e.g., during queryRows()) to avoid issues with
+     * stashed transaction resources during pipeline cleanup.
+     *
+     * Parameters:
+     * - opCtx: Operation context for database operations
      *
      * Returns Status::OK() on success, or an error status if initialization fails.
      */
-    Status initialize();
+    Status initializeForRead(OperationContext* opCtx);
+
+    /**
+     * Close and release acquired collections.
+     *
+     * Resets the acquired collections and clears the initialization flag, allowing
+     * the manager to be re-initialized if needed.
+     */
+    void close();
 
     /**
      * Encode metadata to a rowId.
@@ -222,6 +236,9 @@ private:
 
     // Temporal attribute table for storing metadata rows
     std::unique_ptr<TemporalAttributeTable> attributeTable;
+
+    // Flag to track if we've initialized the reader for read operations
+    bool initializedForRead = false;
 };
 
 }  // namespace mongo::timeseries::hcindex

@@ -653,15 +653,13 @@ Status _createLegacyTimeseries(
                 return opsCollStatus;
             }
 
-            // Create and initialize HCIndexCollectionManager
+            // Create HCIndexCollectionManager
             auto hcindexMgr = std::make_shared<timeseries::hcindex::HCIndexCollectionManager>(
                 opCtx, ns.dbName(), collectionUUID, timeseries::hcindex::DictionaryGranularity::HOURLY);
 
-            auto initStatus = hcindexMgr->initialize();
-            if (!initStatus.isOK()) {
-                LOGV2(9999998, "HCIndex initialization failed", "error"_attr = initStatus);
-                return initStatus;
-            }
+            // Note: Do NOT initialize the manager here. Initialization will happen lazily
+            // when the manager is first used during query execution to avoid lock cycles
+            // during startup.
 
             // Store the manager in BucketCatalog
             auto& bucketCatalog =
@@ -829,15 +827,13 @@ Status _createCollection(
                         return opsCollStatus;
                     }
 
-                    // Create and initialize HCIndexCollectionManager
+                    // Create HCIndexCollectionManager
                     auto hcindexMgr = std::make_shared<timeseries::hcindex::HCIndexCollectionManager>(
                         opCtx, nss.dbName(), collectionUUID, timeseries::hcindex::DictionaryGranularity::HOURLY);
 
-                    auto initStatus = hcindexMgr->initialize();
-                    if (!initStatus.isOK()) {
-                        LOGV2(9999998, "HCIndex initialization failed", "error"_attr = initStatus);
-                        return initStatus;
-                    }
+                    // Note: Do NOT initialize the manager here. Initialization will happen lazily
+                    // when the manager is first used during query execution to avoid lock cycles
+                    // during startup.
 
                     // Store the manager in BucketCatalog
                     auto& bucketCatalog =

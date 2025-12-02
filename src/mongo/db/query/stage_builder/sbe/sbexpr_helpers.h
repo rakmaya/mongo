@@ -578,7 +578,9 @@ public:
         SbSlot bucketSlot,
         const std::vector<sbe::value::PathRequest>& topLevelReqs,
         const std::vector<sbe::value::PathRequest>& traverseReqs,
-        const std::string& timeField);
+        const std::string& timeField,
+        std::unique_ptr<MatchExpression> hcindexFilter = nullptr,
+        boost::optional<UUID> collectionUUID = boost::none);
 
     std::pair<SbStage, SbSlotVector> makeBlockToRow(SbStage stage,
                                                     const SbSlotVector& blockSlots,

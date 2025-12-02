@@ -2090,7 +2090,8 @@ struct UnpackTsBucketNode : public QuerySolutionNode {
           bucketSpec(spec),
           eventFilter(std::move(eventFilter)),
           wholeBucketFilter(std::move(wholeBucketFilter)),
-          includeMeta(includeMeta) {
+          includeMeta(includeMeta),
+          eventFilterAppliedByHCIndex(false) {
         tassert(7969700,
                 "Only support unpacking with a statically known set of fields.",
                 bucketSpec.behavior() == timeseries::BucketSpec::Behavior::kInclude);
@@ -2147,6 +2148,9 @@ struct UnpackTsBucketNode : public QuerySolutionNode {
     std::unique_ptr<MatchExpression> eventFilter = nullptr;
     std::unique_ptr<MatchExpression> wholeBucketFilter = nullptr;
     bool includeMeta = false;
+    // Flag to indicate that the eventFilter was already applied via HCIndex filtering
+    // and should not be applied again as a scalar filter
+    bool eventFilterAppliedByHCIndex = false;
 };
 
 struct WindowNode : public QuerySolutionNode {

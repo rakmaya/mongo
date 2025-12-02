@@ -54,10 +54,36 @@ HCIndexCollectionManager::HCIndexCollectionManager(OperationContext* opCtx,
       symbolDictionary(std::make_unique<TemporalSymbolDictionary>(collectionUUID, granularity, writer.get(), reader.get())),
       attributeTable(std::make_unique<TemporalAttributeTable>(collectionUUID, granularity, symbolDictionary.get(), writer.get(), reader.get())) {}
 
-Status HCIndexCollectionManager::initialize() {
-    // The structures are already initialized in the constructor
-    // In the future, this could create the operations collections if needed
+Status HCIndexCollectionManager::initializeForRead(OperationContext* opCtx) {
+    // If already initialized, return early
+    if (initializedForRead) {
+        return Status::OK();
+    }
+
+    if (!reader) {
+        return Status(ErrorCodes::InternalError, "HCIndex reader not initialized");
+    }
+
+    // Initialize the reader by acquiring collections for symbol and attribute operations
+    // This uses lock-free acquisitions to avoid lock cycles during query execution
+    auto readerInitStatus = reader->initializeCollections(opCtx);
+    if (!readerInitStatus.isOK()) {
+        LOGV2_WARNING(9999996,
+                      "Failed to initialize HCIndex reader collections",
+                      "error"_attr = readerInitStatus);
+        // Continue anyway - the reader will try to acquire collections on-demand if needed
+    }
+
+    initializedForRead = true;
     return Status::OK();
+}
+
+void HCIndexCollectionManager::close() {
+    // Reset the reader to release acquired collections
+    if (reader) {
+        reader->close();
+    }
+    initializedForRead = false;
 }
 
 StatusWith<int64_t> HCIndexCollectionManager::encodeMetadata(OperationContext* opCtx,
@@ -192,6 +218,18 @@ StatusWith<std::vector<int64_t>> HCIndexCollectionManager::queryRows(
     const Timestamp& timestamp) {
     LOGV2(9999910, "HCIndexCollectionManager::queryRows called");
 
+    // Initialize the reader for read operations if not already done
+    // This is done lazily on first use to avoid issues with stashed transaction resources
+    if (!initializedForRead) {
+        auto initStatus = initializeForRead(opCtx);
+        if (!initStatus.isOK()) {
+            LOGV2_WARNING(9999920,
+                          "Failed to initialize reader for read operations",
+                          "error"_attr = initStatus);
+            // Continue anyway - the reader will try to acquire collections on-demand if needed
+        }
+    }
+
     if (!attributeTable) {
         LOGV2(9999911, "HCIndex attribute table not initialized");
         return Status(ErrorCodes::InternalError, "HCIndex attribute table not initialized");
@@ -233,6 +271,10 @@ StatusWith<std::vector<int64_t>> HCIndexCollectionManager::queryRows(
     auto matchingRowIds = table->queryRows(predicateResult.getValue());
     LOGV2(9999918, "Query completed",
           "matchingRowCount"_attr = matchingRowIds.size());
+
+    // Release acquired collections after query is complete
+    // This allows locks to be released and prevents stashed transaction resource issues
+    close();
 
     return matchingRowIds;
 }
