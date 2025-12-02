@@ -114,10 +114,10 @@ StatusWith<std::unique_ptr<SymbolDictionary>> HCIndexReader::constructSymbolDict
     // This avoids lock cycles during query execution
     if (!symbolOpsCollection || !symbolOpsCollection->exists()) {
         // Operations collection doesn't exist yet - this is expected on first load after restart
-        // Return an empty dictionary
-        auto readOnlyStatus = dict->changeState(SymbolDictionaryState::ReadOnly);
-        if (!readOnlyStatus.isOK()) {
-            return readOnlyStatus;
+        // Return an empty dictionary in ReadWrite state so new symbols can be added
+        auto readWriteStatus = dict->changeState(SymbolDictionaryState::ReadWrite);
+        if (!readWriteStatus.isOK()) {
+            return readWriteStatus;
         }
         return std::move(dict);
     }
@@ -188,10 +188,10 @@ StatusWith<std::unique_ptr<AttributeTable>> HCIndexReader::constructAttributeTab
     // This avoids lock cycles during query execution
     if (!attributeOpsCollection || !attributeOpsCollection->exists()) {
         // Operations collection doesn't exist yet - this is expected on first load after restart
-        // Return an empty table
-        auto readOnlyStatus = table->changeState(AttributeTableState::ReadOnly);
-        if (!readOnlyStatus.isOK()) {
-            return readOnlyStatus;
+        // Return an empty table in ReadWrite state so new rows can be added
+        auto readWriteStatus = table->changeState(AttributeTableState::ReadWrite);
+        if (!readWriteStatus.isOK()) {
+            return readWriteStatus;
         }
         return std::move(table);
     }

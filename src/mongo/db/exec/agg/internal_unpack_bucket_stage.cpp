@@ -45,6 +45,23 @@
 namespace mongo {
 
 namespace {
+// Helper function to recursively set backing BSON on all ComparisonMatchExpressions in the tree
+void setBackingBSONOnAllComparisons(MatchExpression* expr, const BSONObj& backingBSON) {
+    if (!expr) {
+        return;
+    }
+
+    // If this is a ComparisonMatchExpression, set the backing BSON
+    if (auto comparisonExpr = dynamic_cast<ComparisonMatchExpressionBase*>(expr)) {
+        comparisonExpr->setBackingBSON(backingBSON);
+    }
+
+    // Recursively process all children
+    for (size_t i = 0; i < expr->numChildren(); ++i) {
+        setBackingBSONOnAllComparisons(expr->getChild(i), backingBSON);
+    }
+}
+
 // Helper function to replace "meta" field prefix with the actual metadata field name in BSON
 BSONObj replaceMetaFieldInBSON(const BSONObj& bson, StringData actualMetaField) {
     BSONObjBuilder builder;
@@ -132,11 +149,9 @@ boost::intrusive_ptr<exec::agg::Stage> documentSourceInternalUnpackBucketToStage
         if (parseResult.isOK()) {
             auto matchExpr = std::move(parseResult.getValue());
 
-            // Set the backing BSON on the MatchExpression to ensure the BSONElements remain valid
-            if (auto comparisonExpr = dynamic_cast<ComparisonMatchExpressionBase*>(matchExpr.get())) {
-                comparisonExpr->setBackingBSON(filterBSON);
-                LOGV2(9999986, "HCIndex: Set backing BSON on ComparisonMatchExpression");
-            }
+            // Set the backing BSON on all ComparisonMatchExpressions in the tree to ensure the BSONElements remain valid
+            setBackingBSONOnAllComparisons(matchExpr.get(), filterBSON);
+            LOGV2(9999986, "HCIndex: Set backing BSON on all ComparisonMatchExpressions");
 
             stage->setHCIndexMetadataFilter(std::move(matchExpr));
             LOGV2(9999983, "HCIndex: Successfully parsed metadata filter");

@@ -1823,13 +1823,8 @@ DocumentSourceContainer::iterator DocumentSourceInternalUnpackBucket::doOptimize
 
                 if (metadataExpr) {
                     LOGV2(9999994, "HCIndex: Extracted metadata predicates", "expr"_attr = metadataExpr->serialize());
-                    // Store the metadata filter BSON for use during unpacking
-                    // We store BSON instead of MatchExpression to ensure the buffer is owned and valid
-                    _hcindexMetadataFilterBSON = metadataExpr->serialize().getOwned();
-                    LOGV2(9999995, "HCIndex: Set metadata filter BSON", "filter"_attr = _hcindexMetadataFilterBSON);
 
-                    // For HCIndex, we need to set the eventFilter to the metadata predicates
-                    // so that the SBE stage can apply HCIndex filtering
+                    // For HCIndex, we need to rename the field names from "meta" back to the original metadata field name
                     // First, rename the field names from "meta" back to the original metadata field name
                     StringMap<std::string> renames;
                     renames[timeseries::kBucketMetaFieldName] = std::string(*metaField);
@@ -1840,6 +1835,12 @@ DocumentSourceContainer::iterator DocumentSourceInternalUnpackBucket::doOptimize
                         // Fall back to using the original metadata expression
                         renamedExpr = std::move(metadataExpr);
                     }
+
+                    // Store the renamed metadata filter BSON for use during unpacking
+                    // We store BSON instead of MatchExpression to ensure the buffer is owned and valid
+                    // This BSON has field names like "metadata.chain" (not "meta.chain")
+                    _hcindexMetadataFilterBSON = renamedExpr->serialize().getOwned();
+                    LOGV2(9999995, "HCIndex: Set metadata filter BSON", "filter"_attr = _hcindexMetadataFilterBSON);
 
                     // Store the renamed metadata filter BSON with owned buffer
                     _eventFilterBson = renamedExpr->serialize().getOwned();
@@ -1897,13 +1898,7 @@ DocumentSourceContainer::iterator DocumentSourceInternalUnpackBucket::doOptimize
                 auto [metadataExpr, residualExpr] = extractMetadataPredicates(std::move(matchExpr), metaField);
 
                 if (metadataExpr) {
-                    // Store the metadata filter BSON for use during unpacking
-                    // We store BSON instead of MatchExpression to ensure the buffer is owned and valid
-                    _hcindexMetadataFilterBSON = metadataExpr->serialize().getOwned();
-                    LOGV2(9999995, "HCIndex: Set metadata filter BSON (Case 2)", "filter"_attr = _hcindexMetadataFilterBSON);
-
-                    // For HCIndex, we need to set the eventFilter to the metadata predicates
-                    // so that the SBE stage can apply HCIndex filtering
+                    // For HCIndex, we need to rename the field names from "meta" back to the original metadata field name
                     // First, rename the field names from "meta" back to the original metadata field name
                     StringMap<std::string> renames;
                     renames[timeseries::kBucketMetaFieldName] = std::string(*metaField);
@@ -1914,6 +1909,12 @@ DocumentSourceContainer::iterator DocumentSourceInternalUnpackBucket::doOptimize
                         // Fall back to using the original metadata expression
                         renamedExpr = std::move(metadataExpr);
                     }
+
+                    // Store the renamed metadata filter BSON for use during unpacking
+                    // We store BSON instead of MatchExpression to ensure the buffer is owned and valid
+                    // This BSON has field names like "metadata.chain" (not "meta.chain")
+                    _hcindexMetadataFilterBSON = renamedExpr->serialize().getOwned();
+                    LOGV2(9999995, "HCIndex: Set metadata filter BSON (Case 2)", "filter"_attr = _hcindexMetadataFilterBSON);
 
                     // Store the renamed metadata filter BSON with owned buffer
                     _eventFilterBson = renamedExpr->serialize().getOwned();
