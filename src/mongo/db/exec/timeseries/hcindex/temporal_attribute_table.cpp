@@ -132,10 +132,18 @@ StatusWith<int64_t> AttributeTable::insertRowDirect(const std::vector<uint32_t>&
                       "Row has more columns than schema");
     }
 
+    // Get current row count (all columns have same size)
+    int64_t rowId = columns.empty() ? 0 : columns[0].size();
 
-    // Store row and assign ID
-    rows.push_back(paddedRow);
-    int64_t rowId = nextRowId++;
+    // Append values to each column
+    for (size_t colIdx = 0; colIdx < paddedRow.size(); ++colIdx) {
+        // Ensure column exists
+        if (colIdx >= columns.size()) {
+            columns.push_back(std::vector<uint32_t>());
+            columnAddedAtRowId.push_back(rowId);
+        }
+        columns[colIdx].push_back(paddedRow[colIdx]);
+    }
 
     return rowId;
 }
@@ -143,47 +151,67 @@ StatusWith<int64_t> AttributeTable::insertRowDirect(const std::vector<uint32_t>&
 boost::optional<std::vector<uint32_t>> AttributeTable::getRow(int64_t rowId) const {
     std::shared_lock<std::shared_mutex> lock(mutex);
 
-    if (rowId < 0 || rowId >= static_cast<int64_t>(rows.size())) {
+    // Check if rowId is valid
+    if (columns.empty() || rowId < 0 || rowId >= static_cast<int64_t>(columns[0].size())) {
         return boost::none;
     }
 
-    return rows[rowId];
+    // Reconstruct row from columns
+    std::vector<uint32_t> row;
+    for (const auto& column : columns) {
+        row.push_back(column[rowId]);
+    }
+
+    return row;
 }
 
-std::vector<int64_t> AttributeTable::queryRows(
-    const AttributeTablePredicate& predicate) const {
-    std::shared_lock<std::shared_mutex> lock(mutex);
-
+std::vector<int64_t> AttributeTable::queryRowsLeaf(
+    const std::vector<uint32_t>& refRowVec) const {
     std::vector<int64_t> matchingRowIds;
 
-    // If refRowVec is empty, no predicates to match
-    if (predicate.refRowVec.empty()) {
+    // If refRowVec is empty or no columns, no predicates to match
+    if (refRowVec.empty() || columns.empty()) {
         return matchingRowIds;
     }
 
+    // Get row count from first column
+    size_t rowCount = columns[0].size();
+
     // Iterate through all rows
-    for (size_t rowIdx = 0; rowIdx < rows.size(); ++rowIdx) {
-        const auto& row = rows[rowIdx];
-
-        // Skip rows that have fewer elements than refRowVec
-        // (schema may have evolved, so older rows may be shorter)
-        if (row.size() < predicate.refRowVec.size()) {
-            continue;
-        }
-
+    for (size_t rowIdx = 0; rowIdx < rowCount; ++rowIdx) {
         bool matches = true;
 
         // Check each non-zero entry in refRowVec
-        for (size_t colIdx = 0; colIdx < predicate.refRowVec.size(); ++colIdx) {
-            uint32_t expectedSymbol = predicate.refRowVec[colIdx];
+        for (size_t colIdx = 0; colIdx < refRowVec.size(); ++colIdx) {
+            uint32_t expectedSymbol = refRowVec[colIdx];
 
             // 0 means this field is not part of the predicate, skip it
             if (expectedSymbol == 0) {
                 continue;
             }
 
+            // Check if column exists and row is valid for this column
+            if (colIdx >= columns.size()) {
+                // Column doesn't exist, treat as missing (0)
+                if (expectedSymbol != 0) {
+                    matches = false;
+                    break;
+                }
+                continue;
+            }
+
+            // Check if this row is valid for this column (column was added before this row)
+            if (rowIdx < static_cast<size_t>(columnAddedAtRowId[colIdx])) {
+                // Row predates column addition, treat as missing (0)
+                if (expectedSymbol != 0) {
+                    matches = false;
+                    break;
+                }
+                continue;
+            }
+
             // Check if the row's symbol at this column matches
-            if (row[colIdx] != expectedSymbol) {
+            if (columns[colIdx][rowIdx] != expectedSymbol) {
                 matches = false;
                 break;
             }
@@ -197,6 +225,65 @@ std::vector<int64_t> AttributeTable::queryRows(
     return matchingRowIds;
 }
 
+std::vector<int64_t> AttributeTable::queryRows(
+    const AttributeTablePredicate& predicate) const {
+    std::shared_lock<std::shared_mutex> lock(mutex);
+
+    // Handle LEAF predicates: simple equality matching
+    if (predicate.isLeaf()) {
+        return queryRowsLeaf(predicate.refRowVec);
+    }
+
+    // Handle OR predicates: union of all child results
+    if (predicate.isOr()) {
+        std::set<int64_t> uniqueMatches;
+        for (const auto& child : predicate.children) {
+            auto childResults = queryRows(child);
+            for (auto rowId : childResults) {
+                uniqueMatches.insert(rowId);
+            }
+        }
+        std::vector<int64_t> result(uniqueMatches.begin(), uniqueMatches.end());
+        return result;
+    }
+
+    // Handle AND predicates: intersection of all child results
+    if (predicate.isAnd()) {
+        if (predicate.children.empty()) {
+            return {};
+        }
+
+        // Start with results from first child
+        auto result = queryRows(predicate.children[0]);
+
+        // Intersect with results from remaining children
+        for (size_t i = 1; i < predicate.children.size(); ++i) {
+            auto childResults = queryRows(predicate.children[i]);
+
+            // Convert to set for efficient intersection
+            std::set<int64_t> childSet(childResults.begin(), childResults.end());
+
+            // Keep only rows that are in both sets
+            std::vector<int64_t> intersection;
+            for (auto rowId : result) {
+                if (childSet.count(rowId) > 0) {
+                    intersection.push_back(rowId);
+                }
+            }
+            result = intersection;
+
+            // Early exit if no matches
+            if (result.empty()) {
+                break;
+            }
+        }
+        return result;
+    }
+
+    // Should not reach here
+    return {};
+}
+
 StatusWith<AttributeTablePredicate> AttributeTable::convertMatchExpressionToPredicate(
     const ::mongo::MatchExpression* matchExpr) const {
 
@@ -204,7 +291,51 @@ StatusWith<AttributeTablePredicate> AttributeTable::convertMatchExpressionToPred
         return Status(ErrorCodes::BadValue, "matchExpr cannot be null");
     }
 
-    // Extract equality matches from the MatchExpression
+    // Handle OR expressions: create an OR node with children
+    if (matchExpr->matchType() == ::mongo::MatchExpression::OR) {
+        AttributeTablePredicate orPredicate;
+        orPredicate.type = AttributeTablePredicate::OR;
+
+        for (size_t i = 0; i < matchExpr->numChildren(); ++i) {
+            auto branchResult = convertMatchExpressionToPredicate(matchExpr->getChild(i));
+            if (!branchResult.isOK()) {
+                // If any branch fails to convert, skip it
+                continue;
+            }
+            orPredicate.children.push_back(branchResult.getValue());
+        }
+
+        // If we collected any children, return the OR predicate
+        if (!orPredicate.children.empty()) {
+            return orPredicate;
+        }
+        // If no children were collected, return empty predicate
+        return AttributeTablePredicate();
+    }
+
+    // Handle AND expressions: create an AND node with children
+    if (matchExpr->matchType() == ::mongo::MatchExpression::AND) {
+        AttributeTablePredicate andPredicate;
+        andPredicate.type = AttributeTablePredicate::AND;
+
+        for (size_t i = 0; i < matchExpr->numChildren(); ++i) {
+            auto branchResult = convertMatchExpressionToPredicate(matchExpr->getChild(i));
+            if (!branchResult.isOK()) {
+                // If any branch fails to convert, skip it
+                continue;
+            }
+            andPredicate.children.push_back(branchResult.getValue());
+        }
+
+        // If we collected any children, return the AND predicate
+        if (!andPredicate.children.empty()) {
+            return andPredicate;
+        }
+        // If no children were collected, return empty predicate
+        return AttributeTablePredicate();
+    }
+
+    // Extract equality matches from the MatchExpression (for AND expressions)
     mongo::pathsupport::EqualityMatches equalities;
     auto status = mongo::pathsupport::extractEqualityMatches(*matchExpr, &equalities);
     if (!status.isOK()) {
@@ -322,7 +453,11 @@ StatusWith<AttributeTablePredicate> AttributeTable::convertMatchExpressionToPred
     LOGV2(9999906, "HCIndex: Final refRowVec",
           "size"_attr = refRowVec.size());
 
-    return AttributeTablePredicate{refRowVec};
+    // Create a LEAF predicate with the refRowVec
+    AttributeTablePredicate leafPredicate;
+    leafPredicate.type = AttributeTablePredicate::LEAF;
+    leafPredicate.refRowVec = refRowVec;
+    return leafPredicate;
 }
 
 Status AttributeTable::addColumn(StringData fieldName) {
@@ -340,10 +475,13 @@ Status AttributeTable::addColumn(StringData fieldName) {
     fieldToColumnIndex[fieldNameStr] = columnIndex;
     schema.push_back(fieldNameStr);
 
-    // Extend all existing rows with 0 (missing value)
-    for (auto& row : rows) {
-        row.push_back(0);
-    }
+    // Get current row count
+    int64_t currentRowCount = columns.empty() ? 0 : columns[0].size();
+
+    // Create new column with 0s for all existing rows (missing value indicator)
+    auto newColumn = std::make_unique<std::vector<uint32_t>>(currentRowCount, 0);
+    columns.push_back(*newColumn);
+    columnAddedAtRowId.push_back(currentRowCount);
 
     // Notify writer of the new schema field (must be done after schema is updated)
     // Note: writeSchema will check state and call writer->addSchemaField if in ReadWrite mode
@@ -379,7 +517,7 @@ const std::vector<std::string>& AttributeTable::getSchema() const {
 
 size_t AttributeTable::getRowCount() const {
     std::shared_lock<std::shared_mutex> lock(mutex);
-    return rows.size();
+    return columns.empty() ? 0 : columns[0].size();
 }
 
 size_t AttributeTable::getMemoryUsageBytes() const {
@@ -393,11 +531,14 @@ size_t AttributeTable::getMemoryUsageBytes() const {
     }
     totalBytes += schema.capacity() * sizeof(std::string);
 
-    // Rows memory
-    for (const auto& row : rows) {
-        totalBytes += row.capacity() * sizeof(uint32_t);
+    // Columns memory
+    for (const auto& column : columns) {
+        totalBytes += column.capacity() * sizeof(uint32_t);
     }
-    totalBytes += rows.capacity() * sizeof(std::vector<uint32_t>);
+    totalBytes += columns.capacity() * sizeof(std::vector<uint32_t>);
+
+    // columnAddedAtRowId memory
+    totalBytes += columnAddedAtRowId.capacity() * sizeof(int64_t);
 
     // Field to column index map
     for (const auto& [fieldName, colIdx] : fieldToColumnIndex) {
@@ -434,10 +575,10 @@ StatusWith<std::vector<uint32_t>> AttributeTable::metadataToRow(
                 return schemaStatus;
             }
 
-            // Extend existing rows with 0
-            for (auto& existingRow : rows) {
-                existingRow.push_back(0);
-            }
+            // Create new column with 0s for all existing rows
+            int64_t currentRowCount = columns.empty() ? 0 : columns[0].size();
+            columns.push_back(std::vector<uint32_t>(currentRowCount, 0));
+            columnAddedAtRowId.push_back(currentRowCount);
         }
     }
 
@@ -473,9 +614,27 @@ StatusWith<std::vector<uint32_t>> AttributeTable::metadataToRow(
 
 boost::optional<int64_t> AttributeTable::findDuplicateRow(
     const std::vector<uint32_t>& row) const {
+    // If no columns, no rows to search
+    if (columns.empty()) {
+        return boost::none;
+    }
+
+    // Get row count from first column
+    size_t rowCount = columns[0].size();
+
     // Linear search through existing rows
-    for (size_t rowIdx = 0; rowIdx < rows.size(); ++rowIdx) {
-        if (rows[rowIdx] == row) {
+    for (size_t rowIdx = 0; rowIdx < rowCount; ++rowIdx) {
+        bool matches = true;
+
+        // Compare each column value
+        for (size_t colIdx = 0; colIdx < row.size() && colIdx < columns.size(); ++colIdx) {
+            if (columns[colIdx][rowIdx] != row[colIdx]) {
+                matches = false;
+                break;
+            }
+        }
+
+        if (matches) {
             return rowIdx;
         }
     }
@@ -544,8 +703,9 @@ Status AttributeTable::writeRow(const std::vector<uint32_t>& row)
 
     // In ReadWrite mode, notify writer of the new row
     if (_state == AttributeTableState::ReadWrite) {
-        // If this is the first schema field, we need to initialize the attribute table.
-        if (schema.empty() && rows.empty()) {
+        // If this is the first row, we need to initialize the attribute table.
+        bool isFirstRow = columns.empty() || columns[0].empty();
+        if (isFirstRow && schema.empty()) {
             auto stat = writer->initAttributeTable(_windowStart, _windowEnd);
             if (!stat.isOK()) {
                 return stat;

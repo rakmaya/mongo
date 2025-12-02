@@ -100,6 +100,7 @@ TEST_F(HCIndexReaderTest, ConstructSymbolDictionaryFromInit) {
 
     // Construct dictionary
     HCIndexReader reader(dbName, collectionUUID);
+    ASSERT_OK(reader.initializeCollections(opCtx));
     auto dictStatus = reader.constructSymbolDictionary(
         opCtx, windowStart, windowEnd, DictionaryGranularity::HOURLY, windowEnd);
     ASSERT_OK(dictStatus);
@@ -145,6 +146,7 @@ TEST_F(HCIndexReaderTest, ConstructSymbolDictionaryFromInitAndAdd) {
     // Construct dictionary
     DatabaseName dbName = DatabaseName::createDatabaseName_forTest(boost::none, "test");
     HCIndexReader reader(dbName, collectionUUID);
+    ASSERT_OK(reader.initializeCollections(opCtx));
     auto dictStatus = reader.constructSymbolDictionary(
         opCtx, windowStart, windowEnd, DictionaryGranularity::HOURLY, windowEnd);
     ASSERT_OK(dictStatus);

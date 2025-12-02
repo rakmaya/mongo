@@ -264,8 +264,21 @@ StatusWith<std::vector<int64_t>> HCIndexCollectionManager::queryRows(
         return predicateResult.getStatus();
     }
 
+    auto& predicate = predicateResult.getValue();
+    std::string predicateType;
+    if (predicate.isLeaf()) {
+        predicateType = "LEAF";
+    } else if (predicate.isAnd()) {
+        predicateType = "AND";
+    } else if (predicate.isOr()) {
+        predicateType = "OR";
+    } else {
+        predicateType = "UNKNOWN";
+    }
     LOGV2(9999917, "Converted match expression to predicate",
-          "refRowVecSize"_attr = predicateResult.getValue().refRowVec.size());
+          "predicateType"_attr = predicateType,
+          "refRowVecSize"_attr = predicate.refRowVec.size(),
+          "childrenCount"_attr = predicate.children.size());
 
     // Query the table for matching rows
     auto matchingRowIds = table->queryRows(predicateResult.getValue());

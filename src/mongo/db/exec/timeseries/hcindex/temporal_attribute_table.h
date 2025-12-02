@@ -88,21 +88,65 @@ enum class AttributeTableState {
 };
 
 /**
- * Represents a query predicate for filtering rows in an attribute table.
- * Uses a reference row vector approach where:
+ * Represents a hierarchical query predicate for filtering rows in an attribute table.
+ * Supports arbitrary nesting of AND/OR expressions.
+ *
+ * Structure:
+ * - LEAF: A simple equality predicate (refRowVec with symbol indices)
+ * - AND: All children must match (intersection of results)
+ * - OR: Any child can match (union of results)
+ *
+ * For LEAF predicates:
  * - refRowVec is a vector of symbol indices in schema order
  * - 0 in refRowVec means that field is not part of the predicate
  * - Non-zero values are the symbol indices to match
  * - refRowVec size is only as large as necessary to encode the predicate
  *   (no padding with 0s at the end)
+ * - A row matches if for all non-zero entries in refRowVec,
+ *   the corresponding column in the row has the same symbol index.
  *
- * A row matches the predicate if for all non-zero entries in refRowVec,
- * the corresponding column in the row has the same symbol index.
+ * For AND/OR predicates:
+ * - children contains the child predicates
+ * - For AND: a row matches if it matches ALL children
+ * - For OR: a row matches if it matches ANY child
+ *
+ * Examples:
+ * - Simple AND: {a: 1, b: 2} -> LEAF with refRowVec=[sym_a, sym_b]
+ * - Simple OR: {$or: [{a: 1}, {b: 2}]} -> OR with 2 LEAF children
+ * - Mixed: {$or: [{a: 1}, {$and: [{b: 2}, {c: 3}]}]} -> OR with 1 LEAF and 1 AND child
+ * - Complex: {$or: [{a: 1}, {$and: [{b: 2}, {$or: [{c: 3}, {d: 4}]}]}]} -> nested tree
  */
 struct AttributeTablePredicate {
-    // Reference row vector: symbol indices in schema order
-    // 0 means field is not part of predicate, non-zero means match this symbol
+    enum Type { LEAF, AND, OR };
+
+    Type type = LEAF;
+
+    // For LEAF: symbol indices in schema order (0 = not part of predicate)
     std::vector<uint32_t> refRowVec;
+
+    // For AND/OR: child predicates
+    std::vector<AttributeTablePredicate> children;
+
+    /**
+     * Check if this predicate is a leaf (simple equality predicate)
+     */
+    bool isLeaf() const {
+        return type == LEAF;
+    }
+
+    /**
+     * Check if this predicate is an AND node
+     */
+    bool isAnd() const {
+        return type == AND;
+    }
+
+    /**
+     * Check if this predicate is an OR node
+     */
+    bool isOr() const {
+        return type == OR;
+    }
 };
 
 /**
@@ -162,18 +206,37 @@ public:
 
     /**
      * Query the attribute table and return a vector of row IDs that match the
-     * specified predicate. The predicate specifies which columns to match and
-     * what symbol indices they should contain. A row matches if all specified
-     * columns have the matching indices.
+     * specified hierarchical predicate.
+     *
+     * For LEAF predicates: A row matches if all specified columns have the matching indices.
+     * For OR predicates: A row matches if it satisfies ANY child predicate (union).
+     * For AND predicates: A row matches if it satisfies ALL child predicates (intersection).
+     *
+     * This method recursively processes the predicate tree to handle arbitrary nesting
+     * of AND/OR expressions like: P or (Q and R) or (S and (T or U))
      */
     std::vector<int64_t> queryRows(const AttributeTablePredicate& predicate) const;
 
     /**
-     * Convert a MatchExpression with equality predicates to an AttributeTablePredicate.
-     * This method extracts equality matches from the MatchExpression, looks up the
-     * symbol indices in the symbol dictionary, and maps field names to column indices.
-     * Returns an error if the MatchExpression contains non-equality predicates or if
-     * any symbol lookup fails.
+     * Helper method to query rows for a LEAF predicate (simple equality matching).
+     * This is called internally by queryRows() for LEAF nodes.
+     */
+    std::vector<int64_t> queryRowsLeaf(const std::vector<uint32_t>& refRowVec) const;
+
+    /**
+     * Convert a MatchExpression to an AttributeTablePredicate.
+     * This method handles both simple AND expressions and complex OR expressions.
+     *
+     * For AND expressions: Extracts equality matches from the MatchExpression,
+     * looks up the symbol indices in the symbol dictionary, and maps field names
+     * to column indices. Returns a simple predicate with refRowVec populated.
+     *
+     * For OR expressions: Recursively converts each OR branch to a predicate and
+     * collects them in the orPredicates vector. Returns an OR predicate where
+     * queryRows will match rows satisfying ANY of the branches.
+     *
+     * Returns an error if any symbol lookup fails or if the MatchExpression
+     * cannot be converted.
      */
     StatusWith<AttributeTablePredicate> convertMatchExpressionToPredicate(
         const ::mongo::MatchExpression* matchExpr) const;
@@ -267,18 +330,21 @@ private:
     Timestamp _windowStart;
     Timestamp _windowEnd;
 
-    // Rows stored as vectors of symbol indices
-    // Each row has the same number of columns as the schema
-    std::vector<std::vector<uint32_t>> rows;
+    // Columnar storage: each vector represents a column of symbol indices
+    // columns[i] contains all values for column i across all rows
+    // All columns have the same size (number of rows)
+    std::vector<std::vector<uint32_t>> columns;
+
+    // Track at which row ID each column was added (for schema evolution)
+    // columnAddedAtRowId[i] = row ID when column i was added
+    // Used to determine which columns are valid for which rows
+    std::vector<int64_t> columnAddedAtRowId;
 
     // Schema: column names in order
     std::vector<std::string> schema;
 
     // Map: field name -> column index (for fast lookups)
     std::map<std::string, size_t> fieldToColumnIndex;
-
-    // Next row ID to assign (starts at 0)
-    int64_t nextRowId = 0;
 
     // Synchronization
     mutable std::shared_mutex mutex;
