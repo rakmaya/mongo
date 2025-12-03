@@ -288,10 +288,6 @@ boost::optional<Document> InternalUnpackBucketStage::getNextMatchingMeasure() {
         // Check HCIndex metadata filter first if present
         if (_hcindexMetadataFilter && _hcindexRowIdsInitialized) {
             auto rowId = _sharedState->_bucketUnpacker.getCurrentRowId();
-            LOGV2(9999990, "HCIndex: Checking rowId",
-                  "rowId"_attr = rowId,
-                  "matchingRowIds"_attr = _hcindexMatchingRowIds.size(),
-                  "isInSet"_attr = (rowId >= 0 && _hcindexMatchingRowIds.find(rowId) != _hcindexMatchingRowIds.end()));
             if (rowId >= 0 && _hcindexMatchingRowIds.find(rowId) == _hcindexMatchingRowIds.end()) {
                 // This measurement's rowId doesn't match the metadata predicate, skip it
                 _sharedState->_bucketUnpacker.skipRow();  // Skip without unpacking

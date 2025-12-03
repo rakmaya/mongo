@@ -23,6 +23,7 @@
 #include "mongo/db/exec/timeseries/hcindex/hcindex_collection_manager.h"
 
 #include "mongo/db/namespace_string.h"
+#include "mongo/util/timer.h"
 #include "mongo/util/str.h"
 #include "mongo/logv2/log.h"
 
@@ -55,6 +56,7 @@ HCIndexCollectionManager::HCIndexCollectionManager(OperationContext* opCtx,
       attributeTable(std::make_unique<TemporalAttributeTable>(collectionUUID, granularity, symbolDictionary.get(), writer.get(), reader.get())) {}
 
 Status HCIndexCollectionManager::initializeForRead(OperationContext* opCtx) {
+    Timer timer;
     // If already initialized, return early
     if (initializedForRead) {
         return Status::OK();
@@ -75,15 +77,22 @@ Status HCIndexCollectionManager::initializeForRead(OperationContext* opCtx) {
     }
 
     initializedForRead = true;
+    LOGV2(9999997,
+          "HCIndexCollectionManager::initializedForRead ",
+          "elapsedMillis"_attr = timer.millis());
     return Status::OK();
 }
 
 void HCIndexCollectionManager::close() {
     // Reset the reader to release acquired collections
+    Timer timer;
     if (reader) {
         reader->close();
     }
     initializedForRead = false;
+    LOGV2(9999998,
+          "HCIndexCollectionManager::close ",
+          "elapsedMillis"_attr = timer.millis());
 }
 
 StatusWith<int64_t> HCIndexCollectionManager::encodeMetadata(OperationContext* opCtx,
@@ -217,6 +226,7 @@ StatusWith<std::vector<int64_t>> HCIndexCollectionManager::queryRows(
     const ::mongo::MatchExpression* matchExpr,
     const Timestamp& timestamp) {
     LOGV2(9999910, "HCIndexCollectionManager::queryRows called");
+    Timer timer;
 
     // Initialize the reader for read operations if not already done
     // This is done lazily on first use to avoid issues with stashed transaction resources
@@ -288,6 +298,10 @@ StatusWith<std::vector<int64_t>> HCIndexCollectionManager::queryRows(
     // Release acquired collections after query is complete
     // This allows locks to be released and prevents stashed transaction resource issues
     close();
+
+    LOGV2(9999919,
+                "HCIndexCollectionManager::queryRows ",
+                "elapsedMillis"_attr = timer.millis());
 
     return matchingRowIds;
 }

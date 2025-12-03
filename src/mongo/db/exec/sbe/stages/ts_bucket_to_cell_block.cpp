@@ -406,7 +406,6 @@ std::unique_ptr<value::ValueBlock> TsBucketToCellBlockStage::createHCIndexFilter
             // Check if this rowId is in the cached matching set
             bool matches = _hcindexMatchingRowIds.count(rowId) > 0;
             bitmap.push_back(matches);
-            LOGV2(9999994, "HCIndex: Bitmap entry", "rowId"_attr = rowId, "matches"_attr = matches);
         } else {
             bitmap.push_back(false);
         }
