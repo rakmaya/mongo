@@ -177,47 +177,52 @@ std::vector<int64_t> AttributeTable::queryRowsLeaf(
     // Get row count from first column
     size_t rowCount = columns[0].size();
 
-    // Iterate through all rows
-    for (size_t rowIdx = 0; rowIdx < rowCount; ++rowIdx) {
-        bool matches = true;
+    // Initialize a bitmap to track which rows match all predicates
+    // Start with all rows as potential matches
+    std::vector<bool> rowMatches(rowCount, true);
 
-        // Check each non-zero entry in refRowVec
-        for (size_t colIdx = 0; colIdx < refRowVec.size(); ++colIdx) {
-            uint32_t expectedSymbol = refRowVec[colIdx];
+    // Iterate through each column with a predicate (column-major order for better vectorization)
+    for (size_t colIdx = 0; colIdx < refRowVec.size(); ++colIdx) {
+        uint32_t expectedSymbol = refRowVec[colIdx];
 
-            // 0 means this field is not part of the predicate, skip it
-            if (expectedSymbol == 0) {
-                continue;
-            }
+        // 0 means this field is not part of the predicate, skip it
+        if (expectedSymbol == 0) {
+            continue;
+        }
 
-            // Check if column exists and row is valid for this column
-            if (colIdx >= columns.size()) {
-                // Column doesn't exist, treat as missing (0)
-                if (expectedSymbol != 0) {
-                    matches = false;
-                    break;
-                }
-                continue;
-            }
+        // Check if column exists
+        if (colIdx >= columns.size()) {
+            // Column doesn't exist, treat all rows as missing (0)
+            // Since expectedSymbol != 0, no rows can match
+            std::fill(rowMatches.begin(), rowMatches.end(), false);
+            break;
+        }
 
-            // Check if this row is valid for this column (column was added before this row)
-            if (rowIdx < static_cast<size_t>(columnAddedAtRowId[colIdx])) {
-                // Row predates column addition, treat as missing (0)
-                if (expectedSymbol != 0) {
-                    matches = false;
-                    break;
-                }
+
+        // columnAddedAtRowId[colIdx] is the rowId where the column was added
+        // and we will treat all earlier rows as missing (0)
+        // TODO: Later we should allow null checks.
+        size_t firstValidRow = static_cast<size_t>(columnAddedAtRowId[colIdx]);
+        std::fill(rowMatches.begin(), rowMatches.begin() + firstValidRow, false);
+
+        auto &column = columns[colIdx];
+        // For this column, check each row (inner loop is now vectorizable)
+        for (size_t rowIdx = firstValidRow; rowIdx < rowCount; ++rowIdx) {
+            // Skip rows that already don't match
+            if (!rowMatches[rowIdx]) {
                 continue;
             }
 
             // Check if the row's symbol at this column matches
-            if (columns[colIdx][rowIdx] != expectedSymbol) {
-                matches = false;
-                break;
+            if (column[rowIdx] != expectedSymbol) {
+                rowMatches[rowIdx] = false;
             }
         }
+    }
 
-        if (matches) {
+    // Collect all rows that matched all predicates
+    for (size_t rowIdx = 0; rowIdx < rowCount; ++rowIdx) {
+        if (rowMatches[rowIdx]) {
             matchingRowIds.push_back(rowIdx);
         }
     }
