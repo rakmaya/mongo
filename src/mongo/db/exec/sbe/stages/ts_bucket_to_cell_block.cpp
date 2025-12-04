@@ -124,10 +124,25 @@ value::SlotAccessor* TsBucketToCellBlockStage::getAccessor(CompileCtx& ctx, valu
 }
 
 void TsBucketToCellBlockStage::open(bool reOpen) {
+    LOGV2(9999997, "TsBucketToCellBlockStage::open() called");
     auto optTimer(getOptTimer(_opCtx));
 
     _commonStats.opens++;
     _children[0]->open(reOpen);
+
+    // Initialize HCIndex once at the start of the query
+    // This avoids repeated initialization/close cycles per bucket
+    if (_hcindexMgr && !_hcindexInitialized && _opCtx) {
+        auto initStatus = _hcindexMgr->initializeForRead(_opCtx);
+        if (initStatus.isOK()) {
+            _hcindexInitialized = true;
+            LOGV2(9999997, "HCIndex initialized in TsBucketToCellBlockStage::open()");
+        } else {
+            LOGV2_WARNING(9999998,
+                          "Failed to initialize HCIndex in TsBucketToCellBlockStage::open()",
+                          "error"_attr = initStatus);
+        }
+    }
 
     // Until we have valid data, we disable access to slots.
     disableSlotAccess();
@@ -165,9 +180,19 @@ PlanState TsBucketToCellBlockStage::getNext() {
 }
 
 void TsBucketToCellBlockStage::close() {
+    LOGV2(9999997, "TsBucketToCellBlockStage::close() called");
     auto optTimer(getOptTimer(_opCtx));
 
     trackClose();
+
+    // Close HCIndex at the end of the query
+    // This releases acquired collections and prevents stashed transaction resource issues
+    if (_hcindexMgr && _hcindexInitialized) {
+        _hcindexMgr->close();
+        _hcindexInitialized = false;
+        LOGV2(9999999, "HCIndex closed in TsBucketToCellBlockStage::close()");
+    }
+
     _children[0]->close();
 }
 
@@ -231,6 +256,11 @@ size_t TsBucketToCellBlockStage::estimateCompileTimeSize() const {
 }
 
 void TsBucketToCellBlockStage::doSaveState() {
+    if (_hcindexMgr && _hcindexInitialized) {
+        // Prepare HCIndex for yielding by releasing collection pointers
+        _hcindexMgr->prepareForYield();
+    }
+
     if (!slotsAccessible()) {
         return;
     }
@@ -247,6 +277,22 @@ void TsBucketToCellBlockStage::doSaveState() {
 
     if (_metaOutSlotId) {
         prepareForYielding(_metaOutAccessor, slotsAccessible());
+    }
+}
+
+void TsBucketToCellBlockStage::doRestoreState() {
+    LOGV2(9999997, "TsBucketToCellBlockStage::doRestoreState() called");
+
+    // Restore HCIndex after yielding by re-acquiring collection pointers
+    if (_hcindexMgr && _hcindexInitialized && _opCtx) {
+        LOGV2(9999997, "TsBucketToCellBlockStage::doRestoreState() restoreForYield on HCIndex");
+        auto restoreStatus = _hcindexMgr->restoreForYield(_opCtx);
+        if (!restoreStatus.isOK()) {
+            LOGV2_WARNING(9999998,
+                          "Failed to restore HCIndex after yield",
+                          "error"_attr = restoreStatus);
+            // Continue anyway - the reader will try to re-acquire on next use if needed
+        }
     }
 }
 

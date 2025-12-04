@@ -79,7 +79,7 @@ Status HCIndexCollectionManager::initializeForRead(OperationContext* opCtx) {
     initializedForRead = true;
     LOGV2(9999997,
           "HCIndexCollectionManager::initializedForRead ",
-          "elapsedMillis"_attr = timer.millis());
+          "elapsedMicros"_attr = timer.micros());
     return Status::OK();
 }
 
@@ -92,7 +92,40 @@ void HCIndexCollectionManager::close() {
     initializedForRead = false;
     LOGV2(9999998,
           "HCIndexCollectionManager::close ",
-          "elapsedMillis"_attr = timer.millis());
+          "elapsedMicros"_attr = timer.micros());
+}
+
+void HCIndexCollectionManager::prepareForYield() {
+    // Release collection pointers held by the reader
+    // This allows locks to be yielded safely during query execution
+    Timer timer;
+    if (reader) {
+        reader->prepareForYield();
+    }
+    LOGV2(9999999,
+          "HCIndexCollectionManager::prepareForYield ",
+          "elapsedMicros"_attr = timer.micros());
+}
+
+Status HCIndexCollectionManager::restoreForYield(OperationContext* opCtx) {
+    // Re-acquire collection pointers after yielding
+    Timer timer;
+    if (!reader) {
+        return Status(ErrorCodes::InternalError, "HCIndex reader not initialized");
+    }
+
+    auto restoreStatus = reader->restoreForYield(opCtx);
+    if (!restoreStatus.isOK()) {
+        LOGV2_WARNING(9999900,
+                      "Failed to restore HCIndex reader collections after yield",
+                      "error"_attr = restoreStatus);
+        return restoreStatus;
+    }
+
+    LOGV2(9999901,
+          "HCIndexCollectionManager::restoreForYield ",
+          "elapsedMicros"_attr = timer.micros());
+    return Status::OK();
 }
 
 StatusWith<int64_t> HCIndexCollectionManager::encodeMetadata(OperationContext* opCtx,
@@ -228,12 +261,17 @@ StatusWith<std::vector<int64_t>> HCIndexCollectionManager::queryRows(
     LOGV2(9999910, "HCIndexCollectionManager::queryRows called");
     Timer timer;
 
-    // Initialize the reader for read operations if not already done
-    // This is done lazily on first use to avoid issues with stashed transaction resources
+    // NOTE: Initialization is now managed by the caller (e.g., TsBucketToCellBlockStage::open())
+    // to avoid repeated initialization/close cycles per query.
+    // The caller should call initializeForRead() once at the start and close() at the end.
     if (!initializedForRead) {
+        LOGV2_WARNING(9999920,
+                      "HCIndexCollectionManager::queryRows called but not initialized. "
+                      "Caller should call initializeForRead() before queryRows()");
+        // Try to initialize anyway as a fallback
         auto initStatus = initializeForRead(opCtx);
         if (!initStatus.isOK()) {
-            LOGV2_WARNING(9999920,
+            LOGV2_WARNING(9999921,
                           "Failed to initialize reader for read operations",
                           "error"_attr = initStatus);
             // Continue anyway - the reader will try to acquire collections on-demand if needed
@@ -295,13 +333,13 @@ StatusWith<std::vector<int64_t>> HCIndexCollectionManager::queryRows(
     LOGV2(9999918, "Query completed",
           "matchingRowCount"_attr = matchingRowIds.size());
 
-    // Release acquired collections after query is complete
-    // This allows locks to be released and prevents stashed transaction resource issues
-    close();
+    // NOTE: close() is now called by the caller (e.g., TsBucketToCellBlockStage::close())
+    // to manage the lifecycle at the stage level instead of per-query.
+    //close();
 
     LOGV2(9999919,
                 "HCIndexCollectionManager::queryRows ",
-                "elapsedMillis"_attr = timer.millis());
+                "elapsedMicros"_attr = timer.micros());
 
     return matchingRowIds;
 }

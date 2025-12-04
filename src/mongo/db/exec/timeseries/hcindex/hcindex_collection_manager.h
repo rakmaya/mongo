@@ -120,6 +120,29 @@ public:
     void close();
 
     /**
+     * Prepare for yielding by releasing collection pointers.
+     *
+     * Called during doSaveState() before a yield point. This releases the collection
+     * pointers held by the reader, allowing locks to be yielded safely.
+     *
+     * The collections can be restored later by calling restoreForYield().
+     */
+    void prepareForYield();
+
+    /**
+     * Restore collection pointers after yielding.
+     *
+     * Called during doRestoreState() after a yield point. This re-acquires the
+     * collection pointers that were released by prepareForYield().
+     *
+     * Parameters:
+     * - opCtx: Operation context for database operations
+     *
+     * Returns Status::OK() on success, or an error status if restoration fails.
+     */
+    Status restoreForYield(OperationContext* opCtx);
+
+    /**
      * Encode metadata to a rowId.
      *
      * Extracts fields from the metadata BSONObj, encodes them using the

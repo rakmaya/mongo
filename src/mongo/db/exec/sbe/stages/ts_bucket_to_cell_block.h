@@ -102,6 +102,8 @@ public:
 protected:
     void doSaveState() final;
 
+    void doRestoreState() final;
+
     void doAttachCollectionAcquisition(const MultipleCollectionAccessor& mca) override {
         return;
     }
@@ -147,6 +149,7 @@ private:
     std::unique_ptr<MatchExpression> _hcindexMetadataFilter;
     boost::optional<UUID> _collectionUUID;
     timeseries::hcindex::HCIndexCollectionManager* _hcindexMgr = nullptr;
+    bool _hcindexInitialized = false;
 
     // Cache of matching rowIds for the current bucket
     // Populated once per bucket to avoid lock acquisition during execution

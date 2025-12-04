@@ -42,15 +42,7 @@ namespace mongo::timeseries::hcindex {
 HCIndexReader::HCIndexReader(const DatabaseName& dbName, const UUID& collectionUUID)
     : dbName(dbName), collectionUUID(collectionUUID) {}
 
-Status HCIndexReader::initializeCollections(OperationContext* opCtx) {
-    // Check if already initialized to avoid re-acquiring collections
-    if (collectionsInitialized) {
-        LOGV2(9999999, "HCIndexReader::initializeCollections - already initialized, skipping");
-        return Status::OK();
-    }
-
-    LOGV2(9999999, "HCIndexReader::initializeCollections - acquiring ops collections (lock-free)");
-
+void HCIndexReader::acquireCollections(OperationContext* opCtx) {
     // Acquire symbol operations collection WITHOUT acquiring locks
     // This is safe because we're just getting a snapshot of the catalog
     auto symbolNss = HCIndexCollectionManager::getSymbolOperationsNamespace(dbName, collectionUUID);
@@ -62,10 +54,10 @@ Status HCIndexReader::initializeCollections(OperationContext* opCtx) {
 
     try {
         symbolOpsCollection = acquireCollectionMaybeLockFree(opCtx, symbolAcquisitionRequest);
-        LOGV2(9999999, "HCIndexReader::initializeCollections - acquired symbol ops collection");
+        LOGV2(9999999, "HCIndexReader::acquireCollections - acquired symbol ops collection");
     } catch (const std::exception& e) {
         LOGV2(9999999,
-              "HCIndexReader::initializeCollections - symbol ops collection doesn't exist yet",
+              "HCIndexReader::acquireCollections - symbol ops collection doesn't exist yet",
               "error"_attr = e.what());
         // Symbol ops collection doesn't exist yet - this is expected on first load
         // We'll handle this gracefully in constructSymbolDictionary
@@ -82,15 +74,24 @@ Status HCIndexReader::initializeCollections(OperationContext* opCtx) {
 
     try {
         attributeOpsCollection = acquireCollectionMaybeLockFree(opCtx, attributeAcquisitionRequest);
-        LOGV2(9999999, "HCIndexReader::initializeCollections - acquired attribute ops collection");
+        LOGV2(9999999, "HCIndexReader::acquireCollections - acquired attribute ops collection");
     } catch (const std::exception& e) {
         LOGV2(9999999,
-              "HCIndexReader::initializeCollections - attribute ops collection doesn't exist yet",
+              "HCIndexReader::acquireCollections - attribute ops collection doesn't exist yet",
               "error"_attr = e.what());
         // Attribute ops collection doesn't exist yet - this is expected on first load
         // We'll handle this gracefully in constructAttributeTable
     }
+}
 
+Status HCIndexReader::initializeCollections(OperationContext* opCtx) {
+    // Check if already initialized to avoid re-acquiring collections
+    if (collectionsInitialized) {
+        LOGV2(9999999, "HCIndexReader::initializeCollections - already initialized, skipping");
+        return Status::OK();
+    }
+
+    acquireCollections(opCtx);
     collectionsInitialized = true;
     return Status::OK();
 }
@@ -315,6 +316,27 @@ void HCIndexReader::close()
     symbolOpsCollection.reset();
     attributeOpsCollection.reset();
     collectionsInitialized = false;
+}
+
+void HCIndexReader::prepareForYield() {
+    // Release collection pointers to allow locks to be yielded
+    // The CollectionAcquisition objects will be reset, releasing their locks
+    LOGV2(9999902, "HCIndexReader::prepareForYield - releasing collection pointers");
+    symbolOpsCollection.reset();
+    attributeOpsCollection.reset();
+}
+
+Status HCIndexReader::restoreForYield(OperationContext* opCtx) {
+    // Re-acquire collection pointers after yielding
+    LOGV2(9999903, "HCIndexReader::restoreForYield - re-acquiring collection pointers");
+
+    if (!collectionsInitialized) {
+        return Status(ErrorCodes::InternalError,
+                      "HCIndexReader collections not initialized before restore");
+    }
+
+    acquireCollections(opCtx);
+    return Status::OK();
 }
 
 }  // namespace mongo::timeseries::hcindex

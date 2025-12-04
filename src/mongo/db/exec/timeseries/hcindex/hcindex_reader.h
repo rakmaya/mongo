@@ -115,14 +115,43 @@ public:
         const Timestamp& upToTimestamp,
         SymbolDictionary* symbolDictionary);
 
-    
+
     /**
      * Release acquired collections to allow lock release and prevent stashed transaction resource
      * issues during pipeline cleanup.
      */
     void close();
 
+    /**
+     * Prepare for yielding by releasing collection pointers.
+     *
+     * Called during doSaveState() before a yield point. This releases the collection
+     * pointers held by the acquisitions, allowing locks to be yielded safely.
+     *
+     * The collections can be restored later by calling restoreForYield().
+     */
+    void prepareForYield();
+
+    /**
+     * Restore collection pointers after yielding.
+     *
+     * Called during doRestoreState() after a yield point. This re-acquires the
+     * collection pointers that were released by prepareForYield().
+     *
+     * Parameters:
+     * - opCtx: Operation context for database operations
+     *
+     * Returns Status::OK() on success, or an error status if restoration fails.
+     */
+    Status restoreForYield(OperationContext* opCtx);
+
 private:
+    /**
+     * Helper method to acquire both symbol and attribute operations collections.
+     * Used by both initializeCollections() and restoreForYield().
+     */
+    void acquireCollections(OperationContext* opCtx);
+
     DatabaseName dbName;
     UUID collectionUUID;
     boost::optional<CollectionAcquisition> symbolOpsCollection;
