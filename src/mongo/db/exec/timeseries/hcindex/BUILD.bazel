@@ -18,6 +18,9 @@ mongo_cc_library(
         "hcindex_writer.h",
         "hcindex_collection_manager.h",
     ],
+    private_hdrs = [
+        "//src/mongo/db/timeseries:hcindex_options.h",
+    ],
     deps = [
         "//src/mongo:base",
         "//src/mongo/bson:bson_validate",

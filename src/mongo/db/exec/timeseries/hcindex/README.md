@@ -92,9 +92,60 @@ This approach is superior to building all-encompassing indexes upfront because:
 - Memory usage scales linearly with data and number of hot-buckets and not total
 cardinality
 
-## Test Cases
+## Test Case - Merchant Transactions
 
-### Real-World Test 1 - Merchant Transactions
+Merchant Transactions dataset contains generated synthetic data for
+transactions across merchants. This is a scenario where most transactions are
+unique when we factor order number into account.
+
+### Why is this a good test case?
+
+- High cardinality metadata
+- Large number of unique transactions
+- Use of Dimensional analytics (e.g. "What is the total sales for all
+McDonalds in New York?")
+
+| Parameter | Unique Values | Notes |
+|-----------|---------------|-------|
+| Chains | 10 | McDonals etc..
+| Merchant Id | 10 | Denotes a specific store within a chain
+| Cities | 12 | New York, San Francisco etc..
+| Product Type | 4 | Sandwiches, Drinks, Combos, Dessert
+| Product Item | 10 | Chicken Sandwich, Coke etc..
+| Order Status | 2 | COMPLETE, FAILED
+| Order Number | XX | Unique order number per merchant
+
+### Real-World Test 1 - 10K Unique Transactions
+
+This emulates a scenario where we have a large number of unique transactions,
+but each transaction is relatively small set of fields. This is a common
+scenario in e-commerce.
+
+| Ingestion | HC Index Enabled | Regular Collection |
+|-----------|------------------|--------------------|
+| M1 (DBG) | 1.3 sec | 50.7 sec |
+| M1 (OPT) | 175 ms | 6.6 sec |
+
+
+| Component | HC Index Enabled | Regular Collection |
+|-----------|------------------|--------------------|
+| Symbol Dictionary size | 4,590 bytes | - |
+| Symbol Dictionary storageSize | 20,480 bytes | - |
+| Attribute Table size | 590,387 bytes | - |
+| Attribute Table storageSize | 196,608 bytes | - |
+| Bucket Collection size | 54,777 bytes | 5,131,044 bytes |
+| Bucket Collection storageSize | 65,536 bytes | 569,344 bytes |
+| **Total Size** | **649,754 bytes** | **5,131,044 bytes** |
+| **Total storageSize** | **282,624 bytes** | **569,344 bytes** |
+| **Compression Ratio** | **2.30x** | **9.01x** |
+
+
+**<u>Key Observations</u>:**
+- HCIndex reduces total data size by **87.4%** (650KB vs 5.1MB)
+- HCIndex reduces storage size by **50.4%** (283KB vs 569KB)
+- Ingestion performance improved by **37.7x** (175ms vs 6.6sec on M1 OPT)
+
+### Real-World Test 2 - Merchant Transactions
 
 | Time Window | Avg. Cardinality | Avg. Volume | Max Cardinality | Max Volume |
 |-------------|------------------|-------------|-----------------|------------|
@@ -106,6 +157,11 @@ cardinality
 | 10 minutes  | TODO             | TODO        | TODO            | TODO       |
 | 30 minutes  | TODO             | TODO        | TODO            | TODO       |
 
+
+## Test Case - Financial Market Data
+
+
+## Test Case - Observability Metrics
 
 #### Performance Metrics
 - **Traditional**:
@@ -203,17 +259,155 @@ To interpret data from 09:00-09:25 in a window that runs 09:00-09:59:
 The `.ops` segment explicitly indicates these are operation streams, not reconstructed structures.
 Operations collections are created in the same database as the original timeseries collection to avoid namespace validation issues.
 
-## Dictionary Granularity
+## Inverted Index For RowIDs
 
-```cpp
-enum class DictionaryGranularity {
-    DAILY,      // New dictionary every day (00:00:00)
-    HOURLY,     // New dictionary every hour (default)
-    THIRTY_MIN, // New dictionary every 30 minutes
-    TEN_MIN,    // New dictionary every 10 minutes
-    FIVE_MIN    // New dictionary every 5 minutes
-};
+For high density (tags that maps to more than 1 rows) having an inverted index
+can be useful to eliminate the need to scan all the rows for a given tag. However,
+in the analytics space, it common to have certain dimensions that are very sparse
+and not worth building an inverted index for. Thus it is important to be able to
+dynamically build inverted indexes for certain dimensions.
+
+## Time-partitioned bitmap (roaring) index for metadata fields
+
+### Indexing Model
+
+For each metadata column (except those explicitly configured as sparse or
+cardinality-exploding), we maintain a time-scoped bitmap index of the form:
+
+```scss
+(column, value, window) → bitmap(RowIDs)
 ```
+
+RowIDs are local to the time window. The index is a write-path append-only
+structure with no per-row deletions; eviction is performed by dropping entire
+windows.
+
+### Metadata Index Options
+
+The index is controlled via `Timeseries.hcindex_options`
+
+| Option               | Description                                               |
+| -------------------- | --------------------------------------------------------- |
+| buildMetadataIndex   | Enables or disables metadata indexing                     |
+| sparseIndexThreshold | Values occurring < X% treated as sparse (not pre-indexed) |
+| denseIndexThreshold  | Values occurring > Y% always indexed                      |
+| dynamicIndexBuild    | Values between thresholds may be indexed on demand        |
+
+- `valueFrequency < sparseThreshold` → no index
+- `valueFrequency > denseThreshold` → always indexed
+- `otherwise` → indexed dynamically based on observed queries
+
+### Regex Support
+
+Regex predicates are supported using
+
+```scss
+regex → matching values → OR(bitmaps) → matching RowIDs
+```
+
+1. Enumerate metadata values in the window dictionary that match the regex
+2. For each matching value, fetch corresponding bitmaps
+3. OR bitmaps to compute matching row set
+4. For columns without bitmap coverage, fall back to scan within the window
+
+This enables regex filtering without scanning the full time window whenever a
+matching dictionary and bitmap exist.
+
+### Time-Window and Dictionary Construction
+
+Each window is associated with a metadata dictionary of the form:
+
+```scss
+window → {value → localValueID}
+```
+Dictionaries contain only values initially observed or promoted in that
+window, except when inheritance rules apply
+
+### Dictionary Inheritance
+
+We do not maintain a global dictionary. Instead:
+- If a sparse column observes a new value in a later window,
+- The ingestion path does not build a fresh dictionary for that value,
+- The window dictionary is marked as referencing the dictionary of the window
+where that value originated.
+
+This avoids dictionary growth for sparse metadata and bounds per-window state.
+
+### Offline Dictionary Merge
+
+As windows age out of the active write path, dictionaries may be merged offline
+into a more compact representation. This occurs outside the ingestion path and
+does not affect active windows
+
+### Regex Dictionary Representation
+
+Each window dictionary may be implemented as one of:
+
+| Dictionary | Notes                                                                |
+| ---------- | -------------------------------------------------------------------- |
+| Trie       | Fast prefix and moderate regex; inexpensive incremental updates      |
+| FST        | More compact; faster regex enumeration; ideal under heavy regex load |
+
+
+Selection criteria:
+- Smaller or dynamically changing value sets → Trie
+- Larger or stable value sets with heavy regex traffic → FST
+
+Inherited windows share the same dictionary representation.
+
+### Collection Naming Convention
+
+- **Bitmap Index**: `hcindex.idx.bitmap.<collectionUUID>` Bitmap index that
+corresponds to a specific windowStart to windowEnd.
+- **Trie**: `hcindex.idx.trie.<collectionUUID>` Trie to make find the the `regex
+--> set of matching values` mapping faster. Also specific to a windowStart to
+windowEnd.
+- **FST**: `hcindex.idx.fst.<collectionUUID>` Finite state transducer to make
+find the the `regex --> set of matching values` mapping even faster. Also
+specific to a windowStart to windowEnd.
+
+
+### Exection Summary
+
+Given predicate `(column REGEX pattern)` over time interval `[t0, t1)`:
+
+```scss
+1. Identify windows overlapping the interval
+2. For each window:
+     enumerate matching values via Trie/FST
+3. OR bitmaps for matched values
+4. Union bitmap results across all windows
+5. Return matching row IDs
+```
+
+### Phase 1 Implementation
+Reference Implementation MVP will do the following to get the initial PoC
+version
+
+1. Implement the bitmap index and Trie
+2. Integrate with the ingestion path
+   1. Add support for dynamic density calculation using information gain.
+   2. Add support for building the bitmap index on demand.
+3. Unit Tests
+
+### Phase 2 Implementation
+1. Implement FST
+2. Add support for dictionary inheritance
+3. Add support for offline dictionary merge
+4. Add support for regex query execution
+5. Add support for costmodel integration
+6. Add support for explain plan visibility
+7. Integration Tests
+
+### Considerations For Future Work
+- Value demotion under memory pressure
+- Autotuning thresholds
+- Additional compression for inherited dictionaries
+- Costmodel integration with query planner
+- Dictionary inheritance made visible in explain plans
+- Regex over free-form text ideally requires n-gram or substring indexing (future work)
+- Very dense values reduce pruning efficiency. A good problem to research on!
+- Subcluster indexing is a good future research!
 
 ## Architecture Overview
 

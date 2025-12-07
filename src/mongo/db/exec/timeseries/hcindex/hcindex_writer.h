@@ -33,6 +33,7 @@
 #include "mongo/db/database_name.h"
 #include "mongo/db/exec/timeseries/hcindex/temporal_symbol_dictionary.h"
 #include "mongo/db/repl/oplog.h"
+#include "mongo/db/timeseries/timeseries_gen.h"
 #include "mongo/util/uuid.h"
 
 #include <cstdint>
@@ -134,12 +135,14 @@ public:
      *
      * @param windowStart Start timestamp of the time window
      * @param windowEnd End timestamp of the time window
-     * @param granularity Dictionary granularity for this window
+     * @param period Time-window period (hour, minute, second)
+     * @param frequency Time-window frequency (1-24 for hour, 1-59 for minute/second)
      * @param isSymbolOps true for symbol operations, false for attribute operations
      */
     Status flush(const Timestamp& windowStart,
                  const Timestamp& windowEnd,
-                 DictionaryGranularity granularity,
+                 HCIndexPeriodEnum period,
+                 int32_t frequency,
                  bool isSymbolOps);
 
     /**
@@ -147,7 +150,8 @@ public:
      */
     Status buildFin(const Timestamp& windowStart,
                    const Timestamp& windowEnd,
-                   DictionaryGranularity granularity,
+                   HCIndexPeriodEnum period,
+                   int32_t frequency,
                    bool isSymbolOps);
 
     /**
@@ -155,7 +159,8 @@ public:
      */
     Status buildRef(const Timestamp& windowStart,
                    const Timestamp& windowEnd,
-                   DictionaryGranularity granularity,
+                   HCIndexPeriodEnum period,
+                   int32_t frequency,
                    const Timestamp& refWindowStart);
 
     /**
@@ -203,14 +208,16 @@ private:
      */
     Status _flushSymbols(const Timestamp& windowStart,
                          const Timestamp& windowEnd,
-                         DictionaryGranularity granularity);
+                         HCIndexPeriodEnum period,
+                         int32_t frequency);
 
     /**
      * Helper method to build and flush accumulated attributes as an operation.
      */
     Status _flushAttributes(const Timestamp& windowStart,
                             const Timestamp& windowEnd,
-                            DictionaryGranularity granularity);
+                            HCIndexPeriodEnum period,
+                            int32_t frequency);
 
     UUID collectionUUID;
     DatabaseName dbName;

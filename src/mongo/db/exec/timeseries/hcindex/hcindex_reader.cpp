@@ -30,6 +30,7 @@
 
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/exec/timeseries/hcindex/hcindex_collection_manager.h"
+#include "mongo/db/timeseries/hcindex_options.h"
 //#include "mongo/db/collection_crud/collection_write_path.h"
 #include "mongo/db/local_catalog/shard_role_api/shard_role.h"
 #include "mongo/db/namespace_string.h"
@@ -100,10 +101,11 @@ StatusWith<std::unique_ptr<SymbolDictionary>> HCIndexReader::constructSymbolDict
     OperationContext* opCtx,
     const Timestamp& windowStart,
     const Timestamp& windowEnd,
-    DictionaryGranularity granularity,
+    HCIndexPeriodEnum period,
+    int32_t frequency,
     const Timestamp& upToTimestamp) {
 
-    auto dict = std::make_unique<SymbolDictionary>(granularity, windowStart, windowEnd, nullptr);
+    auto dict = std::make_unique<SymbolDictionary>(period, frequency, windowStart, windowEnd, nullptr);
 
     // Change state to Reconstruction for dictionaries being reconstructed by the reader
     auto stateStatus = dict->changeState(SymbolDictionaryState::Reconstruction);
@@ -166,6 +168,7 @@ StatusWith<std::unique_ptr<SymbolDictionary>> HCIndexReader::constructSymbolDict
         return readWriteStatus;
     }
 
+    // Return the dictionary (may be empty if no operations were found for this window)
     return std::move(dict);
 }
 
@@ -173,11 +176,12 @@ StatusWith<std::unique_ptr<AttributeTable>> HCIndexReader::constructAttributeTab
     OperationContext* opCtx,
     const Timestamp& windowStart,
     const Timestamp& windowEnd,
-    DictionaryGranularity granularity,
+    HCIndexPeriodEnum period,
+    int32_t frequency,
     const Timestamp& upToTimestamp,
     SymbolDictionary* symbolDictionary) {
 
-    auto table = std::make_unique<AttributeTable>(symbolDictionary, nullptr, windowStart, windowEnd);
+    auto table = std::make_unique<AttributeTable>(symbolDictionary, nullptr, period, frequency, windowStart, windowEnd);
 
     // Change state to Reconstruction for tables being reconstructed by the reader
     auto stateStatus = table->changeState(AttributeTableState::Reconstruction);
@@ -308,6 +312,7 @@ StatusWith<std::unique_ptr<AttributeTable>> HCIndexReader::constructAttributeTab
         return readWriteStatus;
     }
 
+    // Return the table (may be empty if no operations were found for this window)
     return std::move(table);
 }
 

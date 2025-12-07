@@ -1,5 +1,6 @@
 import csv
 import random
+import argparse
 from datetime import datetime, timedelta
 from collections import defaultdict
 
@@ -10,9 +11,8 @@ MERCHANTS_CSV = "merchants.csv"
 PRODUCTS_CSV = "products.csv"
 OUTPUT_CSV = "transactions.csv"
 
+# Default values (can be overridden by command-line arguments)
 WINDOW_MINUTES = 30
-
-# Orders per second: tweak this band to hit ~50k over 30 minutes
 ORDERS_PER_SEC_MIN = 20
 ORDERS_PER_SEC_MAX = 30
 
@@ -20,6 +20,56 @@ FAILED_PROB = 0.03  # ~3% failed
 RANDOM_SEED = 42    # for reproducibility; change/remove for more randomness
 
 random.seed(RANDOM_SEED)
+
+# ---------- Command-line argument parsing ----------
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Generate transaction data for timeseries testing",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Generate 30 minutes of data with 20-30 orders per second
+  python3 generate_transactions.py
+
+  # Generate 60 minutes of data with 10-20 orders per second
+  python3 generate_transactions.py --window-minutes 60 --orders-per-sec-min 10 --orders-per-sec-max 20
+
+  # Generate 10 minutes of data with 5-15 orders per second (for testing multiple time windows)
+  python3 generate_transactions.py --window-minutes 10 --orders-per-sec-min 5 --orders-per-sec-max 15
+        """
+    )
+    parser.add_argument(
+        "--window-minutes",
+        type=int,
+        default=WINDOW_MINUTES,
+        help=f"Time window in minutes (default: {WINDOW_MINUTES})"
+    )
+    parser.add_argument(
+        "--orders-per-sec-min",
+        type=int,
+        default=ORDERS_PER_SEC_MIN,
+        help=f"Minimum orders per second (default: {ORDERS_PER_SEC_MIN})"
+    )
+    parser.add_argument(
+        "--orders-per-sec-max",
+        type=int,
+        default=ORDERS_PER_SEC_MAX,
+        help=f"Maximum orders per second (default: {ORDERS_PER_SEC_MAX})"
+    )
+    parser.add_argument(
+        "--output",
+        default=OUTPUT_CSV,
+        help=f"Output CSV file (default: {OUTPUT_CSV})"
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=RANDOM_SEED,
+        help=f"Random seed for reproducibility (default: {RANDOM_SEED})"
+    )
+
+    return parser.parse_args()
 
 # ---------- Helpers to load config ----------
 
@@ -100,6 +150,7 @@ def build_series_combinations(merchant_pool, products):
             series.append({
                 "chain": m["chain_name"],
                 "merchant_id": m["merchant_id"],
+                "city": m["city"],
                 "product_type": p["product_type"],
                 "product_item": p["product_item"],
                 "base_price": p["base_price"]
@@ -111,7 +162,23 @@ def price_for_item(base_price, quantity):
     factor = 1.0 + random.uniform(-0.05, 0.10)
     return round(base_price * quantity * factor, 2)
 
-def generate_transactions():
+def generate_transactions(window_minutes=WINDOW_MINUTES,
+                         orders_per_sec_min=ORDERS_PER_SEC_MIN,
+                         orders_per_sec_max=ORDERS_PER_SEC_MAX,
+                         output_csv=OUTPUT_CSV,
+                         random_seed=RANDOM_SEED):
+    """Generate transaction data.
+
+    Args:
+        window_minutes: Time window in minutes
+        orders_per_sec_min: Minimum orders per second
+        orders_per_sec_max: Maximum orders per second
+        output_csv: Output CSV file path
+        random_seed: Random seed for reproducibility
+    """
+    # Set random seed
+    random.seed(random_seed)
+
     chains = load_chains()
     chain_by_id = build_chain_index(chains)
     merchants = load_merchants()
@@ -127,19 +194,21 @@ def generate_transactions():
 
     print(f"Loaded {len(chains)} chains, {len(merchant_pool)} merchants, "
           f"{len(products)} products -> {len(series_combos)} potential (merchant, product) series.")
+    print(f"Generating {window_minutes} minutes of data with {orders_per_sec_min}-{orders_per_sec_max} orders/sec...")
 
     # Per-merchant order counter to ensure order_num uniqueness within merchant_id
     merchant_order_counters = defaultdict(int)
+    # Per-merchant running time to emulate realistic order sequences
+    merchant_last_time = defaultdict(lambda: datetime.now().replace(microsecond=0) - timedelta(minutes=window_minutes+5))
 
-    start_time = datetime.now().replace(microsecond=0) - timedelta(minutes=35)
-    end_time = start_time + timedelta(minutes=WINDOW_MINUTES)
+    start_time = datetime.now().replace(microsecond=0) - timedelta(minutes=window_minutes+5)
+    end_time = start_time + timedelta(minutes=window_minutes)
 
-    current_time = start_time
-
-    with open(OUTPUT_CSV, "w", newline="") as f:
+    with open(output_csv, "w", newline="") as f:
         fieldnames = [
             "chain",
             "merchant_id",
+            "city",
             "product_type",
             "product_item",
             "order_num",
@@ -154,9 +223,11 @@ def generate_transactions():
         total_orders = 0
         unique_series_seen = set()
 
+        # Generate orders across the time window
+        current_time = start_time
         while current_time < end_time:
             # How many orders in this second
-            per_sec = random.randint(ORDERS_PER_SEC_MIN, ORDERS_PER_SEC_MAX)
+            per_sec = random.randint(orders_per_sec_min, orders_per_sec_max)
 
             for _ in range(per_sec):
                 combo = random.choice(series_combos)
@@ -169,13 +240,24 @@ def generate_transactions():
                 status = choose_status()
                 price = price_for_item(combo["base_price"], quantity)
 
-                # add sub-second jitter to spread within the second
-                jitter_us = random.randint(0, 999_999)
-                txn_time = current_time + timedelta(microseconds=jitter_us)
+                # Increment merchant's running time with jitter to emulate realistic order sequence
+                # Add a small random delay (0-100ms) from the previous order for this merchant
+
+                # Ensure that we are not behind the current time
+                merchant_last_time[merchant_id] = max(merchant_last_time[merchant_id], current_time)
+
+                jitter_us = random.randint(0, 100_000)
+                merchant_last_time[merchant_id] += timedelta(microseconds=jitter_us)
+
+                # Ensure that we are not breaking into the next second
+                merchant_last_time[merchant_id] = min(merchant_last_time[merchant_id], current_time + timedelta(seconds=1))
+
+                txn_time = merchant_last_time[merchant_id]
 
                 row = {
                     "chain": combo["chain"],
                     "merchant_id": merchant_id,
+                    "city": combo["city"],
                     "product_type": combo["product_type"],
                     "product_item": combo["product_item"],
                     "order_num": order_num,
@@ -193,10 +275,18 @@ def generate_transactions():
 
             current_time += timedelta(seconds=1)
 
-    print(f"Done. Wrote {total_orders} orders to {OUTPUT_CSV}.")
-    print(f"Unique (chain, merchant_id, product_type, product_item) series: {len(unique_series_seen)}.")
+    print(f"Done. Wrote {total_orders} orders to {output_csv}.")
+    print(f"Unique (chain, merchant_id, product_type, product_item) (excluding order_num) series: {len(unique_series_seen)}.")
+    print(f"Time range: {start_time.isoformat()} to {end_time.isoformat()}")
 
 
 if __name__ == "__main__":
-    generate_transactions()
+    args = parse_args()
+    generate_transactions(
+        window_minutes=args.window_minutes,
+        orders_per_sec_min=args.orders_per_sec_min,
+        orders_per_sec_max=args.orders_per_sec_max,
+        output_csv=args.output,
+        random_seed=args.seed
+    )
 

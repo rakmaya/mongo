@@ -92,7 +92,7 @@ TEST_F(HCIndexReaderTest, ConstructSymbolDictionaryFromInit) {
     ASSERT_OK(writer.addSymbol(windowStart, windowEnd, "region", 1));
     ASSERT_OK(writer.addSymbol(windowStart, windowEnd, "zone", 2));
     ASSERT_OK(writer.addSymbol(windowStart, windowEnd, "pod", 3));
-    auto buildStatus = writer.flush(windowStart, windowEnd, DictionaryGranularity::HOURLY, true);
+    auto buildStatus = writer.flush(windowStart, windowEnd, HCIndexPeriodEnum::Hour, 1, true);
     ASSERT_OK(buildStatus);
 
     // Flush pending operations to database
@@ -102,7 +102,7 @@ TEST_F(HCIndexReaderTest, ConstructSymbolDictionaryFromInit) {
     HCIndexReader reader(dbName, collectionUUID);
     ASSERT_OK(reader.initializeCollections(opCtx));
     auto dictStatus = reader.constructSymbolDictionary(
-        opCtx, windowStart, windowEnd, DictionaryGranularity::HOURLY, windowEnd);
+        opCtx, windowStart, windowEnd, HCIndexPeriodEnum::Hour, 1, windowEnd);
     ASSERT_OK(dictStatus);
 
     auto dict = std::move(dictStatus.getValue());
@@ -131,13 +131,13 @@ TEST_F(HCIndexReaderTest, ConstructSymbolDictionaryFromInitAndAdd) {
     ASSERT_OK(writer.initSymbolDictionary(windowStart, windowEnd));
     ASSERT_OK(writer.addSymbol(windowStart, windowEnd, "region", 1));
     ASSERT_OK(writer.addSymbol(windowStart, windowEnd, "zone", 2));
-    auto initStatus = writer.flush(windowStart, windowEnd, DictionaryGranularity::HOURLY, true);
+    auto initStatus = writer.flush(windowStart, windowEnd, HCIndexPeriodEnum::Hour, 1, true);
     ASSERT_OK(initStatus);
 
     // Add more symbols (in ADD mode)
     ASSERT_OK(writer.addSymbol(windowStart, windowEnd, "pod", 3));
     ASSERT_OK(writer.addSymbol(windowStart, windowEnd, "instance", 4));
-    auto addStatus = writer.flush(windowStart, windowEnd, DictionaryGranularity::HOURLY, true);
+    auto addStatus = writer.flush(windowStart, windowEnd, HCIndexPeriodEnum::Hour, 1, true);
     ASSERT_OK(addStatus);
 
     // Flush pending operations to database
@@ -148,7 +148,7 @@ TEST_F(HCIndexReaderTest, ConstructSymbolDictionaryFromInitAndAdd) {
     HCIndexReader reader(dbName, collectionUUID);
     ASSERT_OK(reader.initializeCollections(opCtx));
     auto dictStatus = reader.constructSymbolDictionary(
-        opCtx, windowStart, windowEnd, DictionaryGranularity::HOURLY, windowEnd);
+        opCtx, windowStart, windowEnd, HCIndexPeriodEnum::Hour, 1, windowEnd);
     ASSERT_OK(dictStatus);
 
     auto dict = std::move(dictStatus.getValue());

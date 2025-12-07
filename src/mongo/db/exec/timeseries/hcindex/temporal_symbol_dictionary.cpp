@@ -31,7 +31,9 @@
 #include "mongo/db/exec/timeseries/hcindex/hcindex_writer.h"
 #include "mongo/db/exec/timeseries/hcindex/hcindex_reader.h"
 #include "mongo/base/error_codes.h"
+#include "mongo/logv2/log.h"
 
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 namespace mongo::timeseries::hcindex {
 
@@ -40,12 +42,14 @@ namespace mongo::timeseries::hcindex {
 // ============================================================================
 
 SymbolDictionary::SymbolDictionary(
-    DictionaryGranularity granularity,
+    HCIndexPeriodEnum period,
+    int32_t frequency,
     Timestamp windowStart,
     Timestamp windowEnd,
     HCIndexWriter *writer)
     : _nextSymbolIndex(1)
-    , _granularity(granularity)
+    , _period(period)
+    , _frequency(frequency)
     , _windowStart(windowStart)
     , _windowEnd(windowEnd)
     , _writer(writer)
@@ -158,7 +162,7 @@ void SymbolDictionary::flush()
     }
 
     // Flush pending operations via the writer
-    if (!_writer->flush(_windowStart, _windowEnd, _granularity, true).isOK()) {
+    if (!_writer->flush(_windowStart, _windowEnd, _period, _frequency, true).isOK()) {
         return;  // Could not flush
     }
 
@@ -217,11 +221,13 @@ size_t SymbolDictionary::getMemoryUsageBytes() const {
 // ============================================================================
 
 TemporalSymbolDictionary::TemporalSymbolDictionary(const UUID& collectionUUID,
-                                                   DictionaryGranularity granularity,
+                                                   HCIndexPeriodEnum period,
+                                                   int32_t frequency,
                                                    HCIndexWriter* writer,
                                                    HCIndexReader* reader)
     : _collectionUUID(collectionUUID)
-    , _granularity(granularity)
+    , _period(period)
+    , _frequency(frequency)
     , _writer(writer)
     , _reader(reader)
 {
@@ -336,8 +342,10 @@ StatusWith<SymbolDictionary*> TemporalSymbolDictionary::getOrCreateDictionary(
     if (_reader) {
         auto windowEnd = calculateWindowEnd(windowStart);
         auto reconstructResult = _reader->constructSymbolDictionary(
-            opCtx, windowStart, windowEnd, _granularity, windowStart);
-        if (reconstructResult.isOK()) {
+            opCtx, windowStart, windowEnd, _period, _frequency, windowStart);
+        // If reconstruction succeeds and dictionary has symbols, use it
+        if (reconstructResult.isOK() && reconstructResult.getValue().get()->getSymbolCount() > 0) {
+            LOGV2(9999920, "HCIndex: Reconstructed dictionary for window", "windowStart"_attr = windowStart);
             auto* dictPtr = reconstructResult.getValue().get();
 
             // Set the writer on the reconstructed dictionary so it can accept new symbols
@@ -353,10 +361,12 @@ StatusWith<SymbolDictionary*> TemporalSymbolDictionary::getOrCreateDictionary(
         // of data and missing data.
     }
 
+    LOGV2(9999921, "HCIndex: Creating new dictionary for window", "windowStart"_attr = windowStart);
+
     // Create new dictionary
     auto windowEnd = calculateWindowEnd(windowStart);
     auto dict = std::make_unique<SymbolDictionary>(
-        _granularity, windowStart, windowEnd, _writer);
+        _period, _frequency, windowStart, windowEnd, _writer);
 
     // Change state to ReadWrite for new dictionaries created by TemporalSymbolDictionary
     auto stateStatus = dict->changeState(SymbolDictionaryState::ReadWrite);
@@ -371,60 +381,41 @@ StatusWith<SymbolDictionary*> TemporalSymbolDictionary::getOrCreateDictionary(
 }
 
 Timestamp TemporalSymbolDictionary::calculateWindowStart(const Timestamp& timestamp) const {
-    uint32_t seconds = timestamp.getSecs();
     uint32_t windowSizeSeconds = 0;
 
-    switch (_granularity) {
-        case DictionaryGranularity::DAILY:
-            windowSizeSeconds = 24 * 60 * 60;  // 86400 seconds
+    switch (_period) {
+        case HCIndexPeriodEnum::Hour:
+            windowSizeSeconds = _frequency * 60 * 60;  // frequency hours in seconds
             break;
-        case DictionaryGranularity::HOURLY:
-            windowSizeSeconds = 60 * 60;  // 3600 seconds
+        case HCIndexPeriodEnum::Minute:
+            windowSizeSeconds = _frequency * 60;  // frequency minutes in seconds
             break;
-        case DictionaryGranularity::THIRTY_MIN:
-            windowSizeSeconds = 30 * 60;  // 1800 seconds
-            break;
-        case DictionaryGranularity::TEN_MIN:
-            windowSizeSeconds = 10 * 60;  // 600 seconds
-            break;
-        case DictionaryGranularity::FIVE_MIN:
-            windowSizeSeconds = 5 * 60;  // 300 seconds
-            break;
-        case DictionaryGranularity::AUTO:
-            // Default to HOURLY
-            windowSizeSeconds = 60 * 60;
+        case HCIndexPeriodEnum::Second:
+            windowSizeSeconds = _frequency;  // frequency seconds
             break;
     }
 
+    uint32_t seconds = timestamp.getSecs();
     uint32_t windowStartSeconds = (seconds / windowSizeSeconds) * windowSizeSeconds;
     return Timestamp(windowStartSeconds, 0);
 }
 
 Timestamp TemporalSymbolDictionary::calculateWindowEnd(const Timestamp& windowStart) const {
-    uint32_t seconds = windowStart.getSecs();
     uint32_t windowSizeSeconds = 0;
 
-    switch (_granularity) {
-        case DictionaryGranularity::DAILY:
-            windowSizeSeconds = 24 * 60 * 60;
+    switch (_period) {
+        case HCIndexPeriodEnum::Hour:
+            windowSizeSeconds = _frequency * 60 * 60;  // frequency hours in seconds
             break;
-        case DictionaryGranularity::HOURLY:
-            windowSizeSeconds = 60 * 60;
+        case HCIndexPeriodEnum::Minute:
+            windowSizeSeconds = _frequency * 60;  // frequency minutes in seconds
             break;
-        case DictionaryGranularity::THIRTY_MIN:
-            windowSizeSeconds = 30 * 60;
-            break;
-        case DictionaryGranularity::TEN_MIN:
-            windowSizeSeconds = 10 * 60;
-            break;
-        case DictionaryGranularity::FIVE_MIN:
-            windowSizeSeconds = 5 * 60;
-            break;
-        case DictionaryGranularity::AUTO:
-            windowSizeSeconds = 60 * 60;
+        case HCIndexPeriodEnum::Second:
+            windowSizeSeconds = _frequency;  // frequency seconds
             break;
     }
 
+    uint32_t seconds = windowStart.getSecs();
     return Timestamp(seconds + windowSizeSeconds, 0);
 }
 

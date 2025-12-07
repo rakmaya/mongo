@@ -85,7 +85,8 @@ Status HCIndexWriter::addAttribute(const Timestamp& windowStart,
 
 Status HCIndexWriter::_flushSymbols(const Timestamp& windowStart,
                                     const Timestamp& windowEnd,
-                                    DictionaryGranularity granularity) {
+                                    HCIndexPeriodEnum period,
+                                    int32_t frequency) {
     WindowKey key = std::make_pair(windowStart, windowEnd);
 
     auto it = accumulatedSymbols.find(key);
@@ -106,7 +107,8 @@ Status HCIndexWriter::_flushSymbols(const Timestamp& windowStart,
     docBuilder.append("timestamp", isInitMode ? windowStart : Timestamp());
     docBuilder.append("windowStart", windowStart);
     docBuilder.append("windowEnd", windowEnd);
-    docBuilder.append("granularity", static_cast<int>(granularity));
+    docBuilder.append("period", static_cast<int>(period));
+    docBuilder.append("frequency", frequency);
     docBuilder.append("op", isInitMode ? "INIT" : "opADD");
     docBuilder.append("symbols", symbolsBuilder.obj());
 
@@ -120,7 +122,8 @@ Status HCIndexWriter::_flushSymbols(const Timestamp& windowStart,
 
 Status HCIndexWriter::_flushAttributes(const Timestamp& windowStart,
                                        const Timestamp& windowEnd,
-                                       DictionaryGranularity granularity) {
+                                       HCIndexPeriodEnum period,
+                                       int32_t frequency) {
     WindowKey key = std::make_pair(windowStart, windowEnd);
 
     auto schemaIt = accumulatedSchema.find(key);
@@ -168,7 +171,8 @@ Status HCIndexWriter::_flushAttributes(const Timestamp& windowStart,
     docBuilder.append("timestamp", isInitMode ? windowStart : Timestamp());
     docBuilder.append("windowStart", windowStart);
     docBuilder.append("windowEnd", windowEnd);
-    docBuilder.append("granularity", static_cast<int>(granularity));
+    docBuilder.append("period", static_cast<int>(period));
+    docBuilder.append("frequency", frequency);
     docBuilder.append("op", isInitMode ? "INIT" : "opADD");
     if (hasSchema) {
         docBuilder.append("schema", schemaBuilder.obj());
@@ -192,12 +196,13 @@ Status HCIndexWriter::_flushAttributes(const Timestamp& windowStart,
 
 Status HCIndexWriter::flush(const Timestamp& windowStart,
                             const Timestamp& windowEnd,
-                            DictionaryGranularity granularity,
+                            HCIndexPeriodEnum period,
+                            int32_t frequency,
                             bool isSymbolOps) {
     if (isSymbolOps) {
-        return _flushSymbols(windowStart, windowEnd, granularity);
+        return _flushSymbols(windowStart, windowEnd, period, frequency);
     } else {
-        return _flushAttributes(windowStart, windowEnd, granularity);
+        return _flushAttributes(windowStart, windowEnd, period, frequency);
     }
     // Note: isSymbolInitMode or isAttributeInitMode is reset to false at the end of
     // _flushSymbols or _flushAttributes respectively
@@ -205,14 +210,16 @@ Status HCIndexWriter::flush(const Timestamp& windowStart,
 
 Status HCIndexWriter::buildFin(const Timestamp& windowStart,
                                const Timestamp& windowEnd,
-                               DictionaryGranularity granularity,
+                               HCIndexPeriodEnum period,
+                               int32_t frequency,
                                bool isSymbolOps) {
     BSONObjBuilder docBuilder;
     docBuilder.append("_id", OID::gen());
     docBuilder.append("timestamp", windowEnd);
     docBuilder.append("windowStart", windowStart);
     docBuilder.append("windowEnd", windowEnd);
-    docBuilder.append("granularity", static_cast<int>(granularity));
+    docBuilder.append("period", static_cast<int>(period));
+    docBuilder.append("frequency", frequency);
     docBuilder.append("op", "FIN");
 
     _addPendingOperation(docBuilder.obj(), isSymbolOps);
@@ -221,14 +228,16 @@ Status HCIndexWriter::buildFin(const Timestamp& windowStart,
 
 Status HCIndexWriter::buildRef(const Timestamp& windowStart,
                                const Timestamp& windowEnd,
-                               DictionaryGranularity granularity,
+                               HCIndexPeriodEnum period,
+                               int32_t frequency,
                                const Timestamp& refWindowStart) {
     BSONObjBuilder docBuilder;
     docBuilder.append("_id", OID::gen());
     docBuilder.append("timestamp", windowStart);
     docBuilder.append("windowStart", windowStart);
     docBuilder.append("windowEnd", windowEnd);
-    docBuilder.append("granularity", static_cast<int>(granularity));
+    docBuilder.append("period", static_cast<int>(period));
+    docBuilder.append("frequency", frequency);
     docBuilder.append("op", "REF");
     docBuilder.append("refWindowStart", refWindowStart);
 

@@ -197,9 +197,22 @@ void prependUnpackStageForHCIndexIfRequiredImpl(const boost::intrusive_ptr<Expre
 
     // Check if the pipeline already has an unpack stage (from view resolution)
     const auto& sources = pipeline.getSources();
-    if (!sources.empty() && sources.front()->getSourceName() == "$_internalUnpackBucket"_sd) {
-        LOGV2(10000005, "HCIndex: prependUnpackStageForHCIndexIfRequired - Unpack stage already present, skipping");
-        return;
+    LOGV2(10000004, "HCIndex: prependUnpackStageForHCIndexIfRequired - checking sources", "numSources"_attr = sources.size());
+
+    if (!sources.empty()) {
+        auto firstStageName = sources.front()->getSourceName();
+        LOGV2(10000005, "HCIndex: prependUnpackStageForHCIndexIfRequired - first stage", "stageName"_attr = firstStageName);
+
+        if (firstStageName == "$_internalUnpackBucket"_sd) {
+            LOGV2(10000005, "HCIndex: prependUnpackStageForHCIndexIfRequired - Unpack stage already present, skipping");
+            return;
+        }
+
+        // Don't prepend unpack stage for $collStats - it must be the first stage in the pipeline
+        if (firstStageName == "$collStats"_sd) {
+            LOGV2(10000006, "HCIndex: prependUnpackStageForHCIndexIfRequired - $collStats must be first stage, skipping");
+            return;
+        }
     }
 
     LOGV2(10000002, "HCIndex: prependUnpackStageForHCIndexIfRequired - HCIndex enabled on legacy timeseries, prepending unpack stage");

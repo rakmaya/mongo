@@ -35,6 +35,7 @@
 #include "mongo/db/exec/timeseries/hcindex/temporal_symbol_dictionary.h"
 #include "mongo/db/exec/timeseries/hcindex/temporal_attribute_table.h"
 #include "mongo/db/local_catalog/shard_role_api/shard_role.h"
+#include "mongo/db/timeseries/timeseries_gen.h"
 #include "mongo/util/uuid.h"
 
 #include <memory>
@@ -86,12 +87,15 @@ public:
      *
      * Parameters:
      * - opCtx: Operation context for database operations
+     * - period: Time-window period (hour, minute, second)
+     * - frequency: Time-window frequency (1-24 for hour, 1-59 for minute/second)
      */
     StatusWith<std::unique_ptr<SymbolDictionary>> constructSymbolDictionary(
         OperationContext* opCtx,
         const Timestamp& windowStart,
         const Timestamp& windowEnd,
-        DictionaryGranularity granularity,
+        HCIndexPeriodEnum period,
+        int32_t frequency,
         const Timestamp& upToTimestamp);
 
     /**
@@ -106,12 +110,15 @@ public:
      *
      * Parameters:
      * - opCtx: Operation context for database operations
+     * - period: Time-window period (hour, minute, second)
+     * - frequency: Time-window frequency (1-24 for hour, 1-59 for minute/second)
      */
     StatusWith<std::unique_ptr<AttributeTable>> constructAttributeTable(
         OperationContext* opCtx,
         const Timestamp& windowStart,
         const Timestamp& windowEnd,
-        DictionaryGranularity granularity,
+        HCIndexPeriodEnum period,
+        int32_t frequency,
         const Timestamp& upToTimestamp,
         SymbolDictionary* symbolDictionary);
 

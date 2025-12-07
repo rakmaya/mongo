@@ -33,6 +33,8 @@
 #include "mongo/db/exec/timeseries/hcindex/hcindex_writer.h"
 #include "mongo/db/exec/timeseries/hcindex/hcindex_reader.h"
 #include "mongo/db/repl/oplog.h"
+#include "mongo/db/timeseries/timeseries_gen.h"
+#include "mongo/db/timeseries/hcindex_options.h"
 #include "mongo/util/uuid.h"
 
 #include <functional>
@@ -81,18 +83,20 @@ public:
      * Create a new HCIndex manager for the specified collection.
      *
      * The manager will manage HCIndex structures for the collection identified by
-     * collectionUUID in the specified database, using the specified granularity for time-window scoping.
+     * collectionUUID in the specified database, using the specified period and frequency for time-window scoping.
      *
      * Parameters:
      * - opCtx: Operation context for database operations
      * - dbName: Database name where the timeseries collection resides
      * - collectionUUID: UUID of the timeseries collection
-     * - granularity: Time-window granularity for the HCIndex structures
+     * - period: Time-window period (hour, minute, second)
+     * - frequency: Time-window frequency (1-24 for hour, 1-59 for minute/second)
      */
     HCIndexCollectionManager(OperationContext* opCtx,
                             const DatabaseName& dbName,
                             const UUID& collectionUUID,
-                            DictionaryGranularity granularity);
+                            HCIndexPeriodEnum period,
+                            int32_t frequency);
 
     /**
      * Initialize the reader for read operations by acquiring collections.
@@ -193,9 +197,11 @@ public:
      * Get the dictionary granularity for this collection.
      *
      * Returns the DictionaryGranularity used for time-window scoping.
+     * Computed from the period and frequency configuration.
      */
     DictionaryGranularity getGranularity() const {
-        return granularity;
+        timeseries::HCIndexTimeWindow timeWindow(period, frequency);
+        return timeWindow.toDictionaryGranularity();
     }
 
     /**
@@ -245,8 +251,11 @@ private:
     // Collection UUID for this manager
     UUID collectionUUID;
 
-    // Dictionary granularity for time-window scoping
-    DictionaryGranularity granularity;
+    // Period (hour, minute, second)
+    HCIndexPeriodEnum period;
+
+    // Frequency (1-24 for hour, 1-59 for minute/second)
+    int32_t frequency;
 
     // Writer for operations
     std::unique_ptr<HCIndexWriter> writer;

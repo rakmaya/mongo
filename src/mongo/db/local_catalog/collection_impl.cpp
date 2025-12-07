@@ -98,6 +98,7 @@
 #include "mongo/db/timeseries/timeseries_index_schema_conversion_functions.h"
 #include "mongo/db/timeseries/timeseries_options.h"
 #include "mongo/db/timeseries/viewless_timeseries_collection_creation_helpers.h"
+#include "mongo/db/timeseries/hcindex_options.h"
 #include "mongo/db/timeseries/bucket_catalog/global_bucket_catalog.h"
 #include "mongo/db/exec/timeseries/hcindex/hcindex_collection_manager.h"
 #include "mongo/db/transaction/transaction_participant.h"
@@ -364,9 +365,11 @@ void CollectionImpl::init(OperationContext* opCtx) {
             if (!existingMgr) {
                 try {
 
-                    // Create HCIndexCollectionManager for this collection
+                    // Create HCIndexCollectionManager with time-window from TimeseriesOptions
+                    auto timeWindow = timeseries::getEffectiveHCIndexTimeWindow(
+                        collectionOptions.timeseries ? collectionOptions.timeseries->getHcindexOptions() : boost::none);
                     auto hcindexMgr = std::make_shared<timeseries::hcindex::HCIndexCollectionManager>(
-                        opCtx, ns().dbName(), uuid, timeseries::hcindex::DictionaryGranularity::HOURLY);
+                        opCtx, ns().dbName(), uuid, timeWindow.period, timeWindow.frequency);
 
                     // Note: Do NOT initialize the manager here. Initialization will happen lazily
                     // when the manager is first used during query execution to avoid lock cycles

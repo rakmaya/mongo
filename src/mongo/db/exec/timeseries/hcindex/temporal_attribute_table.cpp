@@ -46,10 +46,14 @@ namespace mongo::timeseries::hcindex {
 
 AttributeTable::AttributeTable(SymbolDictionary* symbolDictionary,
                                HCIndexWriter* writer,
+                               HCIndexPeriodEnum period,
+                               int32_t frequency,
                                const Timestamp& windowStart,
                                const Timestamp& windowEnd)
     : symbolDictionary(symbolDictionary)
     , writer(writer)
+    , _period(period)
+    , _frequency(frequency)
     , _windowStart(windowStart)
     , _windowEnd(windowEnd)
     , _isDirty(false)
@@ -507,7 +511,7 @@ void AttributeTable::flush()
     }
 
     // Flush pending operations via the writer
-    auto status = writer->flush(_windowStart, _windowEnd, symbolDictionary->getGranularity(), false);
+    auto status = writer->flush(_windowStart, _windowEnd, _period, _frequency, false);
     if (!status.isOK()) {
         return;  // Could not flush
     }
@@ -730,12 +734,14 @@ Status AttributeTable::writeRow(const std::vector<uint32_t>& row)
 // ============================================================================
 
 TemporalAttributeTable::TemporalAttributeTable(const UUID& collectionUUID,
-                                               DictionaryGranularity granularity,
+                                               HCIndexPeriodEnum period,
+                                               int32_t frequency,
                                                TemporalSymbolDictionary* symbolDictionary,
                                                HCIndexWriter* writer,
                                                HCIndexReader* reader)
     : collectionUUID(collectionUUID),
-      granularity(granularity),
+      period(period),
+      frequency(frequency),
       temporalSymbolDictionary(symbolDictionary),
       writer(writer),
       reader(reader) {}
@@ -783,6 +789,8 @@ StatusWith<AttributeTable*> TemporalAttributeTable::getOrCreateTableForTimestamp
         return getOrCreateTable(opCtx, windowStart);
     }
 
+    LOGV2(9999923, "HCIndex: Reconstructing attribute table for window", "windowStart"_attr = windowStart);
+
     // Try to reconstruct the table from disk
     // First, get or create the symbol dictionary for this window
     auto dictResult = temporalSymbolDictionary->getOrCreateDictionaryForTimestamp(opCtx, timestamp);
@@ -793,14 +801,19 @@ StatusWith<AttributeTable*> TemporalAttributeTable::getOrCreateTableForTimestamp
 
     // Reconstruct the attribute table from disk
     auto tableResult = reader->constructAttributeTable(
-        opCtx, windowStart, windowEnd, granularity, timestamp, dictPtr);
+        opCtx, windowStart, windowEnd, period, frequency, timestamp, dictPtr);
     if (!tableResult.isOK()) {
         return tableResult.getStatus();
     }
 
+    auto* tablePtr = tableResult.getValue().get();
+    // If the table is empty, then we need a new table for this window
+    if (tablePtr->getRowCount() == 0) {
+        return getOrCreateTable(opCtx, windowStart);
+    }
+
     // Store the reconstructed table in memory for future use
     std::unique_lock<std::shared_mutex> writeLock(mutex);
-    auto* tablePtr = tableResult.getValue().get();
 
     // Set the writer on the reconstructed table so it can accept new data
     if (writer) {
@@ -922,9 +935,11 @@ StatusWith<AttributeTable*> TemporalAttributeTable::getOrCreateTable(
         return dictResult.getStatus();
     }
 
+    LOGV2(9999922, "HCIndex: Creating new attribute table for window", "windowStart"_attr = windowStart);
+
     // Create new table with the symbol dictionary for this window
     Timestamp windowEnd = calculateWindowEnd(windowStart);
-    auto table = std::make_unique<AttributeTable>(dictResult.getValue(), writer, windowStart, windowEnd);
+    auto table = std::make_unique<AttributeTable>(dictResult.getValue(), writer, period, frequency, windowStart, windowEnd);
 
     // Change state to ReadWrite for new tables created by TemporalAttributeTable
     auto stateStatus = table->changeState(AttributeTableState::ReadWrite);
@@ -939,60 +954,41 @@ StatusWith<AttributeTable*> TemporalAttributeTable::getOrCreateTable(
 }
 
 Timestamp TemporalAttributeTable::calculateWindowStart(const Timestamp& timestamp) const {
-    uint32_t seconds = timestamp.getSecs();
     uint32_t windowSizeSeconds = 0;
 
-    switch (granularity) {
-        case DictionaryGranularity::DAILY:
-            windowSizeSeconds = 24 * 60 * 60;  // 86400 seconds
+    switch (period) {
+        case HCIndexPeriodEnum::Hour:
+            windowSizeSeconds = frequency * 60 * 60;  // frequency hours in seconds
             break;
-        case DictionaryGranularity::HOURLY:
-            windowSizeSeconds = 60 * 60;  // 3600 seconds
+        case HCIndexPeriodEnum::Minute:
+            windowSizeSeconds = frequency * 60;  // frequency minutes in seconds
             break;
-        case DictionaryGranularity::THIRTY_MIN:
-            windowSizeSeconds = 30 * 60;  // 1800 seconds
-            break;
-        case DictionaryGranularity::TEN_MIN:
-            windowSizeSeconds = 10 * 60;  // 600 seconds
-            break;
-        case DictionaryGranularity::FIVE_MIN:
-            windowSizeSeconds = 5 * 60;  // 300 seconds
-            break;
-        case DictionaryGranularity::AUTO:
-            // Default to HOURLY
-            windowSizeSeconds = 60 * 60;
+        case HCIndexPeriodEnum::Second:
+            windowSizeSeconds = frequency;  // frequency seconds
             break;
     }
 
+    uint32_t seconds = timestamp.getSecs();
     uint32_t windowStartSeconds = (seconds / windowSizeSeconds) * windowSizeSeconds;
     return Timestamp(windowStartSeconds, 0);
 }
 
 Timestamp TemporalAttributeTable::calculateWindowEnd(const Timestamp& windowStart) const {
-    uint32_t seconds = windowStart.getSecs();
     uint32_t windowSizeSeconds = 0;
 
-    switch (granularity) {
-        case DictionaryGranularity::DAILY:
-            windowSizeSeconds = 24 * 60 * 60;
+    switch (period) {
+        case HCIndexPeriodEnum::Hour:
+            windowSizeSeconds = frequency * 60 * 60;  // frequency hours in seconds
             break;
-        case DictionaryGranularity::HOURLY:
-            windowSizeSeconds = 60 * 60;
+        case HCIndexPeriodEnum::Minute:
+            windowSizeSeconds = frequency * 60;  // frequency minutes in seconds
             break;
-        case DictionaryGranularity::THIRTY_MIN:
-            windowSizeSeconds = 30 * 60;
-            break;
-        case DictionaryGranularity::TEN_MIN:
-            windowSizeSeconds = 10 * 60;
-            break;
-        case DictionaryGranularity::FIVE_MIN:
-            windowSizeSeconds = 5 * 60;
-            break;
-        case DictionaryGranularity::AUTO:
-            windowSizeSeconds = 60 * 60;
+        case HCIndexPeriodEnum::Second:
+            windowSizeSeconds = frequency;  // frequency seconds
             break;
     }
 
+    uint32_t seconds = windowStart.getSecs();
     return Timestamp(seconds + windowSizeSeconds, 0);
 }
 

@@ -46,14 +46,22 @@ NamespaceString HCIndexCollectionManager::getAttributeOperationsNamespace(const 
 HCIndexCollectionManager::HCIndexCollectionManager(OperationContext* opCtx,
                                                    const DatabaseName& dbName,
                                                    const UUID& collectionUUID,
-                                                   DictionaryGranularity granularity)
+                                                   HCIndexPeriodEnum period,
+                                                   int32_t frequency)
     : dbName(dbName),
       collectionUUID(collectionUUID),
-      granularity(granularity),
+      period(period),
+      frequency(frequency),
       writer(std::make_unique<HCIndexWriter>(collectionUUID, dbName)),
       reader(std::make_unique<HCIndexReader>(dbName, collectionUUID)),
-      symbolDictionary(std::make_unique<TemporalSymbolDictionary>(collectionUUID, granularity, writer.get(), reader.get())),
-      attributeTable(std::make_unique<TemporalAttributeTable>(collectionUUID, granularity, symbolDictionary.get(), writer.get(), reader.get())) {}
+      symbolDictionary(std::make_unique<TemporalSymbolDictionary>(collectionUUID, period, frequency, writer.get(), reader.get())),
+      attributeTable(std::make_unique<TemporalAttributeTable>(collectionUUID, period, frequency, symbolDictionary.get(), writer.get(), reader.get()))
+{
+    LOGV2(9999995,
+          "HCIndex: HCIndexCollectionManager created for collectionUUID: {collectionUUID} in database: {dbName}",
+          "collectionUUID"_attr = collectionUUID,
+          "dbName"_attr = dbName);
+}
 
 Status HCIndexCollectionManager::initializeForRead(OperationContext* opCtx) {
     Timer timer;
@@ -212,6 +220,7 @@ StatusWith<BSONObj> HCIndexCollectionManager::decodeMetadata(OperationContext* o
 
 Status HCIndexCollectionManager::flushPendingOperations(
     std::function<Status(const std::string&, const std::vector<InsertStatement>&)> flushCallback) {
+    LOGV2(9999907, "HCIndex: HCIndexCollectionManager::flushPendingOperations called");
     if (!writer) {
         return Status(ErrorCodes::InternalError, "HCIndex writer not initialized");
     }

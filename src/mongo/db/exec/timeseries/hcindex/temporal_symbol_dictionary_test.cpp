@@ -48,7 +48,7 @@ TestSymbolDictionaryContext createTestSymbolDictionaryWithWriter() {
     Timestamp windowEnd(2, 0);
     DatabaseName dbName = DatabaseName::createDatabaseName_forTest(boost::none, "test");
     auto writer = std::make_unique<HCIndexWriter>(collectionUUID, dbName);
-    auto dict = new SymbolDictionary(DictionaryGranularity::HOURLY, windowStart, windowEnd, writer.get());
+    auto dict = new SymbolDictionary(HCIndexPeriodEnum::Hour, 1, windowStart, windowEnd, writer.get());
     ASSERT_OK(dict->changeState(SymbolDictionaryState::ReadWrite));
     return {std::move(writer), dict};
 }
@@ -182,7 +182,7 @@ TestTemporalSymbolDictionaryContext createTestTemporalSymbolDictionaryWithWriter
     auto collectionUUID = UUID::gen();
     DatabaseName dbName = DatabaseName::createDatabaseName_forTest(boost::none, "test");
     auto writer = std::make_unique<HCIndexWriter>(collectionUUID, dbName);
-    auto tempDict = new TemporalSymbolDictionary(collectionUUID, DictionaryGranularity::HOURLY, writer.get());
+    auto tempDict = new TemporalSymbolDictionary(collectionUUID, HCIndexPeriodEnum::Hour, 1, writer.get());
     return {std::move(writer), tempDict};
 }
 
@@ -251,7 +251,8 @@ TEST(TemporalSymbolDictionaryTest, GetWindowForTimestampDaily) {
     auto collectionUUID = UUID::gen();
     DatabaseName dbName = DatabaseName::createDatabaseName_forTest(boost::none, "test");
     auto writer = std::make_unique<HCIndexWriter>(collectionUUID, dbName);
-    TemporalSymbolDictionary tempDict(collectionUUID, DictionaryGranularity::DAILY, writer.get());
+    // Use Hour period with frequency 24 for a daily window
+    TemporalSymbolDictionary tempDict(collectionUUID, HCIndexPeriodEnum::Hour, 24, writer.get());
     Timestamp ts(86401, 0);  // 1 day + 1 second
 
     auto [windowStart, windowEnd] = tempDict.getWindowForTimestamp(ts);
@@ -279,7 +280,7 @@ TEST(TemporalSymbolDictionaryTest, CleanupOldDictionaries) {
     auto collectionUUID = UUID::gen();
     DatabaseName dbName = DatabaseName::createDatabaseName_forTest(boost::none, "test");
     HCIndexWriter writer(collectionUUID, dbName);
-    TemporalSymbolDictionary tempDict(collectionUUID, DictionaryGranularity::HOURLY, &writer);
+    TemporalSymbolDictionary tempDict(collectionUUID, HCIndexPeriodEnum::Hour, 1, &writer);
 
     // Create dictionaries for different time windows
     Timestamp ts1(1000, 0);   // Window: 0-3600
@@ -305,7 +306,7 @@ TEST(TemporalSymbolDictionaryTest, DifferentWindowsHaveSeparateDictionaries) {
     auto collectionUUID = UUID::gen();
     DatabaseName dbName = DatabaseName::createDatabaseName_forTest(boost::none, "test");
     HCIndexWriter writer(collectionUUID, dbName);
-    TemporalSymbolDictionary tempDict(collectionUUID, DictionaryGranularity::HOURLY, &writer);
+    TemporalSymbolDictionary tempDict(collectionUUID, HCIndexPeriodEnum::Hour, 1, &writer);
 
     Timestamp ts1(1000, 0);   // Window: 0-3600
     Timestamp ts2(5000, 0);   // Window: 3600-7200

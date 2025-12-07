@@ -32,6 +32,7 @@
 #include "mongo/base/string_data.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/timeseries/timeseries_gen.h"
 #include "mongo/util/uuid.h"
 
 #include <cstdint>
@@ -106,7 +107,8 @@ public:
      * Reconstruction, ReadWrite, or ReadOnly states.
      */
     SymbolDictionary(
-        DictionaryGranularity granularity,
+        HCIndexPeriodEnum period,
+        int32_t frequency,
         Timestamp windowStart,
         Timestamp windowEnd,
         HCIndexWriter *writer);
@@ -171,13 +173,6 @@ public:
      */
     size_t getMemoryUsageBytes() const;
 
-    /**
-     * Return the granularity of this dictionary.
-     */
-    DictionaryGranularity getGranularity() const {
-        return _granularity;
-    }
-
 private:
     // Bidirectional mapping for symbols
     std::unordered_map<std::string, uint32_t> _wordToIndex;
@@ -186,8 +181,9 @@ private:
     // Next symbol index to assign (starts at 1, 0 is reserved)
     uint32_t _nextSymbolIndex = 1;
 
-    // Granularity
-    DictionaryGranularity _granularity;
+    // Period and frequency for time window calculation
+    HCIndexPeriodEnum _period;
+    int32_t _frequency;
 
     // Range that we cover
     Timestamp _windowStart;
@@ -214,7 +210,7 @@ private:
  *
  * Key features:
  * - Time-window scoped: Each window has its own dictionary
- * - Configurable granularity: DAILY, HOURLY, THIRTY_MIN, TEN_MIN, FIVE_MIN
+ * - Configurable period and frequency: Hour/Minute/Second with custom frequencies
  * - Automatic window management: Creates dictionaries on-demand
  * - Cleanup support: Can remove old dictionaries to free memory
  * - Thread-safe: Safe for concurrent access from multiple threads
@@ -224,14 +220,15 @@ public:
     /**
      * Create a new temporal symbol dictionary manager for managing symbol
      * dictionaries for timeseries collections having the specified
-     * 'collectionUUID' with the given 'granularity'. Behavior is undefined
+     * 'collectionUUID' with the given 'period' and 'frequency'. Behavior is undefined
      * unless the 'collectionUUID' is valid through the lifetime of this object.
      * The 'writer' can be nullptr if this dictionary is being constructed by a
      * reader (in which case no new operations will be written).
      * The 'reader' can be nullptr if reconstruction from disk is not needed.
      */
     TemporalSymbolDictionary(const UUID& collectionUUID,
-                             DictionaryGranularity granularity,
+                             HCIndexPeriodEnum period,
+                             int32_t frequency,
                              HCIndexWriter *writer,
                              class HCIndexReader *reader = nullptr);
 
@@ -333,8 +330,11 @@ private:
     // Collection UUID for this temporal dictionary
     UUID _collectionUUID;
 
-    // Granularity level
-    DictionaryGranularity _granularity;
+    // Period (hour, minute, second)
+    HCIndexPeriodEnum _period;
+
+    // Frequency (1-24 for hour, 1-59 for minute/second)
+    int32_t _frequency;
 
     // Writer (can be nullptr if constructed by reader)
     HCIndexWriter *_writer = nullptr;

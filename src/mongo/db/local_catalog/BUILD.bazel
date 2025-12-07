@@ -499,7 +499,10 @@ mongo_cc_library(
         "unique_collection_name.h",
         "//src/mongo/db/collection_crud:capped_utils.h",
     ],
-    private_hdrs = ["//src/mongo/db/op_observer:batched_write_policy.h"],
+    private_hdrs = [
+        "//src/mongo/db/op_observer:batched_write_policy.h",
+        "//src/mongo/db/timeseries:hcindex_options.h",
+    ],
     deps = [
         ":cannot_convert_index_to_unique_info",
         ":collection_options",
@@ -669,6 +672,7 @@ mongo_cc_library(
         "//src/mongo/db/timeseries:timeseries_conversion_util",
         "//src/mongo/db/timeseries:timeseries_extended_range",
         "//src/mongo/db/timeseries:viewless_timeseries_collection_creation_helpers",
+        "//src/mongo/db/exec/timeseries/hcindex",
         "//src/mongo/db/transaction",
         "//src/mongo/db/ttl:ttl_collection_cache",
         "//src/mongo/db/validate:validate_idl",

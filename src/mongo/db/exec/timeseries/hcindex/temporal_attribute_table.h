@@ -34,6 +34,7 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/timeseries/timeseries_gen.h"
 #include "mongo/util/uuid.h"
 
 #include <cstdint>
@@ -172,6 +173,8 @@ public:
      */
     AttributeTable(SymbolDictionary* symbolDictionary,
                    HCIndexWriter* writer,
+                   HCIndexPeriodEnum period,
+                   int32_t frequency,
                    const Timestamp& windowStart = Timestamp(),
                    const Timestamp& windowEnd = Timestamp());
 
@@ -320,6 +323,10 @@ private:
     // Must remain valid for the lifetime of this AttributeTable
     HCIndexWriter* writer;
 
+    // Period and frequency for time window calculation
+    HCIndexPeriodEnum _period;
+    int32_t _frequency;
+
     // Current state of the table
     AttributeTableState _state = AttributeTableState::NOP;
 
@@ -357,7 +364,7 @@ private:
  *
  * Key features:
  * - Time-window scoped: Each window has its own attribute table
- * - Configurable granularity: DAILY, HOURLY, THIRTY_MIN, TEN_MIN, FIVE_MIN
+ * - Configurable period and frequency: Hour/Minute/Second with custom frequencies
  * - Automatic window management: Creates tables on-demand
  * - Cleanup support: Can remove old tables to free memory
  * - Thread-safe: Safe for concurrent access from multiple threads
@@ -368,7 +375,7 @@ public:
     /**
      * Create a new temporal attribute table manager for managing attribute tables
      * for timeseries collections having the specified 'collectionUUID' with the
-     * given 'granularity'. The symbolDictionary is used to convert metadata values
+     * given 'period' and 'frequency'. The symbolDictionary is used to convert metadata values
      * to symbol indices, the reader is used to read existing attribute operations,
      * and the writer is used to write new attribute operations. All parameters must
      * remain valid for the lifetime of this object.
@@ -378,7 +385,8 @@ public:
      * (in which case no new operations will be written).
      */
     TemporalAttributeTable(const UUID& collectionUUID,
-                           DictionaryGranularity granularity,
+                           HCIndexPeriodEnum period,
+                           int32_t frequency,
                            class TemporalSymbolDictionary* symbolDictionary,
                            class HCIndexWriter* writer,
                            class HCIndexReader* reader = nullptr);
@@ -525,8 +533,11 @@ private:
     // Collection UUID for this temporal attribute table
     UUID collectionUUID;
 
-    // Granularity level
-    DictionaryGranularity granularity;
+    // Period (hour, minute, second)
+    HCIndexPeriodEnum period;
+
+    // Frequency (1-24 for hour, 1-59 for minute/second)
+    int32_t frequency;
 
     // Temporal symbol dictionary for encoding metadata values
     class TemporalSymbolDictionary* temporalSymbolDictionary;

@@ -51,9 +51,9 @@ protected:
         writer = std::make_unique<HCIndexWriter>(collectionUUID, dbName);
         Timestamp windowStart(1, 0);
         Timestamp windowEnd(2, 0);
-        dict = std::make_unique<SymbolDictionary>(DictionaryGranularity::HOURLY, windowStart, windowEnd, writer.get());
+        dict = std::make_unique<SymbolDictionary>(HCIndexPeriodEnum::Hour, 1, windowStart, windowEnd, writer.get());
         ASSERT_OK(dict->changeState(SymbolDictionaryState::ReadWrite));
-        table = std::make_unique<AttributeTable>(dict.get(), writer.get(), windowStart, windowEnd);
+        table = std::make_unique<AttributeTable>(dict.get(), writer.get(), HCIndexPeriodEnum::Hour, 1, windowStart, windowEnd);
         ASSERT_OK(table->changeState(AttributeTableState::ReadWrite));
     }
 
@@ -263,9 +263,9 @@ protected:
         DatabaseName dbName = DatabaseName::createDatabaseName_forTest(boost::none, "test");
         writer = std::make_unique<HCIndexWriter>(collectionUUID, dbName);
         tempDict = std::make_unique<TemporalSymbolDictionary>(
-            collectionUUID, DictionaryGranularity::HOURLY, writer.get());
+            collectionUUID, HCIndexPeriodEnum::Hour, 1, writer.get());
         tempTable = std::make_unique<TemporalAttributeTable>(
-            collectionUUID, DictionaryGranularity::HOURLY, tempDict.get(), writer.get());
+            collectionUUID, HCIndexPeriodEnum::Hour, 1, tempDict.get(), writer.get());
     }
 
     OperationContext* getOpCtx() {
@@ -412,9 +412,9 @@ protected:
         writer = std::make_unique<HCIndexWriter>(collectionUUID, dbName);
         Timestamp windowStart(1, 0);
         Timestamp windowEnd(2, 0);
-        dict = std::make_unique<SymbolDictionary>(DictionaryGranularity::HOURLY, windowStart, windowEnd, writer.get());
+        dict = std::make_unique<SymbolDictionary>(HCIndexPeriodEnum::Hour, 1, windowStart, windowEnd, writer.get());
         ASSERT_OK(dict->changeState(SymbolDictionaryState::ReadWrite));
-        table = std::make_unique<AttributeTable>(dict.get(), writer.get(), windowStart, windowEnd);
+        table = std::make_unique<AttributeTable>(dict.get(), writer.get(), HCIndexPeriodEnum::Hour, 1, windowStart, windowEnd);
         ASSERT_OK(table->changeState(AttributeTableState::ReadWrite));
     }
 
@@ -521,9 +521,9 @@ protected:
         writer = std::make_unique<HCIndexWriter>(collectionUUID, dbName);
         Timestamp windowStart(1, 0);
         Timestamp windowEnd(2, 0);
-        dict = std::make_unique<SymbolDictionary>(DictionaryGranularity::HOURLY, windowStart, windowEnd, writer.get());
+        dict = std::make_unique<SymbolDictionary>(HCIndexPeriodEnum::Hour, 1, windowStart, windowEnd, writer.get());
         ASSERT_OK(dict->changeState(SymbolDictionaryState::ReadWrite));
-        table = std::make_unique<AttributeTable>(dict.get(), writer.get(), windowStart, windowEnd);
+        table = std::make_unique<AttributeTable>(dict.get(), writer.get(), HCIndexPeriodEnum::Hour, 1, windowStart, windowEnd);
         ASSERT_OK(table->changeState(AttributeTableState::ReadWrite));
     }
 
@@ -719,9 +719,9 @@ protected:
         writer = std::make_unique<HCIndexWriter>(collectionUUID, dbName);
         Timestamp windowStart(1, 0);
         Timestamp windowEnd(2, 0);
-        dict = std::make_unique<SymbolDictionary>(DictionaryGranularity::HOURLY, windowStart, windowEnd, writer.get());
+        dict = std::make_unique<SymbolDictionary>(HCIndexPeriodEnum::Hour, 1, windowStart, windowEnd, writer.get());
         ASSERT_OK(dict->changeState(SymbolDictionaryState::ReadWrite));
-        table = std::make_unique<AttributeTable>(dict.get(), writer.get(), windowStart, windowEnd);
+        table = std::make_unique<AttributeTable>(dict.get(), writer.get(), HCIndexPeriodEnum::Hour, 1, windowStart, windowEnd);
         ASSERT_OK(table->changeState(AttributeTableState::ReadWrite));
     }
 
@@ -951,9 +951,9 @@ protected:
         writer = std::make_unique<HCIndexWriter>(collectionUUID, dbName);
         Timestamp windowStart(1, 0);
         Timestamp windowEnd(2, 0);
-        dict = std::make_unique<SymbolDictionary>(DictionaryGranularity::HOURLY, windowStart, windowEnd, writer.get());
+        dict = std::make_unique<SymbolDictionary>(HCIndexPeriodEnum::Hour, 1, windowStart, windowEnd, writer.get());
         ASSERT_OK(dict->changeState(SymbolDictionaryState::ReadWrite));
-        table = std::make_unique<AttributeTable>(dict.get(), writer.get(), windowStart, windowEnd);
+        table = std::make_unique<AttributeTable>(dict.get(), writer.get(), HCIndexPeriodEnum::Hour, 1, windowStart, windowEnd);
         ASSERT_OK(table->changeState(AttributeTableState::ReadWrite));
     }
 

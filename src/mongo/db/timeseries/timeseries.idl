@@ -189,8 +189,33 @@ enums:
             Seconds: "seconds"
             Minutes: "minutes"
             Hours: "hours"
+    HCIndexPeriod:
+        description:
+            "Describes the time-window period for HCIndex structures (Symbol Dictionary and Attribute Table)"
+        type: string
+        values:
+            Hour: "hour"
+            Minute: "minute"
+            Second: "second"
 
 structs:
+    HCIndexOptions:
+        description: "Options for High Cardinality Index (HCIndex) configuration."
+        strict: true
+        query_shape_component: true
+        fields:
+            period:
+                description: "Time-window period for HCIndex structures (Symbol Dictionary and Attribute Table). Valid values: 'hour', 'minute', 'second'. Defaults to 'hour' if not specified."
+                type: HCIndexPeriod
+                optional: true
+                stability: unstable
+                query_shape: parameter
+            frequency:
+                description: "Time-window frequency within the period. Valid range depends on period: 1-24 for 'hour', 1-59 for 'minute', 1-59 for 'second'. Defaults to 1 if not specified."
+                type: int
+                optional: true
+                stability: unstable
+                query_shape: literal
     TimeseriesOptions:
         description: "The options that define a time-series collection."
         strict: true
@@ -243,6 +268,12 @@ structs:
             useHCIndex:
                 description: "Enable High Cardinality Index (HCIndex) for efficient metadata indexing in timeseries collections."
                 type: safeBool
+                optional: true
+                stability: unstable
+                query_shape: literal
+            hcindexOptions:
+                description: "Options for High Cardinality Index (HCIndex) configuration."
+                type: HCIndexOptions
                 optional: true
                 stability: unstable
                 query_shape: literal

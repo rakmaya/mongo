@@ -44,6 +44,7 @@
 #include "mongo/db/timeseries/bucket_catalog/rollover.h"
 #include "mongo/db/timeseries/bucket_compression.h"
 #include "mongo/db/exec/timeseries/hcindex/hcindex_collection_manager.h"
+#include "mongo/db/timeseries/hcindex_options.h"
 #include "mongo/db/timeseries/timeseries_constants.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/assert_util.h"
@@ -1337,6 +1338,9 @@ std::vector<BatchedInsertContext> buildBatchedHCInsertContexts(
     auto timeField = timeseriesOptions.getTimeField();
     auto metaField = timeseriesOptions.getMetaField();
 
+    // Get the effective HCIndex time window configuration from timeseries options
+    auto hcindexTimeWindow = getEffectiveHCIndexTimeWindow(timeseriesOptions.getHcindexOptions());
+
     // Map from time window start to vector of (measurement, time, index, rowId)
     std::map<Timestamp, std::vector<std::tuple<BSONObj, Date_t, size_t, int64_t>>>
         timeWindowToMeasurements;
@@ -1354,6 +1358,10 @@ std::vector<BatchedInsertContext> buildBatchedHCInsertContexts(
         }
         auto time = swTime.getValue();
 
+        // Convert Date_t to Timestamp for HCIndex
+        uint32_t seconds = time.toMillisSinceEpoch() / 1000;
+        Timestamp ts(seconds, 0);
+
         // Extract metadata and encode to rowId
         int64_t rowId = 0;
         if (metaField) {
@@ -1365,10 +1373,6 @@ std::vector<BatchedInsertContext> buildBatchedHCInsertContexts(
             }
             auto meta = std::get<BSONElement>(swTimeAndMeta.getValue());
 
-            // Convert Date_t to Timestamp for HCIndex
-            uint32_t seconds = time.toMillisSinceEpoch() / 1000;
-            Timestamp ts(seconds, 0);
-
             // Encode metadata to rowId
             auto swRowId = hcindexMgr->encodeMetadata(opCtx, meta.Obj(), ts);
             if (!swRowId.isOK()) {
@@ -1379,12 +1383,14 @@ std::vector<BatchedInsertContext> buildBatchedHCInsertContexts(
             rowId = swRowId.getValue();
         }
 
-        // Calculate time window start
-        // For now, use HOURLY granularity (3600 seconds)
-        uint32_t windowSizeSeconds = 60 * 60;  // HOURLY
-        uint32_t seconds = time.toMillisSinceEpoch() / 1000;
-        uint32_t windowStartSeconds = (seconds / windowSizeSeconds) * windowSizeSeconds;
-        Timestamp windowStart(windowStartSeconds, 0);
+        // Calculate time window start based on period and frequency configuration
+        Timestamp windowStart = hcindexTimeWindow.calculateWindowStart(ts);
+
+        LOGV2(9999950, "HCIndex: Processing measurement for window",
+              "timestamp"_attr = ts,
+              "windowStart"_attr = windowStart,
+              "period"_attr = static_cast<int>(hcindexTimeWindow.period),
+              "frequency"_attr = hcindexTimeWindow.frequency);
 
         timeWindowToMeasurements[windowStart].emplace_back(
             measurement, time, index, rowId);
@@ -1415,9 +1421,15 @@ std::vector<BatchedInsertContext> buildBatchedHCInsertContexts(
         getTrackingContext(bucketCatalog.trackingContexts, TrackingScope::kMeasurementBatching);
     auto stats = internal::getOrInitializeExecutionStats(bucketCatalog, collectionUUID);
 
+    LOGV2(9999951, "HCIndex: Processing time windows",
+          "windowCount"_attr = timeWindowToMeasurements.size());
+
     for (auto& [windowStart, measurements] : timeWindowToMeasurements) {
-        // Calculate window end (start + 1 hour for HOURLY granularity)
-        Timestamp windowEnd(windowStart.getSecs() + 3600, 0);
+        LOGV2(9999952, "HCIndex: Processing window with measurements",
+              "windowStart"_attr = windowStart,
+              "measurementCount"_attr = measurements.size());
+        // Calculate window end based on period and frequency configuration
+        Timestamp windowEnd = hcindexTimeWindow.calculateWindowEnd(windowStart);
 
         // Build window metadata BSON for BucketKey
         // This groups buckets by time window, not by metadata cardinality

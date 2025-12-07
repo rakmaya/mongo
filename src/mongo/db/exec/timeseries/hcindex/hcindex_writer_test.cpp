@@ -96,7 +96,7 @@ TEST_F(HCIndexWriterTest, InitSymbolDictionaryAndFlushCreatesINITOperation) {
     ASSERT_OK(writer.addSymbol(windowStart, windowEnd, "prod", 3));
 
     // Flush accumulated symbols
-    auto status = writer.flush(windowStart, windowEnd, DictionaryGranularity::HOURLY, true);
+    auto status = writer.flush(windowStart, windowEnd, HCIndexPeriodEnum::Hour, 1, true);
     ASSERT_OK(status);
 
     // Verify the operation was accumulated
@@ -108,7 +108,9 @@ TEST_F(HCIndexWriterTest, InitSymbolDictionaryAndFlushCreatesINITOperation) {
     ASSERT_EQ(doc.getStringField("op"), "INIT");
     ASSERT_EQ(doc.getField("windowStart").timestamp(), windowStart);
     ASSERT_EQ(doc.getField("windowEnd").timestamp(), windowEnd);
-    ASSERT_EQ(doc.getIntField("granularity"), static_cast<int>(DictionaryGranularity::HOURLY));
+    // Period is stored as integer: Hour=0, Minute=1, Second=2
+    ASSERT_EQ(doc.getIntField("period"), static_cast<int>(HCIndexPeriodEnum::Hour));
+    ASSERT_EQ(doc.getIntField("frequency"), 1);
 
     // Verify symbols are present
     auto symbolsObj = doc.getObjectField("symbols");
@@ -138,7 +140,7 @@ TEST_F(HCIndexWriterTest, InitAttributeTableAndFlushCreatesINITOperation) {
     ASSERT_OK(writer.addAttributeRow(windowStart, windowEnd, {1, 0, 4}));
 
     // Flush accumulated attributes
-    auto status = writer.flush(windowStart, windowEnd, DictionaryGranularity::HOURLY, false);
+    auto status = writer.flush(windowStart, windowEnd, HCIndexPeriodEnum::Hour, 1, false);
     ASSERT_OK(status);
 
     // Verify the operation was accumulated
@@ -174,12 +176,12 @@ TEST_F(HCIndexWriterTest, InitThenAddCreatesINITThenopADDOperations) {
     ASSERT_OK(writer.initSymbolDictionary(windowStart, windowEnd));
     ASSERT_OK(writer.addSymbol(windowStart, windowEnd, "nyc", 1));
     ASSERT_OK(writer.addSymbol(windowStart, windowEnd, "us-east", 2));
-    auto status1 = writer.flush(windowStart, windowEnd, DictionaryGranularity::HOURLY, true);
+    auto status1 = writer.flush(windowStart, windowEnd, HCIndexPeriodEnum::Hour, 1, true);
     ASSERT_OK(status1);
 
     // Second flush: opADD operation with additional symbols (no init call, defaults to ADD mode)
     ASSERT_OK(writer.addSymbol(windowStart, windowEnd, "prod", 3));
-    auto status2 = writer.flush(windowStart, windowEnd, DictionaryGranularity::HOURLY, true);
+    auto status2 = writer.flush(windowStart, windowEnd, HCIndexPeriodEnum::Hour, 1, true);
     ASSERT_OK(status2);
 
     // Verify both operations were accumulated
@@ -213,12 +215,12 @@ TEST_F(HCIndexWriterTest, InitAttributeThenAddCreatesINITThenopADDOperations) {
     ASSERT_OK(writer.addSchemaField(windowStart, windowEnd, "cluster"));
     ASSERT_OK(writer.addSchemaField(windowStart, windowEnd, "service"));
     ASSERT_OK(writer.addAttributeRow(windowStart, windowEnd, {1, 2}));
-    auto status1 = writer.flush(windowStart, windowEnd, DictionaryGranularity::HOURLY, false);
+    auto status1 = writer.flush(windowStart, windowEnd, HCIndexPeriodEnum::Hour, 1, false);
     ASSERT_OK(status1);
 
     // Second flush: opADD operation with additional attribute (no init call, defaults to ADD mode)
     ASSERT_OK(writer.addAttribute(windowStart, windowEnd, "pod", 2));
-    auto status2 = writer.flush(windowStart, windowEnd, DictionaryGranularity::HOURLY, false);
+    auto status2 = writer.flush(windowStart, windowEnd, HCIndexPeriodEnum::Hour, 1, false);
     ASSERT_OK(status2);
 
     // Verify both operations were accumulated
@@ -245,7 +247,7 @@ TEST_F(HCIndexWriterTest, BuildFinCreatesValidDocument) {
     Timestamp windowStart(1, 0);
     Timestamp windowEnd(2, 0);
 
-    auto status = writer.buildFin(windowStart, windowEnd, DictionaryGranularity::HOURLY, true);
+    auto status = writer.buildFin(windowStart, windowEnd, HCIndexPeriodEnum::Hour, 1, true);
     ASSERT_OK(status);
 
     // Verify the operation was accumulated
@@ -257,7 +259,9 @@ TEST_F(HCIndexWriterTest, BuildFinCreatesValidDocument) {
     ASSERT_EQ(doc.getStringField("op"), "FIN");
     ASSERT_EQ(doc.getField("windowStart").timestamp(), windowStart);
     ASSERT_EQ(doc.getField("windowEnd").timestamp(), windowEnd);
-    ASSERT_EQ(doc.getIntField("granularity"), static_cast<int>(DictionaryGranularity::HOURLY));
+    // Period is stored as integer: Hour=0, Minute=1, Second=2
+    ASSERT_EQ(doc.getIntField("period"), static_cast<int>(HCIndexPeriodEnum::Hour));
+    ASSERT_EQ(doc.getIntField("frequency"), 1);
     // Timestamp should be set to windowEnd for FIN operations
     ASSERT_EQ(doc.getField("timestamp").timestamp(), windowEnd);
 }
@@ -271,7 +275,7 @@ TEST_F(HCIndexWriterTest, BuildRefCreatesValidDocument) {
     Timestamp windowEnd(3, 0);
     Timestamp refWindowStart(1, 0);
 
-    auto status = writer.buildRef(windowStart, windowEnd, DictionaryGranularity::HOURLY, refWindowStart);
+    auto status = writer.buildRef(windowStart, windowEnd, HCIndexPeriodEnum::Hour, 1, refWindowStart);
     ASSERT_OK(status);
 
     // Verify the operation was accumulated
@@ -283,7 +287,9 @@ TEST_F(HCIndexWriterTest, BuildRefCreatesValidDocument) {
     ASSERT_EQ(doc.getStringField("op"), "REF");
     ASSERT_EQ(doc.getField("windowStart").timestamp(), windowStart);
     ASSERT_EQ(doc.getField("windowEnd").timestamp(), windowEnd);
-    ASSERT_EQ(doc.getIntField("granularity"), static_cast<int>(DictionaryGranularity::HOURLY));
+    // Period is stored as integer: Hour=0, Minute=1, Second=2
+    ASSERT_EQ(doc.getIntField("period"), static_cast<int>(HCIndexPeriodEnum::Hour));
+    ASSERT_EQ(doc.getIntField("frequency"), 1);
     // Verify reference to previous window
     ASSERT_EQ(doc.getField("refWindowStart").timestamp(), refWindowStart);
 }
@@ -300,13 +306,13 @@ TEST_F(HCIndexWriterTest, SymbolInitFollowedByAddCreatesSequence) {
     ASSERT_OK(writer.initSymbolDictionary(windowStart, windowEnd));
     ASSERT_OK(writer.addSymbol(windowStart, windowEnd, "region", 1));
     ASSERT_OK(writer.addSymbol(windowStart, windowEnd, "zone", 2));
-    auto initStatus = writer.flush(windowStart, windowEnd, DictionaryGranularity::HOURLY, true);
+    auto initStatus = writer.flush(windowStart, windowEnd, HCIndexPeriodEnum::Hour, 1, true);
     ASSERT_OK(initStatus);
 
     // Second flush: opADD operation with new symbols (no init call, defaults to ADD mode)
     ASSERT_OK(writer.addSymbol(windowStart, windowEnd, "pod", 3));
     ASSERT_OK(writer.addSymbol(windowStart, windowEnd, "instance", 4));
-    auto addStatus = writer.flush(windowStart, windowEnd, DictionaryGranularity::HOURLY, true);
+    auto addStatus = writer.flush(windowStart, windowEnd, HCIndexPeriodEnum::Hour, 1, true);
     ASSERT_OK(addStatus);
 
     // Verify both operations were accumulated
@@ -346,12 +352,12 @@ TEST_F(HCIndexWriterTest, AttributeInitFollowedByAddCreatesSequence) {
     ASSERT_OK(writer.addSchemaField(windowStart, windowEnd, "service"));
     ASSERT_OK(writer.addAttributeRow(windowStart, windowEnd, {1, 2}));
     ASSERT_OK(writer.addAttributeRow(windowStart, windowEnd, {1, 3}));
-    auto initStatus = writer.flush(windowStart, windowEnd, DictionaryGranularity::HOURLY, false);
+    auto initStatus = writer.flush(windowStart, windowEnd, HCIndexPeriodEnum::Hour, 1, false);
     ASSERT_OK(initStatus);
 
     // Second flush: opADD operation with new attribute (no init call, defaults to ADD mode)
     ASSERT_OK(writer.addAttribute(windowStart, windowEnd, "pod", 2));
-    auto addStatus = writer.flush(windowStart, windowEnd, DictionaryGranularity::HOURLY, false);
+    auto addStatus = writer.flush(windowStart, windowEnd, HCIndexPeriodEnum::Hour, 1, false);
     ASSERT_OK(addStatus);
 
     // Verify both operations were accumulated
@@ -376,6 +382,110 @@ TEST_F(HCIndexWriterTest, AttributeInitFollowedByAddCreatesSequence) {
     ASSERT_EQ(addDoc.getField("windowEnd").timestamp(), windowEnd);
     auto addAttrsObj = addDoc.getObjectField("attributes");
     ASSERT_EQ(addAttrsObj.getIntField("pod"), 2);
+}
+
+TEST_F(HCIndexWriterTest, FlushWithMinutePeriodStoresCorrectPeriodAndFrequency) {
+    auto collectionUUID = getTestCollectionUUID();
+    DatabaseName dbName = DatabaseName::createDatabaseName_forTest(boost::none, "test");
+    HCIndexWriter writer(collectionUUID, dbName);
+
+    Timestamp windowStart(1, 0);
+    Timestamp windowEnd(2, 0);
+
+    // Mark as INIT mode
+    ASSERT_OK(writer.initSymbolDictionary(windowStart, windowEnd));
+
+    // Add a symbol
+    ASSERT_OK(writer.addSymbol(windowStart, windowEnd, "test", 1));
+
+    // Flush with Minute period and frequency 30
+    auto status = writer.flush(windowStart, windowEnd, HCIndexPeriodEnum::Minute, 30, true);
+    ASSERT_OK(status);
+
+    // Verify the operation was accumulated
+    auto pendingOps = writer.getPendingSymbolOperations();
+    ASSERT_EQ(pendingOps.size(), 1);
+
+    auto doc = pendingOps[0].doc;
+    // Period is stored as integer: Hour=0, Minute=1, Second=2
+    ASSERT_EQ(doc.getIntField("period"), static_cast<int>(HCIndexPeriodEnum::Minute));
+    ASSERT_EQ(doc.getIntField("frequency"), 30);
+}
+
+TEST_F(HCIndexWriterTest, FlushWithSecondPeriodStoresCorrectPeriodAndFrequency) {
+    auto collectionUUID = getTestCollectionUUID();
+    DatabaseName dbName = DatabaseName::createDatabaseName_forTest(boost::none, "test");
+    HCIndexWriter writer(collectionUUID, dbName);
+
+    Timestamp windowStart(1, 0);
+    Timestamp windowEnd(2, 0);
+
+    // Mark as INIT mode
+    ASSERT_OK(writer.initSymbolDictionary(windowStart, windowEnd));
+
+    // Add a symbol
+    ASSERT_OK(writer.addSymbol(windowStart, windowEnd, "test", 1));
+
+    // Flush with Second period and frequency 45
+    auto status = writer.flush(windowStart, windowEnd, HCIndexPeriodEnum::Second, 45, true);
+    ASSERT_OK(status);
+
+    // Verify the operation was accumulated
+    auto pendingOps = writer.getPendingSymbolOperations();
+    ASSERT_EQ(pendingOps.size(), 1);
+
+    auto doc = pendingOps[0].doc;
+    // Period is stored as integer: Hour=0, Minute=1, Second=2
+    ASSERT_EQ(doc.getIntField("period"), static_cast<int>(HCIndexPeriodEnum::Second));
+    ASSERT_EQ(doc.getIntField("frequency"), 45);
+}
+
+TEST_F(HCIndexWriterTest, BuildFinStoresCorrectPeriodAndFrequency) {
+    auto collectionUUID = getTestCollectionUUID();
+    DatabaseName dbName = DatabaseName::createDatabaseName_forTest(boost::none, "test");
+    HCIndexWriter writer(collectionUUID, dbName);
+
+    Timestamp windowStart(1, 0);
+    Timestamp windowEnd(2, 0);
+
+    // Build FIN operation with Minute period and frequency 15 for symbol operations
+    auto status = writer.buildFin(windowStart, windowEnd, HCIndexPeriodEnum::Minute, 15, true);
+    ASSERT_OK(status);
+
+    // Verify the operation was accumulated
+    auto pendingOps = writer.getPendingSymbolOperations();
+    ASSERT_EQ(pendingOps.size(), 1);
+
+    auto doc = pendingOps[0].doc;
+    ASSERT_EQ(doc.getStringField("op"), "FIN");
+    // Period is stored as integer: Hour=0, Minute=1, Second=2
+    ASSERT_EQ(doc.getIntField("period"), static_cast<int>(HCIndexPeriodEnum::Minute));
+    ASSERT_EQ(doc.getIntField("frequency"), 15);
+}
+
+TEST_F(HCIndexWriterTest, BuildRefStoresCorrectPeriodAndFrequency) {
+    auto collectionUUID = getTestCollectionUUID();
+    DatabaseName dbName = DatabaseName::createDatabaseName_forTest(boost::none, "test");
+    HCIndexWriter writer(collectionUUID, dbName);
+
+    Timestamp windowStart(1, 0);
+    Timestamp windowEnd(2, 0);
+    Timestamp refWindowStart(0, 0);
+
+    // Build REF operation with Second period and frequency 30
+    auto status = writer.buildRef(windowStart, windowEnd, HCIndexPeriodEnum::Second, 30, refWindowStart);
+    ASSERT_OK(status);
+
+    // Verify the operation was accumulated
+    auto pendingOps = writer.getPendingSymbolOperations();
+    ASSERT_EQ(pendingOps.size(), 1);
+
+    auto doc = pendingOps[0].doc;
+    ASSERT_EQ(doc.getStringField("op"), "REF");
+    // Period is stored as integer: Hour=0, Minute=1, Second=2
+    ASSERT_EQ(doc.getIntField("period"), static_cast<int>(HCIndexPeriodEnum::Second));
+    ASSERT_EQ(doc.getIntField("frequency"), 30);
+    ASSERT_EQ(doc.getField("refWindowStart").timestamp(), refWindowStart);
 }
 
 }  // namespace mongo::timeseries::hcindex
