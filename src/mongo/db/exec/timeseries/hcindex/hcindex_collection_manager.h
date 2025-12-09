@@ -30,6 +30,7 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/exec/timeseries/hcindex/temporal_symbol_dictionary.h"
 #include "mongo/db/exec/timeseries/hcindex/temporal_attribute_table.h"
+#include "mongo/db/exec/timeseries/hcindex/bitmap_index.h"
 #include "mongo/db/exec/timeseries/hcindex/hcindex_writer.h"
 #include "mongo/db/exec/timeseries/hcindex/hcindex_reader.h"
 #include "mongo/db/repl/oplog.h"
@@ -78,6 +79,14 @@ public:
      * for the given collection UUID in the specified database.
      */
     static NamespaceString getAttributeOperationsNamespace(const DatabaseName& dbName, const UUID& collectionUUID);
+
+    /**
+     * Get the namespace for the bitmap index collection.
+     *
+     * Returns the NamespaceString for the bitmap index collection that should be created
+     * for the given collection UUID in the specified database.
+     */
+    static NamespaceString getBitmapIndexNamespace(const DatabaseName& dbName, const UUID& collectionUUID);
 
     /**
      * Create a new HCIndex manager for the specified collection.
@@ -268,6 +277,9 @@ private:
 
     // Temporal attribute table for storing metadata rows
     std::unique_ptr<TemporalAttributeTable> attributeTable;
+
+    // Temporal bitmap index for fast metadata predicate lookups
+    std::unique_ptr<TemporalBitmapIndex> bitmapIndex;
 
     // Flag to track if we've initialized the reader for read operations
     bool initializedForRead = false;

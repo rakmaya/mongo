@@ -1132,6 +1132,7 @@ Status createHCIndexCollections(OperationContext* opCtx, const DatabaseName& dbN
     // Get the namespaces for the HCIndex operations collections
     auto symbolNss = timeseries::hcindex::HCIndexCollectionManager::getSymbolOperationsNamespace(dbName, collectionUUID);
     auto attributeNss = timeseries::hcindex::HCIndexCollectionManager::getAttributeOperationsNamespace(dbName, collectionUUID);
+    auto bitmapIndexNss = timeseries::hcindex::HCIndexCollectionManager::getBitmapIndexNamespace(dbName, collectionUUID);
 
     // Create symbol operations collection
     CollectionOptions symbolOptions;
@@ -1147,6 +1148,14 @@ Status createHCIndexCollections(OperationContext* opCtx, const DatabaseName& dbN
     if (!attributeStatus.isOK()) {
         return attributeStatus.withContext(
             str::stream() << "Failed to create attribute operations collection: " << attributeNss.toStringForErrorMsg());
+    }
+
+    // Create bitmap index collection
+    CollectionOptions bitmapIndexOptions;
+    auto bitmapIndexStatus = createCollection(opCtx, bitmapIndexNss, bitmapIndexOptions, boost::none);
+    if (!bitmapIndexStatus.isOK()) {
+        return bitmapIndexStatus.withContext(
+            str::stream() << "Failed to create bitmap index collection: " << bitmapIndexNss.toStringForErrorMsg());
     }
 
     return Status::OK();

@@ -81,12 +81,32 @@ void HCIndexReader::acquireCollections(OperationContext* opCtx) {
               "HCIndexReader::acquireCollections - attribute ops collection doesn't exist yet",
               "error"_attr = e.what());
         // Attribute ops collection doesn't exist yet - this is expected on first load
-        // We'll handle this gracefully in constructAttributeTable
+        // We will handle this gracefully in constructAttributeTable
+    }
+
+    // Acquire bitmap index collection WITHOUT acquiring locks
+    // This is safe because we're just getting a snapshot of the catalog
+    auto bitmapIndexNss = HCIndexCollectionManager::getBitmapIndexNamespace(dbName, collectionUUID);
+    CollectionAcquisitionRequest bitmapIndexAcquisitionRequest(
+        bitmapIndexNss,
+        PlacementConcern::kPretendUnsharded,
+        repl::ReadConcernArgs::kImplicitDefault,
+        AcquisitionPrerequisites::kRead);
+
+    try {
+        bitmapIndexCollection = acquireCollectionMaybeLockFree(opCtx, bitmapIndexAcquisitionRequest);
+        LOGV2(9999999, "HCIndexReader::acquireCollections - acquired bitmapIndex collection");
+    } catch (const std::exception& e) {
+        LOGV2(9999999,
+              "HCIndexReader::acquireCollections - bitmap index collection doesn't exist yet",
+              "error"_attr = e.what());
+        // Bitmap Index collection doesn't exist yet. This is expected on first load
+        // We will handle this gracefully in constructBitmapIndex
     }
 }
 
 Status HCIndexReader::initializeCollections(OperationContext* opCtx) {
-    // Check if already initialized to avoid re-acquiring collections
+    // Check if already initialized to avoid reacquiring collections
     if (collectionsInitialized) {
         LOGV2(9999999, "HCIndexReader::initializeCollections - already initialized, skipping");
         return Status::OK();
@@ -239,8 +259,6 @@ StatusWith<std::unique_ptr<AttributeTable>> HCIndexReader::constructAttributeTab
 
             for (const auto& elem : schemaObj) {
                 std::string fieldName = elem.String();
-                LOGV2(9999923, "Adding column",
-                      "fieldName"_attr = fieldName);
                 auto status = table->addColumn(StringData(fieldName));
                 if (!status.isOK()) {
                     return status;
@@ -316,10 +334,119 @@ StatusWith<std::unique_ptr<AttributeTable>> HCIndexReader::constructAttributeTab
     return std::move(table);
 }
 
+StatusWith<std::unique_ptr<BitmapIndex>> HCIndexReader::constructBitmapIndex(
+    OperationContext* opCtx,
+    const Timestamp& windowStart,
+    const Timestamp& windowEnd,
+    HCIndexPeriodEnum period,
+    int32_t frequency,
+    const Timestamp& upToTimestamp)
+{
+    auto index = std::make_unique<BitmapIndex>(period, frequency, windowStart, windowEnd, nullptr);
+
+    // Change state to Reconstruction for indexes being reconstructed by the reader
+    auto stateStatus = index->changeState(BitmapIndexState::Reconstruction);
+    if (!stateStatus.isOK()) {
+        return stateStatus;
+    }
+
+    // Use the cached collection acquisition instead of acquiring again
+    // This avoids lock cycles during query execution
+    if (!bitmapIndexCollection || !bitmapIndexCollection->exists()) {
+        // Bitmap index collection doesn't exist yet - this is expected on first load after restart
+        // Return an empty index in ReadWrite state so new entries can be added
+        auto readWriteStatus = index->changeState(BitmapIndexState::ReadWrite);
+        if (!readWriteStatus.isOK()) {
+            return readWriteStatus;
+        }
+        return std::move(index);
+    }
+
+    // Read and replay operations
+    LOGV2(9999930, "HCIndexReader::constructBitmapIndex - starting reconstruction",
+          "windowStart"_attr = windowStart,
+          "windowEnd"_attr = windowEnd,
+          "upToTimestamp"_attr = upToTimestamp);
+
+    auto cursor = bitmapIndexCollection->getCollectionPtr()->getCursor(opCtx);
+    int operationCount = 0;
+    while (auto record = cursor->next()) {
+        BSONObj doc = record->data.toBson();
+
+        // Only process operations within the window and up to the specified timestamp
+        Timestamp docWindowStart = doc.getField("windowStart").timestamp();
+        Timestamp docWindowEnd = doc.getField("windowEnd").timestamp();
+
+        if (docWindowStart != windowStart || docWindowEnd != windowEnd) {
+            continue;
+        }
+
+        if (doc.getField("timestamp").timestamp() > upToTimestamp) {
+            continue;
+        }
+
+        StringData op = doc.getStringField("op");
+        Timestamp docTimestamp = doc.getField("timestamp").timestamp();
+
+        LOGV2(9999931, "Processing bitmap operation",
+              "op"_attr = op,
+              "timestamp"_attr = docTimestamp);
+
+        if (op == "INIT" || op == "opADD") {
+            // Extract entries from the document
+            // Format: { "entries": [ { "col": columnIndex, "sym": symbolIndex, "rows": [rowId1, rowId2, ...] }, ... ] }
+            BSONElement entriesElem = doc.getField("entries");
+            if (entriesElem && entriesElem.type() == BSONType::array) {
+                auto entriesArray = entriesElem.Array();
+                LOGV2(9999932, "Processing bitmap entries",
+                      "entryCount"_attr = entriesArray.size());
+
+                for (const auto& entryElem : entriesArray) {
+                    if (entryElem.type() == BSONType::object) {
+                        BSONObj entry = entryElem.Obj();
+                        size_t columnIndex = static_cast<size_t>(entry.getIntField("col"));
+                        uint32_t symbolIndex = static_cast<uint32_t>(entry.getIntField("sym"));
+
+                        BSONElement rowsElem = entry.getField("rows");
+                        if (rowsElem && rowsElem.type() == BSONType::array) {
+                            auto rowsArray = rowsElem.Array();
+                            for (const auto& rowIdElem : rowsArray) {
+                                int64_t rowId = rowIdElem.numberLong();
+                                auto addStatus = index->addEntry(columnIndex, symbolIndex, rowId);
+                                if (!addStatus.isOK()) {
+                                    return addStatus;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            operationCount++;
+        }
+    }
+
+    LOGV2(9999933, "HCIndexReader::constructBitmapIndex - reconstruction complete",
+          "operationCount"_attr = operationCount,
+          "entryCount"_attr = index->getEntryCount());
+
+    // Transition the index to ReadWrite after reconstruction is complete.
+    // This allows the index to accept new entries as the timeseries collection continues to
+    // receive new measurements. The index was in Reconstruction mode during the replay of
+    // operations, and now it's ready to accept new writes.
+    auto readWriteStatus = index->changeState(BitmapIndexState::ReadWrite);
+    if (!readWriteStatus.isOK()) {
+        return readWriteStatus;
+    }
+
+    // Return the index (may be empty if no operations were found for this window)
+    return std::move(index);
+}
+
 void HCIndexReader::close()
 {
     symbolOpsCollection.reset();
     attributeOpsCollection.reset();
+    bitmapIndexCollection.reset();
     collectionsInitialized = false;
 }
 
@@ -329,6 +456,7 @@ void HCIndexReader::prepareForYield() {
     LOGV2(9999902, "HCIndexReader::prepareForYield - releasing collection pointers");
     symbolOpsCollection.reset();
     attributeOpsCollection.reset();
+    bitmapIndexCollection.reset();
 }
 
 Status HCIndexReader::restoreForYield(OperationContext* opCtx) {

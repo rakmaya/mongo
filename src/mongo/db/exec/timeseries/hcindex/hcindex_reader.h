@@ -31,6 +31,7 @@
 #include "mongo/base/status_with.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/database_name.h"
+#include "mongo/db/exec/timeseries/hcindex/bitmap_index.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/exec/timeseries/hcindex/temporal_symbol_dictionary.h"
 #include "mongo/db/exec/timeseries/hcindex/temporal_attribute_table.h"
@@ -122,6 +123,26 @@ public:
         const Timestamp& upToTimestamp,
         SymbolDictionary* symbolDictionary);
 
+    /**
+     * Construct a BitmapIndex by replaying operations up to the specified timestamp.
+     * Only reads operations up to the given timestamp, enabling partial construction.
+     *
+     * This allows efficient queries on partial time ranges without waiting for window
+     * completion (FIN operation).
+     *
+     *
+     * Parameters:
+     * - opCtx: Operation context for database operations
+     * - period: Time-window period (hour, minute, second)
+     * - frequency: Time-window frequency (1-24 for hour, 1-59 for minute/second)
+     */
+    StatusWith<std::unique_ptr<BitmapIndex>> constructBitmapIndex(
+        OperationContext* opCtx,
+        const Timestamp& windowStart,
+        const Timestamp& windowEnd,
+        HCIndexPeriodEnum period,
+        int32_t frequency,
+        const Timestamp& upToTimestamp);
 
     /**
      * Release acquired collections to allow lock release and prevent stashed transaction resource
@@ -163,6 +184,7 @@ private:
     UUID collectionUUID;
     boost::optional<CollectionAcquisition> symbolOpsCollection;
     boost::optional<CollectionAcquisition> attributeOpsCollection;
+    boost::optional<CollectionAcquisition> bitmapIndexCollection;
     bool collectionsInitialized = false;
 };
 

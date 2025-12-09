@@ -38,6 +38,7 @@
 
 #include <cstdint>
 #include <map>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -128,6 +129,25 @@ public:
                         size_t columnIndex);
 
     /**
+     * Mark the beginning of bitmap index initialization for the specified window.
+     * Sets the writer to INIT mode for bitmap operations for this window.
+     * After flush() is called, the writer automatically returns to ADD mode for this window.
+     */
+    Status initBitmapIndex(const Timestamp& windowStart, const Timestamp& windowEnd);
+
+    /**
+     * Add a bitmap entry to the accumulation buffer for the specified window.
+     * Each entry maps (columnIndex, symbolIndex) → set of rowIds.
+     * Can be used for both INIT and opADD operations.
+     * Multiple calls accumulate entries that will be flushed together.
+     */
+    Status addBitmapEntry(const Timestamp& windowStart,
+                          const Timestamp& windowEnd,
+                          size_t columnIndex,
+                          uint32_t symbolIndex,
+                          const std::set<int64_t>& rowIds);
+
+    /**
      * Flush accumulated operations grouped by time window.
      * Creates BSON documents for INIT or opADD operations and adds them to pendingOperations.
      * The operation type (INIT or opADD) is determined by the internal state set by
@@ -144,6 +164,22 @@ public:
                  HCIndexPeriodEnum period,
                  int32_t frequency,
                  bool isSymbolOps);
+
+    /**
+     * Flush accumulated bitmap operations grouped by time window.
+     * Creates BSON documents for INIT or opADD operations and adds them to pendingBitmapOperations.
+     * The operation type (INIT or opADD) is determined by the internal state set by
+     * initBitmapIndex(). After flushBitmaps(), the writer returns to ADD mode.
+     *
+     * @param windowStart Start timestamp of the time window
+     * @param windowEnd End timestamp of the time window
+     * @param period Time-window period (hour, minute, second)
+     * @param frequency Time-window frequency (1-24 for hour, 1-59 for minute/second)
+     */
+    Status flushBitmaps(const Timestamp& windowStart,
+                        const Timestamp& windowEnd,
+                        HCIndexPeriodEnum period,
+                        int32_t frequency);
 
     /**
      * Build a FIN operation to mark the window as complete and immutable.
@@ -176,7 +212,13 @@ public:
     std::vector<InsertStatement> getPendingAttributeOperations() const;
 
     /**
-     * Clear all pending operations (both symbol and attribute).
+     * Get all pending bitmap operations accumulated so far.
+     * Returns a vector of InsertStatement objects ready to be flushed.
+     */
+    std::vector<InsertStatement> getPendingBitmapOperations() const;
+
+    /**
+     * Clear all pending operations (symbol, attribute, and bitmap).
      */
     void clearPendingOperations();
 
@@ -192,6 +234,12 @@ public:
      */
     std::string getAttributeOperationsCollectionName() const;
 
+    /**
+     * Get the namespace string for bitmap operations collection.
+     * Format: hcindex.ops.bitmaps.<collectionUUID>
+     */
+    std::string getBitmapOperationsCollectionName() const;
+
 private:
     /**
      * Window key for accumulation buffers: (windowStart, windowEnd) pair
@@ -199,9 +247,19 @@ private:
     using WindowKey = std::pair<Timestamp, Timestamp>;
 
     /**
+     * Key for bitmap entries: (columnIndex, symbolIndex) pair
+     */
+    using BitmapKey = std::pair<size_t, uint32_t>;
+
+    /**
+     * Enum to indicate operation type for _addPendingOperation.
+     */
+    enum class OpType { Symbol, Attribute, Bitmap };
+
+    /**
      * Helper method to build an operation document and add it to pending operations.
      */
-    void _addPendingOperation(const BSONObj& doc, bool isSymbolOps);
+    void _addPendingOperation(const BSONObj& doc, OpType opType);
 
     /**
      * Helper method to build and flush accumulated symbols as an operation.
@@ -219,23 +277,35 @@ private:
                             HCIndexPeriodEnum period,
                             int32_t frequency);
 
+    /**
+     * Helper method to build and flush accumulated bitmap entries as an operation.
+     */
+    Status _flushBitmaps(const Timestamp& windowStart,
+                         const Timestamp& windowEnd,
+                         HCIndexPeriodEnum period,
+                         int32_t frequency);
+
     UUID collectionUUID;
     DatabaseName dbName;
     std::vector<InsertStatement> pendingSymbolOperations;
     std::vector<InsertStatement> pendingAttributeOperations;
+    std::vector<InsertStatement> pendingBitmapOperations;
 
     // Accumulation buffers for incremental building, keyed by window (windowStart, windowEnd)
     std::map<WindowKey, std::vector<std::pair<std::string, uint32_t>>> accumulatedSymbols;
     std::map<WindowKey, std::vector<std::string>> accumulatedSchema;
     std::map<WindowKey, std::vector<std::vector<uint32_t>>> accumulatedRows;
     std::map<WindowKey, std::vector<std::pair<std::string, size_t>>> accumulatedAttributes;
+    // Bitmap entries: (columnIndex, symbolIndex) → set of rowIds
+    std::map<WindowKey, std::map<BitmapKey, std::set<int64_t>>> accumulatedBitmaps;
 
     // State tracking for INIT vs ADD mode, keyed by window
-    // Separate maps for symbol and attribute operations since they can be in different modes.
-    // Defaults to ADD mode. Set to INIT by initSymbolDictionary() or initAttributeTable().
+    // Separate maps for symbol, attribute, and bitmap operations since they can be in different modes.
+    // Defaults to ADD mode. Set to INIT by initSymbolDictionary(), initAttributeTable(), or initBitmapIndex().
     // Resets to ADD after flush() for the corresponding operation type.
     std::map<WindowKey, bool> isSymbolInitMode;
     std::map<WindowKey, bool> isAttributeInitMode;
+    std::map<WindowKey, bool> isBitmapInitMode;
 };
 
 }  // namespace mongo::timeseries::hcindex

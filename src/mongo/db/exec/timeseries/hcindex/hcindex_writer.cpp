@@ -49,6 +49,12 @@ Status HCIndexWriter::initAttributeTable(const Timestamp& windowStart, const Tim
     return Status::OK();
 }
 
+Status HCIndexWriter::initBitmapIndex(const Timestamp& windowStart, const Timestamp& windowEnd) {
+    WindowKey key = std::make_pair(windowStart, windowEnd);
+    isBitmapInitMode[key] = true;
+    return Status::OK();
+}
+
 Status HCIndexWriter::addSymbol(const Timestamp& windowStart,
                                 const Timestamp& windowEnd,
                                 const std::string& word,
@@ -83,6 +89,19 @@ Status HCIndexWriter::addAttribute(const Timestamp& windowStart,
     return Status::OK();
 }
 
+Status HCIndexWriter::addBitmapEntry(const Timestamp& windowStart,
+                                     const Timestamp& windowEnd,
+                                     size_t columnIndex,
+                                     uint32_t symbolIndex,
+                                     const std::set<int64_t>& rowIds) {
+    WindowKey key = std::make_pair(windowStart, windowEnd);
+    BitmapKey bitmapKey = std::make_pair(columnIndex, symbolIndex);
+    // Merge the rowIds into the existing set for this bitmap key
+    auto& existingRowIds = accumulatedBitmaps[key][bitmapKey];
+    existingRowIds.insert(rowIds.begin(), rowIds.end());
+    return Status::OK();
+}
+
 Status HCIndexWriter::_flushSymbols(const Timestamp& windowStart,
                                     const Timestamp& windowEnd,
                                     HCIndexPeriodEnum period,
@@ -112,7 +131,7 @@ Status HCIndexWriter::_flushSymbols(const Timestamp& windowStart,
     docBuilder.append("op", isInitMode ? "INIT" : "opADD");
     docBuilder.append("symbols", symbolsBuilder.obj());
 
-    _addPendingOperation(docBuilder.obj(), true);
+    _addPendingOperation(docBuilder.obj(), OpType::Symbol);
     accumulatedSymbols[key].clear();
 
     // Reset to ADD mode after flush
@@ -184,13 +203,60 @@ Status HCIndexWriter::_flushAttributes(const Timestamp& windowStart,
         docBuilder.append("attributes", attrsBuilder.obj());
     }
 
-    _addPendingOperation(docBuilder.obj(), false);
+    _addPendingOperation(docBuilder.obj(), OpType::Attribute);
     accumulatedSchema[key].clear();
     accumulatedRows[key].clear();
     accumulatedAttributes[key].clear();
 
     // Reset to ADD mode after flush
     isAttributeInitMode[key] = false;
+    return Status::OK();
+}
+
+Status HCIndexWriter::_flushBitmaps(const Timestamp& windowStart,
+                                    const Timestamp& windowEnd,
+                                    HCIndexPeriodEnum period,
+                                    int32_t frequency) {
+    WindowKey key = std::make_pair(windowStart, windowEnd);
+
+    auto it = accumulatedBitmaps.find(key);
+    if (it == accumulatedBitmaps.end() || it->second.empty()) {
+        // Reset to ADD mode even if nothing was flushed
+        isBitmapInitMode[key] = false;
+        return Status::OK();
+    }
+
+    // Build the bitmaps document
+    // Format: { "entries": [ { "col": columnIndex, "sym": symbolIndex, "rows": [rowId1, rowId2, ...] }, ... ] }
+    BSONArrayBuilder entriesBuilder;
+    for (const auto& [bitmapKey, rowIds] : it->second) {
+        BSONObjBuilder entryBuilder;
+        entryBuilder.append("col", static_cast<int>(bitmapKey.first));
+        entryBuilder.append("sym", static_cast<int>(bitmapKey.second));
+        BSONArrayBuilder rowsBuilder;
+        for (int64_t rowId : rowIds) {
+            rowsBuilder.append(static_cast<long long>(rowId));
+        }
+        entryBuilder.append("rows", rowsBuilder.arr());
+        entriesBuilder.append(entryBuilder.obj());
+    }
+
+    bool isInitMode = isBitmapInitMode[key];
+    BSONObjBuilder docBuilder;
+    docBuilder.append("_id", OID::gen());
+    docBuilder.append("timestamp", isInitMode ? windowStart : Timestamp());
+    docBuilder.append("windowStart", windowStart);
+    docBuilder.append("windowEnd", windowEnd);
+    docBuilder.append("period", static_cast<int>(period));
+    docBuilder.append("frequency", frequency);
+    docBuilder.append("op", isInitMode ? "INIT" : "opADD");
+    docBuilder.append("entries", entriesBuilder.arr());
+
+    _addPendingOperation(docBuilder.obj(), OpType::Bitmap);
+    accumulatedBitmaps[key].clear();
+
+    // Reset to ADD mode after flush
+    isBitmapInitMode[key] = false;
     return Status::OK();
 }
 
@@ -208,6 +274,13 @@ Status HCIndexWriter::flush(const Timestamp& windowStart,
     // _flushSymbols or _flushAttributes respectively
 }
 
+Status HCIndexWriter::flushBitmaps(const Timestamp& windowStart,
+                                   const Timestamp& windowEnd,
+                                   HCIndexPeriodEnum period,
+                                   int32_t frequency) {
+    return _flushBitmaps(windowStart, windowEnd, period, frequency);
+}
+
 Status HCIndexWriter::buildFin(const Timestamp& windowStart,
                                const Timestamp& windowEnd,
                                HCIndexPeriodEnum period,
@@ -222,7 +295,7 @@ Status HCIndexWriter::buildFin(const Timestamp& windowStart,
     docBuilder.append("frequency", frequency);
     docBuilder.append("op", "FIN");
 
-    _addPendingOperation(docBuilder.obj(), isSymbolOps);
+    _addPendingOperation(docBuilder.obj(), isSymbolOps ? OpType::Symbol : OpType::Attribute);
     return Status::OK();
 }
 
@@ -241,7 +314,7 @@ Status HCIndexWriter::buildRef(const Timestamp& windowStart,
     docBuilder.append("op", "REF");
     docBuilder.append("refWindowStart", refWindowStart);
 
-    _addPendingOperation(docBuilder.obj(), true);
+    _addPendingOperation(docBuilder.obj(), OpType::Symbol);
     return Status::OK();
 }
 
@@ -253,9 +326,14 @@ std::vector<InsertStatement> HCIndexWriter::getPendingAttributeOperations() cons
     return pendingAttributeOperations;
 }
 
+std::vector<InsertStatement> HCIndexWriter::getPendingBitmapOperations() const {
+    return pendingBitmapOperations;
+}
+
 void HCIndexWriter::clearPendingOperations() {
     pendingSymbolOperations.clear();
     pendingAttributeOperations.clear();
+    pendingBitmapOperations.clear();
 }
 
 std::string HCIndexWriter::getSymbolOperationsCollectionName() const {
@@ -266,11 +344,21 @@ std::string HCIndexWriter::getAttributeOperationsCollectionName() const {
     return str::stream() << dbName.toStringForErrorMsg() << ".hcindex.ops.attributes." << collectionUUID.toString();
 }
 
-void HCIndexWriter::_addPendingOperation(const BSONObj& doc, bool isSymbolOps) {
-    if (isSymbolOps) {
-        pendingSymbolOperations.emplace_back(InsertStatement(doc));
-    } else {
-        pendingAttributeOperations.emplace_back(InsertStatement(doc));
+std::string HCIndexWriter::getBitmapOperationsCollectionName() const {
+    return str::stream() << dbName.toStringForErrorMsg() << ".hcindex.idx.bitmaps." << collectionUUID.toString();
+}
+
+void HCIndexWriter::_addPendingOperation(const BSONObj& doc, OpType opType) {
+    switch (opType) {
+        case OpType::Symbol:
+            pendingSymbolOperations.emplace_back(InsertStatement(doc));
+            break;
+        case OpType::Attribute:
+            pendingAttributeOperations.emplace_back(InsertStatement(doc));
+            break;
+        case OpType::Bitmap:
+            pendingBitmapOperations.emplace_back(InsertStatement(doc));
+            break;
     }
 }
 

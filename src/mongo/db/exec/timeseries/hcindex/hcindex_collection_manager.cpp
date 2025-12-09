@@ -43,6 +43,12 @@ NamespaceString HCIndexCollectionManager::getAttributeOperationsNamespace(const 
     return NamespaceString::createNamespaceString_forTest(fullNs);
 }
 
+NamespaceString HCIndexCollectionManager::getBitmapIndexNamespace(const DatabaseName& dbName, const UUID& collectionUUID) {
+    std::string collName = "hcindex.idx.bitmaps." + collectionUUID.toString();
+    std::string fullNs = str::stream() << dbName.toStringForErrorMsg() << "." << collName;
+    return NamespaceString::createNamespaceString_forTest(fullNs);
+}
+
 HCIndexCollectionManager::HCIndexCollectionManager(OperationContext* opCtx,
                                                    const DatabaseName& dbName,
                                                    const UUID& collectionUUID,
@@ -55,7 +61,8 @@ HCIndexCollectionManager::HCIndexCollectionManager(OperationContext* opCtx,
       writer(std::make_unique<HCIndexWriter>(collectionUUID, dbName)),
       reader(std::make_unique<HCIndexReader>(dbName, collectionUUID)),
       symbolDictionary(std::make_unique<TemporalSymbolDictionary>(collectionUUID, period, frequency, writer.get(), reader.get())),
-      attributeTable(std::make_unique<TemporalAttributeTable>(collectionUUID, period, frequency, symbolDictionary.get(), writer.get(), reader.get()))
+      attributeTable(std::make_unique<TemporalAttributeTable>(collectionUUID, period, frequency, symbolDictionary.get(), writer.get(), reader.get())),
+      bitmapIndex(std::make_unique<TemporalBitmapIndex>(collectionUUID, period, frequency, writer.get(), reader.get()))
 {
     LOGV2(9999995,
           "HCIndex: HCIndexCollectionManager created for collectionUUID: {collectionUUID} in database: {dbName}",
@@ -149,16 +156,29 @@ StatusWith<int64_t> HCIndexCollectionManager::encodeMetadata(OperationContext* o
         return rowIdStatus.getStatus();
     }
 
-    // Extract the result - we get both the rowId and whether it's a new row
+    // Extract the result - we get the rowId, isNewRow flag, and the row vector
     auto insertResult = rowIdStatus.getValue();
     int64_t rowId = insertResult.rowId;
     bool isNewRow = insertResult.isNewRow;
+    const std::vector<uint32_t>& row = insertResult.row;
+
+    // Add the row to the bitmap index for fast metadata predicate lookups
+    // We add both new rows and duplicates to the bitmap index since the bitmap
+    // tracks (column, value) -> rowIds mapping which needs all rowIds
+    if (bitmapIndex) {
+        auto bitmapStatus = bitmapIndex->addRow(opCtx, rowId, row, timestamp);
+        if (!bitmapStatus.isOK()) {
+            LOGV2_WARNING(9999930,
+                          "Failed to add row to bitmap index",
+                          "rowId"_attr = rowId,
+                          "error"_attr = bitmapStatus);
+            // Continue anyway - bitmap index is an optimization, not critical
+        }
+    }
 
     // TODO: Use isNewRow flag to track which rows are new so we can build
     // appropriate ADD operations when flushPendingOperations is called.
-    // For now, we just return the rowId. The caller can use this information
-    // to decide whether to add operations to the writer.
-    (void)isNewRow;  // Suppress unused variable warning
+    (void)isNewRow;  // Suppress unused variable warning for now
 
     return rowId;
 }
@@ -229,12 +249,16 @@ Status HCIndexCollectionManager::flushPendingOperations(
         return Status(ErrorCodes::BadValue, "Flush callback cannot be null");
     }
 
-    // Flush the writer.
+    // Flush all structures to the writer.
     symbolDictionary->flush();
     attributeTable->flush();
+    if (bitmapIndex) {
+        bitmapIndex->flush();
+    }
 
     auto pendingSymbolOps = writer->getPendingSymbolOperations();
     auto pendingAttributeOps = writer->getPendingAttributeOperations();
+    auto pendingBitmapOps = writer->getPendingBitmapOperations();
 
     if (pendingSymbolOps.empty() && pendingAttributeOps.empty()) {
         return Status::OK();  // Nothing to flush
@@ -253,6 +277,15 @@ Status HCIndexCollectionManager::flushPendingOperations(
     if (!pendingAttributeOps.empty()) {
         auto attributeCollName = writer->getAttributeOperationsCollectionName();
         auto status = flushCallback(attributeCollName, pendingAttributeOps);
+        if (!status.isOK()) {
+            return status;
+        }
+    }
+
+    // Flush bitmap operations if any
+    if (!pendingBitmapOps.empty()) {
+        auto bitmapCollName = writer->getBitmapOperationsCollectionName();
+        auto status = flushCallback(bitmapCollName, pendingBitmapOps);
         if (!status.isOK()) {
             return status;
         }
@@ -292,13 +325,13 @@ StatusWith<std::vector<int64_t>> HCIndexCollectionManager::queryRows(
         return Status(ErrorCodes::InternalError, "HCIndex attribute table not initialized");
     }
 
-    LOGV2(9999912, "Getting attribute table for timestamp",
+    LOGV2(9999912, "HCIndex: Getting attribute table for timestamp",
           "timestamp"_attr = timestamp);
 
     // Get the attribute table for this timestamp
     auto tableResult = attributeTable->getTableForTimestamp(timestamp);
     if (!tableResult.isOK()) {
-        LOGV2(9999913, "Table not in memory, trying to create/reconstruct from disk");
+        LOGV2(9999913, "HCIndex: Table not in memory, trying to create/reconstruct from disk");
         // Table doesn't exist in memory. Try to create/reconstruct it from disk.
         auto createResult = attributeTable->getOrCreateTableForTimestamp(opCtx, timestamp);
         if (!createResult.isOK()) {
@@ -307,6 +340,26 @@ StatusWith<std::vector<int64_t>> HCIndexCollectionManager::queryRows(
             return createResult.getStatus();
         }
         tableResult = createResult;
+    }
+
+    // Get the bitmap index if it exists
+    BitmapIndex* index = nullptr;
+    if (bitmapIndex) {
+        auto indexResult = bitmapIndex->getIndexForTimestamp(timestamp);
+        if (!indexResult.isOK()) {
+            LOGV2(9999921, "HCIndex: Bitmap index not in memory, trying to create/reconstruct from disk");
+            // Index may not be in the memory. Try to get it from disk.
+            indexResult = bitmapIndex->getOrCreateIndexForTimestamp(opCtx, timestamp);
+            if (!indexResult.isOK()) {
+                LOGV2(9999922, "Failed to create/reconstruct bitmap index",
+                      "error"_attr = indexResult.getStatus());
+                // Continue anyway - bitmap index is an optimization, not critical
+            } else {
+                index = indexResult.getValue();
+            }
+        } else {
+            index = indexResult.getValue();
+        }
     }
 
     auto table = tableResult.getValue();
@@ -338,7 +391,7 @@ StatusWith<std::vector<int64_t>> HCIndexCollectionManager::queryRows(
           "childrenCount"_attr = predicate.children.size());
 
     // Query the table for matching rows
-    auto matchingRowIds = table->queryRows(predicateResult.getValue());
+    auto matchingRowIds = table->queryRows(predicateResult.getValue(), index);
     LOGV2(9999918, "Query completed",
           "matchingRowCount"_attr = matchingRowIds.size());
 
@@ -358,6 +411,7 @@ Status HCIndexCollectionManager::cleanup() {
     // For now, just clear the structures
     symbolDictionary.reset();
     attributeTable.reset();
+    bitmapIndex.reset();
     writer.reset();
     reader.reset();
     return Status::OK();

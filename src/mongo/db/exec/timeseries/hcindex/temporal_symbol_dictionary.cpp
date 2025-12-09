@@ -331,8 +331,20 @@ TemporalSymbolDictionary::Stats TemporalSymbolDictionary::getStats() const {
 StatusWith<SymbolDictionary*> TemporalSymbolDictionary::getOrCreateDictionary(
     OperationContext* opCtx,
     const Timestamp& windowStart) {
-    std::unique_lock<std::shared_mutex> lock(_mutex);
 
+    // First check if dictionary exists (read lock)
+    {
+        std::shared_lock lock(_mutex);
+        auto it = _dictionaries.find(windowStart);
+        if (it != _dictionaries.end()) {
+            return it->second.get();
+        }
+    }
+
+    // Index doesn't exist, create it (write lock)
+    std::unique_lock lock(_mutex);
+
+    // Check again after the write lock
     auto it = _dictionaries.find(windowStart);
     if (it != _dictionaries.end()) {
         return it->second.get();

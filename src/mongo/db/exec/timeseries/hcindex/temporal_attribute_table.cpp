@@ -28,6 +28,7 @@
  */
 
 #include "mongo/db/exec/timeseries/hcindex/temporal_attribute_table.h"
+#include "mongo/db/exec/timeseries/hcindex/bitmap_index.h"
 #include "mongo/db/exec/timeseries/hcindex/temporal_symbol_dictionary.h"
 #include "mongo/db/exec/timeseries/hcindex/hcindex_writer.h"
 #include "mongo/db/exec/timeseries/hcindex/hcindex_reader.h"
@@ -108,7 +109,7 @@ StatusWith<InsertRowResult> AttributeTable::insertRow(const BSONObj& metadata) {
     // Check for duplicate row
     auto duplicateRowId = findDuplicateRow(row);
     if (duplicateRowId) {
-        return InsertRowResult{duplicateRowId.value(), false};
+        return InsertRowResult{duplicateRowId.value(), false, row};
     }
 
     // Insert new row (note: insertRowDirect does not acquire lock, caller must hold it)
@@ -117,7 +118,7 @@ StatusWith<InsertRowResult> AttributeTable::insertRow(const BSONObj& metadata) {
         return insertResult.getStatus();
     }
 
-    return InsertRowResult{insertResult.getValue(), true};
+    return InsertRowResult{insertResult.getValue(), true, row};
 }
 
 StatusWith<int64_t> AttributeTable::insertRowDirect(const std::vector<uint32_t>& row) {
@@ -170,7 +171,8 @@ boost::optional<std::vector<uint32_t>> AttributeTable::getRow(int64_t rowId) con
 }
 
 std::vector<int64_t> AttributeTable::queryRowsLeaf(
-    const std::vector<uint32_t>& refRowVec) const {
+    const std::vector<uint32_t>& refRowVec,
+    BitmapIndex* bitmapIndex) const {
     std::vector<int64_t> matchingRowIds;
 
     // If refRowVec is empty or no columns, no predicates to match
@@ -178,6 +180,7 @@ std::vector<int64_t> AttributeTable::queryRowsLeaf(
         return matchingRowIds;
     }
 
+    // Fallback: Full scan when no bitmap index is available
     // Get row count from first column
     size_t rowCount = columns[0].size();
 
@@ -202,12 +205,26 @@ std::vector<int64_t> AttributeTable::queryRowsLeaf(
             break;
         }
 
-
         // columnAddedAtRowId[colIdx] is the rowId where the column was added
         // and we will treat all earlier rows as missing (0)
-        // TODO: Later we should allow null checks.
+        // TODO: We should allow null-check/fill operation.
         size_t firstValidRow = static_cast<size_t>(columnAddedAtRowId[colIdx]);
         std::fill(rowMatches.begin(), rowMatches.begin() + firstValidRow, false);
+
+        // If bitmap index exists for this column, then use it.
+        if (bitmapIndex != nullptr && bitmapIndex->hasIndexForColumn(colIdx)) {
+            auto columnRowIds = bitmapIndex->getRowIds(colIdx, expectedSymbol);
+
+            // Mark rows not in columnRowIds as non-matching
+            for (size_t rowIdx = firstValidRow; rowIdx < rowCount; ++rowIdx) {
+                if (rowMatches[rowIdx] && columnRowIds.find(static_cast<int64_t>(rowIdx)) == columnRowIds.end()) {
+                    rowMatches[rowIdx] = false;
+                }
+            }
+            continue;
+        }
+
+        // We need a full scan for this column
 
         auto &column = columns[colIdx];
         // For this column, check each row (inner loop is now vectorizable)
@@ -235,19 +252,20 @@ std::vector<int64_t> AttributeTable::queryRowsLeaf(
 }
 
 std::vector<int64_t> AttributeTable::queryRows(
-    const AttributeTablePredicate& predicate) const {
+    const AttributeTablePredicate& predicate,
+    BitmapIndex* bitmapIndex) const {
     std::shared_lock<std::shared_mutex> lock(mutex);
 
     // Handle LEAF predicates: simple equality matching
     if (predicate.isLeaf()) {
-        return queryRowsLeaf(predicate.refRowVec);
+        return queryRowsLeaf(predicate.refRowVec, bitmapIndex);
     }
 
     // Handle OR predicates: union of all child results
     if (predicate.isOr()) {
         std::set<int64_t> uniqueMatches;
         for (const auto& child : predicate.children) {
-            auto childResults = queryRows(child);
+            auto childResults = queryRows(child, bitmapIndex);
             for (auto rowId : childResults) {
                 uniqueMatches.insert(rowId);
             }
@@ -263,11 +281,11 @@ std::vector<int64_t> AttributeTable::queryRows(
         }
 
         // Start with results from first child
-        auto result = queryRows(predicate.children[0]);
+        auto result = queryRows(predicate.children[0], bitmapIndex);
 
         // Intersect with results from remaining children
         for (size_t i = 1; i < predicate.children.size(); ++i) {
-            auto childResults = queryRows(predicate.children[i]);
+            auto childResults = queryRows(predicate.children[i], bitmapIndex);
 
             // Convert to set for efficient intersection
             std::set<int64_t> childSet(childResults.begin(), childResults.end());
@@ -861,13 +879,14 @@ boost::optional<std::vector<uint32_t>> TemporalAttributeTable::getRow(
 
 std::vector<int64_t> TemporalAttributeTable::queryRows(
     const AttributeTablePredicate& predicate,
-    const Timestamp& timestamp) const {
+    const Timestamp& timestamp,
+    BitmapIndex* bitmapIndex) const {
     auto tableResult = getTableForTimestamp(timestamp);
     if (!tableResult.isOK()) {
         return {};
     }
 
-    return tableResult.getValue()->queryRows(predicate);
+    return tableResult.getValue()->queryRows(predicate, bitmapIndex);
 }
 
 std::pair<Timestamp, Timestamp> TemporalAttributeTable::getWindowForTimestamp(

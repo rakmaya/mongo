@@ -56,14 +56,17 @@ enum class DictionaryGranularity;
 class SymbolDictionary;
 class HCIndexReader;
 class HCIndexWriter;
+class BitmapIndex;
 
 /**
- * Result of inserting a row into an attribute table. Contains the row ID and
- * a flag indicating whether this is a new row (true) or a duplicate (false).
+ * Result of inserting a row into an attribute table. Contains the row ID,
+ * a flag indicating whether this is a new row (true) or a duplicate (false),
+ * and the row vector (symbol indices for each column).
  */
 struct InsertRowResult {
     int64_t rowId;
     bool isNewRow;
+    std::vector<uint32_t> row;  // Symbol indices for each column
 };
 
 /**
@@ -217,14 +220,24 @@ public:
      *
      * This method recursively processes the predicate tree to handle arbitrary nesting
      * of AND/OR expressions like: P or (Q and R) or (S and (T or U))
+     *
+     * If bitmapIndex is provided, it will be used to pre-filter candidate rows before
+     * performing the full scan. This can significantly improve performance when the
+     * bitmap index is populated.
      */
-    std::vector<int64_t> queryRows(const AttributeTablePredicate& predicate) const;
+    std::vector<int64_t> queryRows(const AttributeTablePredicate& predicate,
+                                   BitmapIndex* bitmapIndex = nullptr) const;
 
     /**
      * Helper method to query rows for a LEAF predicate (simple equality matching).
      * This is called internally by queryRows() for LEAF nodes.
+     *
+     * If bitmapIndex is provided, it will be used to get candidate rowIds first,
+     * then verify them against the attribute table. If not provided, performs a
+     * full scan of the attribute table.
      */
-    std::vector<int64_t> queryRowsLeaf(const std::vector<uint32_t>& refRowVec) const;
+    std::vector<int64_t> queryRowsLeaf(const std::vector<uint32_t>& refRowVec,
+                                       BitmapIndex* bitmapIndex = nullptr) const;
 
     /**
      * Convert a MatchExpression to an AttributeTablePredicate.
@@ -466,9 +479,13 @@ public:
      * 'timestamp' and return a vector of row IDs that match the specified
      * predicate. The predicate specifies which columns to match and what symbol
      * indices they should contain.
+     *
+     * If bitmapIndex is provided, it will be used to pre-filter candidate rows
+     * before performing the full scan in the attribute table.
      */
     std::vector<int64_t> queryRows(const AttributeTablePredicate& predicate,
-                                   const Timestamp& timestamp) const;
+                                   const Timestamp& timestamp,
+                                   BitmapIndex* bitmapIndex = nullptr) const;
 
     /**
      * Return the time window boundaries for the specified 'timestamp'.

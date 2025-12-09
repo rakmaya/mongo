@@ -5,18 +5,20 @@ package(default_visibility = ["//visibility:public"])
 mongo_cc_library(
     name = "hcindex",
     srcs = [
-        "temporal_symbol_dictionary.cpp",
-        "temporal_attribute_table.cpp",
-        "hcindex_writer.cpp",
-        "hcindex_reader.cpp",
+        "bitmap_index.cpp",
         "hcindex_collection_manager.cpp",
+        "hcindex_reader.cpp",
+        "hcindex_writer.cpp",
+        "temporal_attribute_table.cpp",
+        "temporal_symbol_dictionary.cpp",
     ],
     hdrs = [
-        "temporal_symbol_dictionary.h",
-        "temporal_attribute_table.h",
+        "bitmap_index.h",
+        "hcindex_collection_manager.h",
         "hcindex_reader.h",
         "hcindex_writer.h",
-        "hcindex_collection_manager.h",
+        "temporal_attribute_table.h",
+        "temporal_symbol_dictionary.h",
     ],
     private_hdrs = [
         "//src/mongo/db/timeseries:hcindex_options.h",
@@ -33,11 +35,12 @@ mongo_cc_library(
 mongo_cc_unit_test(
     name = "hcindex_test",
     srcs = [
-        "temporal_symbol_dictionary_test.cpp",
-        "temporal_attribute_table_test.cpp",
-        "hcindex_writer_test.cpp",
-        "hcindex_reader_test.cpp",
+        "bitmap_index_test.cpp",
         "hcindex_collection_manager_test.cpp",
+        "hcindex_reader_test.cpp",
+        "hcindex_writer_test.cpp",
+        "temporal_attribute_table_test.cpp",
+        "temporal_symbol_dictionary_test.cpp",
     ],
     tags = ["mongo_unittest_first_group"],
     deps = [
