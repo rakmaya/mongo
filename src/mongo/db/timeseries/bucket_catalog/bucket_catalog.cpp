@@ -1415,13 +1415,7 @@ std::vector<BatchedInsertContext> buildBatchedHCInsertContexts(
         getTrackingContext(bucketCatalog.trackingContexts, TrackingScope::kMeasurementBatching);
     auto stats = internal::getOrInitializeExecutionStats(bucketCatalog, collectionUUID);
 
-    LOGV2(9999951, "HCIndex: Processing time windows",
-          "windowCount"_attr = timeWindowToMeasurements.size());
-
     for (auto& [windowStart, measurements] : timeWindowToMeasurements) {
-        LOGV2(9999952, "HCIndex: Processing window with measurements",
-              "windowStart"_attr = windowStart,
-              "measurementCount"_attr = measurements.size());
         // Calculate window end based on period and frequency configuration
         Timestamp windowEnd = hcindexTimeWindow.calculateWindowEnd(windowStart);
 

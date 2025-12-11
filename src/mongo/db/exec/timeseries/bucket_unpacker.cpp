@@ -456,15 +456,8 @@ Document BucketUnpacker::getNext() {
 
     // For HCIndex buckets, decode the metadata for this measurement
     Value metaValueToUse = _metaValue;
-    LOGV2(9999982, "getNext called",
-          "isHCIndexBucket"_attr = _isHCIndexBucket,
-          "includeMetaField"_attr = _includeMetaField,
-          "currentMeasurementIndex"_attr = _currentMeasurementIndex);
     if (_isHCIndexBucket && _includeMetaField) {
         BSONObj decodedMetadata = getDecodedMetadataForMeasurement(_currentMeasurementIndex);
-        LOGV2(9999983, "Decoded metadata",
-              "decodedMetadata"_attr = decodedMetadata,
-              "isEmpty"_attr = decodedMetadata.isEmpty());
         if (!decodedMetadata.isEmpty()) {
             metaValueToUse = Value{decodedMetadata};
         }
@@ -485,9 +478,6 @@ Document BucketUnpacker::getNext() {
 
     // For HCIndex buckets, add the decoded metadata field
     if (_isHCIndexBucket && _includeMetaField && _spec.metaField()) {
-        LOGV2(9999980, "Adding decoded metadata to measurement",
-              "metaField"_attr = *_spec.metaField(),
-              "metaValue"_attr = metaValueToUse.getDocument().toBson());
         measurement.addField(*_spec.metaField(), metaValueToUse);
     }
 
@@ -510,10 +500,6 @@ Document BucketUnpacker::getNext() {
     }
 
     auto frozenMeasurement = measurement.freeze();
-    if (_isHCIndexBucket && _includeMetaField) {
-        LOGV2(9999981, "Returning HCIndex measurement",
-              "measurement"_attr = frozenMeasurement.toBson());
-    }
     return frozenMeasurement;
 }
 

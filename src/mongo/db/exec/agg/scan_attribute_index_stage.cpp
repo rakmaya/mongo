@@ -66,21 +66,12 @@ ScanAttributeIndexStage::ScanAttributeIndexStage(
     : Stage(stageName, pExpCtx), _matchExpr(std::move(matchExpr)) {}
 
 GetNextResult ScanAttributeIndexStage::doGetNext() {
-    LOGV2(9999980, "ScanAttributeIndexStage::doGetNext called",
-          "rowIdIndex"_attr = _rowIdIndex,
-          "matchingRowIdsSize"_attr = _matchingRowIds.size(),
-          "isFirstCall"_attr = (_rowIdIndex == 0 && _matchingRowIds.empty()));
-
     // If this is the first call, query the attribute table for matching rowIds
     if (_rowIdIndex == 0 && _matchingRowIds.empty()) {
-        LOGV2(9999982, "ScanAttributeIndexStage::doGetNext - first call, querying attribute table");
-
         auto opCtx = pExpCtx->getOperationContext();
         auto collUUID = pExpCtx->getUUID();
 
         if (!opCtx || !collUUID) {
-            LOGV2(9999983,
-                  "ScanAttributeIndexStage::doGetNext - missing opCtx or collUUID");
             return GetNextResult::makeEOF();
         }
 
@@ -90,39 +81,24 @@ GetNextResult ScanAttributeIndexStage::doGetNext() {
         auto hcindexMgr = timeseries::bucket_catalog::getHCIndexManager(bucketCatalog, *collUUID);
 
         if (!hcindexMgr) {
-            LOGV2(9999984,
-                  "ScanAttributeIndexStage::doGetNext - HCIndex not enabled for collection");
             return GetNextResult::makeEOF();
         }
 
-        // Note: HCIndex manager initialization is done lazily during queryRows()
-        // to avoid issues with stashed transaction resources during pipeline cleanup.
-        // Do NOT initialize the manager here.
-
         // Get current timestamp for window calculation
         Timestamp currentTimestamp(Date_t::now());
-
-        LOGV2(9999985, "ScanAttributeIndexStage::doGetNext - calling queryRows");
 
         // Query the attribute table for matching rowIds
         // The manager will initialize lazily on first use
         auto queryResult = hcindexMgr->queryRows(opCtx, _matchExpr.get(), currentTimestamp);
         if (!queryResult.isOK()) {
-            LOGV2(9999999,
-                  "ScanAttributeIndexStage::doGetNext - query failed",
-                  "error"_attr = queryResult.getStatus());
             return GetNextResult::makeEOF();
         }
 
         _matchingRowIds = queryResult.getValue();
-        LOGV2(9999996,
-              "ScanAttributeIndexStage::doGetNext - found matching rowIds",
-              "count"_attr = _matchingRowIds.size());
     }
 
     // If we've already emitted all rowIds, return EOF
     if (_rowIdIndex >= _matchingRowIds.size()) {
-        LOGV2(9999981, "ScanAttributeIndexStage::doGetNext - returning EOF");
         return GetNextResult::makeEOF();
     }
 

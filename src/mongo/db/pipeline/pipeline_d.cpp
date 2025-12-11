@@ -1141,15 +1141,7 @@ tryPrepareDistinctExecutor(const intrusive_ptr<ExpressionContext>& expCtx,
                            std::size_t plannerOpts) {
     // We want to do this before createCanonicalQuery() which does the last-minute optimization to
     // 'pipeline' and hence modifies it.
-    LOGV2(9999984, "HCIndex: tryPrepareDistinctExecutor - before tryDistinctGroupRewrite", "numSources"_attr = pipeline->getSources().size());
-    for (const auto& source : pipeline->getSources()) {
-        LOGV2(9999985, "HCIndex: Pipeline source", "stageName"_attr = source->getSourceName());
-    }
     auto [sortPattern, rewrittenGroupStage] = tryDistinctGroupRewrite(pipeline->getSources());
-    LOGV2(9999986, "HCIndex: tryPrepareDistinctExecutor - after tryDistinctGroupRewrite", "numSources"_attr = pipeline->getSources().size());
-    for (const auto& source : pipeline->getSources()) {
-        LOGV2(9999987, "HCIndex: Pipeline source", "stageName"_attr = source->getSourceName());
-    }
 
     const bool isDistinctMultiplanningEnabled =
         expCtx->isFeatureFlagShardFilteringDistinctScanEnabled();
@@ -1183,11 +1175,6 @@ tryPrepareDistinctExecutor(const intrusive_ptr<ExpressionContext>& expCtx,
         // will fail, but will succeed when the corresponding '$meta' projection is passed in
         // another attempt.
         return {swCq.getStatus()};
-    }
-
-    LOGV2(9999988, "HCIndex: tryPrepareDistinctExecutor - after createCanonicalQuery", "numSources"_attr = pipeline->getSources().size());
-    for (const auto& source : pipeline->getSources()) {
-        LOGV2(9999989, "HCIndex: Pipeline source", "stageName"_attr = source->getSourceName());
     }
 
     auto cq = std::move(swCq.getValue());
@@ -1748,15 +1735,7 @@ PipelineD::BuildQueryExecutorResult PipelineD::buildInnerQueryExecutorGeneric(
     ExecShardFilterPolicy shardFilterPolicy) {
     // Make a last effort to optimize pipeline stages before potentially detaching them to be
     // pushed down into the query executor.
-    LOGV2(9999990, "HCIndex: buildInnerQueryExecutorGeneric - before optimizePipeline", "numSources"_attr = pipeline->getSources().size());
-    for (const auto& source : pipeline->getSources()) {
-        LOGV2(9999991, "HCIndex: Pipeline source", "stageName"_attr = source->getSourceName());
-    }
     pipeline_optimization::optimizePipeline(*pipeline);
-    LOGV2(9999992, "HCIndex: buildInnerQueryExecutorGeneric - after optimizePipeline", "numSources"_attr = pipeline->getSources().size());
-    for (const auto& source : pipeline->getSources()) {
-        LOGV2(9999993, "HCIndex: Pipeline source", "stageName"_attr = source->getSourceName());
-    }
 
     auto expCtx = pipeline->getContext();
 

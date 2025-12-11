@@ -427,22 +427,19 @@ StatusWith<BitmapIndex*> TemporalBitmapIndex::getOrCreateIndex(OperationContext*
 
     // Bitmap Index for this window doesn't exist, we need to create it.
     // However, we need to check if the storage has the index.
-    LOGV2(9999940, "HCIndex: getOrCreateIndex - checking reader",
-          "hasReader"_attr = (_reader != nullptr),
-          "windowStart"_attr = windowStart);
     if (_reader) {
         auto windowEnd = calculateWindowEnd(windowStart);
         auto reconstructResult = _reader->constructBitmapIndex(
             opCtx, windowStart, windowEnd, _period, _frequency, windowStart);
 
-        LOGV2(9999941, "HCIndex: getOrCreateIndex - reconstruction result",
+        LOGV2_DEBUG(9999980, 3, "HCIndex: getOrCreateIndex - reconstruction result",
               "isOK"_attr = reconstructResult.isOK(),
               "entryCount"_attr = (reconstructResult.isOK() ?
                   reconstructResult.getValue().get()->getEntryCount() : 0));
 
         // If reconstruction succeeds and dictionary has symbols, use it
         if (reconstructResult.isOK() && reconstructResult.getValue().get()->getEntryCount() > 0) {
-            LOGV2(9999920, "HCIndex: Reconstructed bitmap index for window", "windowStart"_attr = windowStart);
+            LOGV2_DEBUG(9999980, 3, "HCIndex: Reconstructed bitmap index for window", "windowStart"_attr = windowStart);
             auto* bitmapPtr = reconstructResult.getValue().get();
 
             // Set the writer on the reconstructed dictionary so it can accept new symbols

@@ -378,9 +378,11 @@ std::pair<SbStage, PlanStageSlots> SlotBasedStageBuilder::buildUnpackTsBucket(
 
     MatchExpression* eventFilter = unpackNode->eventFilter.get();
 
-    // If the eventFilter was already applied via HCIndex filtering, skip applying it again
+    // If the eventFilter was already applied via HCIndex filtering, skip
+    // applying it again TODO: HCIndex needs to support both HCIndex and event
+    // filter predicates. For example if there is a filter on something other
+    // than metadata (e.g. measurements), this could trip here.  A big TODO!
     if (unpackNode->eventFilterAppliedByHCIndex) {
-        LOGV2(9999995, "HCIndex: Skipping eventFilter application (already applied via HCIndex)");
         eventFilter = nullptr;
     }
 

@@ -64,7 +64,6 @@ bool requiresViewlessTimeseriesTranslation(OperationContext* const opCtx, const 
     bool isTimeseries = coll.isTimeseriesCollection();
     bool isNewWithoutView = coll.isNewTimeseriesWithoutView();
     bool isBucketsCollection = coll.ns().isTimeseriesBucketsCollection();
-    LOGV2(10000000, "HCIndex: requiresViewlessTimeseriesTranslation", "ns"_attr = coll.ns().toStringForErrorMsg(), "isRaw"_attr = isRaw, "isTimeseries"_attr = isTimeseries, "isNewWithoutView"_attr = isNewWithoutView, "isBucketsCollection"_attr = isBucketsCollection);
     return !isRaw && isTimeseries && isNewWithoutView;
 }
 
@@ -152,29 +151,24 @@ void translatePipeline(const boost::intrusive_ptr<ExpressionContext>& expCtx,
     // When the pipeline is empty, all documents in the collection are returned. Therefore, we need
     // to add the unpack stage.
     if (MONGO_unlikely(pipeline.empty())) {
-        LOGV2(9999990, "HCIndex: translatePipeline - pipeline is empty, prepending unpack stage");
         prependUnpackStageToPipeline(expCtx, pipeline, params);
         return;
     }
 
     DocumentSource* initialStage = pipeline.peekFront();
     tassert(10601104, "A non-empty pipeline must have an initial stage", initialStage);
-    LOGV2(9999991, "HCIndex: translatePipeline - initial stage name", "stageName"_attr = initialStage->getSourceName());
     if (requiresCustomTranslation(initialStage)) {
         performCustomTranslation(expCtx, initialStage, pipeline, params);
         return;
     }
 
     bool consumesCollectionData = initialStage->constraints().consumesLogicalCollectionData;
-    LOGV2(9999992, "HCIndex: translatePipeline - consumesCollectionData", "consumesCollectionData"_attr = consumesCollectionData);
 
     // For HCIndex, we need to prepend the unpack stage even if the initial stage doesn't consume collection data
     // This is because stages like $group need the unpacked data to apply HCIndex metadata filtering
     bool isGroupStage = initialStage->getSourceName() == "$group"_sd;
-    LOGV2(9999997, "HCIndex: translatePipeline - isGroupStage", "isGroupStage"_attr = isGroupStage);
 
     if (consumesCollectionData || isGroupStage) {
-        LOGV2(9999993, "HCIndex: translatePipeline - prepending unpack stage");
         prependUnpackStageToPipeline(expCtx, pipeline, params);
     }
 }
@@ -182,7 +176,6 @@ void translatePipeline(const boost::intrusive_ptr<ExpressionContext>& expCtx,
 void prependUnpackStageForHCIndexIfRequiredImpl(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                                             Pipeline& pipeline,
                                             const CollectionPtr& collPtr) {
-    LOGV2(10000003, "HCIndex: prependUnpackStageForHCIndexIfRequired - Entering prependUnpackStageForHCIndexIfRequired");
     // For HCIndex-enabled legacy timeseries collections, we need to add the unpack stage
     // even if this is not a viewless timeseries collection. This is because the query may be
     // executing directly on the buckets collection (when isRawDataOperation is true), and we
@@ -197,25 +190,19 @@ void prependUnpackStageForHCIndexIfRequiredImpl(const boost::intrusive_ptr<Expre
 
     // Check if the pipeline already has an unpack stage (from view resolution)
     const auto& sources = pipeline.getSources();
-    LOGV2(10000004, "HCIndex: prependUnpackStageForHCIndexIfRequired - checking sources", "numSources"_attr = sources.size());
 
     if (!sources.empty()) {
         auto firstStageName = sources.front()->getSourceName();
-        LOGV2(10000005, "HCIndex: prependUnpackStageForHCIndexIfRequired - first stage", "stageName"_attr = firstStageName);
 
         if (firstStageName == "$_internalUnpackBucket"_sd) {
-            LOGV2(10000005, "HCIndex: prependUnpackStageForHCIndexIfRequired - Unpack stage already present, skipping");
             return;
         }
 
         // Don't prepend unpack stage for $collStats - it must be the first stage in the pipeline
         if (firstStageName == "$collStats"_sd) {
-            LOGV2(10000006, "HCIndex: prependUnpackStageForHCIndexIfRequired - $collStats must be first stage, skipping");
             return;
         }
     }
-
-    LOGV2(10000002, "HCIndex: prependUnpackStageForHCIndexIfRequired - HCIndex enabled on legacy timeseries, prepending unpack stage");
 
     TimeseriesTranslationParams hcindexParams{
         *collPtr->getTimeseriesOptions(),
@@ -249,20 +236,17 @@ boost::optional<TimeseriesTranslationParams> getTimeseriesTranslationParamsIfReq
 boost::optional<TimeseriesTranslationParams> getTimeseriesTranslationParamsIfRequired(
     OperationContext* opCtx, const CollectionOrViewAcquisition& collOrView) {
     if (!collOrView.isCollection()) {
-        LOGV2(9999997, "HCIndex: getTimeseriesTranslationParamsIfRequired - not a collection");
         return boost::none;
     }
 
     const CollectionPtr& collPtr = collOrView.getCollectionPtr();
     if (!requiresViewlessTimeseriesTranslation(opCtx, collPtr)) {
-        LOGV2(9999998, "HCIndex: getTimeseriesTranslationParamsIfRequired - not a viewless timeseries collection");
         return boost::none;
     }
 
     tassert(10601100,
             "Timeseries collection must have timeseries options",
             collPtr->getTimeseriesOptions());
-    LOGV2(9999999, "HCIndex: getTimeseriesTranslationParamsIfRequired - returning params");
     return TimeseriesTranslationParams{
         collPtr->getTimeseriesOptions().get(),
         !collPtr->getTimeseriesMixedSchemaBucketsState().mustConsiderMixedSchemaBucketsInReads(),
@@ -275,19 +259,15 @@ void translateStagesIfRequiredImpl(const boost::intrusive_ptr<ExpressionContext>
                                    const T& catalogData) {
     // Do not double translate.
     if (pipeline.isTranslated()) {
-        LOGV2(9999994, "HCIndex: translateStagesIfRequiredImpl - pipeline already translated");
         return;
     }
 
-    LOGV2(9999998, "HCIndex: translateStagesIfRequiredImpl - checking if translation required");
     const boost::optional<TimeseriesTranslationParams> params =
         getTimeseriesTranslationParamsIfRequired(expCtx->getOperationContext(), catalogData);
     if (!params) {
-        LOGV2(9999995, "HCIndex: translateStagesIfRequiredImpl - no timeseries translation params");
         return;
     }
 
-    LOGV2(9999996, "HCIndex: translateStagesIfRequiredImpl - calling translatePipeline");
     translatePipeline(expCtx, pipeline, params.get());
 }
 

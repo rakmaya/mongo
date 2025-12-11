@@ -729,16 +729,6 @@ std::vector<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> prepareExecuto
     const auto expCtx = pipeline->getContext();
     const auto mainCollectionUUID = aggCatalogState.getUUID();
 
-    // Log pipeline stages at the start of prepareExecutors
-    LOGV2(10000020, "HCIndex: Pipeline stages at START of prepareExecutors");
-    size_t idx = 0;
-    for (const auto& source : pipeline->getSources()) {
-        LOGV2(10000021, "HCIndex: Pipeline stage in prepareExecutors",
-              "index"_attr = idx,
-              "stageName"_attr = source->getSourceName());
-        ++idx;
-    }
-
     // Check if the pipeline has a $geoNear stage, as it will be ripped away during the build query
     // executor phase below (to be replaced with a $geoNearCursorStage later during the executor
     // attach phase).
@@ -775,22 +765,6 @@ std::vector<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> prepareExecuto
         [&](const BSONObj& data) {
             return mainCollectionUUID && UUID::parse(data["uuid"]) == *mainCollectionUUID;
         });
-
-    // Log pipeline stages at the end of prepareExecutors
-    LOGV2(10000022, "HCIndex: Pipeline stages at END of prepareExecutors");
-    for (const auto& exec : execs) {
-        if (exec && exec->getPipeline()) {
-            idx = 0;
-            for (const auto& source : exec->getPipeline()->getSources()) {
-                LOGV2(10000023, "HCIndex: Pipeline stage at end of prepareExecutors",
-                    "index"_attr = idx,
-                    "stageName"_attr = source->getSourceName());
-                ++idx;
-            }
-        } else {
-            LOGV2(10000024, "HCIndex: No pipeline available in executor");
-        }
-    }
 
     return execs;
 }
@@ -1077,16 +1051,6 @@ StatusWith<std::unique_ptr<Pipeline>> preparePipeline(
     std::unique_ptr<Pipeline> pipeline =
         parsePipelineAndRegisterQueryStats(aggExState, aggCatalogState, expCtx);
 
-    // Log pipeline stages at the start of prepareExecutors
-    LOGV2(10000000, "HCIndex: Pipeline stages at START of preparePipeline");
-    size_t idx = 0;
-    for (const auto& source : pipeline->getSources()) {
-        LOGV2(10000001, "HCIndex: Pipeline stage in preparePipeline",
-              "index"_attr = idx,
-              "stageName"_attr = source->getSourceName());
-        ++idx;
-    }
-
     // Start the query planning timer right after parsing.
     CurOp::get(aggExState.getOpCtx())->beginQueryPlanningTimer();
     CurOp::get(aggExState.getOpCtx())->debug().isChangeStreamQuery = aggExState.hasChangeStream();
@@ -1126,27 +1090,7 @@ StatusWith<std::unique_ptr<Pipeline>> preparePipeline(
         aggregation_hint_translation::translateIndexHintIfRequired(
             expCtx, aggCatalogState.getMainCollectionOrView(), aggExState.getRequest());
 
-        // Log pipeline stages before performPreOptimizationRewrites
-        LOGV2(10000010, "HCIndex: Pipeline stages BEFORE performPreOptimizationRewrites");
-        idx = 0;
-        for (const auto& source : pipeline->getSources()) {
-            LOGV2(10000011, "HCIndex: Pipeline stage before",
-                  "index"_attr = idx,
-                  "stageName"_attr = source->getSourceName());
-            ++idx;
-        }
-
         pipeline->performPreOptimizationRewrites(expCtx, aggCatalogState.getMainCollectionOrView());
-
-        // Log pipeline stages after performPreOptimizationRewrites
-        LOGV2(10000012, "HCIndex: Pipeline stages AFTER performPreOptimizationRewrites");
-        idx = 0;
-        for (const auto& source : pipeline->getSources()) {
-            LOGV2(10000013, "HCIndex: Pipeline stage after",
-                  "index"_attr = idx,
-                  "stageName"_attr = source->getSourceName());
-            ++idx;
-        }
     }
 
     // If the aggregate command supports encrypted collections, do rewrites of the pipeline to
@@ -1160,16 +1104,6 @@ StatusWith<std::unique_ptr<Pipeline>> preparePipeline(
         aggExState.getRequest().getEncryptionInformation()->setCrudProcessed(true);
     }
 
-    // Log pipeline stages after FLE rewrites
-    LOGV2(10000014, "HCIndex: Pipeline stages AFTER FLERewrite");
-    idx = 0;
-    for (const auto& source : pipeline->getSources()) {
-        LOGV2(10000015, "HCIndex: Pipeline stage after",
-                "index"_attr = idx,
-                "stageName"_attr = source->getSourceName());
-        ++idx;
-    }
-
     if (search_helpers::isMongotPipeline(pipeline.get())) {
         // Before preparing the pipeline executor, we need to do dependency analysis to validate
         // the metadata dependencies.
@@ -1180,16 +1114,6 @@ StatusWith<std::unique_ptr<Pipeline>> preparePipeline(
         uassert(6253506,
                 "Cannot have exchange specified in a search pipeline",
                 !aggExState.getRequest().getExchange());
-    }
-
-    // Log pipeline stages after FLE rewrites
-    LOGV2(10000016, "HCIndex: Pipeline stages AFTER validating Meta dependencies");
-    idx = 0;
-    for (const auto& source : pipeline->getSources()) {
-        LOGV2(10000017, "HCIndex: Pipeline stage after",
-                "index"_attr = idx,
-                "stageName"_attr = source->getSourceName());
-        ++idx;
     }
 
     pipeline_optimization::optimizePipeline(*pipeline);
@@ -1210,17 +1134,6 @@ StatusWith<std::unique_ptr<Pipeline>> preparePipeline(
                                 aggExState.getRequest().getLet())
             .getAsync([](auto) {});
     }
-
-    // Log pipeline stages at the start of prepareExecutors
-    LOGV2(10000000, "HCIndex: Pipeline stages at END of preparePipeline");
-    idx = 0;
-    for (const auto& source : pipeline->getSources()) {
-        LOGV2(10000001, "HCIndex: Pipeline stage at end of preparePipeline",
-              "index"_attr = idx,
-              "stageName"_attr = source->getSourceName());
-        ++idx;
-    }
-
 
     return std::move(pipeline);
 }

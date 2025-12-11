@@ -45,11 +45,6 @@ std::unique_ptr<exec::agg::Pipeline> buildPipeline(const mongo::Pipeline& pipeli
     Pipeline::StageContainer stages;
     const auto& documentSources = pipeline.getSources();
 
-    LOGV2(9999982, "HCIndex: buildPipeline called", "numSources"_attr = documentSources.size());
-    for (const auto& source : documentSources) {
-        LOGV2(9999983, "HCIndex: DocumentSource in pipeline", "stageName"_attr = source->getSourceName());
-    }
-
     try {
         if (MONGO_likely(!documentSources.empty())) {
             stages.reserve(documentSources.size());

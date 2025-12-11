@@ -357,7 +357,6 @@ StatusWith<SymbolDictionary*> TemporalSymbolDictionary::getOrCreateDictionary(
             opCtx, windowStart, windowEnd, _period, _frequency, windowStart);
         // If reconstruction succeeds and dictionary has symbols, use it
         if (reconstructResult.isOK() && reconstructResult.getValue().get()->getSymbolCount() > 0) {
-            LOGV2(9999920, "HCIndex: Reconstructed dictionary for window", "windowStart"_attr = windowStart);
             auto* dictPtr = reconstructResult.getValue().get();
 
             // Set the writer on the reconstructed dictionary so it can accept new symbols
@@ -372,8 +371,6 @@ StatusWith<SymbolDictionary*> TemporalSymbolDictionary::getOrCreateDictionary(
         // is not so great.  TODO: Add some flags so we can detect between lack
         // of data and missing data.
     }
-
-    LOGV2(9999921, "HCIndex: Creating new dictionary for window", "windowStart"_attr = windowStart);
 
     // Create new dictionary
     auto windowEnd = calculateWindowEnd(windowStart);

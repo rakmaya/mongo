@@ -107,12 +107,6 @@ boost::intrusive_ptr<exec::agg::Stage> documentSourceInternalUnpackBucketToStage
 
     tassert(10565500, "expected 'DocumentSourceInternalUnpackBucket' type", dsInternalUnpackBucket);
 
-    LOGV2(9999980, "HCIndex: Creating InternalUnpackBucketStage from DocumentSource", "hasMetadataFilter"_attr = (!dsInternalUnpackBucket->_hcindexMetadataFilterBSON.isEmpty()));
-
-    // Note: HCIndex manager initialization is done lazily during query execution
-    // (e.g., in queryRows()) to avoid issues with stashed transaction resources
-    // during pipeline cleanup. Do NOT initialize the manager here.
-
     auto stage = make_intrusive<exec::agg::InternalUnpackBucketStage>(
         dsInternalUnpackBucket->kStageNameInternal,
         dsInternalUnpackBucket->getExpCtx(),
@@ -123,7 +117,6 @@ boost::intrusive_ptr<exec::agg::Stage> documentSourceInternalUnpackBucketToStage
 
     // Pass the HCIndex metadata filter if present
     if (!dsInternalUnpackBucket->_hcindexMetadataFilterBSON.isEmpty()) {
-        LOGV2(9999981, "HCIndex: Setting metadata filter on Stage", "filter"_attr = dsInternalUnpackBucket->_hcindexMetadataFilterBSON);
 
         // Get the actual metadata field name from the bucket spec
         auto metaField = dsInternalUnpackBucket->_sharedState->_bucketUnpacker.getMetaField();
@@ -132,7 +125,6 @@ boost::intrusive_ptr<exec::agg::Stage> documentSourceInternalUnpackBucketToStage
         // If the metadata field is not "meta", replace it in the BSON
         if (metaField && *metaField != "meta"_sd) {
             filterBSON = replaceMetaFieldInBSON(filterBSON, *metaField);
-            LOGV2(9999985, "HCIndex: Replaced meta field in filter", "originalFilter"_attr = dsInternalUnpackBucket->_hcindexMetadataFilterBSON, "newFilter"_attr = filterBSON);
         }
 
         // Make sure the BSON is owned so it outlives the MatchExpression
@@ -151,10 +143,8 @@ boost::intrusive_ptr<exec::agg::Stage> documentSourceInternalUnpackBucketToStage
 
             // Set the backing BSON on all ComparisonMatchExpressions in the tree to ensure the BSONElements remain valid
             setBackingBSONOnAllComparisons(matchExpr.get(), filterBSON);
-            LOGV2(9999986, "HCIndex: Set backing BSON on all ComparisonMatchExpressions");
 
             stage->setHCIndexMetadataFilter(std::move(matchExpr));
-            LOGV2(9999983, "HCIndex: Successfully parsed metadata filter");
         } else {
             LOGV2_ERROR(9999984, "HCIndex: Failed to parse metadata filter", "error"_attr = parseResult.getStatus());
         }
@@ -184,7 +174,6 @@ InternalUnpackBucketStage::InternalUnpackBucketStage(
       _sampleSize(sampleSize) {}
 
 GetNextResult InternalUnpackBucketStage::doGetNext() {
-    LOGV2(9999979, "InternalUnpackBucketStage::doGetNext called", "hasMetadataFilter"_attr = (_hcindexMetadataFilter != nullptr));
     // BREAKPOINT: Set breakpoint here to see if this is being called
     tassert(5521502, "calling doGetNext() when '_sampleSize' is set is disallowed", !_sampleSize);
 
@@ -195,7 +184,6 @@ GetNextResult InternalUnpackBucketStage::doGetNext() {
     }
 
     auto nextResult = pSource->getNext();
-    LOGV2(9999998, "pSource->getNext() returned", "isAdvanced"_attr = nextResult.isAdvanced());
     while (nextResult.isAdvanced()) {
         auto bucket = nextResult.getDocument().toBson();
         auto bucketMatchedQuery = _sharedState->_wholeBucketFilter &&
@@ -203,13 +191,11 @@ GetNextResult InternalUnpackBucketStage::doGetNext() {
 
         // Set HCIndexCollectionManager and OperationContext if this is an HCIndex-enabled collection
         auto collUUID = pExpCtx->getUUID();
-        LOGV2(9999980, "HCIndex: doGetNext checking for HCIndex", "hasUUID"_attr = collUUID.has_value(), "hasMetadataFilter"_attr = (_hcindexMetadataFilter != nullptr));
         if (collUUID) {
             auto& bucketCatalog = timeseries::bucket_catalog::GlobalBucketCatalog::get(
                 pExpCtx->getOperationContext()->getServiceContext());
             auto hcindexMgr = timeseries::bucket_catalog::getHCIndexManager(
                 bucketCatalog, *collUUID);
-            LOGV2(9999981, "HCIndex: Got HCIndexManager", "hasMgr"_attr = (hcindexMgr != nullptr));
             if (hcindexMgr) {
                 _sharedState->_bucketUnpacker.setHCIndexCollectionManager(hcindexMgr.get());
                 _sharedState->_bucketUnpacker.setOperationContext(pExpCtx->getOperationContext());
@@ -225,14 +211,11 @@ GetNextResult InternalUnpackBucketStage::doGetNext() {
                     auto minObj = controlObj.getObjectField("min");
                     auto bucketTimestampElem = minObj.getField(timeField);
 
-                    LOGV2(9999982, "HCIndex: Extracted bucket timestamp element", "hasElem"_attr = bucketTimestampElem.ok(), "type"_attr = (int)bucketTimestampElem.type());
                     if (bucketTimestampElem && bucketTimestampElem.type() == BSONType::date) {
                         // Convert Date_t (milliseconds) to Timestamp (seconds)
                         auto dateT = bucketTimestampElem.Date();
                         auto seconds = dateT.toMillisSinceEpoch() / 1000;
                         auto bucketTimestamp = Timestamp(seconds, 0);
-                        LOGV2(9999983, "HCIndex: Querying attribute table for bucket",
-                              "bucketTimestamp"_attr = bucketTimestamp);
 
                         auto queryResult = hcindexMgr->queryRows(
                             pExpCtx->getOperationContext(), _hcindexMetadataFilter.get(), bucketTimestamp);
@@ -246,11 +229,8 @@ GetNextResult InternalUnpackBucketStage::doGetNext() {
                                 if (!rowIdStr.empty()) rowIdStr += ", ";
                                 rowIdStr += std::to_string(id);
                             }
-                            LOGV2(9999984, "HCIndex: Found matching rowIds",
-                                  "count"_attr = _hcindexMatchingRowIds.size(),
-                                  "rowIds"_attr = rowIdStr);
                         } else {
-                            LOGV2(9999985, "HCIndex: Query failed",
+                            LOGV2_ERROR(9999985, "HCIndex: Query failed",
                                   "error"_attr = queryResult.getStatus());
                         }
                     }
@@ -279,11 +259,6 @@ GetNextResult InternalUnpackBucketStage::doGetNext() {
 boost::optional<Document> InternalUnpackBucketStage::getNextMatchingMeasure() {
     int measurementCount = 0;
     int matchedCount = 0;
-    LOGV2(9999984, "getNextMatchingMeasure called",
-          "hasEventFilter"_attr = (_sharedState->_eventFilter != nullptr),
-          "hasHCIndexFilter"_attr = (_hcindexMetadataFilter != nullptr),
-          "_hcindexRowIdsInitialized"_attr = _hcindexRowIdsInitialized,
-          "unpackToBson"_attr = _unpackToBson);
     while (_sharedState->_bucketUnpacker.hasNext()) {
         // Check HCIndex metadata filter first if present
         if (_hcindexMetadataFilter && _hcindexRowIdsInitialized) {
@@ -302,9 +277,6 @@ boost::optional<Document> InternalUnpackBucketStage::getNextMatchingMeasure() {
                 auto measure = _sharedState->_bucketUnpacker.getNextBson();
                 bool matches = _sharedState->_bucketUnpacker.bucketMatchedQuery() ||
                     exec::matcher::matchesBSON(_sharedState->_eventFilter.get(), measure);
-                LOGV2(9999985, "Checked measurement (BSON)",
-                      "matches"_attr = matches,
-                      "bucketMatched"_attr = _sharedState->_bucketUnpacker.bucketMatchedQuery());
                 if (matches) {
                     return Document(measure);
                 }
@@ -318,22 +290,14 @@ boost::optional<Document> InternalUnpackBucketStage::getNextMatchingMeasure() {
                                                                      _eventFilterDeps.fields);
                 bool matches = _sharedState->_bucketUnpacker.bucketMatchedQuery() ||
                     exec::matcher::matchesBSON(_sharedState->_eventFilter.get(), measureBson);
-                LOGV2(9999986, "Checked measurement (Document)",
-                      "matches"_attr = matches,
-                      "bucketMatched"_attr = _sharedState->_bucketUnpacker.bucketMatchedQuery(),
-                      "measureBson"_attr = measureBson);
                 if (matches) {
-                    LOGV2(9999987, "Returning matched measurement",
-                          "measure"_attr = measure.toBson());
                     return measure;
                 }
             }
         } else {
-            LOGV2(9999988, "No event filter, returning measurement");
             return _sharedState->_bucketUnpacker.getNext();
         }
     }
-    LOGV2(9999989, "No more measurements");
     return {};
 }
 

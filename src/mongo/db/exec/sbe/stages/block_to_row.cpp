@@ -33,10 +33,8 @@
 #include "mongo/db/exec/sbe/stages/stages.h"
 #include "mongo/db/exec/sbe/values/cell_interface.h"
 #include "mongo/db/exec/sbe/values/value.h"
-#include "mongo/logv2/log.h"
 #include "mongo/util/assert_util.h"
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 namespace mongo::sbe {
 BlockToRowStage::BlockToRowStage(std::unique_ptr<PlanStage> input,
@@ -149,9 +147,6 @@ void BlockToRowStage::prepareDeblock() {
             *onesInBitset += idxPasses;
             selectivityVector[i] = static_cast<char>(idxPasses);
         }
-        LOGV2(9999997, "BlockToRowStage::prepareDeblock - bitmap extracted",
-              "bitmapSize"_attr = extractedBitmap.count(),
-              "onesInBitset"_attr = *onesInBitset);
     }
 
     for (auto acc : _blockAccessors) {
@@ -191,9 +186,6 @@ void BlockToRowStage::prepareDeblock() {
                 "All deblocked value runs for output must be same size",
                 _deblockedValueRuns.back().size() == _deblockedValueRuns.front().size());
     }
-
-    LOGV2(9999998, "BlockToRowStage::prepareDeblock - output rows",
-          "outputRowCount"_attr = (_deblockedValueRuns.empty() ? 0 : _deblockedValueRuns.front().size()));
 }
 
 PlanState BlockToRowStage::getNext() {
@@ -203,7 +195,6 @@ PlanState BlockToRowStage::getNext() {
     checkForInterruptNoYield(_opCtx);
 
     if (!_deblockedValueRuns.empty() && getNextFromDeblockedValues() == PlanState::ADVANCED) {
-        LOGV2(9999999, "BlockToRowStage::getNext - returning row from deblocked values");
         return trackPlanState(PlanState::ADVANCED);
     }
 
@@ -216,7 +207,6 @@ PlanState BlockToRowStage::getNext() {
         disableSlotAccess();
         auto state = _children[0]->getNext();
         if (state == PlanState::IS_EOF) {
-            LOGV2(9999999, "BlockToRowStage::getNext - child returned EOF");
             return trackPlanState(state);
         }
 
@@ -226,7 +216,6 @@ PlanState BlockToRowStage::getNext() {
 
         auto blockState = getNextFromDeblockedValues();
         if (blockState == PlanState::ADVANCED) {
-            LOGV2(9999999, "BlockToRowStage::getNext - returning row after prepareDeblock");
             return trackPlanState(PlanState::ADVANCED);
         }
 

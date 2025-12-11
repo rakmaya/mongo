@@ -124,7 +124,6 @@ value::SlotAccessor* TsBucketToCellBlockStage::getAccessor(CompileCtx& ctx, valu
 }
 
 void TsBucketToCellBlockStage::open(bool reOpen) {
-    LOGV2(9999997, "TsBucketToCellBlockStage::open() called");
     auto optTimer(getOptTimer(_opCtx));
 
     _commonStats.opens++;
@@ -136,7 +135,6 @@ void TsBucketToCellBlockStage::open(bool reOpen) {
         auto initStatus = _hcindexMgr->initializeForRead(_opCtx);
         if (initStatus.isOK()) {
             _hcindexInitialized = true;
-            LOGV2(9999997, "HCIndex initialized in TsBucketToCellBlockStage::open()");
         } else {
             LOGV2_WARNING(9999998,
                           "Failed to initialize HCIndex in TsBucketToCellBlockStage::open()",
@@ -180,7 +178,6 @@ PlanState TsBucketToCellBlockStage::getNext() {
 }
 
 void TsBucketToCellBlockStage::close() {
-    LOGV2(9999997, "TsBucketToCellBlockStage::close() called");
     auto optTimer(getOptTimer(_opCtx));
 
     trackClose();
@@ -190,7 +187,6 @@ void TsBucketToCellBlockStage::close() {
     if (_hcindexMgr && _hcindexInitialized) {
         _hcindexMgr->close();
         _hcindexInitialized = false;
-        LOGV2(9999999, "HCIndex closed in TsBucketToCellBlockStage::close()");
     }
 
     _children[0]->close();
@@ -281,11 +277,8 @@ void TsBucketToCellBlockStage::doSaveState() {
 }
 
 void TsBucketToCellBlockStage::doRestoreState() {
-    LOGV2(9999997, "TsBucketToCellBlockStage::doRestoreState() called");
-
     // Restore HCIndex after yielding by re-acquiring collection pointers
     if (_hcindexMgr && _hcindexInitialized && _opCtx) {
-        LOGV2(9999997, "TsBucketToCellBlockStage::doRestoreState() restoreForYield on HCIndex");
         auto restoreStatus = _hcindexMgr->restoreForYield(_opCtx);
         if (!restoreStatus.isOK()) {
             LOGV2_WARNING(9999998,
@@ -345,7 +338,6 @@ void TsBucketToCellBlockStage::initCellBlocks() {
 }
 
 void TsBucketToCellBlockStage::initializeHCIndexMatchingRowIds(const BSONObj& bucketObj) {
-    LOGV2(9999989, "HCIndex: initializeHCIndexMatchingRowIds called");
 
     // Clear previous cache
     _hcindexMatchingRowIds.clear();
@@ -353,7 +345,7 @@ void TsBucketToCellBlockStage::initializeHCIndexMatchingRowIds(const BSONObj& bu
 
     // Check if we have the necessary components
     if (!_hcindexMgr || !_hcindexMetadataFilter || !_opCtx) {
-        LOGV2(9999990, "HCIndex: Missing required components for HCIndex filtering",
+        LOGV2_WARNING(9999990, "HCIndex: Missing required components for HCIndex filtering",
               "hasMgr"_attr = (_hcindexMgr != nullptr),
               "hasFilter"_attr = (_hcindexMetadataFilter != nullptr),
               "hasOpCtx"_attr = (_opCtx != nullptr));
@@ -363,7 +355,7 @@ void TsBucketToCellBlockStage::initializeHCIndexMatchingRowIds(const BSONObj& bu
     // Check if bucket has HCIndex flag in the meta section
     auto metaElt = bucketObj[timeseries::kBucketMetaFieldName];
     if (metaElt.eoo()) {
-        LOGV2(9999991, "HCIndex: Bucket does not have meta field");
+        LOGV2_WARNING(9999991, "HCIndex: Bucket does not have meta field");
         return;
     }
 
@@ -371,52 +363,43 @@ void TsBucketToCellBlockStage::initializeHCIndexMatchingRowIds(const BSONObj& bu
     auto hcindexFlag = metaObj["hcindex"];
 
     if (hcindexFlag.eoo() || !hcindexFlag.trueValue()) {
-        LOGV2(9999991, "HCIndex: Bucket does not have hcindex flag set in meta");
+        LOGV2_WARNING(9999991, "HCIndex: Bucket does not have hcindex flag set in meta");
         return;
     }
 
     // Get the windowStart from the meta field
     auto windowStartElt = metaObj["windowStart"];
     if (windowStartElt.eoo()) {
-        LOGV2(9999992, "HCIndex: windowStart not found in meta");
+        LOGV2_WARNING(9999992, "HCIndex: windowStart not found in meta");
         return;
     }
 
     if (windowStartElt.type() != BSONType::timestamp) {
-        LOGV2(9999992, "HCIndex: windowStart is not a Timestamp");
+        LOGV2_WARNING(9999992, "HCIndex: windowStart is not a Timestamp");
         return;
     }
 
     Timestamp ts = windowStartElt.timestamp();
-    LOGV2(9999993, "HCIndex: Got windowStart timestamp", "timestamp"_attr = ts);
-
-    // Call queryRows() to get matching rowIds
-    // The manager will initialize lazily on first use (in queryRows())
-    // to avoid issues with stashed transaction resources during pipeline cleanup
-    LOGV2(9999994, "HCIndex: Calling queryRows to get matching rowIds");
 
     auto queryResult = _hcindexMgr->queryRows(_opCtx, _hcindexMetadataFilter.get(), ts);
 
     if (!queryResult.isOK()) {
-        LOGV2(9999995, "HCIndex: queryRows failed", "error"_attr = queryResult.getStatus());
+        LOGV2_WARNING(9999995, "HCIndex: queryRows failed", "error"_attr = queryResult.getStatus());
         return;
     }
 
     auto rowIds = queryResult.getValue();
     _hcindexMatchingRowIds.insert(rowIds.begin(), rowIds.end());
     _hcindexRowIdsInitialized = true;
-
-    LOGV2(9999996, "HCIndex: Initialized matching rowIds", "count"_attr = _hcindexMatchingRowIds.size());
 }
 
 std::unique_ptr<value::ValueBlock> TsBucketToCellBlockStage::createHCIndexFilteredBitmap(
     const BSONObj& bucketObj, size_t nMeasurements) {
-    LOGV2(9999990, "HCIndex: createHCIndexFilteredBitmap called", "nMeasurements"_attr = nMeasurements);
 
     // Check if bucket has HCIndex flag in the meta section
     auto metaElt = bucketObj[timeseries::kBucketMetaFieldName];
     if (metaElt.eoo()) {
-        LOGV2(9999991, "HCIndex: Bucket does not have meta field");
+        LOGV2_WARNING(9999991, "HCIndex: Bucket does not have meta field");
         return nullptr;
     }
 
@@ -424,18 +407,16 @@ std::unique_ptr<value::ValueBlock> TsBucketToCellBlockStage::createHCIndexFilter
     auto hcindexFlag = metaObj["hcindex"];
 
     if (hcindexFlag.eoo() || !hcindexFlag.trueValue()) {
-        LOGV2(9999991, "HCIndex: Bucket does not have hcindex flag set in meta");
+        LOGV2_WARNING(9999991, "HCIndex: Bucket does not have hcindex flag set in meta");
         return nullptr;
     }
-
-    LOGV2(9999992, "HCIndex: Bucket has hcindex flag, building filtered bitmap");
 
     // Get the rowId column from the data section
     auto dataObj = bucketObj[timeseries::kBucketDataFieldName].Obj();
     auto rowIdElt = dataObj["rowId"];
 
     if (rowIdElt.eoo()) {
-        LOGV2(9999993, "HCIndex: rowId field not found in data");
+        LOGV2_WARNING(9999993, "HCIndex: rowId field not found in data");
         return nullptr;
     }
 
@@ -458,17 +439,9 @@ std::unique_ptr<value::ValueBlock> TsBucketToCellBlockStage::createHCIndexFilter
         idx++;
     }
 
-    LOGV2(9999995, "HCIndex: Built bitmap", "size"_attr = bitmap.size());
-
-    // Count true values in bitmap
-    size_t trueCount = 0;
-    for (bool b : bitmap) {
-        if (b) trueCount++;
-    }
-    LOGV2(9999996, "HCIndex: Bitmap true count", "trueCount"_attr = trueCount, "totalSize"_attr = bitmap.size());
-
-    // Convert bitmap to ValueBlock
-    // Create a BoolBlock from the bitmap vector
+    // Convert ValueBlock
+    // TODO: We should optimize this to avoid the copy.
     return std::make_unique<value::BoolBlock>(std::move(bitmap));
 }
+
 }  // namespace mongo::sbe

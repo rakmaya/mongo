@@ -76,19 +76,16 @@ HCIndexCollectionManager::HCIndexCollectionManager(OperationContext* opCtx,
       bitmapIndex(buildMetadataIndex ? std::make_unique<TemporalBitmapIndex>(collectionUUID, period, frequency, writer.get(), reader.get()) : nullptr),
       attributeTable(std::make_unique<TemporalAttributeTable>(collectionUUID, period, frequency, symbolDictionary.get(), bitmapIndex.get(), writer.get(), reader.get()))
 {
-    LOGV2(9999995,
+    LOGV2_DEBUG(9999980, 3,
           "HCIndex: HCIndexCollectionManager created",
           "collectionUUID"_attr = collectionUUID,
           "dbName"_attr = dbName,
           "buildMetadataIndex"_attr = buildMetadataIndex,
           "sparseIndexThreshold"_attr = sparseIndexThreshold,
           "denseIndexThreshold"_attr = denseIndexThreshold,
-          "dynamicIndexBuild"_attr = dynamicIndexBuild);
-    // Log included and excluded columns
-    LOGV2(9999996,
-          "HCIndex: Included and excluded columns",
-          "includedColumns"_attr = _includedColumns,
-          "excludedColumns"_attr = _excludedColumns); 
+          "dynamicIndexBuild"_attr = dynamicIndexBuild,
+          "excludedColumns"_attr = _excludedColumns,
+          "includedColumns"_attr = _includedColumns);
     attributeTable->setIncludedIndexColumns(
         std::unordered_set<std::string>(_includedColumns.begin(), _includedColumns.end()));
     attributeTable->setExcludedIndexColumns(
@@ -242,7 +239,6 @@ StatusWith<BSONObj> HCIndexCollectionManager::decodeMetadata(OperationContext* o
 
 Status HCIndexCollectionManager::flushPendingOperations(
     std::function<Status(const std::string&, const std::vector<InsertStatement>&)> flushCallback) {
-    LOGV2(9999907, "HCIndex: HCIndexCollectionManager::flushPendingOperations called");
     if (!writer) {
         return Status(ErrorCodes::InternalError, "HCIndex writer not initialized");
     }
@@ -302,7 +298,6 @@ StatusWith<std::vector<int64_t>> HCIndexCollectionManager::queryRows(
     OperationContext* opCtx,
     const ::mongo::MatchExpression* matchExpr,
     const Timestamp& timestamp) {
-    LOGV2(9999910, "HCIndexCollectionManager::queryRows called");
     Timer timer;
 
     // NOTE: Initialization is now managed by the caller (e.g., TsBucketToCellBlockStage::open())
@@ -323,21 +318,17 @@ StatusWith<std::vector<int64_t>> HCIndexCollectionManager::queryRows(
     }
 
     if (!attributeTable) {
-        LOGV2(9999911, "HCIndex attribute table not initialized");
         return Status(ErrorCodes::InternalError, "HCIndex attribute table not initialized");
     }
-
-    LOGV2(9999912, "HCIndex: Getting attribute table for timestamp",
-          "timestamp"_attr = timestamp);
 
     // Get the attribute table for this timestamp
     auto tableResult = attributeTable->getTableForTimestamp(timestamp);
     if (!tableResult.isOK()) {
-        LOGV2(9999913, "HCIndex: Table not in memory, trying to create/reconstruct from disk");
+        LOGV2_DEBUG(9999981, 3, "HCIndex: Table not in memory, trying to create/reconstruct from disk");
         // Table doesn't exist in memory. Try to create/reconstruct it from disk.
         auto createResult = attributeTable->getOrCreateTableForTimestamp(opCtx, timestamp);
         if (!createResult.isOK()) {
-            LOGV2(9999914, "Failed to create/reconstruct table",
+            LOGV2_WARNING(9999981, "Failed to create/reconstruct table",
                   "error"_attr = createResult.getStatus());
             return createResult.getStatus();
         }
@@ -349,11 +340,11 @@ StatusWith<std::vector<int64_t>> HCIndexCollectionManager::queryRows(
     if (bitmapIndex) {
         auto indexResult = bitmapIndex->getIndexForTimestamp(timestamp);
         if (!indexResult.isOK()) {
-            LOGV2(9999921, "HCIndex: Bitmap index not in memory, trying to create/reconstruct from disk");
+            LOGV2_DEBUG(9999981, 3, "HCIndex: Bitmap index not in memory, trying to create/reconstruct from disk");
             // Index may not be in the memory. Try to get it from disk.
             indexResult = bitmapIndex->getOrCreateIndexForTimestamp(opCtx, timestamp);
             if (!indexResult.isOK()) {
-                LOGV2(9999922, "Failed to create/reconstruct bitmap index",
+                LOGV2_WARNING(9999981, "Failed to create/reconstruct bitmap index",
                       "error"_attr = indexResult.getStatus());
                 // Continue anyway - bitmap index is an optimization, not critical
             } else {
@@ -365,14 +356,10 @@ StatusWith<std::vector<int64_t>> HCIndexCollectionManager::queryRows(
     }
 
     auto table = tableResult.getValue();
-    LOGV2(9999915, "Got attribute table",
-          "rowCount"_attr = table->getRowCount());
 
     // Convert the MatchExpression to an AttributeTablePredicate
     auto predicateResult = table->convertMatchExpressionToPredicate(matchExpr);
     if (!predicateResult.isOK()) {
-        LOGV2(9999916, "Failed to convert match expression to predicate",
-              "error"_attr = predicateResult.getStatus());
         return predicateResult.getStatus();
     }
 
@@ -387,23 +374,15 @@ StatusWith<std::vector<int64_t>> HCIndexCollectionManager::queryRows(
     } else {
         predicateType = "UNKNOWN";
     }
-    LOGV2(9999917, "Converted match expression to predicate",
-          "predicateType"_attr = predicateType,
-          "refRowVecSize"_attr = predicate.refRowVec.size(),
-          "childrenCount"_attr = predicate.children.size());
 
     // Query the table for matching rows
     auto matchingRowIds = table->queryRows(predicateResult.getValue(), index);
-    LOGV2(9999918, "Query completed",
-          "matchingRowCount"_attr = matchingRowIds.size());
 
-    // NOTE: close() is now called by the caller (e.g., TsBucketToCellBlockStage::close())
-    // to manage the lifecycle at the stage level instead of per-query.
-    //close();
-
-    LOGV2(9999919,
-                "HCIndexCollectionManager::queryRows ",
-                "elapsedMicros"_attr = timer.micros());
+    // Print time took for query rows in debug mode
+    LOGV2_DEBUG(9999980, 3,
+        "HCIndex Query completed",
+        "matchingRowCount"_attr = matchingRowIds.size(),
+        "elapsedMicros"_attr = timer.micros());
 
     return matchingRowIds;
 }

@@ -100,10 +100,6 @@ StatusWith<InsertRowResult> AttributeTable::insertRow(const BSONObj& metadata) {
 
     auto prevSchemaSize = schema.size();
 
-    // Log schema size
-    LOGV2(9999924, "HCIndex: BEFORE Inserting row into attribute table",
-          "schemaSize"_attr = prevSchemaSize);
-
     // Convert metadata to row vector
     auto rowResult = metadataToRow(metadata);
     if (!rowResult.isOK()) {
@@ -123,8 +119,6 @@ StatusWith<InsertRowResult> AttributeTable::insertRow(const BSONObj& metadata) {
         return insertResult.getStatus();
     }
 
-    LOGV2(9999924, "HCIndex: AFTER Inserting row into attribute table",
-          "schemaSize"_attr = schema.size());
     return InsertRowResult{insertResult.getValue(), true, prevSchemaSize != schema.size(), this, row};
 }
 
@@ -376,18 +370,6 @@ StatusWith<AttributeTablePredicate> AttributeTable::convertMatchExpressionToPred
         return status;
     }
 
-    LOGV2(9999900, "HCIndex: convertMatchExpressionToPredicate",
-          "equalitiesCount"_attr = equalities.size(),
-          "schemaSize"_attr = schema.size(),
-          "matchExprType"_attr = matchExpr->matchType());
-
-    // Log the equalities we extracted
-    for (const auto& [fieldPath, eqExpr] : equalities) {
-        LOGV2(9999908, "HCIndex: Extracted equality",
-              "fieldPath"_attr = fieldPath,
-              "exprType"_attr = eqExpr->matchType());
-    }
-
     // Build reference row vector: symbol indices in schema order
     // 0 means field is not part of predicate, non-zero means match this symbol
     std::vector<uint32_t> refRowVec;
@@ -403,10 +385,6 @@ StatusWith<AttributeTablePredicate> AttributeTable::convertMatchExpressionToPred
         }
 
         auto it = fieldToColumnIndex.find(schemaFieldPath);
-        LOGV2(9999901, "HCIndex: Processing field",
-              "fieldPath"_attr = fieldPath,
-              "schemaFieldPath"_attr = schemaFieldPath,
-              "found"_attr = (it != fieldToColumnIndex.end()));
         if (it != fieldToColumnIndex.end()) {
             maxColumnIndex = std::max(maxColumnIndex, it->second);
         }
@@ -426,19 +404,11 @@ StatusWith<AttributeTablePredicate> AttributeTable::convertMatchExpressionToPred
         auto fieldIt = fieldToColumnIndex.find(schemaFieldPath);
         if (fieldIt == fieldToColumnIndex.end()) {
             // Field not in schema - no rows will match
-            LOGV2(9999902, "HCIndex: Field not in schema, returning empty predicate",
-                  "fieldPath"_attr = fieldPath,
-                  "schemaFieldPath"_attr = schemaFieldPath);
             return AttributeTablePredicate();
         }
 
         // Get the symbol value from the BSON element
         const BSONElement& data = eqExpr->getData();
-
-        LOGV2(9999907, "HCIndex: Got data element",
-              "fieldPath"_attr = fieldPath,
-              "dataType"_attr = typeName(data.type()),
-              "dataEOO"_attr = data.eoo());
 
         if (data.eoo()) {
             // Element is EOO (end of object), which means it's invalid
@@ -457,35 +427,21 @@ StatusWith<AttributeTablePredicate> AttributeTable::convertMatchExpressionToPred
 
         // Look up the symbol index in the dictionary
         auto symbolIndex = symbolDictionary->getSymbolIndex(value);
-        LOGV2(9999903, "HCIndex: Symbol lookup",
-              "fieldPath"_attr = fieldPath,
-              "value"_attr = value,
-              "symbolIndex"_attr = (symbolIndex ? *symbolIndex : 0),
-              "found"_attr = symbolIndex.has_value());
 
         if (!symbolIndex) {
             // Symbol not found in dictionary - this field value doesn't exist in this table
             // Return empty predicate (no rows will match)
-            LOGV2(9999904, "HCIndex: Symbol not found in dictionary, returning empty predicate",
-                  "fieldPath"_attr = fieldPath,
-                  "value"_attr = value);
             return AttributeTablePredicate();
         }
 
         // Set the symbol index at the appropriate column position
         refRowVec[fieldIt->second] = *symbolIndex;
-        LOGV2(9999905, "HCIndex: Set refRowVec",
-              "columnIndex"_attr = fieldIt->second,
-              "symbolIndex"_attr = *symbolIndex);
     }
 
     // Trim trailing zeros from refRowVec (don't pad at the end)
     while (!refRowVec.empty() && refRowVec.back() == 0) {
         refRowVec.pop_back();
     }
-
-    LOGV2(9999906, "HCIndex: Final refRowVec",
-          "size"_attr = refRowVec.size());
 
     // Create a LEAF predicate with the refRowVec
     AttributeTablePredicate leafPredicate;
@@ -822,8 +778,6 @@ StatusWith<AttributeTable*> TemporalAttributeTable::getOrCreateTableForTimestamp
         return getOrCreateTable(opCtx, windowStart);
     }
 
-    LOGV2(9999923, "HCIndex: Reconstructing attribute table for window", "windowStart"_attr = windowStart);
-
     // Try to reconstruct the table from disk
     // First, get or create the symbol dictionary for this window
     auto dictResult = temporalSymbolDictionary->getOrCreateDictionaryForTimestamp(opCtx, timestamp);
@@ -876,15 +830,8 @@ StatusWith<InsertRowResult> TemporalAttributeTable::insertRow(OperationContext* 
     // Extract the result - we get the rowId, isNewRow flag, and the row vector
     auto& insertResult = insertStatus.getValue();
     int64_t rowId = insertResult.rowId;
-    bool isNewRow = insertResult.isNewRow;
     bool hasSchemaChanged = insertResult.hasSchemaChanged;
     const std::vector<uint32_t>& row = insertResult.row;
-
-    LOGV2(9999925, "HCIndex: Inserted row into attribute table",
-          "rowId"_attr = rowId,
-          "isNewRow"_attr = isNewRow,
-          "hasSchemaChanged"_attr = hasSchemaChanged,
-          "row"_attr = row);
 
     // Add the row to the bitmap index for fast metadata predicate lookups
     // We add both new rows and duplicates to the bitmap index since the bitmap
@@ -911,8 +858,6 @@ StatusWith<InsertRowResult> TemporalAttributeTable::insertRow(OperationContext* 
                 }
             }
 
-            LOGV2(9999926, "HCIndex: Setting included columns for bitmap index",
-                  "includedColumnIndices"_attr = includedColumnIndices.size());
             temporalBitmapIndex->setIncludedColumns(includedColumnIndices);
         }
 
@@ -924,13 +869,9 @@ StatusWith<InsertRowResult> TemporalAttributeTable::insertRow(OperationContext* 
                           "error"_attr = bitmapStatus);
             // Continue anyway - bitmap index is an optimization, not critical
         }
-    } else {
-        LOGV2(9999931, "HCIndex: No bitmap index available, skipping row addition");
     }
 
-    // TODO: Use isNewRow flag to track which rows are new so we can build
-    // appropriate ADD operations when flushPendingOperations is called.
-    (void)isNewRow;  // Suppress unused variable warning for now
+    // TODO Collect statistics and find information gain on the index.
 
     return insertStatus;
 }
@@ -1043,8 +984,6 @@ StatusWith<AttributeTable*> TemporalAttributeTable::getOrCreateTable(
     if (!dictResult.isOK()) {
         return dictResult.getStatus();
     }
-
-    LOGV2(9999922, "HCIndex: Creating new attribute table for window", "windowStart"_attr = windowStart);
 
     // Create new table with the symbol dictionary for this window
     Timestamp windowEnd = calculateWindowEnd(windowStart);

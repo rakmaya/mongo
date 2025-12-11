@@ -378,10 +378,6 @@ void CollectionImpl::init(OperationContext* opCtx) {
                         bitmapOptions.excludedColumns,
                         bitmapOptions.includedColumns);
 
-                    // Note: Do NOT initialize the manager here. Initialization will happen lazily
-                    // when the manager is first used during query execution to avoid lock cycles
-                    // during startup.
-
                     // Store the manager in BucketCatalog
                     auto setStatus = timeseries::bucket_catalog::setHCIndexManager(
                         bucketCatalog, uuid, hcindexMgr);

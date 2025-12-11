@@ -1884,10 +1884,6 @@ std::unique_ptr<QuerySolution> QueryPlanner::extendWithAggPipeline(
                 ? unpackBucketStage->wholeBucketFilter()->clone()
                 : nullptr;
 
-            LOGV2(9999995, "HCIndex: Query planner reading eventFilter",
-                  "hasEventFilter"_attr = (eventFilter != nullptr),
-                  "eventFilter"_attr = (eventFilter ? eventFilter->serialize() : BSONObj()));
-
             auto unpackNode = std::make_unique<UnpackTsBucketNode>(std::move(solnForAgg),
                                                               unpacker.bucketSpec(),
                                                               std::move(eventFilter),
@@ -1897,7 +1893,6 @@ std::unique_ptr<QuerySolution> QueryPlanner::extendWithAggPipeline(
             // Set the flag if the eventFilter was already applied via HCIndex filtering
             if (unpackBucketStage->isEventFilterAppliedByHCIndex()) {
                 unpackNode->eventFilterAppliedByHCIndex = true;
-                LOGV2(9999995, "HCIndex: Setting eventFilterAppliedByHCIndex flag");
             }
 
             solnForAgg = std::move(unpackNode);

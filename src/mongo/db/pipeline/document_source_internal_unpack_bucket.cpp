@@ -1792,38 +1792,24 @@ DocumentSourceContainer::iterator DocumentSourceInternalUnpackBucket::doOptimize
     }
 
     // For HCIndex collections, handle metadata predicate extraction and filtering
+    // This whole block could be simplified once we can create a PlanStage for
+    // HCIndex-specific filtering. For PoC/Validation purpose, this is
+    // implemented as a pipeline optimization where we can just overwrite things
+    // since optimizations are at the very end (most of the time!)
     if (_sharedState->_bucketUnpacker.bucketSpec().useHCIndex()) {
-        LOGV2(9999990, "HCIndex: doOptimizeAt called for HCIndex collection");
         auto metaFieldOpt = _sharedState->_bucketUnpacker.bucketSpec().metaField();
         boost::optional<StringData> metaField;
         if (metaFieldOpt) {
             metaField = StringData(*metaFieldOpt);
-            LOGV2(9999996, "HCIndex: metaField", "metaField"_attr = *metaField);
-        }
-
-        // Log the pipeline before optimization
-        LOGV2(9999995, "HCIndex: Pipeline before optimization");
-        size_t idx = 0;
-        for (auto& stage : *container) {
-            LOGV2(9999995, "HCIndex: Pipeline stage", "index"_attr = idx, "stageName"_attr = stage->getSourceName());
-            if (auto matchStage = dynamic_cast<DocumentSourceMatch*>(stage.get())) {
-                LOGV2(9999995, "HCIndex: Match stage expression", "expr"_attr = matchStage->getMatchExpression()->serialize());
-            }
-            ++idx;
         }
 
         // Case 1: $match stage BEFORE this unpack bucket stage
         if (itr != container->begin()) {
-            LOGV2(9999991, "HCIndex: Checking previous stage");
             if (auto prevMatch = dynamic_cast<DocumentSourceMatch*>(std::prev(itr)->get()); prevMatch) {
-                LOGV2(9999992, "HCIndex: Found $match stage before unpack bucket");
                 auto matchExpr = prevMatch->getMatchExpression()->clone();
-                LOGV2(9999993, "HCIndex: Match expression", "expr"_attr = matchExpr->serialize());
                 auto [metadataExpr, residualExpr] = extractMetadataPredicates(std::move(matchExpr), metaField);
 
                 if (metadataExpr) {
-                    LOGV2(9999994, "HCIndex: Extracted metadata predicates", "expr"_attr = metadataExpr->serialize());
-
                     // For HCIndex, we need to rename the field names from "meta" back to the original metadata field name
                     // First, rename the field names from "meta" back to the original metadata field name
                     StringMap<std::string> renames;
@@ -1831,7 +1817,6 @@ DocumentSourceContainer::iterator DocumentSourceInternalUnpackBucket::doOptimize
                     auto renamedExpr = expression::copyExpressionAndApplyRenames(metadataExpr.get(), renames);
 
                     if (!renamedExpr) {
-                        LOGV2(9999996, "HCIndex: Failed to rename metadata filter fields");
                         // Fall back to using the original metadata expression
                         renamedExpr = std::move(metadataExpr);
                     }
@@ -1840,7 +1825,6 @@ DocumentSourceContainer::iterator DocumentSourceInternalUnpackBucket::doOptimize
                     // We store BSON instead of MatchExpression to ensure the buffer is owned and valid
                     // This BSON has field names like "metadata.chain" (not "meta.chain")
                     _hcindexMetadataFilterBSON = renamedExpr->serialize().getOwned();
-                    LOGV2(9999995, "HCIndex: Set metadata filter BSON", "filter"_attr = _hcindexMetadataFilterBSON);
 
                     // Store the renamed metadata filter BSON with owned buffer
                     _eventFilterBson = renamedExpr->serialize().getOwned();
@@ -1849,8 +1833,6 @@ DocumentSourceContainer::iterator DocumentSourceInternalUnpackBucket::doOptimize
                     auto statusWithMatchExpr = MatchExpressionParser::parse(
                         _eventFilterBson, getExpCtx());
                     if (!statusWithMatchExpr.isOK()) {
-                        LOGV2(9999997, "HCIndex: Failed to parse renamed metadata filter",
-                              "error"_attr = statusWithMatchExpr.getStatus().reason());
                         // Fall back to using the renamed expression
                         _sharedState->_eventFilter = std::move(renamedExpr);
                     } else {
@@ -1863,9 +1845,6 @@ DocumentSourceContainer::iterator DocumentSourceInternalUnpackBucket::doOptimize
                     // Set SBE compatibility for the eventFilter
                     _isEventFilterSbeCompatible.emplace(getExpCtx()->getSbeCompatibility());
 
-                    LOGV2(9999995, "HCIndex: Set eventFilter to metadata predicates for HCIndex",
-                          "filter"_attr = _eventFilterBson);
-
                     // Update the $match stage to remove metadata predicates so they're not applied at bucket level
                     if (residualExpr) {
                         // There are non-metadata predicates, rebuild the $match with only those
@@ -1873,12 +1852,9 @@ DocumentSourceContainer::iterator DocumentSourceInternalUnpackBucket::doOptimize
                         residualExpr = normalizeMatchExpression(std::move(residualExpr));
 
                         BSONObj residualBson = residualExpr->serialize();
-                        LOGV2(9999993, "HCIndex: Rebuilding $match with residual predicates", "residual"_attr = residualBson);
                         prevMatch->rebuild(residualBson);
                     } else {
                         // All predicates were metadata-only, remove the $match stage entirely
-                        LOGV2(9999993, "HCIndex: Removing $match stage entirely (all predicates were metadata-only)");
-                        // BREAKPOINT: Set breakpoint here to see the call stack
                         container->erase(std::prev(itr));
                         // DO NOT adjust itr - it should still point to the unpack bucket stage
                     }
@@ -1905,7 +1881,6 @@ DocumentSourceContainer::iterator DocumentSourceInternalUnpackBucket::doOptimize
                     auto renamedExpr = expression::copyExpressionAndApplyRenames(metadataExpr.get(), renames);
 
                     if (!renamedExpr) {
-                        LOGV2(9999996, "HCIndex: Failed to rename metadata filter fields (Case 2)");
                         // Fall back to using the original metadata expression
                         renamedExpr = std::move(metadataExpr);
                     }
@@ -1914,7 +1889,6 @@ DocumentSourceContainer::iterator DocumentSourceInternalUnpackBucket::doOptimize
                     // We store BSON instead of MatchExpression to ensure the buffer is owned and valid
                     // This BSON has field names like "metadata.chain" (not "meta.chain")
                     _hcindexMetadataFilterBSON = renamedExpr->serialize().getOwned();
-                    LOGV2(9999995, "HCIndex: Set metadata filter BSON (Case 2)", "filter"_attr = _hcindexMetadataFilterBSON);
 
                     // Store the renamed metadata filter BSON with owned buffer
                     _eventFilterBson = renamedExpr->serialize().getOwned();
@@ -1923,8 +1897,6 @@ DocumentSourceContainer::iterator DocumentSourceInternalUnpackBucket::doOptimize
                     auto statusWithMatchExpr = MatchExpressionParser::parse(
                         _eventFilterBson, getExpCtx());
                     if (!statusWithMatchExpr.isOK()) {
-                        LOGV2(9999997, "HCIndex: Failed to parse renamed metadata filter (Case 2)",
-                              "error"_attr = statusWithMatchExpr.getStatus().reason());
                         // Fall back to using the renamed expression
                         _sharedState->_eventFilter = std::move(renamedExpr);
                     } else {
@@ -1937,16 +1909,12 @@ DocumentSourceContainer::iterator DocumentSourceInternalUnpackBucket::doOptimize
                     // Set SBE compatibility for the eventFilter
                     _isEventFilterSbeCompatible.emplace(getExpCtx()->getSbeCompatibility());
 
-                    LOGV2(9999995, "HCIndex: Set eventFilter to metadata predicates for HCIndex (Case 2)",
-                          "filter"_attr = _eventFilterBson);
-
                     // Update the $match stage to remove metadata predicates
                     if (residualExpr) {
                         BSONObj residualBson = residualExpr->serialize();
                         nextMatch->rebuild(residualBson);
                     } else {
                         // If no residual predicates, remove the $match stage entirely
-                        LOGV2(9999995, "HCIndex: No residual predicates, removing $match stage entirely (Case 2)");
                         container->erase(std::next(itr));
                     }
 
@@ -1956,17 +1924,6 @@ DocumentSourceContainer::iterator DocumentSourceInternalUnpackBucket::doOptimize
                     // container->insert(itr, filterStage);
                 }
             }
-        }
-
-        // Log the pipeline after HCIndex optimization
-        LOGV2(9999994, "HCIndex: Pipeline after HCIndex optimization");
-        idx = 0;
-        for (auto& stage : *container) {
-            LOGV2(9999994, "HCIndex: Pipeline stage", "index"_attr = idx, "stageName"_attr = stage->getSourceName());
-            if (auto matchStage = dynamic_cast<DocumentSourceMatch*>(stage.get())) {
-                LOGV2(9999994, "HCIndex: Match stage expression", "expr"_attr = matchStage->getMatchExpression()->serialize());
-            }
-            ++idx;
         }
     }
 
@@ -2120,7 +2077,6 @@ DocumentSourceContainer::iterator DocumentSourceInternalUnpackBucket::doOptimize
         if (_sharedState->_bucketUnpacker.bucketSpec().useHCIndex()) {
             // Check if we have extracted metadata predicates (indicated by _hcindexMetadataFilterBSON being set)
             if (!_hcindexMetadataFilterBSON.isEmpty()) {
-                LOGV2(9999988, "HCIndex: Skipping group rewrite because metadata filter is set");
                 shouldSkipGroupRewrite = true;
             } else if (itr != container->begin()) {
                 // Also check if there's a $match stage before this unpack bucket stage
@@ -2145,9 +2101,6 @@ DocumentSourceContainer::iterator DocumentSourceInternalUnpackBucket::doOptimize
             }
         }
     }
-
-    // HCIndex metadata filtering is now handled during execution in InternalUnpackBucketStage
-    // where we have access to the bucket timestamp for proper window calculation.
 
     //
     // If a field is overwritten through computed projection/addFields, or project out using a
