@@ -100,12 +100,24 @@ public:
      * - collectionUUID: UUID of the timeseries collection
      * - period: Time-window period (hour, minute, second)
      * - frequency: Time-window frequency (1-24 for hour, 1-59 for minute/second)
+     * - buildMetadataIndex: Enable/disable bitmap metadata indexing (default: true)
+     * - sparseIndexThreshold: Values occurring < X% treated as sparse (default: 1.0)
+     * - denseIndexThreshold: Values occurring > Y% always indexed (default: 10.0)
+     * - dynamicIndexBuild: Values between thresholds may be indexed on demand (default: false)
+     * - excludedColumns: List of columns to never index (default: empty)
+     * - includedColumns: List of columns to always index (default: empty)
      */
     HCIndexCollectionManager(OperationContext* opCtx,
                             const DatabaseName& dbName,
                             const UUID& collectionUUID,
                             HCIndexPeriodEnum period,
-                            int32_t frequency);
+                            int32_t frequency,
+                            bool buildMetadataIndex,
+                            double sparseIndexThreshold,
+                            double denseIndexThreshold,
+                            bool dynamicIndexBuild,
+                            std::vector<std::string> excludedColumns,
+                            std::vector<std::string> includedColumns);
 
     /**
      * Initialize the reader for read operations by acquiring collections.
@@ -266,6 +278,14 @@ private:
     // Frequency (1-24 for hour, 1-59 for minute/second)
     int32_t frequency;
 
+    // Bitmap index options
+    bool _buildMetadataIndex;
+    double _sparseIndexThreshold;
+    double _denseIndexThreshold;
+    bool _dynamicIndexBuild;
+    std::vector<std::string> _excludedColumns;
+    std::vector<std::string> _includedColumns;
+
     // Writer for operations
     std::unique_ptr<HCIndexWriter> writer;
 
@@ -275,11 +295,11 @@ private:
     // Temporal symbol dictionary for encoding metadata values
     std::unique_ptr<TemporalSymbolDictionary> symbolDictionary;
 
-    // Temporal attribute table for storing metadata rows
-    std::unique_ptr<TemporalAttributeTable> attributeTable;
-
     // Temporal bitmap index for fast metadata predicate lookups
     std::unique_ptr<TemporalBitmapIndex> bitmapIndex;
+
+    // Temporal attribute table for storing metadata rows
+    std::unique_ptr<TemporalAttributeTable> attributeTable;
 
     // Flag to track if we've initialized the reader for read operations
     bool initializedForRead = false;

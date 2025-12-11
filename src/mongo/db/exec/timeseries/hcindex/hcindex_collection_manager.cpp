@@ -53,21 +53,46 @@ HCIndexCollectionManager::HCIndexCollectionManager(OperationContext* opCtx,
                                                    const DatabaseName& dbName,
                                                    const UUID& collectionUUID,
                                                    HCIndexPeriodEnum period,
-                                                   int32_t frequency)
+                                                   int32_t frequency,
+                                                   bool buildMetadataIndex,
+                                                   double sparseIndexThreshold,
+                                                   double denseIndexThreshold,
+                                                   bool dynamicIndexBuild,
+                                                   std::vector<std::string> excludedColumns,
+                                                   std::vector<std::string> includedColumns)
     : dbName(dbName),
       collectionUUID(collectionUUID),
       period(period),
       frequency(frequency),
+      _buildMetadataIndex(buildMetadataIndex),
+      _sparseIndexThreshold(sparseIndexThreshold),
+      _denseIndexThreshold(denseIndexThreshold),
+      _dynamicIndexBuild(dynamicIndexBuild),
+      _excludedColumns(std::move(excludedColumns)),
+      _includedColumns(std::move(includedColumns)),
       writer(std::make_unique<HCIndexWriter>(collectionUUID, dbName)),
       reader(std::make_unique<HCIndexReader>(dbName, collectionUUID)),
       symbolDictionary(std::make_unique<TemporalSymbolDictionary>(collectionUUID, period, frequency, writer.get(), reader.get())),
-      attributeTable(std::make_unique<TemporalAttributeTable>(collectionUUID, period, frequency, symbolDictionary.get(), writer.get(), reader.get())),
-      bitmapIndex(std::make_unique<TemporalBitmapIndex>(collectionUUID, period, frequency, writer.get(), reader.get()))
+      bitmapIndex(buildMetadataIndex ? std::make_unique<TemporalBitmapIndex>(collectionUUID, period, frequency, writer.get(), reader.get()) : nullptr),
+      attributeTable(std::make_unique<TemporalAttributeTable>(collectionUUID, period, frequency, symbolDictionary.get(), bitmapIndex.get(), writer.get(), reader.get()))
 {
     LOGV2(9999995,
-          "HCIndex: HCIndexCollectionManager created for collectionUUID: {collectionUUID} in database: {dbName}",
+          "HCIndex: HCIndexCollectionManager created",
           "collectionUUID"_attr = collectionUUID,
-          "dbName"_attr = dbName);
+          "dbName"_attr = dbName,
+          "buildMetadataIndex"_attr = buildMetadataIndex,
+          "sparseIndexThreshold"_attr = sparseIndexThreshold,
+          "denseIndexThreshold"_attr = denseIndexThreshold,
+          "dynamicIndexBuild"_attr = dynamicIndexBuild);
+    // Log included and excluded columns
+    LOGV2(9999996,
+          "HCIndex: Included and excluded columns",
+          "includedColumns"_attr = _includedColumns,
+          "excludedColumns"_attr = _excludedColumns); 
+    attributeTable->setIncludedIndexColumns(
+        std::unordered_set<std::string>(_includedColumns.begin(), _includedColumns.end()));
+    attributeTable->setExcludedIndexColumns(
+        std::unordered_set<std::string>(_excludedColumns.begin(), _excludedColumns.end()));
 }
 
 Status HCIndexCollectionManager::initializeForRead(OperationContext* opCtx) {
@@ -150,37 +175,14 @@ StatusWith<int64_t> HCIndexCollectionManager::encodeMetadata(OperationContext* o
         return Status(ErrorCodes::InternalError, "HCIndex structures not initialized");
     }
 
-    // Insert the metadata row into the attribute table
-    auto rowIdStatus = attributeTable->insertRow(opCtx, metadata, timestamp);
-    if (!rowIdStatus.isOK()) {
-        return rowIdStatus.getStatus();
+    // Insert the metadata row into the attribute table and generate necessary
+    // bitmap indices.
+    auto insertStatus = attributeTable->insertRow(opCtx, metadata, timestamp);
+    if (!insertStatus.isOK()) {
+        return insertStatus.getStatus();
     }
 
-    // Extract the result - we get the rowId, isNewRow flag, and the row vector
-    auto insertResult = rowIdStatus.getValue();
-    int64_t rowId = insertResult.rowId;
-    bool isNewRow = insertResult.isNewRow;
-    const std::vector<uint32_t>& row = insertResult.row;
-
-    // Add the row to the bitmap index for fast metadata predicate lookups
-    // We add both new rows and duplicates to the bitmap index since the bitmap
-    // tracks (column, value) -> rowIds mapping which needs all rowIds
-    if (bitmapIndex) {
-        auto bitmapStatus = bitmapIndex->addRow(opCtx, rowId, row, timestamp);
-        if (!bitmapStatus.isOK()) {
-            LOGV2_WARNING(9999930,
-                          "Failed to add row to bitmap index",
-                          "rowId"_attr = rowId,
-                          "error"_attr = bitmapStatus);
-            // Continue anyway - bitmap index is an optimization, not critical
-        }
-    }
-
-    // TODO: Use isNewRow flag to track which rows are new so we can build
-    // appropriate ADD operations when flushPendingOperations is called.
-    (void)isNewRow;  // Suppress unused variable warning for now
-
-    return rowId;
+    return insertStatus.getValue().rowId;
 }
 
 StatusWith<BSONObj> HCIndexCollectionManager::decodeMetadata(OperationContext* opCtx,

@@ -42,6 +42,8 @@ std::unique_ptr<BitmapIndex> createTestBitmapIndex() {
     auto index = std::make_unique<BitmapIndex>(
         HCIndexPeriodEnum::Hour, 1, windowStart, windowEnd, nullptr);
     ASSERT_OK(index->changeState(BitmapIndexState::Reconstruction));
+    // Set up included columns for testing (columns 0, 1, 2, 3)
+    index->setIncludedColumns({0, 1, 2, 3});
     return index;
 }
 
@@ -288,6 +290,8 @@ TestTemporalBitmapIndexContext createTestTemporalBitmapIndexWithWriter() {
     auto writer = std::make_unique<HCIndexWriter>(collectionUUID, dbName);
     auto index = std::make_unique<TemporalBitmapIndex>(
         collectionUUID, HCIndexPeriodEnum::Hour, 1, writer.get(), nullptr);
+    // Set up included columns for testing (columns 0, 1, 2, 3)
+    index->setIncludedColumns({0, 1, 2, 3});
     return {std::move(writer), std::move(index)};
 }
 

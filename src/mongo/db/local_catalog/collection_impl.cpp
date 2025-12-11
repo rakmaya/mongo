@@ -365,11 +365,18 @@ void CollectionImpl::init(OperationContext* opCtx) {
             if (!existingMgr) {
                 try {
 
-                    // Create HCIndexCollectionManager with time-window from TimeseriesOptions
-                    auto timeWindow = timeseries::getEffectiveHCIndexTimeWindow(
-                        collectionOptions.timeseries ? collectionOptions.timeseries->getHcindexOptions() : boost::none);
+                    // Create HCIndexCollectionManager with time-window and bitmap options from TimeseriesOptions
+                    auto hcindexOptions = collectionOptions.timeseries ? collectionOptions.timeseries->getHcindexOptions() : boost::none;
+                    auto timeWindow = timeseries::getEffectiveHCIndexTimeWindow(hcindexOptions);
+                    auto bitmapOptions = timeseries::getEffectiveHCIndexBitmapOptions(hcindexOptions);
                     auto hcindexMgr = std::make_shared<timeseries::hcindex::HCIndexCollectionManager>(
-                        opCtx, ns().dbName(), uuid, timeWindow.period, timeWindow.frequency);
+                        opCtx, ns().dbName(), uuid, timeWindow.period, timeWindow.frequency,
+                        bitmapOptions.buildMetadataIndex,
+                        bitmapOptions.sparseIndexThreshold,
+                        bitmapOptions.denseIndexThreshold,
+                        bitmapOptions.dynamicIndexBuild,
+                        bitmapOptions.excludedColumns,
+                        bitmapOptions.includedColumns);
 
                     // Note: Do NOT initialize the manager here. Initialization will happen lazily
                     // when the manager is first used during query execution to avoid lock cycles

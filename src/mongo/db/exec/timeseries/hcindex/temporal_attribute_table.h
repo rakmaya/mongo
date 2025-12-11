@@ -57,6 +57,7 @@ class SymbolDictionary;
 class HCIndexReader;
 class HCIndexWriter;
 class BitmapIndex;
+class TemporalBitmapIndex;
 
 /**
  * Result of inserting a row into an attribute table. Contains the row ID,
@@ -66,6 +67,8 @@ class BitmapIndex;
 struct InsertRowResult {
     int64_t rowId;
     bool isNewRow;
+    bool hasSchemaChanged;
+    class AttributeTable* table;
     std::vector<uint32_t> row;  // Symbol indices for each column
 };
 
@@ -293,6 +296,11 @@ public:
     const std::vector<std::string>& getSchema() const;
 
     /**
+     * Get Column Indices
+     */
+    const std::map<std::string, size_t>& getFieldToColumnIndexMap() const;
+
+    /**
      * Return the total number of rows in this attribute table.
      */
     size_t getRowCount() const;
@@ -401,6 +409,7 @@ public:
                            HCIndexPeriodEnum period,
                            int32_t frequency,
                            class TemporalSymbolDictionary* symbolDictionary,
+                           class TemporalBitmapIndex* bitmapIndex,
                            class HCIndexWriter* writer,
                            class HCIndexReader* reader = nullptr);
 
@@ -500,6 +509,16 @@ public:
     Status cleanupOldTables(const Timestamp& beforeTimestamp);
 
     /**
+     * Set Excluded columns
+     */
+    void setExcludedIndexColumns(std::unordered_set<std::string> excludedColumns);
+
+    /**
+     * Set Included columns
+     */
+    void setIncludedIndexColumns(std::unordered_set<std::string> includedColumns);
+
+    /**
      * Flush all pending operations to the database.
      */
     void flush();
@@ -547,6 +566,9 @@ private:
     // iterator to eject unused tables.
     std::map<Timestamp, std::unique_ptr<AttributeTable>> tables;
 
+    std::unordered_set<std::string> excludedIndexColumns;
+    std::unordered_set<std::string> includedIndexColumns;
+
     // Collection UUID for this temporal attribute table
     UUID collectionUUID;
 
@@ -558,6 +580,8 @@ private:
 
     // Temporal symbol dictionary for encoding metadata values
     class TemporalSymbolDictionary* temporalSymbolDictionary;
+
+    class TemporalBitmapIndex* temporalBitmapIndex;
 
     // Writer for writing new attribute operations (can be nullptr if constructed by reader)
     class HCIndexWriter* writer;

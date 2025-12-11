@@ -163,6 +163,15 @@ public:
      */
     bool hasIndexForColumn(size_t columnIndex) const;
 
+    /**
+     * Set Excluded columns
+     */
+    void setExcludedColumns(std::unordered_set<std::size_t> excludedColumns);
+
+    /**
+     * Set Included columns
+     */
+    void setIncludedColumns(std::unordered_set<std::size_t> includedColumns);
 
     /**
      * Flush any pending operations to the database via the writer.
@@ -232,6 +241,12 @@ private:
 
     // Whether there are any pending operations
     bool _isDirty = false;
+
+    // Columns that are excluded, even if information-gain says otherwise.
+    std::unordered_set<std::size_t> _excludedColumns;
+
+    // Columns that are allowed to have indexes.
+    std::unordered_set<std::size_t> _indexedColumns;
 
     // Synchronization
     mutable std::shared_mutex _mutex;
@@ -331,6 +346,16 @@ public:
     void flush();
 
     /**
+     * Set Excluded columns
+     */
+    void setExcludedColumns(std::unordered_set<std::size_t> excludedColumns);
+
+    /**
+     * Set Included columns
+     */
+    void setIncludedColumns(std::unordered_set<std::size_t> includedColumns);
+
+    /**
      * Statistics about this temporal bitmap index.
      */
     struct Stats {
@@ -381,6 +406,20 @@ private:
 
     // Reader (can be nullptr if reconstruction from disk is not needed)
     HCIndexReader* _reader = nullptr;
+
+    // Bitmap index options
+    bool _buildMetadataIndex;
+    double _sparseIndexThreshold;
+    double _denseIndexThreshold;
+    bool _dynamicIndexBuild;
+
+    bool _doRecomputeIndexedColumns;
+
+    // Columns that are excluded according to user preference
+    std::unordered_set<std::size_t> _excludedColumns;
+
+    // Columns that are included according to user preference
+    std::unordered_set<std::size_t> _includedColumns;
 
     // Synchronization
     mutable std::shared_mutex _mutex;

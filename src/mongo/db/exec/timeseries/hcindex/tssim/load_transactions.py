@@ -57,7 +57,8 @@ def create_timeseries_collection(db, collection_name, use_hcindex=False):
         timeseries_config["useHCIndex"] = True
         timeseries_config["hcindexOptions"] = {
             "period": "minute",
-            "frequency": 1
+            "frequency": 1,
+            "excludedColumns": ["product_item", "order_num", "order_status"]
         }
 
     create_cmd = {

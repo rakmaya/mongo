@@ -127,6 +127,9 @@ Status BitmapIndex::addRow(int64_t rowId, const std::vector<uint32_t>& row) {
     }
 
     for (size_t columnIndex = 0; columnIndex < row.size(); ++columnIndex) {
+        if (_indexedColumns.find(columnIndex) == _indexedColumns.end()) {
+            continue;
+        }
         uint32_t symbolIndex = row[columnIndex];
         // Skip missing values (symbolIndex == 0)
         if (symbolIndex != 0) {
@@ -260,6 +263,22 @@ bool BitmapIndex::hasIndexForColumn(size_t columnIndex) const
     return _bitmaps.find(columnIndex) != _bitmaps.end();
 }
 
+void BitmapIndex::setExcludedColumns(std::unordered_set<std::size_t> excludedColumns)
+{
+    std::shared_lock lock(_mutex);
+    _excludedColumns = std::move(excludedColumns);
+}
+
+void BitmapIndex::setIncludedColumns(std::unordered_set<std::size_t> includedColumns)
+{
+    std::shared_lock lock(_mutex);
+
+    // For now, this just overwrites.
+    // TODO: Merge with the computed columns based on the information-gain
+    _indexedColumns = std::move(includedColumns);
+}
+
+
 void BitmapIndex::flush() {
     std::unique_lock lock(_mutex);
     if (!_isDirty || _writer == nullptr) {
@@ -333,7 +352,8 @@ TemporalBitmapIndex::TemporalBitmapIndex(const UUID& collectionUUID,
       _period(period),
       _frequency(frequency),
       _writer(writer),
-      _reader(reader) {}
+      _reader(reader),
+      _doRecomputeIndexedColumns(false) {}
 
 Timestamp TemporalBitmapIndex::calculateWindowStart(const Timestamp& timestamp) const {
     uint32_t secs = timestamp.getSecs();
@@ -481,6 +501,13 @@ Status TemporalBitmapIndex::addRow(OperationContext* opCtx,
     if (!indexResult.isOK()) {
         return indexResult.getStatus();
     }
+
+    // If the schema has changed, we need to let bitmap recompute the set of
+    // indexed columns.
+    if (_doRecomputeIndexedColumns) {
+        indexResult.getValue()->setIncludedColumns(_includedColumns);
+        _doRecomputeIndexedColumns = false;
+    }
     return indexResult.getValue()->addRow(rowId, row);
 }
 
@@ -531,6 +558,20 @@ void TemporalBitmapIndex::flush() {
     for (auto& [windowStart, index] : _indexes) {
         index->flush();
     }
+}
+
+void TemporalBitmapIndex::setExcludedColumns(std::unordered_set<std::size_t> excludedColumns)
+{
+    std::shared_lock lock(_mutex);
+    _excludedColumns = std::move(excludedColumns);
+    _doRecomputeIndexedColumns = true;
+}
+
+void TemporalBitmapIndex::setIncludedColumns(std::unordered_set<std::size_t> includedColumns)
+{
+    std::shared_lock lock(_mutex);
+    _includedColumns = std::move(includedColumns);
+    _doRecomputeIndexedColumns = true;
 }
 
 TemporalBitmapIndex::Stats TemporalBitmapIndex::getStats() const {

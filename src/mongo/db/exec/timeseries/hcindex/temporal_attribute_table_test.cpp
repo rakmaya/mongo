@@ -265,7 +265,7 @@ protected:
         tempDict = std::make_unique<TemporalSymbolDictionary>(
             collectionUUID, HCIndexPeriodEnum::Hour, 1, writer.get());
         tempTable = std::make_unique<TemporalAttributeTable>(
-            collectionUUID, HCIndexPeriodEnum::Hour, 1, tempDict.get(), writer.get());
+            collectionUUID, HCIndexPeriodEnum::Hour, 1, tempDict.get(), nullptr, writer.get());
     }
 
     OperationContext* getOpCtx() {

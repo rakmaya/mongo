@@ -63,7 +63,13 @@ TEST_F(HCIndexCollectionManagerTest, Initialize) {
     createOpsCollections(collectionUUID);
 
     DatabaseName dbName = DatabaseName::createDatabaseName_forTest(boost::none, "test");
-    HCIndexCollectionManager manager(opCtx, dbName, collectionUUID, HCIndexPeriodEnum::Hour, 1);
+    HCIndexCollectionManager manager(opCtx, dbName, collectionUUID, HCIndexPeriodEnum::Hour, 1,
+                                     true,   // buildMetadataIndex
+                                     1.0,    // sparseIndexThreshold
+                                     10.0,   // denseIndexThreshold
+                                     false,  // dynamicIndexBuild
+                                     {},     // excludedColumns
+                                     {});    // includedColumns
     auto status = manager.initializeForRead(opCtx);
     ASSERT_OK(status);
 }
@@ -74,7 +80,13 @@ TEST_F(HCIndexCollectionManagerTest, EncodeMetadata) {
     createOpsCollections(collectionUUID);
 
     DatabaseName dbName = DatabaseName::createDatabaseName_forTest(boost::none, "test");
-    HCIndexCollectionManager manager(opCtx, dbName, collectionUUID, HCIndexPeriodEnum::Hour, 1);
+    HCIndexCollectionManager manager(opCtx, dbName, collectionUUID, HCIndexPeriodEnum::Hour, 1,
+                                     true,   // buildMetadataIndex
+                                     1.0,    // sparseIndexThreshold
+                                     10.0,   // denseIndexThreshold
+                                     false,  // dynamicIndexBuild
+                                     {},     // excludedColumns
+                                     {});    // includedColumns
     ASSERT_OK(manager.initializeForRead(opCtx));
 
     BSONObj metadata = BSON("region" << "us-east" << "env" << "prod");
@@ -92,7 +104,13 @@ TEST_F(HCIndexCollectionManagerTest, Deduplication) {
     createOpsCollections(collectionUUID);
 
     DatabaseName dbName = DatabaseName::createDatabaseName_forTest(boost::none, "test");
-    HCIndexCollectionManager manager(opCtx, dbName, collectionUUID, HCIndexPeriodEnum::Hour, 1);
+    HCIndexCollectionManager manager(opCtx, dbName, collectionUUID, HCIndexPeriodEnum::Hour, 1,
+                                     true,   // buildMetadataIndex
+                                     1.0,    // sparseIndexThreshold
+                                     10.0,   // denseIndexThreshold
+                                     false,  // dynamicIndexBuild
+                                     {},     // excludedColumns
+                                     {});    // includedColumns
     ASSERT_OK(manager.initializeForRead(opCtx));
 
     BSONObj metadata = BSON("region" << "us-east" << "env" << "prod");

@@ -98,6 +98,12 @@ Status AttributeTable::changeState(AttributeTableState newState) {
 StatusWith<InsertRowResult> AttributeTable::insertRow(const BSONObj& metadata) {
     std::unique_lock<std::shared_mutex> lock(mutex);
 
+    auto prevSchemaSize = schema.size();
+
+    // Log schema size
+    LOGV2(9999924, "HCIndex: BEFORE Inserting row into attribute table",
+          "schemaSize"_attr = prevSchemaSize);
+
     // Convert metadata to row vector
     auto rowResult = metadataToRow(metadata);
     if (!rowResult.isOK()) {
@@ -109,16 +115,17 @@ StatusWith<InsertRowResult> AttributeTable::insertRow(const BSONObj& metadata) {
     // Check for duplicate row
     auto duplicateRowId = findDuplicateRow(row);
     if (duplicateRowId) {
-        return InsertRowResult{duplicateRowId.value(), false, row};
+        return InsertRowResult{duplicateRowId.value(), false, false, this, row};
     }
 
-    // Insert new row (note: insertRowDirect does not acquire lock, caller must hold it)
     auto insertResult = insertRowDirect(row);
     if (!insertResult.isOK()) {
         return insertResult.getStatus();
     }
 
-    return InsertRowResult{insertResult.getValue(), true, row};
+    LOGV2(9999924, "HCIndex: AFTER Inserting row into attribute table",
+          "schemaSize"_attr = schema.size());
+    return InsertRowResult{insertResult.getValue(), true, prevSchemaSize != schema.size(), this, row};
 }
 
 StatusWith<int64_t> AttributeTable::insertRowDirect(const std::vector<uint32_t>& row) {
@@ -542,6 +549,12 @@ const std::vector<std::string>& AttributeTable::getSchema() const {
     return schema;
 }
 
+const std::map<std::string, size_t>& AttributeTable::getFieldToColumnIndexMap() const
+{
+    std::shared_lock<std::shared_mutex> lock(mutex);
+    return fieldToColumnIndex;
+}
+
 size_t AttributeTable::getRowCount() const {
     std::shared_lock<std::shared_mutex> lock(mutex);
     return columns.empty() ? 0 : columns[0].size();
@@ -755,12 +768,14 @@ TemporalAttributeTable::TemporalAttributeTable(const UUID& collectionUUID,
                                                HCIndexPeriodEnum period,
                                                int32_t frequency,
                                                TemporalSymbolDictionary* symbolDictionary,
+                                               TemporalBitmapIndex* bitmapIndex,
                                                HCIndexWriter* writer,
                                                HCIndexReader* reader)
     : collectionUUID(collectionUUID),
       period(period),
       frequency(frequency),
       temporalSymbolDictionary(symbolDictionary),
+      temporalBitmapIndex(bitmapIndex),
       writer(writer),
       reader(reader) {}
 
@@ -851,7 +866,73 @@ StatusWith<InsertRowResult> TemporalAttributeTable::insertRow(OperationContext* 
         return tableResult.getStatus();
     }
 
-    return tableResult.getValue()->insertRow(metadata);
+    auto insertStatus = tableResult.getValue()->insertRow(metadata);
+
+    // Insert the metadata row into the attribute table
+    if (!insertStatus.isOK()) {
+        return insertStatus;
+    }
+
+    // Extract the result - we get the rowId, isNewRow flag, and the row vector
+    auto& insertResult = insertStatus.getValue();
+    int64_t rowId = insertResult.rowId;
+    bool isNewRow = insertResult.isNewRow;
+    bool hasSchemaChanged = insertResult.hasSchemaChanged;
+    const std::vector<uint32_t>& row = insertResult.row;
+
+    LOGV2(9999925, "HCIndex: Inserted row into attribute table",
+          "rowId"_attr = rowId,
+          "isNewRow"_attr = isNewRow,
+          "hasSchemaChanged"_attr = hasSchemaChanged,
+          "row"_attr = row);
+
+    // Add the row to the bitmap index for fast metadata predicate lookups
+    // We add both new rows and duplicates to the bitmap index since the bitmap
+    // tracks (column, value) -> rowIds mapping which needs all rowIds
+    if (temporalBitmapIndex) {
+        if (hasSchemaChanged) {
+            auto const& fieldMap = insertResult.table->getFieldToColumnIndexMap();
+            std::unordered_set<std::size_t> includedColumnIndices;
+
+            // For now, this is a hack. We should be using the information gain
+            // to determine which columns to include in the bitmap index and then
+            // overriding it with the user-specified included/excluded columns.
+            if (!includedIndexColumns.empty()) {
+                for (const auto& [fieldName, colIdx] : fieldMap) {
+                    if (includedIndexColumns.find(fieldName) != includedIndexColumns.end()) {
+                        includedColumnIndices.insert(colIdx);
+                    }
+                }
+            } else {
+                for (const auto& [fieldName, colIdx] : fieldMap) {
+                    if (excludedIndexColumns.find(fieldName) == excludedIndexColumns.end()) {
+                        includedColumnIndices.insert(colIdx);
+                    }
+                }
+            }
+
+            LOGV2(9999926, "HCIndex: Setting included columns for bitmap index",
+                  "includedColumnIndices"_attr = includedColumnIndices.size());
+            temporalBitmapIndex->setIncludedColumns(includedColumnIndices);
+        }
+
+        auto bitmapStatus = temporalBitmapIndex->addRow(opCtx, rowId, row, timestamp);
+        if (!bitmapStatus.isOK()) {
+            LOGV2_WARNING(9999930,
+                          "Failed to add row to bitmap index",
+                          "rowId"_attr = rowId,
+                          "error"_attr = bitmapStatus);
+            // Continue anyway - bitmap index is an optimization, not critical
+        }
+    } else {
+        LOGV2(9999931, "HCIndex: No bitmap index available, skipping row addition");
+    }
+
+    // TODO: Use isNewRow flag to track which rows are new so we can build
+    // appropriate ADD operations when flushPendingOperations is called.
+    (void)isNewRow;  // Suppress unused variable warning for now
+
+    return insertStatus;
 }
 
 StatusWith<int64_t> TemporalAttributeTable::insertRowDirect(
@@ -912,6 +993,15 @@ Status TemporalAttributeTable::cleanupOldTables(const Timestamp& beforeTimestamp
     return Status::OK();
 }
 
+void TemporalAttributeTable::setExcludedIndexColumns(std::unordered_set<std::string> excludedColumns)
+{
+    excludedIndexColumns = std::move(excludedColumns);
+}
+
+void TemporalAttributeTable::setIncludedIndexColumns(std::unordered_set<std::string> includedColumns)
+{
+    includedIndexColumns = std::move(includedColumns);
+}
 
 void TemporalAttributeTable::flush()
 {

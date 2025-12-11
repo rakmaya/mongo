@@ -216,6 +216,44 @@ structs:
                 optional: true
                 stability: unstable
                 query_shape: literal
+            buildMetadataIndex:
+                description: "Enables or disables metadata bitmap indexing. When true, bitmap indexes are built for metadata fields to accelerate queries. Defaults to true."
+                type: safeBool
+                optional: true
+                stability: unstable
+                query_shape: literal
+            sparseIndexThreshold:
+                description: "Values occurring less than this percentage are treated as sparse and not pre-indexed. Valid range: 0-100. Defaults to 1 (1%)."
+                type: safeDouble
+                optional: true
+                validator: {gte: 0.0, lte: 100.0}
+                stability: unstable
+                query_shape: literal
+            denseIndexThreshold:
+                description: "Values occurring more than this percentage are always indexed. Valid range: 0-100. Defaults to 10 (10%)."
+                type: safeDouble
+                optional: true
+                validator: {gte: 0.0, lte: 100.0}
+                stability: unstable
+                query_shape: literal
+            dynamicIndexBuild:
+                description: "When true, values between sparse and dense thresholds may be indexed on demand based on query patterns. Defaults to false."
+                type: safeBool
+                optional: true
+                stability: unstable
+                query_shape: literal
+            excludedColumns:
+                description: "List of metadata field paths to never include in the bitmap index."
+                type: array<string>
+                optional: true
+                stability: unstable
+                query_shape: anonymize
+            includedColumns:
+                description: "List of metadata field paths to always include in the bitmap index, regardless of thresholds."
+                type: array<string>
+                optional: true
+                stability: unstable
+                query_shape: anonymize
     TimeseriesOptions:
         description: "The options that define a time-series collection."
         strict: true

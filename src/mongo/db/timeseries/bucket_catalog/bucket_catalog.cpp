@@ -1386,12 +1386,6 @@ std::vector<BatchedInsertContext> buildBatchedHCInsertContexts(
         // Calculate time window start based on period and frequency configuration
         Timestamp windowStart = hcindexTimeWindow.calculateWindowStart(ts);
 
-        LOGV2(9999950, "HCIndex: Processing measurement for window",
-              "timestamp"_attr = ts,
-              "windowStart"_attr = windowStart,
-              "period"_attr = static_cast<int>(hcindexTimeWindow.period),
-              "frequency"_attr = hcindexTimeWindow.frequency);
-
         timeWindowToMeasurements[windowStart].emplace_back(
             measurement, time, index, rowId);
 

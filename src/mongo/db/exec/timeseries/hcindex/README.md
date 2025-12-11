@@ -288,10 +288,12 @@ The index is controlled via `Timeseries.hcindex_options`
 
 | Option               | Description                                               |
 | -------------------- | --------------------------------------------------------- |
-| buildMetadataIndex   | Enables or disables metadata indexing                     |
+| buildMetadataIndex   | Enables or disables metadata indexing. Default is true.   |
 | sparseIndexThreshold | Values occurring < X% treated as sparse (not pre-indexed) |
 | denseIndexThreshold  | Values occurring > Y% always indexed                      |
 | dynamicIndexBuild    | Values between thresholds may be indexed on demand        |
+| excludedColumns      | List of columns to never index                            |
+| includedColumns      | List of columns to always index                           |
 
 - `valueFrequency < sparseThreshold` → no index
 - `valueFrequency > denseThreshold` → always indexed

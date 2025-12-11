@@ -165,5 +165,87 @@ inline HCIndexTimeWindow getEffectiveHCIndexTimeWindow(
     return HCIndexTimeWindow(period, frequency);
 }
 
+/**
+ * Represents bitmap index options for HCIndex metadata indexing.
+ */
+struct HCIndexBitmapOptions {
+    bool buildMetadataIndex;
+    double sparseIndexThreshold;
+    double denseIndexThreshold;
+    bool dynamicIndexBuild;
+    std::vector<std::string> excludedColumns;
+    std::vector<std::string> includedColumns;
+
+    // Default values
+    static constexpr bool kDefaultBuildMetadataIndex = true;
+    static constexpr double kDefaultSparseIndexThreshold = 1.0;   // 1%
+    static constexpr double kDefaultDenseIndexThreshold = 10.0;   // 10%
+    static constexpr bool kDefaultDynamicIndexBuild = false;
+
+    HCIndexBitmapOptions()
+        : buildMetadataIndex(kDefaultBuildMetadataIndex),
+          sparseIndexThreshold(kDefaultSparseIndexThreshold),
+          denseIndexThreshold(kDefaultDenseIndexThreshold),
+          dynamicIndexBuild(kDefaultDynamicIndexBuild),
+          excludedColumns(),
+          includedColumns() {}
+
+    HCIndexBitmapOptions(bool buildMetadataIndex,
+                         double sparseIndexThreshold,
+                         double denseIndexThreshold,
+                         bool dynamicIndexBuild,
+                         std::vector<std::string> excludedColumns,
+                         std::vector<std::string> includedColumns)
+        : buildMetadataIndex(buildMetadataIndex),
+          sparseIndexThreshold(sparseIndexThreshold),
+          denseIndexThreshold(denseIndexThreshold),
+          dynamicIndexBuild(dynamicIndexBuild),
+          excludedColumns(std::move(excludedColumns)),
+          includedColumns(std::move(includedColumns)) {}
+};
+
+/**
+ * Helper to convert a vector of StringData to vector of std::string.
+ */
+inline std::vector<std::string> toStringVector(const std::vector<StringData>& input) {
+    std::vector<std::string> result;
+    result.reserve(input.size());
+    for (const auto& sd : input) {
+        result.push_back(std::string(sd));
+    }
+    return result;
+}
+
+/**
+ * Get the effective HCIndexBitmapOptions from HCIndexOptions.
+ * Returns default values if options are not specified.
+ */
+inline HCIndexBitmapOptions getEffectiveHCIndexBitmapOptions(
+    const boost::optional<HCIndexOptions>& hcindexOptions) {
+    if (!hcindexOptions) {
+        return HCIndexBitmapOptions();
+    }
+
+    // Convert StringData vectors to string vectors
+    std::vector<std::string> excludedCols;
+    std::vector<std::string> includedCols;
+
+    if (auto excluded = hcindexOptions->getExcludedColumns()) {
+        excludedCols = toStringVector(*excluded);
+    }
+    if (auto included = hcindexOptions->getIncludedColumns()) {
+        includedCols = toStringVector(*included);
+    }
+
+    return HCIndexBitmapOptions(
+        hcindexOptions->getBuildMetadataIndex().value_or(HCIndexBitmapOptions::kDefaultBuildMetadataIndex),
+        hcindexOptions->getSparseIndexThreshold().value_or(HCIndexBitmapOptions::kDefaultSparseIndexThreshold),
+        hcindexOptions->getDenseIndexThreshold().value_or(HCIndexBitmapOptions::kDefaultDenseIndexThreshold),
+        hcindexOptions->getDynamicIndexBuild().value_or(HCIndexBitmapOptions::kDefaultDynamicIndexBuild),
+        std::move(excludedCols),
+        std::move(includedCols)
+    );
+}
+
 }  // namespace mongo::timeseries
 
