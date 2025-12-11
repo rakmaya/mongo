@@ -34,6 +34,7 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/crypto/encryption_fields_gen.h"
 #include "mongo/db/audit.h"
+#include "mongo/db/exec/timeseries/hcindex/hcindex_collection_manager.h"
 #include "mongo/db/index_builds/index_builds_coordinator.h"
 #include "mongo/db/local_catalog/catalog_raii.h"
 #include "mongo/db/local_catalog/clustered_collection_util.h"
@@ -60,6 +61,7 @@
 #include "mongo/db/stats/top.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/write_unit_of_work.h"
+#include "mongo/db/timeseries/bucket_catalog/global_bucket_catalog.h"
 #include "mongo/db/views/view.h"
 #include "mongo/logv2/log.h"
 #include "mongo/platform/atomic_word.h"
@@ -149,6 +151,58 @@ void warnEncryptedCollectionsIfNeeded(OperationContext* opCtx, const CollectionP
             "name"_attr = coll->ns(),
             "stateCollections"_attr = leaked);
     }
+}
+
+/**
+ * Helper to drop HCIndex-related collections when a timeseries collection with HCIndex is dropped.
+ * This includes the symbol operations, attribute operations, and bitmap index collections.
+ */
+void _dropHCIndexCollections(OperationContext* opCtx,
+                              Database* db,
+                              const DatabaseName& dbName,
+                              const UUID& collectionUUID) {
+    using timeseries::hcindex::HCIndexCollectionManager;
+
+    // Get the namespaces for the HCIndex operations collections
+    auto symbolNss = HCIndexCollectionManager::getSymbolOperationsNamespace(dbName, collectionUUID);
+    auto attributeNss = HCIndexCollectionManager::getAttributeOperationsNamespace(dbName, collectionUUID);
+    auto bitmapIndexNss = HCIndexCollectionManager::getBitmapIndexNamespace(dbName, collectionUUID);
+
+    LOGV2(9999994, "Dropping HCIndex collections for timeseries collection",
+          "collectionUUID"_attr = collectionUUID,
+          "symbolNss"_attr = symbolNss,
+          "attributeNss"_attr = attributeNss,
+          "bitmapIndexNss"_attr = bitmapIndexNss);
+
+    // Drop each HCIndex collection, ignoring errors if they don't exist
+    // Need to acquire MODE_X lock on each collection before dropping
+    auto dropIfExists = [&](const NamespaceString& nss) {
+        if (CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, nss)) {
+            Lock::CollectionLock collLock(opCtx, nss, MODE_X);
+            writeConflictRetry(opCtx, "dropHCIndexCollection", nss, [&] {
+                WriteUnitOfWork wuow(opCtx);
+                auto status = db->dropCollectionEvenIfSystem(opCtx, nss, {});
+                if (!status.isOK() && status.code() != ErrorCodes::NamespaceNotFound) {
+                    LOGV2_WARNING(9999993, "Failed to drop HCIndex collection",
+                                  "nss"_attr = nss,
+                                  "error"_attr = status);
+                }
+                wuow.commit();
+            });
+        }
+    };
+
+    dropIfExists(symbolNss);
+    dropIfExists(attributeNss);
+    dropIfExists(bitmapIndexNss);
+
+    // Also cleanup the HCIndexManager from the BucketCatalog
+    auto& bucketCatalog =
+        timeseries::bucket_catalog::GlobalBucketCatalog::get(opCtx->getServiceContext());
+    timeseries::bucket_catalog::cleanupHCIndex(bucketCatalog, collectionUUID);
+
+    LOGV2(9999992, "HCIndex collections dropped successfully",
+          "collectionUUID"_attr = collectionUUID);
 }
 
 Status _dropView(OperationContext* opCtx,
@@ -460,12 +514,26 @@ Status _dropCollection(OperationContext* opCtx,
                                    &collectionName = collectionName,
                                    &reply,
                                    fromMigrate](const NamespaceString& bucketNs, bool dropView) {
+                // Before dropping, check if HCIndex is enabled and get the collection UUID
+                // so we can drop the HCIndex collections after the main collection is dropped.
+                boost::optional<UUID> hcindexCollectionUUID;
+                {
+                    auto bucketsColl =
+                        CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, bucketNs);
+                    if (bucketsColl) {
+                        auto tsOptions = bucketsColl->getTimeseriesOptions();
+                        if (tsOptions && tsOptions->getUseHCIndex()) {
+                            hcindexCollectionUUID = bucketsColl->uuid();
+                        }
+                    }
+                }
+
                 return _abortIndexBuildsAndDrop(
                     opCtx,
                     std::move(autoDb),
                     bucketNs,
                     expectedUUID,
-                    [opCtx, dropView, &expectedUUID, &collectionName, &reply, fromMigrate](
+                    [opCtx, dropView, &expectedUUID, &collectionName, &reply, fromMigrate, hcindexCollectionUUID](
                         Database* db, const NamespaceString& bucketsNs) {
                         // Disallow checking the expectedUUID when dropping time-series collections.
                         uassert(ErrorCodes::InvalidOptions,
@@ -496,6 +564,11 @@ Status _dropCollection(OperationContext* opCtx,
                                     .ignore();
                                 wuow.commit();
                             });
+
+                        // Drop HCIndex collections if this timeseries collection had HCIndex enabled
+                        if (hcindexCollectionUUID) {
+                            _dropHCIndexCollections(opCtx, db, bucketsNs.dbName(), *hcindexCollectionUUID);
+                        }
 
                         return Status::OK();
                     },
