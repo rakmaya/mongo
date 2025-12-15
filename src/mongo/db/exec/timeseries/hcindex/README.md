@@ -141,9 +141,9 @@ scenario in e-commerce.
 | Bucket Collection size | 57,050 bytes | 5,131,370 bytes |
 | Bucket Collection storageSize | 69,632 bytes | 569,344 bytes |
 | Bucket Collection totalSize | 69,632 bytes | 1,863,680 bytes |
-| **Total Size** |  |  |
-| **Total storageSize** |  |  |
-| **Total totalSize** |  |  |
+| **Total Size** | **1,174,297 bytes**  | **5,131,370 bytes**  |
+| **Total storageSize** | **561,152 bytes**  | **569,344 bytes**  |
+| **Total totalSize** | **561,152 bytes**  | **1,863,680 bytes**  |
 | **Compression Ratio** | **2.30x** | **9.01x** |
 
 
