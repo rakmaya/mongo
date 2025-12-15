@@ -129,14 +129,21 @@ scenario in e-commerce.
 
 | Component | HC Index Enabled | Regular Collection |
 |-----------|------------------|--------------------|
-| Symbol Dictionary size | 4,590 bytes | - |
-| Symbol Dictionary storageSize | 20,480 bytes | - |
-| Attribute Table size | 590,387 bytes | - |
+| Symbol Dictionary size | 9,159 bytes | - |
+| Symbol Dictionary storageSize | 24,576 bytes | - |
+| Symbol Dictionary totalSize | 24,576 bytes | - |
+| Attribute Table size | 591,047 bytes | - |
 | Attribute Table storageSize | 196,608 bytes | - |
-| Bucket Collection size | 54,777 bytes | 5,131,044 bytes |
-| Bucket Collection storageSize | 65,536 bytes | 569,344 bytes |
-| **Total Size** | **649,754 bytes** | **5,131,044 bytes** |
-| **Total storageSize** | **282,624 bytes** | **569,344 bytes** |
+| Attribute Table totalSize | 196,608 bytes | - |
+| Inverted Bitmap size | 516,871 bytes | - |
+| Inverted Bitmap storageSize | 270,336 bytes | - |
+| Inverted Bitmap totalSize | 270,336 bytes | - |
+| Bucket Collection size | 57,050 bytes | 5,131,370 bytes |
+| Bucket Collection storageSize | 69,632 bytes | 569,344 bytes |
+| Bucket Collection totalSize | 69,632 bytes | 1,863,680 bytes |
+| **Total Size** |  |  |
+| **Total storageSize** |  |  |
+| **Total totalSize** |  |  |
 | **Compression Ratio** | **2.30x** | **9.01x** |
 
 
