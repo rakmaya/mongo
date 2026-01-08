@@ -168,6 +168,260 @@ TEST(SymbolDictionaryTest, GetMemoryUsageBytesReturnsPositiveValue) {
 }
 
 // ============================================================================
+// DeltaSymbolDictionary Tests
+// ============================================================================
+
+// Helper struct to hold DeltaSymbolDictionary and its dependencies for testing
+struct TestDeltaSymbolDictionaryContext {
+    std::unique_ptr<HCIndexWriter> writer;
+    std::unique_ptr<SymbolDictionary> baseDictionary;
+    std::unique_ptr<DeltaSymbolDictionary> deltaDictionary;
+};
+
+// Helper function to create a DeltaSymbolDictionary for testing
+TestDeltaSymbolDictionaryContext createTestDeltaSymbolDictionaryWithWriter() {
+    auto collectionUUID = UUID::gen();
+    Timestamp windowStart(0, 0);
+    Timestamp windowEnd(3600, 0);
+    DatabaseName dbName = DatabaseName::createDatabaseName_forTest(boost::none, "test");
+    auto writer = std::make_unique<HCIndexWriter>(collectionUUID, dbName);
+    auto baseDictionary = std::make_unique<SymbolDictionary>(
+        HCIndexPeriodEnum::Hour, 1, windowStart, windowEnd, writer.get());
+    ASSERT_OK(baseDictionary->changeState(SymbolDictionaryState::ReadWrite));
+
+    // Add some base symbols
+    ASSERT_OK(baseDictionary->getOrInsertSymbol("base-symbol-1"));
+    ASSERT_OK(baseDictionary->getOrInsertSymbol("base-symbol-2"));
+
+    Timestamp deltaWindowStart(3600, 0);
+    Timestamp deltaWindowEnd(7200, 0);
+    auto deltaDictionary = std::make_unique<DeltaSymbolDictionary>(
+        HCIndexPeriodEnum::Hour, 1, deltaWindowStart, deltaWindowEnd, baseDictionary.get(), writer.get());
+    ASSERT_OK(deltaDictionary->changeState(SymbolDictionaryState::ReadWrite));
+
+    return {std::move(writer), std::move(baseDictionary), std::move(deltaDictionary)};
+}
+
+TEST(DeltaSymbolDictionaryTest, GetOrInsertSymbolInBase) {
+    auto ctx = createTestDeltaSymbolDictionaryWithWriter();
+
+    // Symbol from base dictionary should be found
+    auto result = ctx.deltaDictionary->getSymbolIndex("base-symbol-1");
+    ASSERT_TRUE(result);
+    ASSERT_EQ(1u, result.value());
+}
+
+TEST(DeltaSymbolDictionaryTest, GetOrInsertSymbolAddsToLocalDelta) {
+    auto ctx = createTestDeltaSymbolDictionaryWithWriter();
+
+    // New symbol should be added to local delta
+    auto result = ctx.deltaDictionary->getOrInsertSymbol("new-local-symbol");
+    ASSERT_TRUE(result.isOK());
+    // Should be index 3 (after base symbols 1 and 2)
+    ASSERT_EQ(3u, result.getValue());
+
+    // Verify it's in local delta
+    auto& localDelta = ctx.deltaDictionary->getLocalDelta();
+    ASSERT_EQ(1u, localDelta.size());
+    ASSERT_TRUE(localDelta.find("new-local-symbol") != localDelta.end());
+}
+
+TEST(DeltaSymbolDictionaryTest, GetOrInsertSymbolReturnsSameIndexForSameWord) {
+    auto ctx = createTestDeltaSymbolDictionaryWithWriter();
+
+    auto result1 = ctx.deltaDictionary->getOrInsertSymbol("new-symbol");
+    auto result2 = ctx.deltaDictionary->getOrInsertSymbol("new-symbol");
+
+    ASSERT_TRUE(result1.isOK());
+    ASSERT_TRUE(result2.isOK());
+    ASSERT_EQ(result1.getValue(), result2.getValue());
+}
+
+TEST(DeltaSymbolDictionaryTest, GetSymbolFromBase) {
+    auto ctx = createTestDeltaSymbolDictionaryWithWriter();
+
+    auto result = ctx.deltaDictionary->getSymbol(1);
+    ASSERT_TRUE(result);
+    ASSERT_EQ("base-symbol-1", result.value());
+}
+
+TEST(DeltaSymbolDictionaryTest, GetSymbolFromLocalDelta) {
+    auto ctx = createTestDeltaSymbolDictionaryWithWriter();
+
+    auto insertResult = ctx.deltaDictionary->getOrInsertSymbol("local-symbol");
+    ASSERT_TRUE(insertResult.isOK());
+
+    auto result = ctx.deltaDictionary->getSymbol(insertResult.getValue());
+    ASSERT_TRUE(result);
+    ASSERT_EQ("local-symbol", result.value());
+}
+
+TEST(DeltaSymbolDictionaryTest, GetSymbolReturnsNoneForInvalidIndex) {
+    auto ctx = createTestDeltaSymbolDictionaryWithWriter();
+
+    auto result = ctx.deltaDictionary->getSymbol(999);
+    ASSERT_FALSE(result);
+}
+
+TEST(DeltaSymbolDictionaryTest, GetSymbolCountIncludesBaseAndLocal) {
+    auto ctx = createTestDeltaSymbolDictionaryWithWriter();
+
+    // Initially should have 2 from base
+    ASSERT_EQ(2u, ctx.deltaDictionary->getSymbolCount());
+
+    // Add a local symbol
+    ASSERT_OK(ctx.deltaDictionary->getOrInsertSymbol("local-1"));
+    ASSERT_EQ(3u, ctx.deltaDictionary->getSymbolCount());
+
+    // Add another local symbol
+    ASSERT_OK(ctx.deltaDictionary->getOrInsertSymbol("local-2"));
+    ASSERT_EQ(4u, ctx.deltaDictionary->getSymbolCount());
+}
+
+TEST(DeltaSymbolDictionaryTest, GetMemoryUsageBytesReturnsPositiveValue) {
+    auto ctx = createTestDeltaSymbolDictionaryWithWriter();
+
+    ASSERT_OK(ctx.deltaDictionary->getOrInsertSymbol("local-symbol"));
+
+    size_t memoryUsage = ctx.deltaDictionary->getMemoryUsageBytes();
+    ASSERT_GT(memoryUsage, 0u);
+}
+
+TEST(DeltaSymbolDictionaryTest, GetWindowBoundaries) {
+    auto ctx = createTestDeltaSymbolDictionaryWithWriter();
+
+    ASSERT_EQ(Timestamp(3600, 0), ctx.deltaDictionary->getWindowStart());
+    ASSERT_EQ(Timestamp(7200, 0), ctx.deltaDictionary->getWindowEnd());
+}
+
+TEST(DeltaSymbolDictionaryTest, GetBaseDictionary) {
+    auto ctx = createTestDeltaSymbolDictionaryWithWriter();
+
+    ASSERT_EQ(ctx.baseDictionary.get(), ctx.deltaDictionary->getBaseDictionary());
+}
+
+TEST(DeltaSymbolDictionaryTest, GetNextSymbolIndex) {
+    auto ctx = createTestDeltaSymbolDictionaryWithWriter();
+
+    // Initially should be 3 (after base symbols 1 and 2)
+    ASSERT_EQ(3u, ctx.deltaDictionary->getNextSymbolIndex());
+
+    ASSERT_OK(ctx.deltaDictionary->getOrInsertSymbol("local-1"));
+    ASSERT_EQ(4u, ctx.deltaDictionary->getNextSymbolIndex());
+}
+
+TEST(DeltaSymbolDictionaryTest, HasNoInheritedDeltaInitially) {
+    auto ctx = createTestDeltaSymbolDictionaryWithWriter();
+
+    ASSERT_FALSE(ctx.deltaDictionary->hasInheritedDelta());
+    ASSERT_FALSE(ctx.deltaDictionary->getInheritedFromWindowStart());
+}
+
+TEST(DeltaSymbolDictionaryTest, GetEffectiveDelta) {
+    auto ctx = createTestDeltaSymbolDictionaryWithWriter();
+
+    ASSERT_OK(ctx.deltaDictionary->getOrInsertSymbol("delta-symbol-1"));
+    ASSERT_OK(ctx.deltaDictionary->getOrInsertSymbol("delta-symbol-2"));
+
+    auto effectiveDelta = ctx.deltaDictionary->getEffectiveDelta();
+    ASSERT_EQ(2u, effectiveDelta.size());
+    ASSERT_TRUE(effectiveDelta.find("delta-symbol-1") != effectiveDelta.end());
+    ASSERT_TRUE(effectiveDelta.find("delta-symbol-2") != effectiveDelta.end());
+}
+
+TEST(DeltaSymbolDictionaryTest, LazyInheritanceFromPreviousInterval) {
+    auto collectionUUID = UUID::gen();
+    DatabaseName dbName = DatabaseName::createDatabaseName_forTest(boost::none, "test");
+    auto writer = std::make_unique<HCIndexWriter>(collectionUUID, dbName);
+
+    // Create base dictionary
+    Timestamp baseWindowStart(0, 0);
+    Timestamp baseWindowEnd(3600, 0);
+    auto baseDictionary = std::make_unique<SymbolDictionary>(
+        HCIndexPeriodEnum::Hour, 1, baseWindowStart, baseWindowEnd, writer.get());
+    ASSERT_OK(baseDictionary->changeState(SymbolDictionaryState::ReadWrite));
+    ASSERT_OK(baseDictionary->getOrInsertSymbol("base-symbol"));
+
+    // Create first delta dictionary (interval N-1)
+    Timestamp delta1WindowStart(3600, 0);
+    Timestamp delta1WindowEnd(7200, 0);
+    auto delta1 = std::make_unique<DeltaSymbolDictionary>(
+        HCIndexPeriodEnum::Hour, 1, delta1WindowStart, delta1WindowEnd, baseDictionary.get(), writer.get());
+    ASSERT_OK(delta1->changeState(SymbolDictionaryState::ReadWrite));
+    ASSERT_OK(delta1->getOrInsertSymbol("delta1-symbol"));
+
+    // Create second delta dictionary (interval N) with delta1 as previous
+    Timestamp delta2WindowStart(7200, 0);
+    Timestamp delta2WindowEnd(10800, 0);
+    auto delta2 = std::make_unique<DeltaSymbolDictionary>(
+        HCIndexPeriodEnum::Hour, 1, delta2WindowStart, delta2WindowEnd, baseDictionary.get(), writer.get(),
+        delta1.get(), nullptr);
+    ASSERT_OK(delta2->changeState(SymbolDictionaryState::ReadWrite));
+
+    // Initially no inherited delta
+    ASSERT_FALSE(delta2->hasInheritedDelta());
+
+    // Looking up a symbol from delta1 via getOrInsertSymbol should trigger inheritance
+    // (getSymbolIndex is const and cannot trigger inheritance)
+    auto result = delta2->getOrInsertSymbol("delta1-symbol");
+    ASSERT_TRUE(result.isOK());
+
+    // Now should have inherited delta
+    ASSERT_TRUE(delta2->hasInheritedDelta());
+    ASSERT_TRUE(delta2->getInheritedFromWindowStart());
+    ASSERT_EQ(delta1WindowStart, delta2->getInheritedFromWindowStart().value());
+
+    // Verify the symbol was found via inheritance (not added as new local)
+    ASSERT_TRUE(delta2->getLocalDelta().empty());
+    ASSERT_FALSE(delta2->getInheritedDelta().empty());
+}
+
+TEST(DeltaSymbolDictionaryTest, ComputeDeltaSimilarityIdenticalSets) {
+    std::set<std::string> delta1 = {"a", "b", "c"};
+    std::set<std::string> delta2 = {"a", "b", "c"};
+
+    double similarity = computeDeltaSimilarity(delta1, delta2);
+    ASSERT_EQ(1.0, similarity);
+}
+
+TEST(DeltaSymbolDictionaryTest, ComputeDeltaSimilarityNoOverlap) {
+    std::set<std::string> delta1 = {"a", "b", "c"};
+    std::set<std::string> delta2 = {"d", "e", "f"};
+
+    double similarity = computeDeltaSimilarity(delta1, delta2);
+    ASSERT_EQ(0.0, similarity);
+}
+
+TEST(DeltaSymbolDictionaryTest, ComputeDeltaSimilarityPartialOverlap) {
+    std::set<std::string> delta1 = {"a", "b", "c"};
+    std::set<std::string> delta2 = {"b", "c", "d"};
+
+    // Intersection: {b, c} = 2
+    // Union: {a, b, c, d} = 4
+    // Similarity: 2/4 = 0.5
+    double similarity = computeDeltaSimilarity(delta1, delta2);
+    ASSERT_EQ(0.5, similarity);
+}
+
+TEST(DeltaSymbolDictionaryTest, ComputeDeltaSimilarityEmptySets) {
+    std::set<std::string> delta1;
+    std::set<std::string> delta2;
+
+    // Both empty sets should have similarity 1.0 (identical)
+    double similarity = computeDeltaSimilarity(delta1, delta2);
+    ASSERT_EQ(1.0, similarity);
+}
+
+TEST(DeltaSymbolDictionaryTest, ComputeDeltaSimilarityOneEmptySet) {
+    std::set<std::string> delta1 = {"a", "b"};
+    std::set<std::string> delta2;
+
+    // One empty set should have similarity 0.0
+    double similarity = computeDeltaSimilarity(delta1, delta2);
+    ASSERT_EQ(0.0, similarity);
+}
+
+// ============================================================================
 // TemporalSymbolDictionary Tests
 // ============================================================================
 

@@ -45,7 +45,7 @@ namespace mongo::timeseries::hcindex {
 // AttributeTable Implementation
 // ============================================================================
 
-AttributeTable::AttributeTable(SymbolDictionary* symbolDictionary,
+AttributeTable::AttributeTable(ISymbolDictionary* symbolDictionary,
                                HCIndexWriter* writer,
                                HCIndexPeriodEnum period,
                                int32_t frequency,

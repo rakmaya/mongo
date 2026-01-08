@@ -81,7 +81,7 @@ public:
      * Sets the writer to INIT mode for symbol operations for this window.
      * After flush() is called, the writer automatically returns to ADD mode for this window.
      */
-    Status initSymbolDictionary(const Timestamp& windowStart, const Timestamp& windowEnd);
+    Status initSymbolDictionary(const Timestamp& windowStart, const Timestamp& windowEnd, const boost::optional<Timestamp>& refBaseDictionary, uint32_t localIndexOffset);
 
     /**
      * Mark the beginning of attribute table initialization for the specified window.
@@ -306,6 +306,16 @@ private:
     std::map<WindowKey, bool> isSymbolInitMode;
     std::map<WindowKey, bool> isAttributeInitMode;
     std::map<WindowKey, bool> isBitmapInitMode;
+
+    // Init Mode Parameters
+    struct SymbolInitParams {
+        // If this window has a base dictionary referenced from another window.
+        boost::optional<Timestamp> refBaseDictionary;
+        // Local symbol index offset
+        uint32_t localIndexOffset = 0;
+    };
+
+    std::map<WindowKey, SymbolInitParams> symbolInitParams;
 };
 
 }  // namespace mongo::timeseries::hcindex

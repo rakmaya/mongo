@@ -88,7 +88,7 @@ TEST_F(HCIndexReaderTest, ConstructSymbolDictionaryFromInit) {
     Timestamp windowEnd(2, 0);
 
     // Initialize symbol dictionary and add symbols
-    ASSERT_OK(writer.initSymbolDictionary(windowStart, windowEnd));
+    ASSERT_OK(writer.initSymbolDictionary(windowStart, windowEnd, boost::none, 1));
     ASSERT_OK(writer.addSymbol(windowStart, windowEnd, "region", 1));
     ASSERT_OK(writer.addSymbol(windowStart, windowEnd, "zone", 2));
     ASSERT_OK(writer.addSymbol(windowStart, windowEnd, "pod", 3));
@@ -128,7 +128,7 @@ TEST_F(HCIndexReaderTest, ConstructSymbolDictionaryFromInitAndAdd) {
     Timestamp windowEnd(2, 0);
 
     // Initialize symbol dictionary and add initial symbols
-    ASSERT_OK(writer.initSymbolDictionary(windowStart, windowEnd));
+    ASSERT_OK(writer.initSymbolDictionary(windowStart, windowEnd, boost::none, 1));
     ASSERT_OK(writer.addSymbol(windowStart, windowEnd, "region", 1));
     ASSERT_OK(writer.addSymbol(windowStart, windowEnd, "zone", 2));
     auto initStatus = writer.flush(windowStart, windowEnd, HCIndexPeriodEnum::Hour, 1, true);

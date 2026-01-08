@@ -192,6 +192,159 @@ StatusWith<std::unique_ptr<SymbolDictionary>> HCIndexReader::constructSymbolDict
     return std::move(dict);
 }
 
+StatusWith<SymbolDictionaryConstructionResult> HCIndexReader::constructSymbolDictionaryWithDelta(
+    OperationContext* opCtx,
+    const Timestamp& windowStart,
+    const Timestamp& windowEnd,
+    HCIndexPeriodEnum period,
+    int32_t frequency,
+    const Timestamp& upToTimestamp,
+    SymbolDictionary* baseDictionary) {
+
+    SymbolDictionaryConstructionResult result;
+
+    // Use the cached collection acquisition instead of acquiring again
+    if (!symbolOpsCollection || !symbolOpsCollection->exists()) {
+        // Operations collection doesn't exist yet - create an empty base dictionary
+        auto dict = std::make_unique<SymbolDictionary>(period, frequency, windowStart, windowEnd, nullptr);
+        auto stateStatus = dict->changeState(SymbolDictionaryState::ReadWrite);
+        if (!stateStatus.isOK()) {
+            return stateStatus;
+        }
+        result.baseDictionary = std::move(dict);
+        return result;
+    }
+
+    // First pass: scan for INIT operation to determine if this is a delta or base
+    boost::optional<Timestamp> refBaseDictionaryWindowStart;
+    uint32_t localIndexOffset = 0;
+    bool foundInit = false;
+
+    auto cursor = symbolOpsCollection->getCollectionPtr()->getCursor(opCtx);
+    while (auto record = cursor->next()) {
+        BSONObj doc = record->data.toBson();
+
+        Timestamp docWindowStart = doc.getField("windowStart").timestamp();
+        Timestamp docWindowEnd = doc.getField("windowEnd").timestamp();
+
+        if (docWindowStart != windowStart || docWindowEnd != windowEnd) {
+            continue;
+        }
+
+        if (doc.getField("timestamp").timestamp() > upToTimestamp) {
+            continue;
+        }
+
+        StringData op = doc.getStringField("op");
+        if (op == "INIT") {
+            foundInit = true;
+            // Check for REF field indicating this references a base dictionary
+            if (doc.hasField("REF")) {
+                refBaseDictionaryWindowStart = doc.getField("REF").timestamp();
+                localIndexOffset = doc.getField("localIndexOffset").numberInt();
+            }
+            break;
+        }
+    }
+
+    // Create the appropriate dictionary type
+    if (refBaseDictionaryWindowStart) {
+        // This is a delta dictionary - references a base
+        result.refBaseDictionaryWindowStart = refBaseDictionaryWindowStart;
+
+        auto deltaDict = std::make_unique<DeltaSymbolDictionary>(
+            period, frequency, windowStart, windowEnd, baseDictionary, nullptr);
+        auto stateStatus = deltaDict->changeState(SymbolDictionaryState::Reconstruction);
+        if (!stateStatus.isOK()) {
+            return stateStatus;
+        }
+
+        // Local index offset is the next symbol index to assign
+        deltaDict->setNextSymbolIndex(localIndexOffset);
+
+        // Second pass: replay operations to populate the delta dictionary
+        cursor = symbolOpsCollection->getCollectionPtr()->getCursor(opCtx);
+        while (auto record = cursor->next()) {
+            BSONObj doc = record->data.toBson();
+
+            Timestamp docWindowStart = doc.getField("windowStart").timestamp();
+            Timestamp docWindowEnd = doc.getField("windowEnd").timestamp();
+
+            if (docWindowStart != windowStart || docWindowEnd != windowEnd) {
+                continue;
+            }
+
+            if (doc.getField("timestamp").timestamp() > upToTimestamp) {
+                continue;
+            }
+
+            StringData op = doc.getStringField("op");
+            if (op == "INIT" || op == "opADD") {
+                BSONObj symbolsObj = doc.getObjectField("symbols");
+                for (const auto& elem : symbolsObj) {
+                    std::string word = elem.fieldName();
+                    auto status = deltaDict->getOrInsertSymbol(StringData(word));
+                    if (!status.isOK()) {
+                        return status.getStatus();
+                    }
+                }
+            }
+        }
+
+        auto readWriteStatus = deltaDict->changeState(SymbolDictionaryState::ReadWrite);
+        if (!readWriteStatus.isOK()) {
+            return readWriteStatus;
+        }
+
+        result.deltaDictionary = std::move(deltaDict);
+    } else {
+        // This is a base dictionary (no REF)
+        auto dict = std::make_unique<SymbolDictionary>(period, frequency, windowStart, windowEnd, nullptr);
+        auto stateStatus = dict->changeState(SymbolDictionaryState::Reconstruction);
+        if (!stateStatus.isOK()) {
+            return stateStatus;
+        }
+
+        // Second pass: replay operations to populate the base dictionary
+        cursor = symbolOpsCollection->getCollectionPtr()->getCursor(opCtx);
+        while (auto record = cursor->next()) {
+            BSONObj doc = record->data.toBson();
+
+            Timestamp docWindowStart = doc.getField("windowStart").timestamp();
+            Timestamp docWindowEnd = doc.getField("windowEnd").timestamp();
+
+            if (docWindowStart != windowStart || docWindowEnd != windowEnd) {
+                continue;
+            }
+
+            if (doc.getField("timestamp").timestamp() > upToTimestamp) {
+                continue;
+            }
+
+            StringData op = doc.getStringField("op");
+            if (op == "INIT" || op == "opADD") {
+                BSONObj symbolsObj = doc.getObjectField("symbols");
+                for (const auto& elem : symbolsObj) {
+                    std::string word = elem.fieldName();
+                    auto status = dict->getOrInsertSymbol(StringData(word));
+                    if (!status.isOK()) {
+                        return status.getStatus();
+                    }
+                }
+            }
+        }
+
+        auto readWriteStatus = dict->changeState(SymbolDictionaryState::ReadWrite);
+        if (!readWriteStatus.isOK()) {
+            return readWriteStatus;
+        }
+
+        result.baseDictionary = std::move(dict);
+    }
+
+    return result;
+}
+
 StatusWith<std::unique_ptr<AttributeTable>> HCIndexReader::constructAttributeTable(
     OperationContext* opCtx,
     const Timestamp& windowStart,
@@ -199,7 +352,7 @@ StatusWith<std::unique_ptr<AttributeTable>> HCIndexReader::constructAttributeTab
     HCIndexPeriodEnum period,
     int32_t frequency,
     const Timestamp& upToTimestamp,
-    SymbolDictionary* symbolDictionary) {
+    ISymbolDictionary* symbolDictionary) {
 
     auto table = std::make_unique<AttributeTable>(symbolDictionary, nullptr, period, frequency, windowStart, windowEnd);
 

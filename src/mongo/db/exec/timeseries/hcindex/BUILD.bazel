@@ -15,6 +15,7 @@ mongo_cc_library(
     hdrs = [
         "bitmap_index.h",
         "hcindex_collection_manager.h",
+        "hcindex_isymbol_dictionary.h",
         "hcindex_reader.h",
         "hcindex_writer.h",
         "temporal_attribute_table.h",

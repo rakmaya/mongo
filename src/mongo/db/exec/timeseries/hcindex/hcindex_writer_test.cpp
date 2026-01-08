@@ -88,7 +88,7 @@ TEST_F(HCIndexWriterTest, InitSymbolDictionaryAndFlushCreatesINITOperation) {
     Timestamp windowEnd(2, 0);
 
     // Mark as INIT mode
-    ASSERT_OK(writer.initSymbolDictionary(windowStart, windowEnd));
+    ASSERT_OK(writer.initSymbolDictionary(windowStart, windowEnd, boost::none, 1));
 
     // Add symbols incrementally
     ASSERT_OK(writer.addSymbol(windowStart, windowEnd, "nyc", 1));
@@ -173,7 +173,7 @@ TEST_F(HCIndexWriterTest, InitThenAddCreatesINITThenopADDOperations) {
     Timestamp windowEnd(2, 0);
 
     // First flush: INIT operation with initial symbols
-    ASSERT_OK(writer.initSymbolDictionary(windowStart, windowEnd));
+    ASSERT_OK(writer.initSymbolDictionary(windowStart, windowEnd, boost::none, 1));
     ASSERT_OK(writer.addSymbol(windowStart, windowEnd, "nyc", 1));
     ASSERT_OK(writer.addSymbol(windowStart, windowEnd, "us-east", 2));
     auto status1 = writer.flush(windowStart, windowEnd, HCIndexPeriodEnum::Hour, 1, true);
@@ -303,7 +303,7 @@ TEST_F(HCIndexWriterTest, SymbolInitFollowedByAddCreatesSequence) {
     Timestamp windowEnd(2, 0);
 
     // First flush: INIT operation with initial symbols
-    ASSERT_OK(writer.initSymbolDictionary(windowStart, windowEnd));
+    ASSERT_OK(writer.initSymbolDictionary(windowStart, windowEnd, boost::none, 1));
     ASSERT_OK(writer.addSymbol(windowStart, windowEnd, "region", 1));
     ASSERT_OK(writer.addSymbol(windowStart, windowEnd, "zone", 2));
     auto initStatus = writer.flush(windowStart, windowEnd, HCIndexPeriodEnum::Hour, 1, true);
@@ -393,7 +393,7 @@ TEST_F(HCIndexWriterTest, FlushWithMinutePeriodStoresCorrectPeriodAndFrequency) 
     Timestamp windowEnd(2, 0);
 
     // Mark as INIT mode
-    ASSERT_OK(writer.initSymbolDictionary(windowStart, windowEnd));
+    ASSERT_OK(writer.initSymbolDictionary(windowStart, windowEnd, boost::none, 1));
 
     // Add a symbol
     ASSERT_OK(writer.addSymbol(windowStart, windowEnd, "test", 1));
@@ -421,7 +421,7 @@ TEST_F(HCIndexWriterTest, FlushWithSecondPeriodStoresCorrectPeriodAndFrequency) 
     Timestamp windowEnd(2, 0);
 
     // Mark as INIT mode
-    ASSERT_OK(writer.initSymbolDictionary(windowStart, windowEnd));
+    ASSERT_OK(writer.initSymbolDictionary(windowStart, windowEnd, boost::none, 1));
 
     // Add a symbol
     ASSERT_OK(writer.addSymbol(windowStart, windowEnd, "test", 1));

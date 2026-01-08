@@ -31,6 +31,7 @@
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/timestamp.h"
+#include "mongo/db/exec/timeseries/hcindex/hcindex_isymbol_dictionary.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
 #include "mongo/util/uuid.h"
@@ -38,10 +39,11 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <set>
+#include <shared_mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
-#include <shared_mutex>
 
 namespace mongo::timeseries::hcindex {
 
@@ -97,7 +99,7 @@ enum class SymbolDictionaryState {
  * - Append-only: New symbols always get new indices
  * - Thread-safe: Uses shared_mutex for concurrent access
  */
-class SymbolDictionary {
+class SymbolDictionary : public ISymbolDictionary {
 
 public:
 
@@ -119,7 +121,7 @@ public:
      * dictionary is full. Note that the index starts from 1 and 0 index is
      * reserved to represent missing values in fetch requests.
      */
-    StatusWith<uint32_t> getOrInsertSymbol(StringData word);
+    StatusWith<uint32_t> getOrInsertSymbol(StringData word) override;
 
     /**
      * Insert a symbol directly with the specified index. This is used during
@@ -148,30 +150,53 @@ public:
 
     /**
      * Flush any pending operations to the database via the writer.
-     */   
+     */
     void flush();
 
     /**
      * Return the symbol index for the specified 'word' if found. Otherwise,
      * return boost::none.
      */
-    boost::optional<uint32_t> getSymbolIndex(StringData word) const;
+    boost::optional<uint32_t> getSymbolIndex(StringData word) const override;
 
     /**
      * Return the word at tht specified 'index' if found. Otherwise, return
      * boost::none.
      */
-    boost::optional<StringData> getSymbol(uint32_t index) const;
+    boost::optional<StringData> getSymbol(uint32_t index) const override;
 
     /**
      * Return the total number of symbols in this dictionary.
      */
-    size_t getSymbolCount() const;
+    size_t getSymbolCount() const override;
 
     /**
      * Return the memory usage of this dictionary in bytes.
      */
     size_t getMemoryUsageBytes() const;
+
+    /**
+     * Get the window start timestamp.
+     */
+    Timestamp getWindowStart() const {
+        return _windowStart;
+    }
+
+    /**
+     * Get the window end timestamp.
+     */
+    Timestamp getWindowEnd() const {
+        return _windowEnd;
+    }
+
+    /**
+     * Check if this dictionary is in a writable state (ReadWrite or Reconstruction).
+     */
+    bool isWritable() const {
+        std::shared_lock<std::shared_mutex> lock(_mutex);
+        return _state == SymbolDictionaryState::ReadWrite ||
+               _state == SymbolDictionaryState::Reconstruction;
+    }
 
 private:
     // Bidirectional mapping for symbols
@@ -203,6 +228,253 @@ private:
 };
 
 /**
+ * Represents a delta-based symbol dictionary for a specific time window.
+ *
+ * Uses a 3-level lookup hierarchy to minimize storage:
+ * 1. baseDictionary: Full snapshot from a previous epoch (immutable)
+ * 2. inheritedDelta: Symbols inherited from a recent interval's delta (lazy)
+ * 3. localDelta: New symbols added in THIS interval only
+ *
+ * Key properties:
+ * - Lookup order: localDelta → inheritedDelta → baseDictionary
+ * - Lazy inheritance: inheritedDelta is set when first needed, not upfront
+ * - Base compaction: When consecutive intervals have similar deltas, merge into new base
+ * - Thread-safe: Uses shared_mutex for concurrent access
+ */
+class DeltaSymbolDictionary : public ISymbolDictionary {
+public:
+    /**
+     * Create a new delta symbol dictionary for the specified time window.
+     *
+     * @param period Time period granularity
+     * @param frequency Frequency within the period
+     * @param windowStart Start timestamp of this interval
+     * @param windowEnd End timestamp of this interval
+     * @param baseDictionary Pointer to the base dictionary (must outlive this object)
+     * @param writer Writer for persisting operations (can be nullptr for read-only)
+     * @param prevInterval1 Previous interval (N-1) for lazy inheritance (can be nullptr)
+     * @param prevInterval2 Previous interval (N-2) for lazy inheritance (can be nullptr)
+     */
+    DeltaSymbolDictionary(HCIndexPeriodEnum period,
+                          int32_t frequency,
+                          Timestamp windowStart,
+                          Timestamp windowEnd,
+                          SymbolDictionary* baseDictionary,
+                          HCIndexWriter* writer,
+                          DeltaSymbolDictionary* prevInterval1 = nullptr,
+                          DeltaSymbolDictionary* prevInterval2 = nullptr);
+
+    /**
+     * Look up or insert a symbol using the 3-level hierarchy.
+     *
+     * Lookup order:
+     * 1. Check baseDictionary
+     * 2. Check inheritedDelta (if set)
+     * 3. Check localDelta
+     * 4. If not found anywhere, add to localDelta
+     *
+     * Uses the prevInterval1 and prevInterval2 provided at construction time
+     * for lazy inheritance.
+     *
+     * @param word The symbol to look up or insert
+     * @return Symbol index or error
+     */
+    StatusWith<uint32_t> getOrInsertSymbol(StringData word) override;
+
+    /**
+     * Look up a symbol (read-only, no insertion).
+     * Uses the same 3-level lookup hierarchy.
+     */
+    boost::optional<uint32_t> getSymbolIndex(StringData word) const override;
+
+    /**
+     * Decode a symbol index back to its string value.
+     * Searches through all levels of the hierarchy.
+     */
+    boost::optional<StringData> getSymbol(uint32_t index) const override;
+
+    /**
+     * Get the effective delta (inheritedDelta + localDelta) for similarity comparison.
+     * Returns a set of symbol strings that are in this interval's delta.
+     */
+    std::set<std::string> getEffectiveDelta() const;
+
+    /**
+     * Get just the local delta symbols.
+     */
+    const std::unordered_map<std::string, uint32_t>& getLocalDelta() const {
+        return _localWordToIndex;
+    }
+
+    /**
+     * Get the inherited delta symbols (empty if not inherited).
+     */
+    const std::unordered_map<std::string, uint32_t>& getInheritedDelta() const {
+        return _inheritedWordToIndex;
+    }
+
+    /**
+     * Check if this interval has inherited from another interval.
+     */
+    bool hasInheritedDelta() const {
+        return _hasInheritedDelta;
+    }
+
+    /**
+     * Get the window start timestamp of the interval we inherited from.
+     * Only valid if hasInheritedDelta() is true.
+     */
+    boost::optional<Timestamp> getInheritedFromWindowStart() const {
+        return _inheritedFromWindowStart;
+    }
+
+    /**
+     * Get the base dictionary this interval uses.
+     */
+    SymbolDictionary* getBaseDictionary() const {
+        return _baseDictionary;
+    }
+
+    /**
+     * Set the base dictionary for this delta dictionary.
+     * Used when reconstructing from disk where the base needs to be set after construction.
+     */
+    void setBaseDictionary(SymbolDictionary* baseDictionary) {
+        _baseDictionary = baseDictionary;
+        // Recalculate next symbol index based on the new base
+        _nextSymbolIndex = baseDictionary ? baseDictionary->getSymbolCount() + 1 : 1;
+    }
+
+    /**
+     * Set the writer for this dictionary.
+     * Used when reconstructing from disk where the writer needs to be set after construction.
+     */
+    void setWriter(HCIndexWriter* writer) {
+        _writer = writer;
+    }
+
+    /**
+     * Get the window start timestamp.
+     */
+    Timestamp getWindowStart() const {
+        return _windowStart;
+    }
+
+    /**
+     * Get the window end timestamp.
+     */
+    Timestamp getWindowEnd() const {
+        return _windowEnd;
+    }
+
+    /**
+     * Get the next symbol index that will be assigned.
+     */
+    uint32_t getNextSymbolIndex() const {
+        return _nextSymbolIndex;
+    }
+
+    /**
+     * Set the next symbol index to assign.
+     * 
+     */
+    void setNextSymbolIndex(uint32_t nextSymbolIndex) {
+        _nextSymbolIndex = nextSymbolIndex;
+    }
+
+    /**
+     * Change the state of this dictionary.
+     */
+    Status changeState(SymbolDictionaryState newState);
+
+    /**
+     * Flush pending operations to the database.
+     */
+    void flush();
+
+    /**
+     * Get total symbol count (base + inherited + local).
+     * Implements ISymbolDictionary interface.
+     */
+    size_t getSymbolCount() const override;
+
+    /**
+     * Get memory usage in bytes.
+     */
+    size_t getMemoryUsageBytes() const;
+
+    /**
+     * Get the window start of the base dictionary this delta references.
+     * Returns boost::none if no base dictionary is set.
+     */
+    boost::optional<Timestamp> getBaseDictionaryWindowStart() const {
+        if (_baseDictionary) {
+            return _baseDictionary->getWindowStart();
+        }
+        return boost::none;
+    }
+
+private:
+    /**
+     * Try to inherit delta from the given previous interval.
+     * Called lazily when a symbol is not found in base or local.
+     */
+    bool tryInheritFrom(DeltaSymbolDictionary* prevInterval);
+
+    // Base dictionary (full snapshot, immutable reference)
+    SymbolDictionary* _baseDictionary;
+
+    // Previous intervals for lazy inheritance (can be nullptr)
+    DeltaSymbolDictionary* _prevInterval1 = nullptr;
+    DeltaSymbolDictionary* _prevInterval2 = nullptr;
+
+    // Inherited delta (set lazily when first needed)
+    bool _hasInheritedDelta = false;
+    boost::optional<Timestamp> _inheritedFromWindowStart;
+    std::unordered_map<std::string, uint32_t> _inheritedWordToIndex;
+    std::vector<std::string> _inheritedIndexToWord;
+
+    // Local delta (symbols new to THIS interval)
+    std::unordered_map<std::string, uint32_t> _localWordToIndex;
+    std::vector<std::string> _localIndexToWord;
+
+    // Next symbol index to assign (continues from base + inherited)
+    uint32_t _nextSymbolIndex;
+    uint32_t _numEncodedSymbols;
+
+    // Time window for this interval
+    HCIndexPeriodEnum _period;
+    int32_t _frequency;
+    Timestamp _windowStart;
+    Timestamp _windowEnd;
+
+    // Writer for persistence
+    HCIndexWriter* _writer = nullptr;
+
+    // State and dirty tracking
+    SymbolDictionaryState _state = SymbolDictionaryState::NOP;
+    bool _isDirty = false;
+
+    // Synchronization
+    mutable std::shared_mutex _mutex;
+};
+
+/**
+ * Compute similarity between two sets of symbols.
+ * Returns a value between 0.0 (no overlap) and 1.0 (identical).
+ * Uses Jaccard similarity: |A ∩ B| / |A ∪ B|
+ */
+double computeDeltaSimilarity(const std::set<std::string>& delta1,
+                               const std::set<std::string>& delta2);
+
+/**
+ * Default similarity threshold for triggering base compaction.
+ * When two consecutive intervals' deltas have similarity >= this value,
+ * a new base dictionary is created.
+ */
+constexpr double kDefaultSimilarityThreshold = 0.8;
+
+/**
  * Manages temporal symbol dictionaries for a timeseries collection.
  *
  * Creates and maintains separate symbol dictionaries for each time window,
@@ -213,6 +485,7 @@ private:
  * - Configurable period and frequency: Hour/Minute/Second with custom frequencies
  * - Automatic window management: Creates dictionaries on-demand
  * - Cleanup support: Can remove old dictionaries to free memory
+ * - Delta-based storage: Uses base + inherited + local for space efficiency
  * - Thread-safe: Safe for concurrent access from multiple threads
  */
 class TemporalSymbolDictionary {
@@ -242,7 +515,7 @@ public:
      * created. opCtx is required for reconstruction from disk if the dictionary
      * is not in memory.
      */
-    StatusWith<SymbolDictionary*> getOrCreateDictionaryForTimestamp(OperationContext* opCtx,
+    StatusWith<ISymbolDictionary*> getOrCreateDictionaryForTimestamp(OperationContext* opCtx,
                                                                      const Timestamp& ts);
 
     /**
@@ -251,7 +524,7 @@ public:
      * error. Note that the returned pointer is valid for the lifetime of this
      * TemporalSymbolDictionary.
      */
-    StatusWith<SymbolDictionary*> getDictionaryForTimestamp(const Timestamp& ts) const;
+    StatusWith<ISymbolDictionary*> getDictionaryForTimestamp(const Timestamp& ts) const;
 
     /**
      * Encode the specified 'word' for the time window that includes the
@@ -310,6 +583,27 @@ private:
                                                         const Timestamp& windowStart);
 
     /**
+     * Create or Fetch the delta dictionary for the time window that starts at the
+     * specified 'windowStart' timestamp.
+     */
+    StatusWith<DeltaSymbolDictionary*> getOrCreateDeltaDictionary(OperationContext* opCtx,
+                                                                   const Timestamp& windowStart);
+
+    /**
+     * Check if the previous two intervals have similar deltas, and if so,
+     * create a new base dictionary by merging the old base with those deltas.
+     * Returns the new base (or the existing base if no merge happened).
+     */
+    SymbolDictionary* maybeCreateNewBase(const Timestamp& windowStart);
+
+    /**
+     * Get the previous two delta intervals relative to the given windowStart.
+     * Returns nullptrs if the intervals don't exist.
+     */
+    std::pair<DeltaSymbolDictionary*, DeltaSymbolDictionary*> getPreviousTwoIntervals(
+        const Timestamp& windowStart);
+
+    /**
      * Return the window start timestamp for the time window that includes the
      * specified 'timestamp'.
      */
@@ -321,11 +615,27 @@ private:
      */
     Timestamp calculateWindowEnd(const Timestamp& windowStart) const;
 
+    /**
+     * Return the previous window start timestamp.
+     */
+    Timestamp calculatePreviousWindowStart(const Timestamp& windowStart) const;
+
     // Map: windowStart → SymbolDictionary
+    // Stores base dictionaries that delta dictionaries reference.
     // We want to clean up older dictionaries.
     // TODO: In future, we can create a projection of this map to an LRU
     // iterator to eject unused dictionaries.
     std::map<Timestamp, std::unique_ptr<SymbolDictionary>> _dictionaries;
+
+    // Delta dictionary support
+    // Map: windowStart → DeltaSymbolDictionary
+    std::map<Timestamp, std::unique_ptr<DeltaSymbolDictionary>> _deltaDictionaries;
+
+    // Current base dictionary pointer (owned by _dictionaries)
+    SymbolDictionary* _currentBase = nullptr;
+
+    // Similarity threshold for creating new bases
+    double _similarityThreshold = kDefaultSimilarityThreshold;
 
     // Collection UUID for this temporal dictionary
     UUID _collectionUUID;

@@ -44,6 +44,37 @@
 namespace mongo::timeseries::hcindex {
 
 /**
+ * Result of constructing a symbol dictionary from operations.
+ * Contains either:
+ * - A SymbolDictionary (base dictionary with no reference)
+ * - A DeltaSymbolDictionary (references a base dictionary from another window)
+ *
+ * The caller is responsible for storing these in the appropriate maps
+ * in TemporalSymbolDictionary.
+ */
+struct SymbolDictionaryConstructionResult {
+    // The base dictionary - only set if this is a new base (INIT without REF)
+    std::unique_ptr<SymbolDictionary> baseDictionary;
+
+    // The delta dictionary - only set if this references a base (INIT with REF)
+    std::unique_ptr<DeltaSymbolDictionary> deltaDictionary;
+
+    // The window start of the referenced base dictionary (if deltaDictionary is set)
+    boost::optional<Timestamp> refBaseDictionaryWindowStart;
+
+    // Returns true if this result contains a delta dictionary (references a base)
+    bool isDelta() const { return deltaDictionary != nullptr; }
+
+    // Returns the dictionary as an ISymbolDictionary pointer
+    ISymbolDictionary* getDictionary() const {
+        if (deltaDictionary) {
+            return deltaDictionary.get();
+        }
+        return baseDictionary.get();
+    }
+};
+
+/**
  * Reads and constructs time-parametrized index structures from operations timeseries.
  * Replays operations to construct dictionaries and attribute tables for specific windows.
  *
@@ -100,6 +131,43 @@ public:
         const Timestamp& upToTimestamp);
 
     /**
+     * Construct a symbol dictionary (either base or delta) by replaying operations.
+     *
+     * This is the preferred method for constructing symbol dictionaries as it handles
+     * both base dictionaries (INIT without REF) and delta dictionaries (INIT with REF).
+     *
+     * The result contains:
+     * - baseDictionary: Set if INIT has no REF (this is a new base dictionary)
+     * - deltaDictionary: Set if INIT has REF (references a base from another window)
+     * - refBaseDictionaryWindowStart: The window start of the referenced base
+     *
+     * The caller (TemporalSymbolDictionary) is responsible for:
+     * 1. Looking up the referenced base dictionary if refBaseDictionaryWindowStart is set
+     * 2. Setting the base dictionary pointer on the delta dictionary
+     * 3. Storing the dictionaries in the appropriate maps
+     *
+     * Parameters:
+     * - opCtx: Operation context for database operations
+     * - windowStart: Start timestamp of the time window
+     * - windowEnd: End timestamp of the time window
+     * - period: Time-window period (hour, minute, second)
+     * - frequency: Time-window frequency (1-24 for hour, 1-59 for minute/second)
+     * - upToTimestamp: Only replay operations up to this timestamp
+     * - baseDictionary: Optional base dictionary to use for delta construction.
+     *                   If provided and INIT has REF, this base will be used.
+     *                   If nullptr and INIT has REF, a delta will be created without base
+     *                   (caller must set base later).
+     */
+    StatusWith<SymbolDictionaryConstructionResult> constructSymbolDictionaryWithDelta(
+        OperationContext* opCtx,
+        const Timestamp& windowStart,
+        const Timestamp& windowEnd,
+        HCIndexPeriodEnum period,
+        int32_t frequency,
+        const Timestamp& upToTimestamp,
+        SymbolDictionary* baseDictionary = nullptr);
+
+    /**
      * Construct an AttributeTable by replaying operations up to the specified timestamp.
      * Only reads operations up to the given timestamp, enabling partial construction.
      *
@@ -121,7 +189,7 @@ public:
         HCIndexPeriodEnum period,
         int32_t frequency,
         const Timestamp& upToTimestamp,
-        SymbolDictionary* symbolDictionary);
+        ISymbolDictionary* symbolDictionary);
 
     /**
      * Construct a BitmapIndex by replaying operations up to the specified timestamp.

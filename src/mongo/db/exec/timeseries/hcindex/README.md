@@ -8,7 +8,7 @@ this problem. The pimary characteristics of analytics are:
 - A large volume of data is ingested over a short span of time.
 - Data is extremly sparse (e.g. "clothing sold by store-X in the last hour",
 "number of containers re-started in the last 10 seconds") and is spread out over
-a large number of dimensions. That is **ingest cardinality** is high.
+a large number of dimensions. That is **ingestion cardinality** is extremely high.
 - When zoomed out (e.g. all clothing sold by store-X), the data is very dense
 across some dimensions and sparse across others. The concept of "zoom out" is
 relative to the query. And thus **query-cardinality** can be high across some
@@ -32,8 +32,10 @@ to be useful where it can be. It is not worth building any inverted incides
 if the entire dataset is unique across all dimensions since index itself becomes
 a scan.
 
-One of the major benefit that MongoDB has over Pinot is its bucketing model. Luckily
-this model aligns very well with the time-parametrized index structures. Some changes are required to allow pushdown of predicates to the bucket level, but it is not impossible.
+One of the major benefit that MongoDB has over Clickhouse and Apache Pinot is
+its bucketing model.  Luckily this model aligns very well with the
+time-parametrized index structures.  Some changes are required to allow pushdown
+of predicates to the bucket level, but it is not impossible.
 
 ## Reference Implementation
 
@@ -245,16 +247,52 @@ stored in timeseries collections:
 3. **FIN** - Finalize operation
    - Marks Dictionary and AttributeTable as complete/immutable
    - No more operations can be added after FIN
+   - FIN is optional since during query time, system looks for INIT and
+   subsequent opADDs. FIN just serves as a marker to indicate that no more
+   changes will be made even if more opADDs are requested.
 
 4. **REF** - Reference operation (optimization)
+   - Only applicable to the INIT operation
+   - Only used in the Symbol Dictionary
    - Indicates this window reuses dictionary from a previous window
    - Avoids duplicating identical dictionaries
+   - Example: In the case of the Merchant Transactions dataset, Since most
+   common items are in the base dictionary, we can reuse it
+   However, order numbers are an extremely high cardinality field and that we
+   see in the current window are unique to this window and will be added to the
+   local dictionary. In the below example, we are reusing the base dictionary
+   (see REF) that contains bulk of the data from a previous window.
+   ```
+    {
+    _id: ObjectId('695f114c524101152468cc9d'),
+    timestamp: Timestamp({ t: 1765810680, i: 0 }),
+    windowStart: Timestamp({ t: 1765810680, i: 0 }),
+    windowEnd: Timestamp({ t: 1765810740, i: 0 }),
+    period: 1,
+    frequency: 1,
+    REF: Timestamp({ t: 1765810560, i: 0 }),
+    localIndexOffset: Long('179'),
+    op: 'INIT',
+    symbols: {
+      '190': 304,
+      '191': 305,
+      '192': 306,
+      '193': 307,
+      '194': 308,
+      '195': 309
+    }
+    ```
 
 ### Key Advantage: Partial Reconstruction
 
 To interpret data from 09:00-09:25 in a window that runs 09:00-09:59:
 - Only reconstruct operations up to 09:25
 - No need to read ahead to FIN at 09:59:59
+- Referenced dictionaries can also be reconstructed partially
+- Referenced dictionaries + local window specific opADDs = complete dictionary
+  and this allows for efficient seeks. High cardinality data that is unique to
+  the local window does not need to be read into memory if we are not looking
+  at the window.
 - Enables efficient streaming queries on partial time ranges
 - Reduces latency for early-window queries
 
@@ -263,8 +301,10 @@ To interpret data from 09:00-09:25 in a window that runs 09:00-09:59:
 - **Symbol Operations**: `hcindex.ops.symbols.<collectionUUID>` (in user's database)
 - **Attribute Operations**: `hcindex.ops.attributes.<collectionUUID>` (in user's database)
 
-The `.ops` segment explicitly indicates these are operation streams, not reconstructed structures.
-Operations collections are created in the same database as the original timeseries collection to avoid namespace validation issues.
+The `.ops` segment explicitly indicates these are operation streams, not
+reconstructed structures.  Operations collections are created in the same
+database as the original timeseries collection to avoid namespace validation
+issues.
 
 ## Inverted Index For RowIDs
 
@@ -272,7 +312,7 @@ For high density (tags that maps to more than 1 rows) having an inverted index
 can be useful to eliminate the need to scan all the rows for a given tag. However,
 in the analytics space, it common to have certain dimensions that are very sparse
 and not worth building an inverted index for. Thus it is important to be able to
-dynamically build inverted indexes for certain dimensions.
+dynamically build inverted indexes for those significant dimensions only.
 
 ## Time-partitioned bitmap (roaring) index for metadata fields
 
@@ -354,7 +394,7 @@ Each window dictionary may be implemented as one of:
 
 | Dictionary | Notes                                                                |
 | ---------- | -------------------------------------------------------------------- |
-| Trie       | Fast prefix and moderate regex; inexpensive incremental updates      |
+| Trie       | Fast prefix/suffix and moderate regex; inexpensive incremental updates     |
 | FST        | More compact; faster regex enumeration; ideal under heavy regex load |
 
 
@@ -389,24 +429,34 @@ Given predicate `(column REGEX pattern)` over time interval `[t0, t1)`:
 5. Return matching row IDs
 ```
 
-### Phase 1 Implementation
+### Phase 0 Reference Implementation
 Reference Implementation MVP will do the following to get the initial PoC
 version
+1. Implement basic PoC functionality for HC Index (Ingestion & Query)
+   1. PoC Implementation of Symbol Dictionary and Attribute Table
+   2. Query pipeline changes for basic find/filter (Class & SBE)
+2. Basic Bitmap Index (could be a map) for metadata fields
+4. Basic unit tests
 
-1. Implement the bitmap index and Trie
+### Phase 1 Implementation
+
+1. Implement the roaring/compact bitmap index
+2. Implement Trie (Prefix/Suffix expressions are relatively common in analytics)
 2. Integrate with the ingestion path
    1. Add support for dynamic density calculation using information gain.
    2. Add support for building the bitmap index on demand.
-3. Unit Tests
+3. SIMD & AVX optimizations for scanning AttributeTable
+4. Unit Tests
+5. mongos pushdowns
 
 ### Phase 2 Implementation
-1. Implement FST
+1. Implement FST (full regex support)
 2. Add support for dictionary inheritance
 3. Add support for offline dictionary merge
-4. Add support for regex query execution
 5. Add support for costmodel integration
 6. Add support for explain plan visibility
-7. Integration Tests
+7. Implement Aggregation Buckets & Query Pushdown to use these buckets
+8. Integration Tests
 
 ### Considerations For Future Work
 - Value demotion under memory pressure

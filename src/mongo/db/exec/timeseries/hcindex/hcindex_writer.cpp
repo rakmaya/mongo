@@ -37,9 +37,14 @@ namespace mongo::timeseries::hcindex {
 HCIndexWriter::HCIndexWriter(const UUID& collectionUUID, const DatabaseName& dbName)
     : collectionUUID(collectionUUID), dbName(dbName) {}
 
-Status HCIndexWriter::initSymbolDictionary(const Timestamp& windowStart, const Timestamp& windowEnd) {
+Status HCIndexWriter::initSymbolDictionary(const Timestamp& windowStart,
+                                           const Timestamp& windowEnd,
+                                           const boost::optional<Timestamp>& refBaseDictionary,
+                                           uint32_t localIndexOffset) {
     WindowKey key = std::make_pair(windowStart, windowEnd);
     isSymbolInitMode[key] = true;
+    symbolInitParams[key].refBaseDictionary = refBaseDictionary;
+    symbolInitParams[key].localIndexOffset = localIndexOffset;
     return Status::OK();
 }
 
@@ -128,6 +133,13 @@ Status HCIndexWriter::_flushSymbols(const Timestamp& windowStart,
     docBuilder.append("windowEnd", windowEnd);
     docBuilder.append("period", static_cast<int>(period));
     docBuilder.append("frequency", frequency);
+
+    // If there is a base dictionary referenced, add a REF operation.
+    if (isInitMode && symbolInitParams[key].refBaseDictionary) {
+        docBuilder.append("REF", symbolInitParams[key].refBaseDictionary.get());
+        docBuilder.append("localIndexOffset", static_cast<long long>(symbolInitParams[key].localIndexOffset));
+    }
+
     docBuilder.append("op", isInitMode ? "INIT" : "opADD");
     docBuilder.append("symbols", symbolsBuilder.obj());
 

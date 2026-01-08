@@ -33,6 +33,7 @@
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/timestamp.h"
+#include "mongo/db/exec/timeseries/hcindex/hcindex_isymbol_dictionary.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
 #include "mongo/util/uuid.h"
@@ -53,7 +54,6 @@ namespace mongo::timeseries::hcindex {
 
 // FORWARD DECLARATIONS
 enum class DictionaryGranularity;
-class SymbolDictionary;
 class HCIndexReader;
 class HCIndexWriter;
 class BitmapIndex;
@@ -166,7 +166,7 @@ struct AttributeTablePredicate {
  * - Missing values: 0 is reserved to denote missing values in cells
  * - Row IDs: Stable identifiers for rows. IDs are not reused
  * - Thread-safe: Uses shared_mutex for concurrent access
- * - Dictionary-backed: Uses a SymbolDictionary to convert metadata values to indices
+ * - Dictionary-backed: Uses an ISymbolDictionary to convert metadata values to indices
  */
 class AttributeTable {
 public:
@@ -177,7 +177,7 @@ public:
      * The table starts in NOP state. Use changeState() to transition to
      * Reconstruction, ReadWrite, or ReadOnly states.
      */
-    AttributeTable(SymbolDictionary* symbolDictionary,
+    AttributeTable(ISymbolDictionary* symbolDictionary,
                    HCIndexWriter* writer,
                    HCIndexPeriodEnum period,
                    int32_t frequency,
@@ -338,7 +338,7 @@ private:
 
     // Symbol dictionary for converting metadata values to indices
     // Must remain valid for the lifetime of this AttributeTable
-    SymbolDictionary* symbolDictionary;
+    ISymbolDictionary* symbolDictionary;
 
     // Writer for writing new attribute operations
     // Must remain valid for the lifetime of this AttributeTable
