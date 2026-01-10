@@ -151,9 +151,10 @@ public:
                                      LookupRequirement::kAllowed,
                                      UnionRequirement::kAllowed,
                                      ChangeStreamRequirement::kDenylist};
-        // For HCIndex collections, we now allow $match stages to be swapped before the unpack
-        // bucket stage. The ScanAttributeIndexStage will be inserted before the unpack bucket
-        // to filter by metadata predicates, and the $match stage will be removed.
+        // For HCIndex collections, we now allow match stages to be swapped
+        // before the unpack bucket stage. The ScanAttributeIndexStage will be
+        // inserted before the unpack bucket to filter by metadata predicates,
+        // and the $match stage will be removed.
         constraints.canSwapWithMatch = true;
         // The user cannot specify multiple $unpackBucket stages in the pipeline.
         constraints.canAppearOnlyOnceInPipeline = true;
@@ -338,8 +339,9 @@ public:
     }
 
     /**
-     * Returns true if the eventFilter was already applied via HCIndex filtering.
-     * This is used to determine if the eventFilter should be applied again in the SBE stage.
+     * Returns true if the eventFilter was already applied via HCIndex
+     * filtering.  This is used to determine if the eventFilter should be
+     * applied again in in the later stages of the SBE pipeline.
      */
     bool isEventFilterAppliedByHCIndex() const {
         return !_hcindexMetadataFilterBSON.isEmpty();
@@ -446,9 +448,9 @@ private:
     boost::optional<bool> _isSbeCompatible = boost::none;
     boost::optional<SbeCompatibility> _isEventFilterSbeCompatible = boost::none;
 
-    // HCIndex metadata filter to be applied during unpacking
-    // This is extracted from $match stages that come before this stage
-    // Stored as BSON to ensure the buffer is owned and valid when passed to execution stage
+    // HCIndex metadata filter to be applied during unpacking This is extracted
+    // from match stages that come before this stage Unfortunately, we need to
+    // copy and own the buffer.
     BSONObj _hcindexMetadataFilterBSON;
 };
 }  // namespace MONGO_MOD_PUB mongo

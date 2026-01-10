@@ -45,43 +45,48 @@
 namespace mongo {
 
 namespace {
-// Helper function to recursively set backing BSON on all ComparisonMatchExpressions in the tree
+
+// Set backing BSON on all ComparisonMatchExpressions in the tree. This needs
+// to removed once we have a plan-rewrite that embeds appropriate plan stage
+// information that overrides the meta field name appropriately in the
+// MatchExpression.
 void setBackingBSONOnAllComparisons(MatchExpression* expr, const BSONObj& backingBSON) {
     if (!expr) {
         return;
     }
 
-    // If this is a ComparisonMatchExpression, set the backing BSON
+    // PoC implementation only supports ComparisonMatchExpressions. I am not
+    // doing a full generic MatchExpression rewrite because this will be easier
+    // if we can pull this logic up to the pre-optimizer stage.
     if (auto comparisonExpr = dynamic_cast<ComparisonMatchExpressionBase*>(expr)) {
         comparisonExpr->setBackingBSON(backingBSON);
     }
 
-    // Recursively process all children
     for (size_t i = 0; i < expr->numChildren(); ++i) {
         setBackingBSONOnAllComparisons(expr->getChild(i), backingBSON);
     }
 }
 
-// Helper function to replace "meta" field prefix with the actual metadata field name in BSON
+// We need to change the generic "meta" symbology to the actual metadata field
+// name used in the time-series collection.
 BSONObj replaceMetaFieldInBSON(const BSONObj& bson, StringData actualMetaField) {
     BSONObjBuilder builder;
     for (auto elem : bson) {
         std::string fieldName = std::string(elem.fieldNameStringData());
 
-        // Check if the field name starts with "meta." (dotted path)
+        // TODO: Currently this handles only the simple case of a prefix match,
+        // object and arrays. This could easily be generatized. Lets do that
+        // once we decide the right place for this in the query pipeline.
+
         if (fieldName.find("meta.") == 0) {
-            // Replace "meta." with the actual metadata field name + "."
             std::string newFieldName = std::string(actualMetaField) + "." + fieldName.substr(5);
             builder.appendAs(elem, newFieldName);
         } else if (fieldName == "meta") {
-            // Replace "meta" with the actual metadata field name
             builder.appendAs(elem, actualMetaField);
         } else if (elem.type() == BSONType::object) {
-            // Recursively process nested objects
             auto nestedObj = replaceMetaFieldInBSON(elem.Obj(), actualMetaField);
             builder.append(elem.fieldName(), nestedObj);
         } else if (elem.type() == BSONType::array) {
-            // For arrays, we need to process each element
             BSONArrayBuilder arrayBuilder(builder.subarrayStart(elem.fieldName()));
             for (auto arrayElem : elem.Obj()) {
                 if (arrayElem.type() == BSONType::object) {
@@ -98,7 +103,8 @@ BSONObj replaceMetaFieldInBSON(const BSONObj& bson, StringData actualMetaField) 
     }
     return builder.obj();
 }
-}  // namespace
+
+}
 
 boost::intrusive_ptr<exec::agg::Stage> documentSourceInternalUnpackBucketToStageFn(
     const boost::intrusive_ptr<DocumentSource>& documentSource) {
@@ -115,19 +121,18 @@ boost::intrusive_ptr<exec::agg::Stage> documentSourceInternalUnpackBucketToStage
         dsInternalUnpackBucket->_unpackToBson,
         dsInternalUnpackBucket->_sampleSize);
 
-    // Pass the HCIndex metadata filter if present
+    // If we are handling an HCIndex enabled collection, then we need to rewrite
+    // the metadata filters.
     if (!dsInternalUnpackBucket->_hcindexMetadataFilterBSON.isEmpty()) {
 
-        // Get the actual metadata field name from the bucket spec
         auto metaField = dsInternalUnpackBucket->_sharedState->_bucketUnpacker.getMetaField();
         BSONObj filterBSON = dsInternalUnpackBucket->_hcindexMetadataFilterBSON;
 
-        // If the metadata field is not "meta", replace it in the BSON
+        // If user has customized it, replace "meta" with the actual one.
         if (metaField && *metaField != "meta"_sd) {
             filterBSON = replaceMetaFieldInBSON(filterBSON, *metaField);
         }
 
-        // Make sure the BSON is owned so it outlives the MatchExpression
         if (!filterBSON.isOwned()) {
             filterBSON = filterBSON.getOwned();
         }
@@ -140,10 +145,7 @@ boost::intrusive_ptr<exec::agg::Stage> documentSourceInternalUnpackBucketToStage
 
         if (parseResult.isOK()) {
             auto matchExpr = std::move(parseResult.getValue());
-
-            // Set the backing BSON on all ComparisonMatchExpressions in the tree to ensure the BSONElements remain valid
             setBackingBSONOnAllComparisons(matchExpr.get(), filterBSON);
-
             stage->setHCIndexMetadataFilter(std::move(matchExpr));
         } else {
             LOGV2_ERROR(9999984, "HCIndex: Failed to parse metadata filter", "error"_attr = parseResult.getStatus());
@@ -174,7 +176,6 @@ InternalUnpackBucketStage::InternalUnpackBucketStage(
       _sampleSize(sampleSize) {}
 
 GetNextResult InternalUnpackBucketStage::doGetNext() {
-    // BREAKPOINT: Set breakpoint here to see if this is being called
     tassert(5521502, "calling doGetNext() when '_sampleSize' is set is disallowed", !_sampleSize);
 
     // Otherwise, fallback to unpacking every measurement in all buckets until the child stage is
@@ -189,7 +190,10 @@ GetNextResult InternalUnpackBucketStage::doGetNext() {
         auto bucketMatchedQuery = _sharedState->_wholeBucketFilter &&
             exec::matcher::matchesBSON(_sharedState->_wholeBucketFilter.get(), bucket);
 
-        // Set HCIndexCollectionManager and OperationContext if this is an HCIndex-enabled collection
+        // Set HCIndexCollectionManager and OperationContext if this is an
+        // HCIndex-enabled collection. Extract the row-ids. This simply gets to
+        // the row-ids. If there are filters on the measurements, we expect
+        // that to be pipelined after the extraction.
         auto collUUID = pExpCtx->getUUID();
         if (collUUID) {
             auto& bucketCatalog = timeseries::bucket_catalog::GlobalBucketCatalog::get(
@@ -200,12 +204,15 @@ GetNextResult InternalUnpackBucketStage::doGetNext() {
                 _sharedState->_bucketUnpacker.setHCIndexCollectionManager(hcindexMgr.get());
                 _sharedState->_bucketUnpacker.setOperationContext(pExpCtx->getOperationContext());
 
-                // If we have an HCIndex metadata filter, query for matching rowIds using the bucket timestamp
+                // If we have an HCIndex metadata filter, query for matching
+                // rowIds using the bucket timestamp
                 if (_hcindexMetadataFilter) {
                     _hcindexMatchingRowIds.clear();
                     _hcindexRowIdsInitialized = false;
 
-                    // Extract the bucket timestamp from control.min.<timeField>
+                    // TODO: Right now we are assuming control.min.time as the
+                    // timestamp field. Need to verify if there are cases where
+                    // this will not be available.
                     auto timeField = _sharedState->_bucketUnpacker.bucketSpec().timeField();
                     auto controlObj = bucket.getObjectField("control");
                     auto minObj = controlObj.getObjectField("min");
@@ -257,16 +264,16 @@ GetNextResult InternalUnpackBucketStage::doGetNext() {
 }
 
 boost::optional<Document> InternalUnpackBucketStage::getNextMatchingMeasure() {
-    int measurementCount = 0;
-    int matchedCount = 0;
     while (_sharedState->_bucketUnpacker.hasNext()) {
         // Check HCIndex metadata filter first if present
         if (_hcindexMetadataFilter && _hcindexRowIdsInitialized) {
             auto rowId = _sharedState->_bucketUnpacker.getCurrentRowId();
             if (rowId >= 0 && _hcindexMatchingRowIds.find(rowId) == _hcindexMatchingRowIds.end()) {
-                // This measurement's rowId doesn't match the metadata predicate, skip it
-                _sharedState->_bucketUnpacker.skipRow();  // Skip without unpacking
-                // We need to read the measurement to advance the row iterator
+                // Ahem! It is about time MongoDB had a proper iterator. Without
+                // it many of the primimitives cannot be reasonably implemented.
+                // For now I have added the skipRow, to not force an unpack.
+                _sharedState->_bucketUnpacker.skipRow();
+                // Without this, I need to upack like below!
                 //auto _ = _sharedState->_bucketUnpacker.getNext();
                 continue;
             }

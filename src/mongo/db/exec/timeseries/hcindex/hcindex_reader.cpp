@@ -31,7 +31,6 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/exec/timeseries/hcindex/hcindex_collection_manager.h"
 #include "mongo/db/timeseries/hcindex_options.h"
-//#include "mongo/db/collection_crud/collection_write_path.h"
 #include "mongo/db/local_catalog/shard_role_api/shard_role.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/logv2/log.h"
@@ -44,8 +43,7 @@ HCIndexReader::HCIndexReader(const DatabaseName& dbName, const UUID& collectionU
     : dbName(dbName), collectionUUID(collectionUUID) {}
 
 void HCIndexReader::acquireCollections(OperationContext* opCtx) {
-    // Acquire symbol operations collection WITHOUT acquiring locks
-    // This is safe because we're just getting a snapshot of the catalog
+    // Tries to acquire symbol operations collection WITHOUT acquiring locks
     auto symbolNss = HCIndexCollectionManager::getSymbolOperationsNamespace(dbName, collectionUUID);
     CollectionAcquisitionRequest symbolAcquisitionRequest(
         symbolNss,
@@ -55,13 +53,11 @@ void HCIndexReader::acquireCollections(OperationContext* opCtx) {
 
     try {
         symbolOpsCollection = acquireCollectionMaybeLockFree(opCtx, symbolAcquisitionRequest);
-        LOGV2(9999999, "HCIndexReader::acquireCollections - acquired symbol ops collection");
     } catch (const std::exception& e) {
-        LOGV2(9999999,
+        LOGV2(9999990,
               "HCIndexReader::acquireCollections - symbol ops collection doesn't exist yet",
               "error"_attr = e.what());
-        // Symbol ops collection doesn't exist yet - this is expected on first load
-        // We'll handle this gracefully in constructSymbolDictionary
+        // TODO: Raise it?
     }
 
     // Acquire attribute operations collection WITHOUT acquiring locks
@@ -75,13 +71,11 @@ void HCIndexReader::acquireCollections(OperationContext* opCtx) {
 
     try {
         attributeOpsCollection = acquireCollectionMaybeLockFree(opCtx, attributeAcquisitionRequest);
-        LOGV2(9999999, "HCIndexReader::acquireCollections - acquired attribute ops collection");
     } catch (const std::exception& e) {
-        LOGV2(9999999,
+        LOGV2(9999990,
               "HCIndexReader::acquireCollections - attribute ops collection doesn't exist yet",
               "error"_attr = e.what());
-        // Attribute ops collection doesn't exist yet - this is expected on first load
-        // We will handle this gracefully in constructAttributeTable
+        // TODO: Raise it?
     }
 
     // Acquire bitmap index collection WITHOUT acquiring locks
@@ -95,20 +89,18 @@ void HCIndexReader::acquireCollections(OperationContext* opCtx) {
 
     try {
         bitmapIndexCollection = acquireCollectionMaybeLockFree(opCtx, bitmapIndexAcquisitionRequest);
-        LOGV2(9999999, "HCIndexReader::acquireCollections - acquired bitmapIndex collection");
     } catch (const std::exception& e) {
-        LOGV2(9999999,
+        LOGV2(9999990,
               "HCIndexReader::acquireCollections - bitmap index collection doesn't exist yet",
               "error"_attr = e.what());
-        // Bitmap Index collection doesn't exist yet. This is expected on first load
-        // We will handle this gracefully in constructBitmapIndex
+        // TODO: Raise it?
     }
 }
 
 Status HCIndexReader::initializeCollections(OperationContext* opCtx) {
     // Check if already initialized to avoid reacquiring collections
     if (collectionsInitialized) {
-        LOGV2(9999999, "HCIndexReader::initializeCollections - already initialized, skipping");
+        LOGV2(9999990, "HCIndexReader::initializeCollections - already initialized, skipping");
         return Status::OK();
     }
 
@@ -134,9 +126,7 @@ StatusWith<std::unique_ptr<SymbolDictionary>> HCIndexReader::constructSymbolDict
     }
 
     // Use the cached collection acquisition instead of acquiring again
-    // This avoids lock cycles during query execution
     if (!symbolOpsCollection || !symbolOpsCollection->exists()) {
-        // Operations collection doesn't exist yet - this is expected on first load after restart
         // Return an empty dictionary in ReadWrite state so new symbols can be added
         auto readWriteStatus = dict->changeState(SymbolDictionaryState::ReadWrite);
         if (!readWriteStatus.isOK()) {
@@ -374,12 +364,6 @@ StatusWith<std::unique_ptr<AttributeTable>> HCIndexReader::constructAttributeTab
         return std::move(table);
     }
 
-    // Read and replay operations
-    LOGV2(9999920, "HCIndexReader::constructAttributeTable - starting reconstruction",
-          "windowStart"_attr = windowStart,
-          "windowEnd"_attr = windowEnd,
-          "upToTimestamp"_attr = upToTimestamp);
-
     auto cursor = attributeOpsCollection->getCollectionPtr()->getCursor(opCtx);
     int operationCount = 0;
     while (auto record = cursor->next()) {
@@ -400,15 +384,9 @@ StatusWith<std::unique_ptr<AttributeTable>> HCIndexReader::constructAttributeTab
         StringData op = doc.getStringField("op");
         Timestamp docTimestamp = doc.getField("timestamp").timestamp();
 
-        LOGV2(9999921, "Processing operation",
-              "op"_attr = op,
-              "timestamp"_attr = docTimestamp);
-
         if (op == "INIT") {
             // Extract schema and rows from INIT operation
             BSONObj schemaObj = doc.getObjectField("schema");
-            LOGV2(9999922, "Processing INIT operation",
-                  "schemaFieldCount"_attr = schemaObj.nFields());
 
             for (const auto& elem : schemaObj) {
                 std::string fieldName = elem.String();
@@ -422,8 +400,6 @@ StatusWith<std::unique_ptr<AttributeTable>> HCIndexReader::constructAttributeTab
             BSONElement rowsElem = doc.getField("rows");
             if (rowsElem && rowsElem.type() == BSONType::array) {
                 auto rowsArray = rowsElem.Array();
-                LOGV2(9999924, "Inserting rows",
-                      "rowCount"_attr = rowsArray.size());
 
                 for (const auto& rowElem : rowsArray) {
                     if (rowElem.type() == BSONType::array) {
@@ -516,10 +492,6 @@ StatusWith<std::unique_ptr<BitmapIndex>> HCIndexReader::constructBitmapIndex(
     }
 
     // Read and replay operations
-    LOGV2(9999930, "HCIndexReader::constructBitmapIndex - starting reconstruction",
-          "windowStart"_attr = windowStart,
-          "windowEnd"_attr = windowEnd,
-          "upToTimestamp"_attr = upToTimestamp);
 
     auto cursor = bitmapIndexCollection->getCollectionPtr()->getCursor(opCtx);
     int operationCount = 0;
@@ -541,18 +513,12 @@ StatusWith<std::unique_ptr<BitmapIndex>> HCIndexReader::constructBitmapIndex(
         StringData op = doc.getStringField("op");
         Timestamp docTimestamp = doc.getField("timestamp").timestamp();
 
-        LOGV2(9999931, "Processing bitmap operation",
-              "op"_attr = op,
-              "timestamp"_attr = docTimestamp);
-
         if (op == "INIT" || op == "opADD") {
             // Extract entries from the document
             // Format: { "entries": [ { "col": columnIndex, "sym": symbolIndex, "rows": [rowId1, rowId2, ...] }, ... ] }
             BSONElement entriesElem = doc.getField("entries");
             if (entriesElem && entriesElem.type() == BSONType::array) {
                 auto entriesArray = entriesElem.Array();
-                LOGV2(9999932, "Processing bitmap entries",
-                      "entryCount"_attr = entriesArray.size());
 
                 for (const auto& entryElem : entriesArray) {
                     if (entryElem.type() == BSONType::object) {
@@ -578,10 +544,6 @@ StatusWith<std::unique_ptr<BitmapIndex>> HCIndexReader::constructBitmapIndex(
         }
     }
 
-    LOGV2(9999933, "HCIndexReader::constructBitmapIndex - reconstruction complete",
-          "operationCount"_attr = operationCount,
-          "entryCount"_attr = index->getEntryCount());
-
     // Transition the index to ReadWrite after reconstruction is complete.
     // This allows the index to accept new entries as the timeseries collection continues to
     // receive new measurements. The index was in Reconstruction mode during the replay of
@@ -605,8 +567,6 @@ void HCIndexReader::close()
 
 void HCIndexReader::prepareForYield() {
     // Release collection pointers to allow locks to be yielded
-    // The CollectionAcquisition objects will be reset, releasing their locks
-    LOGV2(9999902, "HCIndexReader::prepareForYield - releasing collection pointers");
     symbolOpsCollection.reset();
     attributeOpsCollection.reset();
     bitmapIndexCollection.reset();
@@ -614,8 +574,6 @@ void HCIndexReader::prepareForYield() {
 
 Status HCIndexReader::restoreForYield(OperationContext* opCtx) {
     // Re-acquire collection pointers after yielding
-    LOGV2(9999903, "HCIndexReader::restoreForYield - re-acquiring collection pointers");
-
     if (!collectionsInitialized) {
         return Status(ErrorCodes::InternalError,
                       "HCIndexReader collections not initialized before restore");

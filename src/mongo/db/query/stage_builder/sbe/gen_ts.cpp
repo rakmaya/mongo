@@ -334,13 +334,14 @@ std::pair<SbStage, PlanStageSlots> SlotBasedStageBuilder::buildUnpackTsBucket(
     // two do block processing over the cells.
     auto [topLevelReqs, traverseReqs] = getCellPathReqs(unpackNode);
 
-    // Add a TsBucketToCellBlock stage. Among other things, this stage generates a "default" bitmap
-    // of all 1s in to this slot. The bitmap represents which documents are present (1) and which
-    // have been filtered (0). This bitmap is carried around until the block_to_row stage.
+    // Add a TsBucketToCellBlock stage. Among other things, this stage generates
+    // a "default" bitmap of all 1s in to this slot. The bitmap represents which
+    // documents are present (1) and which have been filtered (0). This bitmap
+    // is carried around until the block_to_row stage.
+
     // Prepare HCIndex metadata filter if available
     std::unique_ptr<MatchExpression> hcindexFilter;
     boost::optional<UUID> collectionUUID;
-
     if (unpackNode->eventFilter) {
         // Clone the event filter for HCIndex filtering
         hcindexFilter = unpackNode->eventFilter->clone();
@@ -379,9 +380,12 @@ std::pair<SbStage, PlanStageSlots> SlotBasedStageBuilder::buildUnpackTsBucket(
     MatchExpression* eventFilter = unpackNode->eventFilter.get();
 
     // If the eventFilter was already applied via HCIndex filtering, skip
-    // applying it again TODO: HCIndex needs to support both HCIndex and event
-    // filter predicates. For example if there is a filter on something other
-    // than metadata (e.g. measurements), this could trip here.  A big TODO!
+    // applying it again.
+    // TODO: HCIndex needs to support both HCIndex and event filter predicates.
+    // For example if there is a filter on something other than metadata (e.g.
+    // measurements), this could trip here. A big TODO! I think it should work
+    // if we can split and push down the measurement prdicates to post cell to
+    // row operation.
     if (unpackNode->eventFilterAppliedByHCIndex) {
         eventFilter = nullptr;
     }

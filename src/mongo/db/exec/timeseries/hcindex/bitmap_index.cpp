@@ -84,6 +84,7 @@ Status BitmapIndex::addEntryHelper(size_t columnIndex, uint32_t symbolIndex, int
     }
 
     if (_state == BitmapIndexState::ReadWrite) {
+
         // Writer must be set in ReadWrite mode
         if (_writer == nullptr) {
             return Status(ErrorCodes::InternalError,
@@ -131,6 +132,7 @@ Status BitmapIndex::addRow(int64_t rowId, const std::vector<uint32_t>& row) {
             continue;
         }
         uint32_t symbolIndex = row[columnIndex];
+
         // Skip missing values (symbolIndex == 0)
         if (symbolIndex != 0) {
             auto status = addEntryHelper(columnIndex, symbolIndex, rowId);
@@ -164,8 +166,9 @@ std::set<int64_t> BitmapIndex::queryRowIdsAnd(const std::vector<uint32_t>& predi
 
     for (size_t columnIndex = 0; columnIndex < predicate.size(); ++columnIndex) {
         uint32_t symbolIndex = predicate[columnIndex];
-        // Skip "don't care" columns (symbolIndex == 0)
+
         if (symbolIndex == 0) {
+            // Skip "don't care" columns (symbolIndex == 0)
             continue;
         }
 
@@ -228,7 +231,7 @@ Status BitmapIndex::changeState(BitmapIndexState newState) {
             break;
         case BitmapIndexState::Reconstruction:
             // From Reconstruction, can transition to ReadWrite (to accept new
-            // bitmaps)  or ReadOnly
+            // bitmaps) or ReadOnly
             if (newState != BitmapIndexState::ReadOnly &&
                 newState != BitmapIndexState::ReadWrite) {
                 return Status(ErrorCodes::IllegalOperation,
@@ -274,7 +277,7 @@ void BitmapIndex::setIncludedColumns(std::unordered_set<std::size_t> includedCol
     std::shared_lock lock(_mutex);
 
     // For now, this just overwrites.
-    // TODO: Merge with the computed columns based on the information-gain
+    // TODO: Merge with the computed columns based on the information gain
     _indexedColumns = std::move(includedColumns);
 }
 
@@ -287,7 +290,7 @@ void BitmapIndex::flush() {
 
     // Flush the accumulated entries to pending operations
     if (!_writer->flushBitmaps(_windowStart, _windowEnd, _period, _frequency).isOK()) {
-        return;  // Could not flush
+        return;
     }
 
     _isDirty = false;
@@ -432,14 +435,8 @@ StatusWith<BitmapIndex*> TemporalBitmapIndex::getOrCreateIndex(OperationContext*
         auto reconstructResult = _reader->constructBitmapIndex(
             opCtx, windowStart, windowEnd, _period, _frequency, windowStart);
 
-        LOGV2_DEBUG(9999980, 3, "HCIndex: getOrCreateIndex - reconstruction result",
-              "isOK"_attr = reconstructResult.isOK(),
-              "entryCount"_attr = (reconstructResult.isOK() ?
-                  reconstructResult.getValue().get()->getEntryCount() : 0));
-
         // If reconstruction succeeds and dictionary has symbols, use it
         if (reconstructResult.isOK() && reconstructResult.getValue().get()->getEntryCount() > 0) {
-            LOGV2_DEBUG(9999980, 3, "HCIndex: Reconstructed bitmap index for window", "windowStart"_attr = windowStart);
             auto* bitmapPtr = reconstructResult.getValue().get();
 
             // Set the writer on the reconstructed dictionary so it can accept new symbols

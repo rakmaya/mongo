@@ -107,8 +107,9 @@ struct WriteBatch {
         false;  // If true, bucket has been opened due to the inserted measurement having different
     // metadata than available buckets.
 
-    bool isHCIndexBatch = false;  // If true, this batch is from the HCIndex path and measurements
-                                   // contain rowIds and window metadata.
+    // If true, this batch is from the HCIndex path and measurements contain
+    // rowIds and window metadata.
+    bool isHCIndexBatch = false;
 
     const OperationId opId;
 

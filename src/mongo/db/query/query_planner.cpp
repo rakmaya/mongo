@@ -1890,7 +1890,8 @@ std::unique_ptr<QuerySolution> QueryPlanner::extendWithAggPipeline(
                                                               std::move(wholeBucketFilter),
                                                               unpacker.includeMetaField());
 
-            // Set the flag if the eventFilter was already applied via HCIndex filtering
+            // Set the flag if the eventFilter was already applied via
+            // HCIndex filtering
             if (unpackBucketStage->isEventFilterAppliedByHCIndex()) {
                 unpackNode->eventFilterAppliedByHCIndex = true;
             }

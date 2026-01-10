@@ -215,17 +215,6 @@ public:
     Status cleanup();
 
     /**
-     * Get the dictionary granularity for this collection.
-     *
-     * Returns the DictionaryGranularity used for time-window scoping.
-     * Computed from the period and frequency configuration.
-     */
-    DictionaryGranularity getGranularity() const {
-        timeseries::HCIndexTimeWindow timeWindow(period, frequency);
-        return timeWindow.toDictionaryGranularity();
-    }
-
-    /**
      * Query the attribute table for rows matching a predicate at a given timestamp.
      *
      * This method converts a MatchExpression to an AttributeTablePredicate and queries

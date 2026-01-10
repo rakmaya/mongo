@@ -52,7 +52,10 @@
  */
 
 namespace mongo::timeseries::bucket_catalog {
+
+// FORWARD DECLARATIONS
 class BucketCatalog;
+
 }
 
 namespace mongo::timeseries::write_ops_utils {
@@ -176,8 +179,7 @@ void makeWriteRequestFromBatch(OperationContext* opCtx,
                                std::vector<mongo::write_ops::UpdateCommandRequest>* updateOps);
 
 /**
- * Builds the insert and update requests with HCIndex support.
- * If the collection has HCIndex enabled, uses HCIndexBucketEncoder for encoding.
+ * Builds the insert and update requests for HCIndex emabled collections.
  */
 void makeWriteRequestFromBatch(OperationContext* opCtx,
                                std::shared_ptr<bucket_catalog::WriteBatch> batch,

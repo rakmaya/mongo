@@ -398,7 +398,7 @@ BSONObj makeTimeseriesInsertCompressedBucketDocument(
 
     auto metadataElem = batch->bucketKey.metadata.element();
     if (metadataElem) {
-        // For HCIndex batches, add the HCIndex flag to the metadata
+        // Add the HCIndex flag to the metadata
         if (batch->isHCIndexBatch) {
             BSONObjBuilder metaBuilder;
             metaBuilder.appendElements(metadataElem.Obj());
@@ -408,7 +408,8 @@ BSONObj makeTimeseriesInsertCompressedBucketDocument(
             insertBuilder.appendAs(metadataElem, kBucketMetaFieldName);
         }
     } else if (batch->isHCIndexBatch) {
-        // Even if there's no metadata element, add the HCIndex flag for HCIndex batches
+        // Even if there's no metadata element, add the HCIndex flag to indicate
+        // that this is a bucket for HCIndex batches
         BSONObjBuilder metaBuilder;
         metaBuilder.append(kBucketMetaHCIndexPresent, 1);
         insertBuilder.append(kBucketMetaFieldName, metaBuilder.obj());
@@ -442,7 +443,7 @@ mongo::write_ops::WriteCommandRequestBase makeTimeseriesWriteOpBase(std::vector<
 }
 
 void isMeasurementsSortedOnTime(std::shared_ptr<bucket_catalog::WriteBatch> batch) {
-    // Skip this check for HCIndex batches since they use rowIds instead of actual measurements
+    // Skip this check for HCIndex batches.
     if (batch->isHCIndexBatch) {
         return;
     }
@@ -477,8 +478,10 @@ void makeWriteRequestFromBatch(OperationContext* opCtx,
                                bucket_catalog::BucketCatalog* bucketCatalog,
                                std::vector<mongo::write_ops::InsertCommandRequest>* insertOps,
                                std::vector<mongo::write_ops::UpdateCommandRequest>* updateOps) {
-    // For now, just delegate to the traditional path
-    // The HCIndex path uses the same write path since measurements already have rowIds embedded
+    // For now, just delegate to the traditional path. The HCIndex path can use
+    // the the same write path since measurements are transformed to a form that
+    // is suitable for the traditional write path.
+    // TODO: Remove this function once we have a proper HCIndex write path.
     makeWriteRequestFromBatch(opCtx, batch, bucketsNs, insertOps, updateOps);
 }
 
@@ -506,7 +509,9 @@ mongo::write_ops::InsertCommandRequest makeTimeseriesInsertOpFromBatch(
     // Extra verification that the insert op decompresses to the same values put in.
     // We use a PseudoRandom to test frequency of checks, this is not cryptographically
     // secure, but good enough for simple rate limiting on verifications.
-    // Skip verification for HCIndex batches since they use window metadata instead of measurement metadata.
+    // TODO: For now, skip verification for HCIndex batches since they use
+    // window metadata instead of measurement metadata. Data is transformed. We
+    // need a different verifier function for HCIndex.
     if (!batch->isHCIndexBatch && gPerformTimeseriesCompressionIntermediateDataIntegrityCheckOnInsert.load() &&
         (opCtx->getClient()->getPrng().nextInt32() % 100) <
             gPerformTimeseriesCompressionIntermediateDataIntegrityCheckOnInsertFrequency.load()) {
@@ -603,7 +608,8 @@ mongo::write_ops::UpdateOpEntry makeTimeseriesCompressedDiffEntry(
     // We use a PseudoRandom to test frequency of checks, this is not cryptographically
     // secure, but good enough for simple rate limiting on verifications.
     doc_diff::VerifierFunc verifierFunction = nullptr;
-    // Skip verification for HCIndex batches since they use window metadata instead of measurement metadata.
+    // Skip verification for HCIndex batches. TODO: Remove this check once we
+    // have a proper HCIndex write path verifier.
     if (!batch->isHCIndexBatch &&
         ((gPerformTimeseriesCompressionIntermediateDataIntegrityCheckOnInsert.load() &&
          (opCtx->getClient()->getPrng().nextInt32() % 100) <

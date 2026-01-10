@@ -97,11 +97,14 @@
 namespace mongo {
 
 /**
- * Helper function to extract metadata-only predicates from a MatchExpression.
- * Returns a pair of (metadataOnlyExpr, residualExpr) where:
- * - metadataOnlyExpr contains only predicates on the metadata field
- * - residualExpr contains the remaining predicates
+ * Returns a pair of (metadataOnlyExpr, residualExpr) where metadataOnlyExpr
+ * contains only predicates on the metadata field and residualExpr contains the
+ * remaining predicates. Once query planner can provide an appropriate planstage
+ * we won't need do this. This is necessary b/c metadata related predicates needs
+ * to be applied during unpacking for HCIndex enabled collections. Remaining can
+ * be applied whereever they are in the pipeline.
  */
+
 std::pair<std::unique_ptr<MatchExpression>, std::unique_ptr<MatchExpression>>
 extractMetadataPredicates(std::unique_ptr<MatchExpression> expr,
                           boost::optional<StringData> metaField) {
@@ -109,14 +112,12 @@ extractMetadataPredicates(std::unique_ptr<MatchExpression> expr,
         return {nullptr, std::move(expr)};
     }
 
-    // The predicate uses user-facing field names (e.g., "metadata"), but splitOutMetaOnlyPredicate
-    // expects bucket-level field names (e.g., "meta"). We need to rename the field before splitting.
     StringMap<std::string> renames;
     renames[std::string{*metaField}] = std::string{timeseries::kBucketMetaFieldName};
 
     auto result = expression::splitMatchExpressionBy(
         std::move(expr),
-        {std::string{timeseries::kBucketMetaFieldName}},  // Use "meta" not "metadata"
+        {std::string{timeseries::kBucketMetaFieldName}},
         renames,
         expression::isOnlyDependentOn);
 

@@ -54,7 +54,6 @@ public:
 
     /**
      * Sets the HCIndex metadata filter to be applied during unpacking.
-     * This filter will be used to check if measurements match the metadata predicate.
      */
     void setHCIndexMetadataFilter(std::unique_ptr<MatchExpression> filter) {
         _hcindexMetadataFilter = std::move(filter);

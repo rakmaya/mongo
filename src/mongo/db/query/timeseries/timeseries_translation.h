@@ -95,9 +95,10 @@ MONGO_MOD_FILE_PRIVATE void prependUnpackStageToPipeline_forTest(
     const TimeseriesTranslationParams& params);
 
 /**
- * For HCIndex-enabled legacy timeseries collections, prepends the unpack stage to the pipeline
- * even if this is not a viewless timeseries collection. This is needed when the query is
- * executing directly on the buckets collection (when isRawDataOperation is true).
+ * For HCIndex-enabled legacy timeseries collections, prepends the unpack stage
+ * to the pipeline. Note that for HCIndex, bucket metadata doesn't contain
+ * much. So extraction is necessary (except for certain cases like collStats
+ * etc...)
  */
 void prependUnpackStageForHCIndexIfRequired(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                                             Pipeline& pipeline,

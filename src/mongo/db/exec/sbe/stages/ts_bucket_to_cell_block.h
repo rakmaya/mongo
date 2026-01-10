@@ -36,7 +36,10 @@
 #include "mongo/util/uuid.h"
 
 namespace mongo::timeseries::hcindex {
+
+// FORWARD DECLARATION
 class HCIndexCollectionManager;
+
 }
 
 namespace mongo::sbe {
@@ -78,15 +81,17 @@ public:
     size_t estimateCompileTimeSize() const final;
 
     /**
-     * Sets the HCIndex metadata filter for this stage.
-     * This filter will be applied to the bitmap during initCellBlocks().
+     * Set the HCIndex metadata filter for this stage.
      */
     void setHCIndexMetadataFilter(std::unique_ptr<MatchExpression> filter) {
         _hcindexMetadataFilter = std::move(filter);
     }
 
     /**
-     * Sets the collection UUID for HCIndex operations.
+     * Set the collection UUID for HCIndex operations. This is needed to access
+     * the HCIndex operations collections. This is a temporary solution until we
+     * have a propr PlanStage that will setup the Dictionary, AttributeTable,
+     * and BitMap index before we get to the unpack stage.
      */
     void setCollectionUUID(UUID collectionUUID) {
         _collectionUUID = collectionUUID;
@@ -114,18 +119,19 @@ private:
     void initCellBlocks();
 
     /**
-     * Initialize HCIndex matching rowIds for the current bucket.
-     * This should be called once per bucket before unpacking measurements.
-     * Caches the matching rowIds to avoid lock acquisition during execution.
+     * Initialize HCIndex matching rowIds for the current bucket.  This is
+     * called once per bucket before unpacking measurements.  Note that we cache
+     * the matching rowIds to avoid lock (re)acquisition during execution.
      */
     void initializeHCIndexMatchingRowIds(const BSONObj& bucketObj);
 
     /**
-     * Creates a filtered bitmap for HCIndex-encoded buckets.
+     * Create a filtered bitmap for HCIndex-encoded buckets.
      * Returns nullptr if the bucket is not HCIndex-encoded or filtering fails.
      */
-    std::unique_ptr<value::ValueBlock> createHCIndexFilteredBitmap(const BSONObj& bucketObj,
-                                                                    size_t nMeasurements);
+    std::unique_ptr<value::ValueBlock> createHCIndexFilteredBitmap(
+        const BSONObj& bucketObj,
+        size_t nMeasurements);
 
     const value::SlotId _bucketSlotId;
     const std::vector<value::PathRequest> _pathReqs;

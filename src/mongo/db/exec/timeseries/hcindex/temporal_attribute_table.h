@@ -53,7 +53,6 @@ class MatchExpression;
 namespace mongo::timeseries::hcindex {
 
 // FORWARD DECLARATIONS
-enum class DictionaryGranularity;
 class HCIndexReader;
 class HCIndexWriter;
 class BitmapIndex;

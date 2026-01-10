@@ -537,9 +537,9 @@ size_t DeltaSymbolDictionary::getMemoryUsageBytes() const {
     return totalBytes;
 }
 
-// ============================================================================
-// Similarity Function
-// ============================================================================
+// ===============
+// Local Functions
+// ===============
 
 double computeDeltaSimilarity(const std::set<std::string>& delta1,
                                const std::set<std::string>& delta2) {

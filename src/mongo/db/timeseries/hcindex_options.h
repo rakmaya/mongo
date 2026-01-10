@@ -50,8 +50,10 @@
 namespace mongo::timeseries {
 
 /**
- * Represents a time-window configuration for HCIndex structures.
- * Combines period (hour, minute, second) with frequency (1-24 for hour, 1-59 for minute/second).
+ * Represents a time-window configuration for HCIndex structures.  Combines
+ * period (hour, minute, second) with frequency (1-24 for hour, 1-59 for
+ * minute/second). A collection can only have a single time window
+ * configuration.
  */
 struct HCIndexTimeWindow {
     HCIndexPeriodEnum period;
@@ -82,7 +84,7 @@ struct HCIndexTimeWindow {
     }
 
     /**
-     * Get the window size in seconds for this period and frequency.
+     * Return the window size in seconds.
      */
     uint32_t getWindowSizeSeconds() const {
         switch (period) {
@@ -128,6 +130,7 @@ struct HCIndexTimeWindow {
      * - Minute period: THIRTY_MIN (30 min), TEN_MIN (10 min), FIVE_MIN (5 min) based on frequency
      * - Second period: Not directly supported, defaults to FIVE_MIN
      */
+    /*
     hcindex::DictionaryGranularity toDictionaryGranularity() const {
         switch (period) {
             case HCIndexPeriodEnum::Hour:
@@ -147,6 +150,7 @@ struct HCIndexTimeWindow {
         }
         MONGO_UNREACHABLE;
     }
+    */
 };
 
 /**

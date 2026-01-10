@@ -371,12 +371,12 @@ void Pipeline::performPreOptimizationRewrites(const boost::intrusive_ptr<Express
     // The only supported translation is for viewless timeseries collections.
     timeseries::translateStagesIfRequired(expCtx, *this, collOrView);
 
-    // For HCIndex-enabled legacy timeseries collections, we need to add the unpack stage
-    // even if this is not a viewless timeseries collection. This is because the query may be
-    // executing directly on the buckets collection (when isRawDataOperation is true), and we
-    // need the unpack stage to apply HCIndex metadata filtering.
-    // However, we should only do this if the pipeline hasn't already been translated
-    // (e.g., from view resolution for legacy timeseries collections).
+    // For HCIndex-enabled legacy timeseries collections, we need to add the
+    // unpack stage even if this is not a viewless timeseries collection. This
+    // is because during debug, the query was executing directly on the buckets
+    // collection (when isRawDataOperation is true). For us, we need the unpack
+    // stage to apply HCIndex metadata filtering. However, we should only do
+    // this if the pipeline hasn't already been translated.
     if (!isTranslated() && collOrView.isCollection()) {
         const auto& collPtr = collOrView.getCollectionPtr();
         timeseries::prependUnpackStageForHCIndexIfRequired(expCtx, *this, collPtr);

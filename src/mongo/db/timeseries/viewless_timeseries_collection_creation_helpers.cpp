@@ -167,9 +167,9 @@ Status createDefaultTimeseriesIndex(OperationContext* opCtx,
     }
 
     // Skip creating the default metadata index for HCIndex collections.
-    // HCIndex stores encoded metadata (rowIds) in the bucket's meta field, not the original
-    // metadata values. The default index on the metadata field would be useless and would
-    // cause queries with metadata predicates to fail because the index would not match.
+    // HCIndex stores encoded metadata (rowIds) in the bucket's meta field,
+    // not the original metadata values. The default index on the metadata
+    // field would be useless.
     if (tsOptions->getUseHCIndex() && tsOptions->getUseHCIndex().value_or(false)) {
         return Status::OK();
     }

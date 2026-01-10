@@ -2148,8 +2148,9 @@ struct UnpackTsBucketNode : public QuerySolutionNode {
     std::unique_ptr<MatchExpression> eventFilter = nullptr;
     std::unique_ptr<MatchExpression> wholeBucketFilter = nullptr;
     bool includeMeta = false;
-    // Flag to indicate that the eventFilter was already applied via HCIndex filtering
-    // and should not be applied again as a scalar filter
+
+    // Flag to indicate that the eventFilter was already applied via HCIndex
+    // filtering and should not be applied again as a scalar filter
     bool eventFilterAppliedByHCIndex = false;
 };
 

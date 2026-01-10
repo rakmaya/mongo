@@ -51,21 +51,6 @@ namespace mongo::timeseries::hcindex {
 class HCIndexReader;
 class HCIndexWriter;
 
-
-/**
- * Granularity level of the dictionary
- * TODO. Add AUTO to let the system decide the best granularity based on the
- * density and cardinality of the data.
- */
-enum class DictionaryGranularity {
-    AUTO,       // Not used. This now defaults to HOURLY
-    DAILY,      // every day (00:00:00 UTC)
-    HOURLY,     // every hour
-    THIRTY_MIN, // every 30 minutes
-    TEN_MIN,    // every 10 minutes
-    FIVE_MIN,   // every 5 minutes
-};
-
 /**
  * State machine for SymbolDictionary lifecycle:
  * - NOP: Initial state, no operations allowed

@@ -757,7 +757,7 @@ TEST_F(CreateCollectionTest, CreateTimeseriesCollectionWithHCIndexEnabled) {
                                                                 << "metaField"
                                                                 << "meta"
                                                                 << "useHCIndex" << true)),
-                                          /*allowRenameOutOfTheWay*/ false));
+                                          false));
 
     ASSERT_TRUE(collectionExists(opCtx.get(), newNss));
 
@@ -767,6 +767,7 @@ TEST_F(CreateCollectionTest, CreateTimeseriesCollectionWithHCIndexEnabled) {
     ASSERT_EQ(collOptions.timeseries->getTimeField(), "ts");
     ASSERT_TRUE(collOptions.timeseries->getMetaField());
     ASSERT_EQ(collOptions.timeseries->getMetaField().value_or(""), "meta");
+
     // Verify useHCIndex is set to true
     auto useHCIndex = collOptions.timeseries->getUseHCIndex();
     ASSERT_TRUE(useHCIndex);
@@ -792,7 +793,7 @@ TEST_F(CreateCollectionTest, CreateTimeseriesCollectionWithHCIndexDisabled) {
                                                                 << "metaField"
                                                                 << "meta"
                                                                 << "useHCIndex" << false)),
-                                          /*allowRenameOutOfTheWay*/ false));
+                                          false));
 
     ASSERT_TRUE(collectionExists(opCtx.get(), newNss));
 
@@ -824,7 +825,7 @@ TEST_F(CreateCollectionTest, CreateTimeseriesCollectionWithHCIndexDefaultValue) 
                                                                 << "ts"
                                                                 << "metaField"
                                                                 << "meta")),
-                                          /*allowRenameOutOfTheWay*/ false));
+                                          false));
 
     ASSERT_TRUE(collectionExists(opCtx.get(), newNss));
 
@@ -837,6 +838,6 @@ TEST_F(CreateCollectionTest, CreateTimeseriesCollectionWithHCIndexDefaultValue) 
     // useHCIndex should not be set (boost::none) when not specified
     ASSERT_FALSE(collOptions.timeseries->getUseHCIndex());
 }
-/**/
+
 }  // namespace
 }  // namespace mongo

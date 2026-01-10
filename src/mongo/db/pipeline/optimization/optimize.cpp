@@ -29,10 +29,6 @@
 
 #include "mongo/db/pipeline/optimization/optimize.h"
 
-#include "mongo/logv2/log.h"
-
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
-
 namespace mongo::pipeline_optimization {
 
 MONGO_FAIL_POINT_DEFINE(disablePipelineOptimization);
@@ -48,9 +44,7 @@ void optimizePipeline(Pipeline& pipeline) {
     if (MONGO_unlikely(disablePipelineOptimization.shouldFail())) {
         return;
     }
-
     optimizeContainer(&pipeline.getSources());
-
     optimizeEachStage(&pipeline.getSources());
 }
 

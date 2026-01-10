@@ -84,7 +84,7 @@ std::unique_ptr<PlanStage> TsBucketToCellBlockStage::clone() const {
                                                              _commonStats.nodeId,
                                                              participateInTrialRunTracking());
 
-    // Clone HCIndex members
+    // Clone HCIndex members as well.
     if (_hcindexMetadataFilter) {
         cloned->_hcindexMetadataFilter = _hcindexMetadataFilter->clone();
     }
@@ -129,8 +129,7 @@ void TsBucketToCellBlockStage::open(bool reOpen) {
     _commonStats.opens++;
     _children[0]->open(reOpen);
 
-    // Initialize HCIndex once at the start of the query
-    // This avoids repeated initialization/close cycles per bucket
+    // Initialize HCIndex structures
     if (_hcindexMgr && !_hcindexInitialized && _opCtx) {
         auto initStatus = _hcindexMgr->initializeForRead(_opCtx);
         if (initStatus.isOK()) {
@@ -182,8 +181,7 @@ void TsBucketToCellBlockStage::close() {
 
     trackClose();
 
-    // Close HCIndex at the end of the query
-    // This releases acquired collections and prevents stashed transaction resource issues
+    // Close HCIndex structures
     if (_hcindexMgr && _hcindexInitialized) {
         _hcindexMgr->close();
         _hcindexInitialized = false;
@@ -253,7 +251,7 @@ size_t TsBucketToCellBlockStage::estimateCompileTimeSize() const {
 
 void TsBucketToCellBlockStage::doSaveState() {
     if (_hcindexMgr && _hcindexInitialized) {
-        // Prepare HCIndex for yielding by releasing collection pointers
+        // We need to release the collection pointers and prepare to yield.
         _hcindexMgr->prepareForYield();
     }
 
@@ -277,19 +275,19 @@ void TsBucketToCellBlockStage::doSaveState() {
 }
 
 void TsBucketToCellBlockStage::doRestoreState() {
-    // Restore HCIndex after yielding by re-acquiring collection pointers
+    // HCIndex structures needs to be restored after a yield.
     if (_hcindexMgr && _hcindexInitialized && _opCtx) {
         auto restoreStatus = _hcindexMgr->restoreForYield(_opCtx);
         if (!restoreStatus.isOK()) {
             LOGV2_WARNING(9999998,
                           "Failed to restore HCIndex after yield",
                           "error"_attr = restoreStatus);
-            // Continue anyway - the reader will try to re-acquire on next use if needed
+            // TODO: Should we fail the query instead of continuing?
+            // I have noticed that the calls that touch the collections fails
+            // anyway.
         }
     }
 }
-
-
 
 void TsBucketToCellBlockStage::initCellBlocks() {
     auto [bucketTag, bucketVal] = _bucketAccessor->getViewOfValue();
@@ -316,16 +314,19 @@ void TsBucketToCellBlockStage::initCellBlocks() {
     // Create bitmap for filtering measurements
     std::unique_ptr<value::ValueBlock> bitmap;
 
-    // Try to apply HCIndex filtering if available
+    // Apply HCIndex filtering if available
     if (_hcindexMetadataFilter && _hcindexMgr && _collectionUUID) {
-        // Initialize matching rowIds for this bucket (calls queryRows() once per bucket)
+        // Initialize matching rowIds for this bucket. this internally, calls
+        // queryRows() once per bucket.
         initializeHCIndexMatchingRowIds(bucketObj);
 
-        // Build bitmap using cached rowIds (no lock acquisition)
+        // Build bitmap using cached rowIds
         bitmap = createHCIndexFilteredBitmap(bucketObj, nMeasurements);
     }
 
-    // Fall back to all-1s bitmap if HCIndex filtering is not available or fails
+    // Fall back to all-1s bitmap if HCIndex filtering is not available or
+    // fails. TODO: Distinguish between "HCIndex not available" and
+    // "HCIndex failed"
     if (!bitmap) {
         bitmap = std::make_unique<value::MonoBlock>(nMeasurements,
                                                     value::TypeTags::Boolean,
@@ -343,7 +344,7 @@ void TsBucketToCellBlockStage::initializeHCIndexMatchingRowIds(const BSONObj& bu
     _hcindexMatchingRowIds.clear();
     _hcindexRowIdsInitialized = false;
 
-    // Check if we have the necessary components
+    // TODO: Should we assert/fail instead of returning?
     if (!_hcindexMgr || !_hcindexMetadataFilter || !_opCtx) {
         LOGV2_WARNING(9999990, "HCIndex: Missing required components for HCIndex filtering",
               "hasMgr"_attr = (_hcindexMgr != nullptr),
@@ -352,39 +353,34 @@ void TsBucketToCellBlockStage::initializeHCIndexMatchingRowIds(const BSONObj& bu
         return;
     }
 
-    // Check if bucket has HCIndex flag in the meta section
+    // HCIndex cannot be used if we don't have metadata.
+    // TODO: These 4 checks are sub-optimal in the query path. We should remove
+    // this once we have necessary checks during the creation of collection.
     auto metaElt = bucketObj[timeseries::kBucketMetaFieldName];
     if (metaElt.eoo()) {
-        LOGV2_WARNING(9999991, "HCIndex: Bucket does not have meta field");
+        LOGV2_WARNING(9999990, "HCIndex: Bucket does not have meta field");
         return;
     }
-
     auto metaObj = metaElt.Obj();
     auto hcindexFlag = metaObj["hcindex"];
-
     if (hcindexFlag.eoo() || !hcindexFlag.trueValue()) {
-        LOGV2_WARNING(9999991, "HCIndex: Bucket does not have hcindex flag set in meta");
+        LOGV2_WARNING(9999990, "HCIndex: Bucket does not have hcindex flag set in meta");
         return;
     }
-
-    // Get the windowStart from the meta field
     auto windowStartElt = metaObj["windowStart"];
     if (windowStartElt.eoo()) {
-        LOGV2_WARNING(9999992, "HCIndex: windowStart not found in meta");
+        LOGV2_WARNING(9999990, "HCIndex: windowStart not found in meta");
         return;
     }
-
     if (windowStartElt.type() != BSONType::timestamp) {
-        LOGV2_WARNING(9999992, "HCIndex: windowStart is not a Timestamp");
+        LOGV2_WARNING(9999990, "HCIndex: windowStart is not a Timestamp");
         return;
     }
 
     Timestamp ts = windowStartElt.timestamp();
-
     auto queryResult = _hcindexMgr->queryRows(_opCtx, _hcindexMetadataFilter.get(), ts);
-
     if (!queryResult.isOK()) {
-        LOGV2_WARNING(9999995, "HCIndex: queryRows failed", "error"_attr = queryResult.getStatus());
+        LOGV2_WARNING(9999990, "HCIndex: queryRows failed", "error"_attr = queryResult.getStatus());
         return;
     }
 
@@ -396,16 +392,14 @@ void TsBucketToCellBlockStage::initializeHCIndexMatchingRowIds(const BSONObj& bu
 std::unique_ptr<value::ValueBlock> TsBucketToCellBlockStage::createHCIndexFilteredBitmap(
     const BSONObj& bucketObj, size_t nMeasurements) {
 
-    // Check if bucket has HCIndex flag in the meta section
+    // TODO/Remove: DRY this up with initializeHCIndexMatchingRowIds()
     auto metaElt = bucketObj[timeseries::kBucketMetaFieldName];
     if (metaElt.eoo()) {
         LOGV2_WARNING(9999991, "HCIndex: Bucket does not have meta field");
         return nullptr;
     }
-
     auto metaObj = metaElt.Obj();
     auto hcindexFlag = metaObj["hcindex"];
-
     if (hcindexFlag.eoo() || !hcindexFlag.trueValue()) {
         LOGV2_WARNING(9999991, "HCIndex: Bucket does not have hcindex flag set in meta");
         return nullptr;
@@ -414,13 +408,12 @@ std::unique_ptr<value::ValueBlock> TsBucketToCellBlockStage::createHCIndexFilter
     // Get the rowId column from the data section
     auto dataObj = bucketObj[timeseries::kBucketDataFieldName].Obj();
     auto rowIdElt = dataObj["rowId"];
-
     if (rowIdElt.eoo()) {
         LOGV2_WARNING(9999993, "HCIndex: rowId field not found in data");
         return nullptr;
     }
 
-    // Extract the rowId values from the BSONColumn
+    // TODO: Write directly to a BoolBlock.
     BSONColumn rowIdColumn(rowIdElt);
     std::vector<bool> bitmap;
     bitmap.reserve(nMeasurements);
@@ -438,9 +431,6 @@ std::unique_ptr<value::ValueBlock> TsBucketToCellBlockStage::createHCIndexFilter
         }
         idx++;
     }
-
-    // Convert ValueBlock
-    // TODO: We should optimize this to avoid the copy.
     return std::make_unique<value::BoolBlock>(std::move(bitmap));
 }
 

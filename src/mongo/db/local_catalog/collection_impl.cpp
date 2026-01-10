@@ -349,8 +349,6 @@ void CollectionImpl::init(OperationContext* opCtx) {
         }
     }
 
-
-
     getIndexCatalog()->init(opCtx, this);
 
     // Initialize HCIndex if this is an HCIndex-enabled timeseries collection
@@ -360,12 +358,13 @@ void CollectionImpl::init(OperationContext* opCtx) {
         if (svcCtx) {
             auto& bucketCatalog = timeseries::bucket_catalog::GlobalBucketCatalog::get(svcCtx);
 
-            // Check if HCIndexCollectionManager already exists
             auto existingMgr = timeseries::bucket_catalog::getHCIndexManager(bucketCatalog, uuid);
             if (!existingMgr) {
                 try {
 
-                    // Create HCIndexCollectionManager with time-window and bitmap options from TimeseriesOptions
+                    // Create HCIndexCollectionManager with options set in the
+                    // collection.
+
                     auto hcindexOptions = collectionOptions.timeseries ? collectionOptions.timeseries->getHcindexOptions() : boost::none;
                     auto timeWindow = timeseries::getEffectiveHCIndexTimeWindow(hcindexOptions);
                     auto bitmapOptions = timeseries::getEffectiveHCIndexBitmapOptions(hcindexOptions);
@@ -378,19 +377,18 @@ void CollectionImpl::init(OperationContext* opCtx) {
                         bitmapOptions.excludedColumns,
                         bitmapOptions.includedColumns);
 
-                    // Store the manager in BucketCatalog
                     auto setStatus = timeseries::bucket_catalog::setHCIndexManager(
                         bucketCatalog, uuid, hcindexMgr);
                     if (!setStatus.isOK()) {
-                        LOGV2(9999988, "HCIndex: [INIT COLLECTION] Failed to store manager during collection init for {ns}: {error}",
+                        LOGV2(9999990, "HCIndex: [INIT COLLECTION] Failed to store manager during collection init for {ns}: {error}",
                               "ns"_attr = ns().toStringForErrorMsg(), "error"_attr = setStatus);
                     }
                 } catch (const std::exception& e) {
-                    // Don't fail collection initialization if HCIndex manager creation fails
+                    // TODO:
                 }
             }
         } else {
-            LOGV2(9999990, "HCIndex: [INIT COLLECTION] Failed to get service context during collection init", logAttrs(ns()));
+            LOGV2(9999990, "HCIndex: [INIT COLLECTION] Failed to get service context during collection init for {ns}", "ns"_attr = ns().toStringForErrorMsg());
         }
     }
 

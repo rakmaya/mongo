@@ -35,9 +35,6 @@
 #include "mongo/db/raw_data_operation.h"
 #include "mongo/db/timeseries/timeseries_index_schema_conversion_functions.h"
 #include "mongo/db/timeseries/timeseries_options.h"
-#include "mongo/logv2/log.h"
-
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
 namespace mongo {
 
@@ -164,8 +161,11 @@ void translatePipeline(const boost::intrusive_ptr<ExpressionContext>& expCtx,
 
     bool consumesCollectionData = initialStage->constraints().consumesLogicalCollectionData;
 
-    // For HCIndex, we need to prepend the unpack stage even if the initial stage doesn't consume collection data
-    // This is because stages like $group need the unpacked data to apply HCIndex metadata filtering
+    // For HCIndex, unpack stage needs to be prepended even if the initial stage
+    // doesn't consume collection data. This is because stages like $group need
+    // the unpacked data to apply HCIndex metadata filtering
+    // TODO: Make this change be very specific to query against HCIndex
+    // collections.
     bool isGroupStage = initialStage->getSourceName() == "$group"_sd;
 
     if (consumesCollectionData || isGroupStage) {
@@ -176,10 +176,12 @@ void translatePipeline(const boost::intrusive_ptr<ExpressionContext>& expCtx,
 void prependUnpackStageForHCIndexIfRequiredImpl(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                                             Pipeline& pipeline,
                                             const CollectionPtr& collPtr) {
-    // For HCIndex-enabled legacy timeseries collections, we need to add the unpack stage
-    // even if this is not a viewless timeseries collection. This is because the query may be
-    // executing directly on the buckets collection (when isRawDataOperation is true), and we
-    // need the unpack stage to apply HCIndex metadata filtering.
+    // For HCIndex-enabled legacy timeseries collections, we need to add the
+    // unpack stage even if this is not a viewless timeseries collection. This
+    // is because the query may be executing directly on the buckets collection
+    // (I found one case where isRawDataOperation is true, but needs to verify
+    // if thiere are other cases.), and we need the unpack stage to apply
+    // HCIndex metadata filtering.
     if (!collPtr || !collPtr->isTimeseriesCollection() || !collPtr->getTimeseriesOptions()) {
         return;
     }
@@ -188,9 +190,8 @@ void prependUnpackStageForHCIndexIfRequiredImpl(const boost::intrusive_ptr<Expre
         return;
     }
 
-    // Check if the pipeline already has an unpack stage (from view resolution)
+    // Check if the pipeline already has an unpack stage
     const auto& sources = pipeline.getSources();
-
     if (!sources.empty()) {
         auto firstStageName = sources.front()->getSourceName();
 
@@ -198,7 +199,8 @@ void prependUnpackStageForHCIndexIfRequiredImpl(const boost::intrusive_ptr<Expre
             return;
         }
 
-        // Don't prepend unpack stage for $collStats - it must be the first stage in the pipeline
+        // Ignore this for $collStats since that has be the first stage in the
+        // pipeline (TODO: any other exceptions?)
         if (firstStageName == "$collStats"_sd) {
             return;
         }
@@ -206,7 +208,7 @@ void prependUnpackStageForHCIndexIfRequiredImpl(const boost::intrusive_ptr<Expre
 
     TimeseriesTranslationParams hcindexParams{
         *collPtr->getTimeseriesOptions(),
-        true /* assumeNoMixedSchemaData - default for legacy timeseries */,
+        true,
         collPtr->areTimeseriesBucketsFixed()};
     prependUnpackStageToPipeline(expCtx, pipeline, hcindexParams);
     pipeline.setTranslated();

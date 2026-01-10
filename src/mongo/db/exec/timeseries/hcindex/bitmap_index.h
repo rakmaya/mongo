@@ -55,13 +55,14 @@ class AttributeTable;
  * State machine for BitmapIndex lifecycle:
  * - NOP: Initial state, no operations allowed
  * - Reconstruction: Index is being reconstructed from stored operations
- * - ReadWrite: Index is in normal write mode (new entries can be added)
+ * - ReadWrite: Index is in normal read and write mode (new entries can be added)
  * - ReadOnly: Index is locked, no modifications allowed
  *
  * State transitions:
  * - NOP -> Reconstruction (via changeState)
  * - NOP -> ReadWrite (via changeState)
  * - Reconstruction -> ReadOnly (via changeState)
+ * - Reconstruction -> ReadWrite (only if the map is empty)
  * - ReadWrite -> ReadOnly (via changeState)
  * - ReadOnly -> (no transitions allowed)
  */
@@ -83,8 +84,8 @@ enum class BitmapIndexState {
  * - Thread-safe: Uses shared_mutex for concurrent access
  * - Column-value indexed: Each unique (column, value) pair has its own bitmap
  *
- * Implementation note: For Phase 1 MVP, we use std::set<int64_t> as a simple
- * bitmap representation. This can be optimized with Roaring Bitmaps in Phase 2.
+ * Implementation note: For Phase 0 MVP, we use std::set<int64_t> as a simple
+ * bitmap representation. This can be optimized with Roaring Bitmaps in Phase 1.
  */
 class BitmapIndex {
 public:

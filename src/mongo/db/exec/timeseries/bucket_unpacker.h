@@ -53,7 +53,10 @@
 #include <boost/optional/optional.hpp>
 
 namespace mongo::timeseries::hcindex {
+
+// FORWARD DECLARATIONS
 class HCIndexCollectionManager;
+
 }
 
 namespace mongo::timeseries {
@@ -300,38 +303,39 @@ public:
     const std::set<std::string>& fieldsToIncludeExcludeDuringUnpack();
 
     /**
-     * Sets the HCIndexCollectionManager for decoding HCIndex-encoded metadata.
-     * This is optional and only needed when unpacking HCIndex-encoded buckets.
+     * Set the HCIndexCollectionManager for decoding HCIndex-encoded metadata.
      */
     void setHCIndexCollectionManager(hcindex::HCIndexCollectionManager* hcindexMgr) {
         _hcindexMgr = hcindexMgr;
     }
 
     /**
-     * Sets the OperationContext for HCIndex operations.
-     * This is required when using HCIndex-encoded buckets.
+     * Set the OperationContext for HCIndex operations. This is required when
+     * since HCIndex needs to access ops and idx collections.
      */
     void setOperationContext(OperationContext* opCtx) {
         _opCtx = opCtx;
     }
 
     /**
-     * Gets the decoded metadata for an HCIndex-encoded measurement at the given index.
-     * Returns the decoded metadata BSONObj, or an empty BSONObj if decoding fails or this is not
-     * an HCIndex bucket.
+     * Decoded metadata for an HCIndex-encoded measurement at the given index.
+     * Returns the decoded metadata BSONObj, or an empty BSONObj if decoding
+     * fails or this is not an HCIndex bucket.
      */
     BSONObj getDecodedMetadataForMeasurement(int measurementIndex);
 
     /**
-     * Gets the rowId for the current measurement being unpacked.
-     * Returns the rowId as an int64_t, or -1 if this is not an HCIndex bucket or rowId is unavailable.
+     * Returns a non-negative rowId or -1 if this is not an HCIndex bucket or
+     * rowId is unavailable.
      */
     int64_t getCurrentRowId() const;
 
     /**
-     * Skips the current measurement without unpacking it.
-     * This advances the internal iterators to the next measurement.
-     * Used for HCIndex filtering to skip measurements that don't match the metadata predicate.
+     * Skips the current measurement without unpacking it.  This advances the
+     * internal iterators to the next measurement.  Used for HCIndex filtering
+     * to skip measurements that don't match the metadata predicate. For now,
+     * this is the only way until we have a true iterator implementation that
+     * supports pushdowns.
      */
     void skipRow();
 
@@ -410,23 +414,18 @@ private:
     boost::optional<std::set<std::string>> _unpackFieldsToIncludeExclude = boost::none;
 
     // HCIndexCollectionManager for decoding HCIndex-encoded metadata.
-    // Optional - only set when unpacking HCIndex-encoded buckets.
     hcindex::HCIndexCollectionManager* _hcindexMgr = nullptr;
 
     // OperationContext for HCIndex operations.
-    // Required when using HCIndex-encoded buckets.
     OperationContext* _opCtx = nullptr;
 
     // Flag indicating whether this bucket is HCIndex-encoded.
-    // When true, each measurement has its own rowId that needs to be decoded.
     bool _isHCIndexBucket = false;
 
     // Counter for tracking the current measurement index during unpacking.
-    // Used for HCIndex buckets to decode the correct rowId for each measurement.
     int32_t _currentMeasurementIndex = 0;
 
     // Cached rowId column for HCIndex buckets.
-    // Initialized during reset() if this is an HCIndex bucket.
     boost::optional<BSONColumn> _rowIdColumn;
     boost::optional<BSONColumn::Iterator> _rowIdColumnIterator;
 };

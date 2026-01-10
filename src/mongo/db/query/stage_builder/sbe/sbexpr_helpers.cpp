@@ -62,8 +62,6 @@
 #include <memory>
 #include <variant>
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
-
 namespace mongo::stage_builder {
 namespace {
 inline abt::ABT extractABT(SbExpr& e) {
@@ -968,20 +966,16 @@ std::tuple<SbStage, SbSlot, SbSlotVector, SbSlotVector> SbBuilder::makeTsBucketT
                                                             timeField,
                                                             _nodeId);
 
-    // Set HCIndex metadata filter if provided
+    // Set HCIndex metadata filter
     if (hcindexFilter && collectionUUID) {
         tsBucketStage->setHCIndexMetadataFilter(std::move(hcindexFilter));
         tsBucketStage->setCollectionUUID(*collectionUUID);
 
-        // Get the HCIndexCollectionManager from the bucket catalog
         auto& bucketCatalog = timeseries::bucket_catalog::GlobalBucketCatalog::get(
             _state.opCtx->getServiceContext());
         auto hcindexMgr = timeseries::bucket_catalog::getHCIndexManager(
             bucketCatalog, *collectionUUID);
         if (hcindexMgr) {
-            // Do NOT initialize the manager here. Initialization will happen lazily
-            // when the manager is first used during query execution (e.g., in queryRows())
-            // to avoid issues with stashed transaction resources during pipeline cleanup.
             tsBucketStage->setHCIndexCollectionManager(hcindexMgr.get());
         }
     }

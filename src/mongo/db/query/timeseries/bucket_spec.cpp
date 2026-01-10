@@ -154,10 +154,10 @@ BucketSpec::BucketPredicate BucketSpec::createPredicatesOnBucketLevelField(
         (matchExprPath == bucketSpec.metaField().value() ||
          expression::isPathPrefixOf(bucketSpec.metaField().value(), matchExprPath))) {
 
-        // For HCIndex buckets, metadata predicates cannot be pushed down to the bucket level
-        // because the bucket's metadata field contains only window metadata (windowStart, windowEnd),
-        // not the original metadata. Metadata predicates must be applied as event filters after
-        // unpacking and decoding the rowIds back to original metadata.
+        // For HCIndex buckets, metadata predicates cannot be pushed down since
+        // the bucket metadata contains only window metadata (windowStart,
+        // windowEnd), not the original metadata.  Metadata predicates are
+        // applied during the unpacking stage.
         if (bucketSpec.useHCIndex()) {
             return handleIneligible(policy, matchExpr, "cannot push down metadata predicates for HCIndex buckets");
         }
@@ -452,13 +452,12 @@ BucketSpec::SplitPredicates BucketSpec::getPushdownPredicates(
 
     auto metaField = haveComputedMetaField ? boost::none : tsOptions.getMetaField();
 
-    // For HCIndex collections, don't split out metadata predicates - they must be applied
-    // as event filters after unpacking and decoding the rowIds back to original metadata
+    // For HCIndex collections, don't split out metadata predicates. We need to
+    // apply it as event filters after unpacking and decoding the rowIds back
+    // to original metadata. Residual predicates should be processed as normal.
     std::unique_ptr<MatchExpression> metaOnlyPred = nullptr;
     std::unique_ptr<MatchExpression> residualPred = std::move(matchExpr);
-
     if (!tsOptions.getUseHCIndex().value_or(false)) {
-        // For non-HCIndex collections, split out metadata predicates for bucket-level filtering
         auto [metaPred, residual] = splitOutMetaOnlyPredicate(std::move(residualPred), metaField);
         metaOnlyPred = std::move(metaPred);
         residualPred = std::move(residual);
@@ -474,7 +473,8 @@ BucketSpec::SplitPredicates BucketSpec::getPushdownPredicates(
             // to the buckets before unpacking. So we can use default values
             // for the rest of the arguments.
         };
-        // Set the HCIndex flag if enabled for this collection
+
+        // Set the HCIndex flag accordngly.
         if (tsOptions.getUseHCIndex().value_or(false)) {
             bucketSpec.setUseHCIndex(true);
         }

@@ -1259,7 +1259,9 @@ StatusWith<TimeseriesWriteBatches> prepareInsertsToBuckets(
     const std::vector<size_t>& indices,
     const AllowQueryBasedReopening allowQueryBasedReopening,
     std::vector<WriteStageErrorAndIndex>& errorsAndIndices) {
-    // Fork: If HCIndex is enabled, use the HCIndex path that groups by time window only
+
+    // Fork: If HCIndex is enabled, use the HCIndex path that groups by time
+    // window only
     std::vector<BatchedInsertContext> batchedInsertContexts;
     if (timeseriesOptions.getUseHCIndex().get_value_or(false)) {
         // HCIndex path: Groups by time window, transforms BSON with window info
@@ -1321,10 +1323,10 @@ std::vector<BatchedInsertContext> buildBatchedHCInsertContexts(
     const std::vector<size_t>& indices,
     std::vector<WriteStageErrorAndIndex>& errorsAndIndices) {
 
-    // Get HCIndexCollectionManager for this collection
     auto hcindexMgr = getHCIndexManager(bucketCatalog, collectionUUID);
     if (!hcindexMgr) {
         // If no HCIndex manager, fall back to traditional path
+        // TODO: Log this?
         return buildBatchedInsertContexts(bucketCatalog,
                                          collectionUUID,
                                          timeseriesOptions,
@@ -1338,7 +1340,6 @@ std::vector<BatchedInsertContext> buildBatchedHCInsertContexts(
     auto timeField = timeseriesOptions.getTimeField();
     auto metaField = timeseriesOptions.getMetaField();
 
-    // Get the effective HCIndex time window configuration from timeseries options
     auto hcindexTimeWindow = getEffectiveHCIndexTimeWindow(timeseriesOptions.getHcindexOptions());
 
     // Map from time window start to vector of (measurement, time, index, rowId)
@@ -1419,14 +1420,18 @@ std::vector<BatchedInsertContext> buildBatchedHCInsertContexts(
         // Calculate window end based on period and frequency configuration
         Timestamp windowEnd = hcindexTimeWindow.calculateWindowEnd(windowStart);
 
-        // Build window metadata BSON for BucketKey
-        // This groups buckets by time window, not by metadata cardinality
+        // Build window metadata BSON for BucketKey. We group buckets by time
+        // window, not by metadata cardinality
         BSONObjBuilder windowMetaBuilder;
         windowMetaBuilder.append("windowStart", windowStart);
         windowMetaBuilder.append("windowEnd", windowEnd);
         BSONObj windowMetadata = windowMetaBuilder.obj();
 
-        // Sort measurements by time (same as traditional path)
+        // Sort measurements by time (same as traditional path). We should
+        // see if this is even necessary. If we are able to have multiple
+        // measurement "groups" when the insert order breaks the time
+        // monotonicity, then we can just do the merge portion of the sort
+        // and avoid full sort.
         auto sortedMeasurements = measurements;
         std::sort(sortedMeasurements.begin(),
                   sortedMeasurements.end(),
@@ -1439,10 +1444,8 @@ std::vector<BatchedInsertContext> buildBatchedHCInsertContexts(
         std::vector<BatchedInsertTuple> transformedTuples;
 
         for (const auto& [measurement, time, index, rowId] : sortedMeasurements) {
-            // Build transformed measurement BSON
             BSONObjBuilder transformedBuilder;
 
-            // Iterate through original measurement fields
             for (const auto& elem : measurement) {
                 StringData fieldName = elem.fieldNameStringData();
 
@@ -1460,26 +1463,25 @@ std::vector<BatchedInsertContext> buildBatchedHCInsertContexts(
 
             // Add rowId as a separate field (outside metaField) for HCIndex encoding
             transformedBuilder.append("rowId", rowId);
-
             BSONObj transformedMeasurement = transformedBuilder.obj();
             transformedTuples.emplace_back(transformedMeasurement, time, index);
         }
 
-        // Create BucketKey using window metadata
-        // This groups buckets by time window, avoiding high cardinality metadata grouping
-        // Wrap the entire windowMetadata object as a field element (e.g., "meta: {windowStart, windowEnd}")
+        // Create BucketKey using window metadata. This groups buckets by time
+        // window, avoiding high cardinality metadata grouping Wrap the entire
+        // windowMetadata object as a field element (e.g., "meta: {windowStart,
+        // windowEnd}")
         StringData metaFieldName = metaField ? *metaField : kBucketMetaFieldName;
 
-        // Build the metadata element with window metadata
-        // We need to keep the BSON object alive for the BucketMetadata constructor
+        // Build the metadata element with window metadata. We need to keep the
+        // BSON object alive for the BucketMetadata constructor
         BSONObjBuilder windowMetaFieldBuilder;
         windowMetaFieldBuilder.append(metaFieldName, windowMetadata);
         BSONObj windowMetaFieldObj = windowMetaFieldBuilder.obj();
 
-        // Create a copy of the metadata element to ensure it's valid
         BSONElement windowMetadataElement = windowMetaFieldObj.firstElement();
 
-        // Create BucketKey with the window metadata
+        // BucketKey with the window metadata!
         BucketKey bucketKey{collectionUUID,
                             BucketMetadata{trackingContext, windowMetadataElement, metaFieldName}};
         auto stripeNumber = internal::getStripeNumber(bucketCatalog, bucketKey);
@@ -1494,11 +1496,14 @@ std::vector<BatchedInsertContext> buildBatchedHCInsertContexts(
     // Flush pending HCIndex operations before returning
     auto flushStatus = hcindexMgr->flushPendingOperations(
         [opCtx](const std::string& collName, const std::vector<InsertStatement>& ops) -> Status {
-            // Parse collection name to NamespaceString
-            // Collection name format: "database.hcindex.ops.symbols.<uuid>" or "database.hcindex.ops.attributes.<uuid>"
+            // Parse collection name to NamespaceString Collection name format:
+            // "database.hcindex.ops.symbols.<uuid>" or
+            // "database.hcindex.ops.attributes.<uuid>"
+            // TODO: Big One! What is the right function to use here? The
+            // _forTest for now since I went with my understanding of the code
+            // from unit tests.
             auto nss = NamespaceString::createNamespaceString_forTest(boost::none, collName);
 
-            // Acquire the operations collection with write lock
             CollectionAcquisitionRequest request{
                 nss,
                 PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
@@ -1511,7 +1516,6 @@ std::vector<BatchedInsertContext> buildBatchedHCInsertContexts(
                              str::stream() << "HCIndex operations collection not found: " << collName);
             }
 
-            // Wrap in WriteUnitOfWork for transactional consistency
             WriteUnitOfWork wuow(opCtx);
             auto insertStatus = collection_internal::insertDocuments(
                 opCtx, collection.getCollectionPtr(), ops.begin(), ops.end(), nullptr, false);
@@ -1573,7 +1577,6 @@ Status setHCIndexManager(BucketCatalog& catalog,
         return Status(ErrorCodes::BadValue, "HCIndexCollectionManager cannot be null");
     }
 
-    // Store the manager
     catalog.hcindexManagers[collectionUUID] = hcindexMgr;
     return Status::OK();
 }
@@ -1599,4 +1602,5 @@ void cleanupHCIndex(BucketCatalog& catalog, const UUID& collectionUUID) {
         catalog.hcindexManagers.erase(it);
     }
 }
+
 }  // namespace mongo::timeseries::bucket_catalog

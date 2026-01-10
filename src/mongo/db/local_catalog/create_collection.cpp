@@ -641,20 +641,25 @@ Status _createLegacyTimeseries(
             timeseries::createDefaultTimeseriesIndex(opCtx, collectionWriter, validatedCollator));
 
         // Initialize HCIndex if enabled for this timeseries collection
+        // TODO: Move this out to a separate function/utility
         if (options.timeseries && options.timeseries->getUseHCIndex() &&
             options.timeseries->getUseHCIndex().value_or(false)) {
-            LOGV2(9999999, "HCIndex initialization started for collection", "ns"_attr = ns);
+            LOGV2(9999990, "HCIndex initialization started for collection", "ns"_attr = ns);
 
             auto collectionUUID = collectionWriter->uuid();
 
-            // Create the necessary operations collections for HCIndex
+            // Create the necessary operations collections for HCIndex. HCIndex
+            // requires Dictionary, AttributeTable and bitmap index
+            // collections.
+
             auto opsCollStatus = createHCIndexCollections(opCtx, ns.dbName(), collectionUUID);
             if (!opsCollStatus.isOK()) {
-                LOGV2(9999998, "HCIndex operations collections creation failed", "error"_attr = opsCollStatus);
+                LOGV2(9999990, "HCIndex operations collections creation failed", "error"_attr = opsCollStatus);
                 return opsCollStatus;
             }
 
-            // Create HCIndexCollectionManager with time-window and bitmap options from TimeseriesOptions
+            // Create HCIndexCollectionManager with the specified options.
+
             auto hcindexOptions = options.timeseries ? options.timeseries->getHcindexOptions() : boost::none;
             auto timeWindow = timeseries::getEffectiveHCIndexTimeWindow(hcindexOptions);
             auto bitmapOptions = timeseries::getEffectiveHCIndexBitmapOptions(hcindexOptions);
@@ -667,21 +672,15 @@ Status _createLegacyTimeseries(
                 bitmapOptions.excludedColumns,
                 bitmapOptions.includedColumns);
 
-            // Note: Do NOT initialize the manager here. Initialization will happen lazily
-            // when the manager is first used during query execution to avoid lock cycles
-            // during startup.
-
-            // Store the manager in BucketCatalog
+            // Store the Manager in the BucketCatalog
             auto& bucketCatalog =
                 timeseries::bucket_catalog::GlobalBucketCatalog::get(opCtx->getServiceContext());
             auto setStatus = timeseries::bucket_catalog::setHCIndexManager(
                 bucketCatalog, collectionUUID, hcindexMgr);
             if (!setStatus.isOK()) {
-                LOGV2(9999997, "Failed to store HCIndex manager in BucketCatalog", "error"_attr = setStatus);
+                LOGV2(9999990, "Failed to store HCIndex manager in BucketCatalog", "error"_attr = setStatus);
                 return setStatus;
             }
-
-            LOGV2(9999996, "HCIndex initialization completed successfully", "ns"_attr = ns);
         }
 
         wuow.commit();
@@ -801,11 +800,6 @@ Status _createCollection(
         // viewless time-series collections if we are creating the collection on a primary. This is
         // done within the same WUOW as the collection creation.
         if (collectionOptions.timeseries && !nss.isTimeseriesBucketsCollection()) {
-            LOGV2(9999995, "Creating timeseries collection",
-                  "ns"_attr = nss,
-                  "writesAreReplicated"_attr = opCtx->writesAreReplicated(),
-                  "useHCIndex"_attr = collectionOptions.timeseries->getUseHCIndex().value_or(false));
-
             if (opCtx->writesAreReplicated()) {
                 CollectionWriter collWriter(opCtx, nss);
                 invariant(collWriter->isNewTimeseriesWithoutView());
@@ -824,20 +818,22 @@ Status _createCollection(
                     timeseries::createDefaultTimeseriesIndex(opCtx, collWriter, validatedCollator));
 
                 // Initialize HCIndex if enabled for this timeseries collection
+                // TODO: Move this out to a separate function/utility
                 if (collectionOptions.timeseries && collectionOptions.timeseries->getUseHCIndex() &&
                     collectionOptions.timeseries->getUseHCIndex().value_or(false)) {
-                    LOGV2(9999999, "HCIndex initialization started for collection", "ns"_attr = nss);
 
                     auto collectionUUID = collWriter->uuid();
 
                     // Create the necessary operations collections for HCIndex
+
                     auto opsCollStatus = createHCIndexCollections(opCtx, nss.dbName(), collectionUUID);
                     if (!opsCollStatus.isOK()) {
-                        LOGV2(9999998, "HCIndex operations collections creation failed", "error"_attr = opsCollStatus);
+                        LOGV2(9999990, "HCIndex operations collections creation failed", "error"_attr = opsCollStatus);
                         return opsCollStatus;
                     }
 
-                    // Create HCIndexCollectionManager with time-window and bitmap options from TimeseriesOptions
+                    // Create HCIndexCollectionManager with the specified
+                    // options.
                     auto hcindexOptions = collectionOptions.timeseries ? collectionOptions.timeseries->getHcindexOptions() : boost::none;
                     auto timeWindow = timeseries::getEffectiveHCIndexTimeWindow(hcindexOptions);
                     auto bitmapOptions = timeseries::getEffectiveHCIndexBitmapOptions(hcindexOptions);
@@ -850,21 +846,15 @@ Status _createCollection(
                         bitmapOptions.excludedColumns,
                         bitmapOptions.includedColumns);
 
-                    // Note: Do NOT initialize the manager here. Initialization will happen lazily
-                    // when the manager is first used during query execution to avoid lock cycles
-                    // during startup.
-
                     // Store the manager in BucketCatalog
                     auto& bucketCatalog =
                         timeseries::bucket_catalog::GlobalBucketCatalog::get(opCtx->getServiceContext());
                     auto setStatus = timeseries::bucket_catalog::setHCIndexManager(
                         bucketCatalog, collectionUUID, hcindexMgr);
                     if (!setStatus.isOK()) {
-                        LOGV2(9999997, "Failed to store HCIndex manager in BucketCatalog", "error"_attr = setStatus);
+                        LOGV2(9999990, "Failed to store HCIndex manager in BucketCatalog", "error"_attr = setStatus);
                         return setStatus;
                     }
-
-                    LOGV2(9999996, "HCIndex initialization completed successfully", "ns"_attr = nss);
                 }
             }
         }
@@ -1143,12 +1133,12 @@ Status createVirtualCollection(OperationContext* opCtx,
 }
 
 Status createHCIndexCollections(OperationContext* opCtx, const DatabaseName& dbName, const UUID& collectionUUID) {
-    // Get the namespaces for the HCIndex operations collections
     auto symbolNss = timeseries::hcindex::HCIndexCollectionManager::getSymbolOperationsNamespace(dbName, collectionUUID);
     auto attributeNss = timeseries::hcindex::HCIndexCollectionManager::getAttributeOperationsNamespace(dbName, collectionUUID);
     auto bitmapIndexNss = timeseries::hcindex::HCIndexCollectionManager::getBitmapIndexNamespace(dbName, collectionUUID);
 
     // Create symbol operations collection
+
     CollectionOptions symbolOptions;
     auto symbolStatus = createCollection(opCtx, symbolNss, symbolOptions, boost::none);
     if (!symbolStatus.isOK()) {
@@ -1157,6 +1147,7 @@ Status createHCIndexCollections(OperationContext* opCtx, const DatabaseName& dbN
     }
 
     // Create attribute operations collection
+
     CollectionOptions attributeOptions;
     auto attributeStatus = createCollection(opCtx, attributeNss, attributeOptions, boost::none);
     if (!attributeStatus.isOK()) {
@@ -1165,6 +1156,7 @@ Status createHCIndexCollections(OperationContext* opCtx, const DatabaseName& dbN
     }
 
     // Create bitmap index collection
+
     CollectionOptions bitmapIndexOptions;
     auto bitmapIndexStatus = createCollection(opCtx, bitmapIndexNss, bitmapIndexOptions, boost::none);
     if (!bitmapIndexStatus.isOK()) {

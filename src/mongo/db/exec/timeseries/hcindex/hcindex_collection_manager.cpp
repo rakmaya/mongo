@@ -104,7 +104,6 @@ Status HCIndexCollectionManager::initializeForRead(OperationContext* opCtx) {
     }
 
     // Initialize the reader by acquiring collections for symbol and attribute operations
-    // This uses lock-free acquisitions to avoid lock cycles during query execution
     auto readerInitStatus = reader->initializeCollections(opCtx);
     if (!readerInitStatus.isOK()) {
         LOGV2_WARNING(9999996,
@@ -300,17 +299,17 @@ StatusWith<std::vector<int64_t>> HCIndexCollectionManager::queryRows(
     const Timestamp& timestamp) {
     Timer timer;
 
-    // NOTE: Initialization is now managed by the caller (e.g., TsBucketToCellBlockStage::open())
+    // NOTE: Initialization should be done by the caller (e.g., TsBucketToCellBlockStage::open())
     // to avoid repeated initialization/close cycles per query.
     // The caller should call initializeForRead() once at the start and close() at the end.
     if (!initializedForRead) {
-        LOGV2_WARNING(9999920,
+        LOGV2_WARNING(9999990,
                       "HCIndexCollectionManager::queryRows called but not initialized. "
                       "Caller should call initializeForRead() before queryRows()");
         // Try to initialize anyway as a fallback
         auto initStatus = initializeForRead(opCtx);
         if (!initStatus.isOK()) {
-            LOGV2_WARNING(9999921,
+            LOGV2_WARNING(9999990,
                           "Failed to initialize reader for read operations",
                           "error"_attr = initStatus);
             // Continue anyway - the reader will try to acquire collections on-demand if needed
@@ -324,11 +323,10 @@ StatusWith<std::vector<int64_t>> HCIndexCollectionManager::queryRows(
     // Get the attribute table for this timestamp
     auto tableResult = attributeTable->getTableForTimestamp(timestamp);
     if (!tableResult.isOK()) {
-        LOGV2_DEBUG(9999981, 3, "HCIndex: Table not in memory, trying to create/reconstruct from disk");
         // Table doesn't exist in memory. Try to create/reconstruct it from disk.
         auto createResult = attributeTable->getOrCreateTableForTimestamp(opCtx, timestamp);
         if (!createResult.isOK()) {
-            LOGV2_WARNING(9999981, "Failed to create/reconstruct table",
+            LOGV2_WARNING(9999990, "Failed to create/reconstruct table",
                   "error"_attr = createResult.getStatus());
             return createResult.getStatus();
         }
@@ -379,7 +377,7 @@ StatusWith<std::vector<int64_t>> HCIndexCollectionManager::queryRows(
     auto matchingRowIds = table->queryRows(predicateResult.getValue(), index);
 
     // Print time took for query rows in debug mode
-    LOGV2_DEBUG(9999980, 3,
+    LOGV2_DEBUG(9999990, 3,
         "HCIndex Query completed",
         "matchingRowCount"_attr = matchingRowIds.size(),
         "elapsedMicros"_attr = timer.micros());
@@ -388,8 +386,6 @@ StatusWith<std::vector<int64_t>> HCIndexCollectionManager::queryRows(
 }
 
 Status HCIndexCollectionManager::cleanup() {
-    // In the future, this could drop the operations collections
-    // For now, just clear the structures
     symbolDictionary.reset();
     attributeTable.reset();
     bitmapIndex.reset();
@@ -397,6 +393,7 @@ Status HCIndexCollectionManager::cleanup() {
     reader.reset();
     return Status::OK();
 }
+
 
 }  // namespace mongo::timeseries::hcindex
 

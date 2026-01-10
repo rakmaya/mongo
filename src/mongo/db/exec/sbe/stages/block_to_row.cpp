@@ -35,7 +35,6 @@
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/util/assert_util.h"
 
-
 namespace mongo::sbe {
 BlockToRowStage::BlockToRowStage(std::unique_ptr<PlanStage> input,
                                  value::SlotVector blocks,

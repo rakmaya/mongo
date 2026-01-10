@@ -38,11 +38,8 @@
 #include "mongo/db/exec/document_value/document_internal.h"
 #include "mongo/db/exec/document_value/document_metadata_fields.h"
 #include "mongo/db/exec/document_value/value.h"
-#include "mongo/logv2/log.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
-
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 #include <algorithm>
 #include <array>
@@ -466,8 +463,8 @@ Document BucketUnpacker::getNext() {
         ++(*_rowIdColumnIterator);
     }
 
-    // For HCIndex buckets, don't include the original metadata in the unpacker
-    // We'll add the decoded metadata ourselves after unpacking
+    // Skip the mutated meta field for HCIndex bucket. Metada is decoded
+    // using HCIndex constructs.
     bool includeMetaFieldForUnpacker = _includeMetaField;
     if (_isHCIndexBucket && _includeMetaField) {
         includeMetaFieldForUnpacker = false;
@@ -476,7 +473,6 @@ Document BucketUnpacker::getNext() {
     _hasNext = _unpackingImpl->getNext(
         measurement, _spec, metaValueToUse, _includeTimeField, includeMetaFieldForUnpacker);
 
-    // For HCIndex buckets, add the decoded metadata field
     if (_isHCIndexBucket && _includeMetaField && _spec.metaField()) {
         measurement.addField(*_spec.metaField(), metaValueToUse);
     }
@@ -499,8 +495,7 @@ Document BucketUnpacker::getNext() {
         measurement.metadata().setTimeseriesBucketMaxTime(*_maxTime);
     }
 
-    auto frozenMeasurement = measurement.freeze();
-    return frozenMeasurement;
+    return measurement.freeze();
 }
 
 BSONObj BucketUnpacker::getNextBson() {
@@ -574,7 +569,6 @@ void BucketUnpacker::reset(BSONObj&& bucket, bool bucketMatchedQuery) {
     _unpackingImpl.reset();
     _bucket = std::move(bucket);
     _bucketMatchedQuery = bucketMatchedQuery;
-    _currentMeasurementIndex = 0;
     _isHCIndexBucket = false;
     uassert(5346510, "An empty bucket cannot be unpacked", !_bucket.isEmpty());
 
@@ -824,15 +818,18 @@ const std::set<StringData> BucketUnpacker::reservedBucketFieldNames = {
     kBucketIdFieldName, kBucketDataFieldName, kBucketMetaFieldName, kBucketControlFieldName};
 
 int64_t BucketUnpacker::getCurrentRowId() const {
-    // If this is not an HCIndex bucket or we don't have a rowId column iterator, return -1
+    // Only HCIndex has encoded rowIds
     if (!_isHCIndexBucket || !_rowIdColumnIterator) {
         return -1;
     }
 
-    // Get the current rowId from the cached iterator
     if (!_rowIdColumnIterator->more()) {
         return -1;
     }
+
+    // TODO: rowIds could be encoded in a Delta-of-Delta encoding. It is worth
+    // adding this encoding to the BSONColumn framework since it is also usable
+    // for timefield and certain measurements.
 
     const BSONElement& rowIdElem = **_rowIdColumnIterator;
     if (rowIdElem.eoo() || rowIdElem.type() != BSONType::numberLong) {
@@ -843,12 +840,11 @@ int64_t BucketUnpacker::getCurrentRowId() const {
 }
 
 void BucketUnpacker::skipRow() {
-    // If this is not an HCIndex bucket or we don't have a rowId column iterator, do nothing
+    // Only HCIndex has encoded rowIds
     if (!_isHCIndexBucket || !_rowIdColumnIterator) {
         return;
     }
 
-    // Advance the rowId iterator
     if (_rowIdColumnIterator->more()) {
         ++(*_rowIdColumnIterator);
     }
@@ -862,12 +858,11 @@ void BucketUnpacker::skipRow() {
 
 BSONObj BucketUnpacker::getDecodedMetadataForMeasurement(int measurementIndex) {
 
-    // If this is not an HCIndex bucket or we don't have a manager, return empty
+    // Only valid HCIndex buckets can be decoded.
     if (!_isHCIndexBucket || !_hcindexMgr || !_rowIdColumnIterator) {
         return BSONObj();
     }
 
-    // Get the current rowId from the cached iterator
     if (!_rowIdColumnIterator->more()) {
         return BSONObj();
     }
@@ -879,10 +874,9 @@ BSONObj BucketUnpacker::getDecodedMetadataForMeasurement(int measurementIndex) {
 
     int64_t rowId = rowIdElem.numberLong();
 
-    // Advance the iterator for the next measurement
+    // Advance
     ++(*_rowIdColumnIterator);
 
-    // Get the timestamp from the control field for decoding
     auto controlField = _bucket[kBucketControlFieldName];
     if (!controlField || controlField.type() != BSONType::object) {
         return BSONObj();
@@ -900,11 +894,10 @@ BSONObj BucketUnpacker::getDecodedMetadataForMeasurement(int measurementIndex) {
         return BSONObj();
     }
 
-    // Convert Date_t to Timestamp
     uint32_t seconds = timeElem.date().toMillisSinceEpoch() / 1000;
     Timestamp ts(seconds, 0);
 
-    // Decode the rowId back to metadata
+    // Decode
     auto decodedMetadataStatus = _hcindexMgr->decodeMetadata(_opCtx, rowId, ts);
     if (!decodedMetadataStatus.isOK()) {
         return BSONObj();

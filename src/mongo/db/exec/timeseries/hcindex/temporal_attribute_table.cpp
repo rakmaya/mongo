@@ -772,13 +772,11 @@ StatusWith<AttributeTable*> TemporalAttributeTable::getOrCreateTableForTimestamp
         }
     }
 
-    // Table doesn't exist in memory. Try to reconstruct from disk if reader is available.
     if (!reader) {
         // No reader available, create a new empty table
         return getOrCreateTable(opCtx, windowStart);
     }
 
-    // Try to reconstruct the table from disk
     // First, get or create the symbol dictionary for this window
     auto dictResult = temporalSymbolDictionary->getOrCreateDictionaryForTimestamp(opCtx, timestamp);
     if (!dictResult.isOK()) {
@@ -794,15 +792,12 @@ StatusWith<AttributeTable*> TemporalAttributeTable::getOrCreateTableForTimestamp
     }
 
     auto* tablePtr = tableResult.getValue().get();
-    // If the table is empty, then we need a new table for this window
     if (tablePtr->getRowCount() == 0) {
+        // If the table is empty, then we need a new table for this window
         return getOrCreateTable(opCtx, windowStart);
     }
 
-    // Store the reconstructed table in memory for future use
     std::unique_lock<std::shared_mutex> writeLock(mutex);
-
-    // Set the writer on the reconstructed table so it can accept new data
     if (writer) {
         tablePtr->setWriter(writer);
     }

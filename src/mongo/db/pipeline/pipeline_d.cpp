@@ -529,7 +529,7 @@ StatusWith<unique_ptr<PlanExecutor, PlanExecutor::Deleter>> PipelineD::createRan
         auto topkSortPlan = std::make_unique<UnpackTimeseriesBucket>(
             expCtx.get(), ws.get(), std::move(collScanPlan), bucketUnpacker->copy());
 
-        // Set HCIndexCollectionManager if this is an HCIndex-enabled collection
+        // Set HCIndexCollectionManager
         auto collUUID = expCtx->getUUID();
         if (collUUID) {
             auto& bucketCatalog = timeseries::bucket_catalog::GlobalBucketCatalog::get(
@@ -537,9 +537,6 @@ StatusWith<unique_ptr<PlanExecutor, PlanExecutor::Deleter>> PipelineD::createRan
             auto hcindexMgr = timeseries::bucket_catalog::getHCIndexManager(
                 bucketCatalog, *collUUID);
             if (hcindexMgr) {
-                // Do NOT initialize the manager here. Initialization will happen lazily
-                // when the manager is first used during query execution to avoid issues with
-                // stashed transaction resources during pipeline cleanup.
                 topkSortPlan->setHCIndexCollectionManager(hcindexMgr.get());
             }
         }

@@ -100,7 +100,9 @@ struct BatchedInsertContext {
     const TimeseriesOptions& options;
     ExecutionStatsController stats;
     std::vector<BatchedInsertTuple> measurementsTimesAndIndices;
-    bool isHCIndexBatch = false;  // If true, this batch is from the HCIndex path
+
+    // If true, this batch is from the HCIndex path
+    bool isHCIndexBatch = false;
 
     BatchedInsertContext(BucketKey&,
                          StripeNumber,
@@ -198,10 +200,11 @@ public:
     // Memory usage threshold in bytes after which idle buckets will be expired.
     std::function<uint64_t()> memoryUsageThreshold;
 
-    // HCIndexCollectionManager instances per collection UUID for HCIndex-enabled collections.
-    // Protected by 'mutex'.
-    std::unordered_map<UUID, std::shared_ptr<hcindex::HCIndexCollectionManager>, UUID::Hash>
-        hcindexManagers;
+    // HCIndexCollectionManager instances per collection.
+    std::unordered_map<
+        UUID,
+        std::shared_ptr<hcindex::HCIndexCollectionManager>,
+        UUID::Hash> hcindexManagers;
 };
 
 /**
@@ -298,16 +301,15 @@ Status setHCIndexManager(BucketCatalog& catalog,
                          std::shared_ptr<hcindex::HCIndexCollectionManager> hcindexMgr);
 
 /**
- * Retrieves the HCIndexCollectionManager for a collection.
- * Returns nullptr if the collection does not have HCIndex enabled.
+ * Returns the HCIndexCollectionManager if found. Otherwise, returns nullprt.
  */
 std::shared_ptr<hcindex::HCIndexCollectionManager> getHCIndexManager(
     BucketCatalog& catalog,
     const UUID& collectionUUID);
 
 /**
- * Cleans up HCIndex structures when a collection is dropped.
- * Removes the HCIndexCollectionManager for the collection.
+ * Cleans up HCIndex structures when a collection is dropped. Also removed the
+ * HCIndexCollectionManager for the collection.
  */
 void cleanupHCIndex(BucketCatalog& catalog, const UUID& collectionUUID);
 
@@ -578,11 +580,11 @@ std::vector<BatchedInsertContext> buildBatchedInsertContexts(
     std::vector<WriteStageErrorAndIndex>& errorsAndIndices);
 
 /**
- * HCIndex version of buildBatchedInsertContexts().
- * Groups measurements by time window only (not by metadata) and transforms the BSON documents.
- * For each measurement, rewrites the timeField to windowStart and metaField to contain window info.
- * Flushes pending HCIndex operations before returning.
- * Returns a vector of BatchedInsertContext with transformed measurements.
+ * HCIndex version of buildBatchedInsertContexts().  Groups measurements by time
+ * window only (not by metadata) and transforms the BSON documents.  For each
+ * measurement, rewrites the timeField to windowStart and metaField to contain
+ * window info. Flushes pending HCIndex operations before returning. Returns a
+ * vector of BatchedInsertContext with transformed measurements.
  */
 std::vector<BatchedInsertContext> buildBatchedHCInsertContexts(
     OperationContext* opCtx,
