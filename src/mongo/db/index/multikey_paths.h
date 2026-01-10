@@ -33,6 +33,7 @@
 #include "mongo/bson/bson_depth.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/util/modules.h"
 
 #include <cstddef>
 #include <functional>
@@ -41,6 +42,7 @@
 #include <boost/container/flat_set.hpp>
 #include <boost/container/small_vector.hpp>
 
+MONGO_MOD_PUBLIC;
 namespace mongo {
 
 // If non-empty, a vector with size equal to the number of elements in the index key pattern. Each
@@ -74,7 +76,9 @@ using MultikeyPaths = boost::container::small_vector<MultikeyComponents, kFewCom
 
 namespace multikey_paths {
 
-std::string toString(MultikeyPaths paths);
+std::string toString(const MultikeyPaths& paths);
+
+std::string multikeyComponentsToString(const MultikeyComponents& paths);
 
 /**
  * Encodes 'paths' as binary data and appends it to 'builder'.

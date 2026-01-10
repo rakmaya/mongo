@@ -34,6 +34,7 @@
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/lite_parsed_document_source.h"
+#include "mongo/db/pipeline/lite_parsed_document_source_nested_pipelines.h"
 #include "mongo/db/pipeline/lite_parsed_pipeline.h"
 #include "mongo/util/modules.h"
 
@@ -42,6 +43,8 @@
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
+
+DECLARE_STAGE_PARAMS_DERIVED_DEFAULT(RankFusion);
 
 /**
  * The $rankFusion stage is syntactic sugar for generating an output of ranked results by combining
@@ -73,17 +76,16 @@ public:
     static std::list<boost::intrusive_ptr<DocumentSource>> createFromBson(
         BSONElement elem, const boost::intrusive_ptr<ExpressionContext>& pExpCtx);
 
-    class LiteParsed final : public LiteParsedDocumentSourceNestedPipelines {
+    class LiteParsed final : public LiteParsedDocumentSourceNestedPipelines<LiteParsed> {
     public:
         static std::unique_ptr<LiteParsed> parse(const NamespaceString& nss,
                                                  const BSONElement& spec,
                                                  const LiteParserOptions& options);
 
-        LiteParsed(std::string parseTimeName,
+        LiteParsed(const BSONElement& spec,
                    const NamespaceString& nss,
                    std::vector<LiteParsedPipeline> pipelines)
-            : LiteParsedDocumentSourceNestedPipelines(
-                  std::move(parseTimeName), nss, std::move(pipelines)) {}
+            : LiteParsedDocumentSourceNestedPipelines(spec, nss, std::move(pipelines)) {}
 
 
         PrivilegeVector requiredPrivileges(bool isMongos,
@@ -101,6 +103,10 @@ public:
 
         bool isHybridSearchStage() const final {
             return true;
+        }
+
+        std::unique_ptr<StageParams> getStageParams() const override {
+            return std::make_unique<RankFusionStageParams>(_originalBson);
         }
     };
 

@@ -41,6 +41,7 @@
 #include "mongo/db/update/document_diff_applier.h"
 #include "mongo/db/update/document_diff_serialization.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/overloaded_visitor.h"  // IWYU pragma: keep
 
 #include <cstdint>
@@ -57,9 +58,9 @@ namespace write_ops {
 // Conservative per array element overhead. This value was calculated as 1 byte (element type) + 5
 // bytes (max string encoding of the array index encoded as string and the maximum key is 99999) + 1
 // byte (zero terminator) = 7 bytes
-constexpr int kWriteCommandBSONArrayPerElementOverheadBytes = 7;
+MONGO_MOD_PUBLIC constexpr int kWriteCommandBSONArrayPerElementOverheadBytes = 7;
 
-constexpr int kRetryableAndTxnBatchWriteBSONSizeOverhead =
+MONGO_MOD_PUBLIC constexpr int kRetryableAndTxnBatchWriteBSONSizeOverhead =
     kWriteCommandBSONArrayPerElementOverheadBytes * 2;
 
 /**
@@ -91,7 +92,7 @@ void opTimeSerializerWithTermCheck(repl::OpTime opTime, StringData fieldName, BS
  */
 repl::OpTime opTimeParser(BSONElement elem);
 
-class UpdateModification {
+class MONGO_MOD_PUBLIC UpdateModification {
 public:
     enum class Type { kReplacement, kModifier, kPipeline, kDelta, kTransform };
     using TransformFunc = std::function<boost::optional<BSONObj>(const BSONObj&)>;
@@ -159,32 +160,32 @@ public:
     Type type() const;
 
     BSONObj getUpdateReplacement() const {
-        invariant(type() == Type::kReplacement);
+        tassert(11052018, "Unexpected type", type() == Type::kReplacement);
         return get<ReplacementUpdate>(_update).bson;
     }
 
     BSONObj getUpdateModifier() const {
-        invariant(type() == Type::kModifier);
+        tassert(11052019, "Unexpected type", type() == Type::kModifier);
         return get<ModifierUpdate>(_update).bson;
     }
 
     const std::vector<BSONObj>& getUpdatePipeline() const {
-        invariant(type() == Type::kPipeline);
+        tassert(11052020, "Unexpected type", type() == Type::kPipeline);
         return get<PipelineUpdate>(_update);
     }
 
     doc_diff::Diff getDiff() const {
-        invariant(type() == Type::kDelta);
+        tassert(11052021, "Unexpected type", type() == Type::kDelta);
         return get<DeltaUpdate>(_update).diff;
     }
 
     const TransformFunc& getTransform() const {
-        invariant(type() == Type::kTransform);
+        tassert(11052022, "Unexpected type", type() == Type::kTransform);
         return get<TransformUpdate>(_update).transform;
     }
 
     bool mustCheckExistenceForInsertOperations() const {
-        invariant(type() == Type::kDelta);
+        tassert(11052023, "Unexpected type", type() == Type::kDelta);
         return get<DeltaUpdate>(_update).options.mustCheckExistenceForInsertOperations;
     }
 
@@ -241,7 +242,7 @@ private:
  * model doesn't fit with IDL, which does not have support for placing fields at the same level as
  * the owning object.
  */
-class WriteError {
+class MONGO_MOD_PUBLIC WriteError {
 public:
     static constexpr auto kIndexFieldName = "index"_sd;
     static constexpr auto kCodeFieldName = "code"_sd;

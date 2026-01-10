@@ -41,6 +41,7 @@
 #include "mongo/db/query/compiler/logical_model/projection/projection_policies.h"
 #include "mongo/db/query/explain_options.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/string_map.h"
 
 #include <cstddef>
@@ -48,7 +49,6 @@
 #include <memory>
 #include <set>
 #include <string>
-#include <utility>
 #include <vector>
 
 #include <boost/optional/optional.hpp>
@@ -132,6 +132,11 @@ public:
     virtual boost::optional<size_t> maxFieldsToProject() const {
         return boost::none;
     }
+
+    /**
+     * Checks if a ProjectionNode will add any fields.
+     */
+    bool isAdditionSetEmpty() const;
 
     /**
      * Recursively reports all computed paths in this projection, adding them into 'computedPaths'.

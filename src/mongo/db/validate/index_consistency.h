@@ -33,15 +33,16 @@
 #include "mongo/bson/ordering.h"
 #include "mongo/bson/simple_bsonobj_comparator.h"
 #include "mongo/db/index/multikey_paths.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/index_catalog_entry.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
-#include "mongo/db/local_catalog/throttle_cursor.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/record_id.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog_entry.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
 #include "mongo/db/storage/key_string/key_string.h"
+#include "mongo/db/throttle_cursor.h"
 #include "mongo/db/validate/validate_results.h"
 #include "mongo/db/validate/validate_state.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/progress_meter.h"
 
 #include <cstddef>
@@ -54,13 +55,13 @@
 
 namespace mongo {
 
-class IndexDescriptor;
+class IndexCatalogEntry;
 
 /**
  * Contains all the index information and stats throughout the validation.
  */
 struct IndexInfo {
-    IndexInfo(const IndexDescriptor& descriptor);
+    IndexInfo(const IndexCatalogEntry& descriptor);
     // Index name.
     const std::string indexName;
     // Contains the indexes key pattern.
@@ -85,7 +86,6 @@ struct IndexInfo {
     const bool unique;
     // Index access method pointer.
     const IndexAccessMethod* accessMethod;
-    IndexType indexType;
 };
 
 /**
@@ -276,13 +276,6 @@ private:
                      IndexInfo* indexInfo,
                      const RecordId& recordId,
                      ValidateResults* results);
-
-    /**
-     * Returns true if we should skip doing the hash bucket counting to detect extra/missing index
-     * keys. This is currently done for geo indexes as they can experience rounding errors in trig
-     * functions leading to false positives
-     */
-    bool skipTrackingIndexKeyCount(const IndexInfo& indexInfo);
 
     /**
      * During the first phase of validation, tracks the multikey paths for every observed document.

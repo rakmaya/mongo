@@ -36,6 +36,7 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/sharding_environment/cluster_command_test_fixture.h"
 #include "mongo/executor/remote_command_request.h"
+#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/unittest/unittest.h"
 
 #include <functional>
@@ -71,7 +72,6 @@ protected:
     void expectReturnsSuccess(int shardIndex) override {
         onCommandForPoolExecutor([this, shardIndex](const executor::RemoteCommandRequest& request) {
             ASSERT_EQ(kNss.coll(), request.cmdObj.firstElement().valueStringData());
-
             BSONObjBuilder bob;
             bob.append("n", 1);
             appendTxnResponseMetadata(bob);
@@ -81,7 +81,11 @@ protected:
 };
 
 TEST_F(ClusterDeleteTest, NoErrors) {
-    testNoErrors(kDeleteCmdTargeted, kDeleteCmdScatterGather);
+    for (auto uweKnobValue : {false, true}) {
+        RAIIServerParameterControllerForTest uweController("featureFlagUnifiedWriteExecutor",
+                                                           uweKnobValue);
+        testNoErrors(kDeleteCmdTargeted, kDeleteCmdScatterGather);
+    }
 }
 
 TEST_F(ClusterDeleteTest, AttachesAtClusterTimeForSnapshotReadConcern) {
@@ -100,8 +104,12 @@ TEST_F(ClusterDeleteTest, CorrectMetrics) {
     b.append("delete", 1);
     b.append("getmore", 0);
     b.append("command", 0);
-
-    testOpcountersAreCorrect(kDeleteCmdTargeted, /* expectedValue */ b.obj());
+    const BSONObj obj = b.obj();
+    for (auto uweKnobValue : {false, true}) {
+        RAIIServerParameterControllerForTest uweController("featureFlagUnifiedWriteExecutor",
+                                                           uweKnobValue);
+        testOpcountersAreCorrect(kDeleteCmdTargeted, /* expectedValue */ obj);
+    }
 }
 
 TEST_F(ClusterDeleteTest, RejectsCmdAggregateNamespace) {

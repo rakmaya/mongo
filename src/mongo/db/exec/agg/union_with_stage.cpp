@@ -34,7 +34,7 @@
 #include "mongo/db/exec/agg/document_source_to_stage_registry.h"
 #include "mongo/db/exec/agg/pipeline_builder.h"
 #include "mongo/db/pipeline/document_source_union_with.h"
-#include "mongo/db/views/resolved_view.h"
+#include "mongo/db/views/resolved_view.h"  // IWYU pragma: keep
 #include "mongo/logv2/log.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
@@ -126,7 +126,7 @@ GetNextResult UnionWithStage::doGetNext() {
         } catch (const ExceptionFor<ErrorCodes::CommandOnShardedViewNotSupportedOnMongod>& e) {
             // Preparation of sub pipeline failed. The pipeline will be modified to use the view
             // definition instead, and we attempt to prepare it again.
-            _sharedState->_pipeline = DocumentSourceUnionWith::buildPipelineFromViewDefinition(
+            _sharedState->_pipeline = DocumentSourceUnionWith::parsePipelineWithMaybeViewDefinition(
                 pExpCtx,
                 ResolvedNamespace{e->getNamespace(), e->getPipeline()},
                 std::move(serializedPipeline),
@@ -173,22 +173,27 @@ void UnionWithStage::prepareSubPipeline(const std::vector<BSONObj>& serializedPi
     // context of the unionWith '_pipeline' as part of DocumentSourceUnionWith constructor.
     // Attach query settings to the '_pipeline->getContext()' by copying them from the
     // parent query ExpressionContext.
-    _sharedState->_pipeline->getContext()->setQuerySettingsIfNotPresent(
-        pExpCtx->getQuerySettings());
+    const boost::intrusive_ptr<ExpressionContext>& pipelineCtx =
+        _sharedState->_pipeline->getContext();
+    pipelineCtx->initializeReferencedSystemVariables();
+    pipelineCtx->setQuerySettingsIfNotPresent(pExpCtx->getQuerySettings());
 
     logPipeline(104243, "$unionWith before pipeline prep: ", *_sharedState->_pipeline);
-    _sharedState->_pipeline = pExpCtx->getMongoProcessInterface()->preparePipelineForExecution(
-        std::move(_sharedState->_pipeline));
+
+    _sharedState->_pipeline =
+        pExpCtx->getMongoProcessInterface()->finalizeAndMaybePreparePipelineForExecution(
+            pipelineCtx,
+            std::move(_sharedState->_pipeline),
+            true /* attachCursorAfterOptimizing */,
+            pipeline_optimization::optimizeAndValidatePipeline);
     logPipeline(104244, "$unionWith POST pipeline prep: ", *_sharedState->_pipeline);
 
     _sharedState->_executionState = UnionWithSharedState::ExecutionProgress::kIteratingSubPipeline;
 
-    _sharedState->_execPipeline = exec::agg::buildPipeline(_sharedState->_pipeline->freeze());
-
     // The $unionWith stage takes responsibility for disposing of its Pipeline. When the outer
     // Pipeline that contains the $unionWith is disposed of, it will propagate dispose() to its
     // subpipeline.
-    _sharedState->_execPipeline->dismissDisposal();
+    _sharedState->_execPipeline = exec::agg::buildPipeline(_sharedState->_pipeline->freeze());
 }
 
 bool UnionWithStage::usedDisk() const {

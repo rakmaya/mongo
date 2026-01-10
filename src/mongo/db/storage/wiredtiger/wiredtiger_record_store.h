@@ -52,6 +52,7 @@
 #include "mongo/db/validate/validate_results.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/util/fail_point.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/uuid.h"
 
 #include <cstddef>
@@ -103,6 +104,10 @@ public:
         bool logEnabled{true};
         // This specifies the value for the block_compressor configuration parameter.
         std::string blockCompressor{"snappy"};
+        // Max memory page size.
+        // Setting this larger than 10m can hurt latencies and throughput degradation if this
+        // is the oplog. See SERVER-16247.
+        std::string memoryPageMax{"10M"};
         // Any additional configuration parameters for WT_SESSION::create() in the configuration
         // string format.
         std::string extraCreateOptions;
@@ -237,14 +242,9 @@ public:
     }
 
     /**
-     * Sets the new number of records and flushes the size storer.
+     * Sets the new number of records and data size, and flushes the size storer.
      */
-    void setNumRecords(long long numRecords);
-
-    /**
-     * Sets the new data size and flushes the size storer.
-     */
-    void setDataSize(long long dataSize);
+    void setSize(long long numRecords, long long dataSize) override;
 
     RecordStore::RecordStoreContainer getContainer() override;
 
@@ -321,7 +321,8 @@ protected:
                                               const RecordId&,
                                               const RecordData&,
                                               const char* damageSource,
-                                              const DamageVector&) override;
+                                              const DamageVector&,
+                                              const SeekableRecordCursor*) override;
 
     Status _truncate(OperationContext*, RecoveryUnit&) override;
 
@@ -578,6 +579,14 @@ public:
                                 RecoveryUnit& ru,
                                 const WiredTigerRecordStore& rs,
                                 bool forward);
+    WT_CURSOR* get() const {
+        tassert(10522600, "unexpected null cursor", _cursor);
+        return _cursor->get();
+    }
+
+    WT_CURSOR* operator->() const {
+        return get();
+    }
 };
 
 /**

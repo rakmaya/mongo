@@ -51,11 +51,10 @@
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
 
 #include <memory>
 #include <set>
-#include <string>
-#include <utility>
 
 #include <boost/none.hpp>
 #include <boost/none_t.hpp>
@@ -66,6 +65,8 @@ namespace mongo {
 using QueryShapeConfigurationMap = stdx::unordered_map<query_shape::QueryShapeHash,
                                                        query_settings::QueryShapeConfiguration,
                                                        QueryShapeHashHasher>;
+
+DECLARE_STAGE_PARAMS_DERIVED_DEFAULT(QuerySettings);
 
 /**
  * The $querySettings stage returns all QueryShapeConfigurations stored in the cluster.
@@ -78,7 +79,7 @@ public:
     static boost::intrusive_ptr<DocumentSource> createFromBson(
         BSONElement elem, const boost::intrusive_ptr<ExpressionContext>& pExpCtx);
 
-    class LiteParsed final : public LiteParsedDocumentSource {
+    class LiteParsed final : public LiteParsedDocumentSourceDefault<LiteParsed> {
     public:
         static std::unique_ptr<LiteParsed> parse(const NamespaceString& nss,
                                                  const BSONElement& spec,
@@ -86,11 +87,15 @@ public:
             uassert(7746800,
                     "$querySettings stage expects a document as argument",
                     spec.type() == BSONType::object);
-            return std::make_unique<LiteParsed>(spec.fieldName(), nss.tenantId());
+            return std::make_unique<LiteParsed>(spec, nss.tenantId());
         }
 
-        LiteParsed(std::string parseTimeName, const boost::optional<TenantId>& tenantId)
-            : LiteParsedDocumentSource(std::move(parseTimeName)),
+        std::unique_ptr<StageParams> getStageParams() const override {
+            return std::make_unique<QuerySettingsStageParams>(_originalBson);
+        }
+
+        LiteParsed(const BSONElement& spec, const boost::optional<TenantId>& tenantId)
+            : LiteParsedDocumentSourceDefault(spec),
               _privileges({Privilege(ResourcePattern::forClusterResource(tenantId),
                                      ActionType::querySettings)}) {}
 

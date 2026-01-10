@@ -2,7 +2,7 @@
 
 This document is a work-in-progress and just provides a high-level overview of the search implementation.
 
-[Atlas Search](https://www.mongodb.com/docs/atlas/atlas-search/) provides integrated full-text search by running queries with the $search and $searchMeta aggregation stages. You can read about the $vectorSearch aggregation stage in [vector_search](https://github.com/mongodb/mongo/blob/master/src/mongo/db/query/vector_search/README.md).
+[Atlas Search](https://www.mongodb.com/docs/atlas/atlas-search/) provides integrated full-text search by running queries with the $search and $searchMeta aggregation stages. You can read about the $vectorSearch aggregation stage in [vector_search](../../pipeline/search/vectorSearch_technical_overview.md).
 
 ## Lucene
 
@@ -20,7 +20,7 @@ Apache Lucene is an open-source text search library, written in Java. Lucene all
 
 In the current “coupled” search architecture, one `mongot` runs alongside each `mongod` or `mongos`. Each `mongod`/`mongos` and `mongot` pair are on the same physical box/server and communicate via localhost.
 
-`mongot` replicates the data from its collocated `mongod` node using change streams and builds Lucene indexes on that replicated data. `mongot` is guaranteed to be eventually consistent with mongod. Check out [mongot_cursor](https://github.com/mongodb/mongo/blob/master/src/mongo/db/query/search/mongot_cursor.h) for the core shared code that establishes and executes communication between `mongod` and `mongot`.
+`mongot` replicates the data from its collocated `mongod` node using change streams and builds Lucene indexes on that replicated data. `mongot` is guaranteed to be eventually consistent with mongod. Check out [mongot_cursor](/src/mongo/db/query/search/mongot_cursor.h) for the core shared code that establishes and executes communication between `mongod` and `mongot`.
 
 ## Search Indexes
 
@@ -51,7 +51,7 @@ db.coll.aggregate([
 ]);
 ```
 
-$search and $searchMeta are parsed as [DocumentSourceSearch](https://github.com/mongodb/mongo/blob/master/src/mongo/db/pipeline/search/document_source_search.h) and [DocumentSourceSearchMeta](https://github.com/mongodb/mongo/blob/master/src/mongo/db/pipeline/search/document_source_search_meta.h), respectively. When using the classic engine, however, DocumentSourceSearch is [desugared](https://github.com/mongodb/mongo/blob/04f19bb61aba10577658947095020f00ac1403c4/src/mongo/db/pipeline/search/document_source_search.cpp#L118) into a sequence that uses the [$\_internalSearchMongotRemote stage](https://github.com/mongodb/mongo/blob/master/src/mongo/db/pipeline/search/document_source_internal_search_mongot_remote.h) and, if the `returnStoredSource` option is false, the [$\_internalSearchIdLookup stage](https://github.com/mongodb/mongo/blob/master/src/mongo/db/pipeline/search/document_source_internal_search_id_lookup.h). In SBE, both $search and $searchMeta are lowered directly from the original document sources.
+$search and $searchMeta are parsed as [DocumentSourceSearch](/src/mongo/db/pipeline/search/document_source_search.h) and [DocumentSourceSearchMeta](/src/mongo/db/pipeline/search/document_source_search_meta.h), respectively. When using the classic engine, however, DocumentSourceSearch is [desugared](https://github.com/mongodb/mongo/blob/04f19bb61aba10577658947095020f00ac1403c4/src/mongo/db/pipeline/search/document_source_search.cpp#L118) into a sequence that uses the [$\_internalSearchMongotRemote stage](/src/mongo/db/pipeline/search/document_source_internal_search_mongot_remote.h) and, if the `returnStoredSource` option is false, the [$\_internalSearchIdLookup stage](/src/mongo/db/pipeline/search/document_source_internal_search_id_lookup.h). In SBE, both $search and $searchMeta are lowered directly from the original document sources.
 
 For example, the stage `{$search: {query: “chocolate”, path: “flavor”}, returnStoredSource: false}` will desugar into the two stages: `{$_internalSearchMongotRemote: {query: “chocolate”, path: “flavor”}, returnStoredSource: false}` and `{$_internalSearchIdLookup: {}}`.
 
@@ -77,6 +77,11 @@ For example, if we know that we will need all documents from mongot in order to 
 
 The $\_internalSearchIdLookup stage is responsible for recreating the entire document to give to the rest of the agg pipeline (in the above example, $match and $project) and for checking to make sure the data returned is up to date with the data on `mongod`, since `mongot`’s indexed data is eventually consistent with `mongod`. For example, if `mongot` returned the \_id to a document that had been deleted, $\_internalSearchIdLookup is responsible for catching; it won’t find a document matching that \_id and then filters out that document. The stage will also perform shard filtering, where it ensures there are no duplicates from separate shards, and it will retrieve the most up-to-date field values. However, this stage doesn’t account for documents that had been inserted to the collection but not yet propagated to `mongot` via the $changeStream; that’s why search queries are eventually consistent but don’t guarantee strong consistency.
 
+**Catalog Access and Shard Filtering**: Unlike most pipeline stages that just transform documents, `$_internalSearchIdLookup` must read from storage to perform \_id lookups. This requires a `CollectionAcquisition`, which holds both the collection pointer and the shard version information needed for filtering. Reusing the same `CollectionAcquisition` across all \_id lookups ensures a consistent snapshot of the collection and proper shard filtering. This is handled in two phases:
+
+- **Setup via `bindCatalogInfo()`**: Before execution begins, [`Pipeline::bindCatalogInfo()`](https://github.com/mongodb/mongo/blob/a013280e0e5dc374f78adbc4cb68b4d190c1d9ed/src/mongo/db/pipeline/pipeline.h#L448-L450) gives each stage a chance to grab the catalog resources it needs. For $\_internalSearchIdLookup, this means receiving the `CollectionAcquisition` along with a shared [`ShardRoleTransactionResourcesStasherForPipeline`](https://github.com/mongodb/mongo/blob/a013280e0e5dc374f78adbc4cb68b4d190c1d9ed/src/mongo/db/pipeline/shard_role_transaction_resources_stasher_for_pipeline.h#L46) that preserves transaction resources across getMores. The stage bundles these into a [`DSInternalSearchIdLookUpCatalogResourceHandle`](https://github.com/mongodb/mongo/blob/a013280e0e5dc374f78adbc4cb68b4d190c1d9ed/src/mongo/db/pipeline/search/document_source_internal_search_id_lookup.h#L257-L277) to use during execution.
+- **Execution via `CatalogResourceHandle`**: During `doGetNext()`, the stage calls `acquire()` on the `CatalogResourceHandle` to restore transaction resources onto the opCtx (required before accessing the `CollectionAcquisition`), sets up the \_id lookup query, then calls `release()`. The underlying query executor then uses the same `CollectionAcquisition` and manages its own stashing and unstashing during execution.
+
 ### Explains
 
 Like normal explain queries, search explain queries can be run with three different verbosities, "queryPlanner" which does not execute the query, and "executionStats" and "allPlansExecution" which do execute the query and output execution stats about the query.
@@ -87,4 +92,4 @@ For queries with "executionStats" or "allPlansExecution" verbosity levels, we fo
 
 ### Didn't Find What You're Looking For?
 
-Visit [the landing page](https://github.com/mongodb/mongo/blob/master/src/mongo/db/query/search/README.md) for all $search/$vectorSearch/$searchMeta related documentation for server contributors.
+Visit [the landing page](/src/mongo/db/query/search/README.md) for all $search/$vectorSearch/$searchMeta related documentation for server contributors.

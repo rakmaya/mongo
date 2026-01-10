@@ -32,15 +32,10 @@
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/json.h"
 #include "mongo/db/exec/document_value/document.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_mock.h"
-#include "mongo/db/local_catalog/index_catalog_mock.h"
-#include "mongo/db/local_catalog/shard_role_api/shard_role_mock.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/expression_context_builder.h"
@@ -49,6 +44,10 @@
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/service_context_d_test_fixture.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_mock.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog_mock.h"
+#include "mongo/db/shard_role/shard_role_mock.h"
 #include "mongo/db/storage/snapshot.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/intrusive_counter.h"
@@ -161,9 +160,7 @@ IndexEntry buildSimpleIndexEntry(const BSONObj& kp) {
             false,
             false,
             CoreIndexInfo::Identifier("a_1"),
-            nullptr,
             {},
-            nullptr,
             nullptr};
 }
 }  // namespace
@@ -208,9 +205,9 @@ TEST_F(ClassicStageBuilderTest, VirtualScanTranslation) {
 }
 
 TEST_F(ClassicStageBuilderTest, IndexFetchTranslationPopulatesMap) {
-    auto idxScan = std::make_unique<IndexScanNode>(buildSimpleIndexEntry(BSON("a" << 1)));
+    auto idxScan = std::make_unique<IndexScanNode>(kNss, buildSimpleIndexEntry(BSON("a" << 1)));
     QuerySolutionNode* idxScanPtr = idxScan.get();
-    auto fetch = std::make_unique<FetchNode>(std::move(idxScan));
+    auto fetch = std::make_unique<FetchNode>(std::move(idxScan), kNss);
     QuerySolutionNode* fetchPtr = fetch.get();
 
     auto stage = buildPlanStage(makeQuerySolution(std::move(fetch)));

@@ -29,7 +29,6 @@
 
 #pragma once
 
-#include "mongo/base/string_data.h"
 #include "mongo/base/string_data_comparator.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/config.h"  // IWYU pragma: keep
@@ -40,6 +39,7 @@
 #include "mongo/platform/compiler.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/bufreader.h"
+#include "mongo/util/modules.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -79,13 +79,13 @@ public:
         }
     }
 
-    std::pair<value::TypeTags, value::Value> getViewOfValue(size_t idx) const {
+    TagValueView getViewOfValue(size_t idx) const {
         const RowType& self = *static_cast<const RowType*>(this);
         SlotAccessorHelper::dassertValidSlotValue(self.tags()[idx], self.values()[idx]);
         return {self.tags()[idx], self.values()[idx]};
     }
 
-    std::pair<value::TypeTags, value::Value> copyOrMoveValue(size_t idx) {
+    TagValueOwned copyOrMoveValue(size_t idx) {
         RowType& self = *static_cast<RowType*>(this);
         SlotAccessorHelper::dassertValidSlotValue(self.tags()[idx], self.values()[idx]);
         if (self.owned()[idx]) {
@@ -106,6 +106,16 @@ public:
         self.values()[idx] = val;
         self.tags()[idx] = tag;
         self.owned()[idx] = own;
+    }
+
+    void reset(size_t idx, value::TagValueMaybeOwned val) {
+        auto [owned, tag, value] = val.releaseToRaw();
+        reset(idx, owned, tag, value);
+    }
+
+    void reset(size_t idx, value::TagValueOwned val) {
+        auto [tag, value] = val.releaseToRaw();
+        reset(idx, true, tag, value);
     }
 
 
@@ -392,6 +402,7 @@ private:
     const ComparatorType* _comparator = nullptr;
 };
 typedef RowEq<MaterializedRow> MaterializedRowEq;
+typedef RowEq<FixedSizeRow<1 /*N*/>> SingleRowFixedSizeRowEq;
 
 template <typename RowType>
 struct RowLess {
@@ -447,6 +458,7 @@ private:
 };
 
 typedef RowHasher<MaterializedRow> MaterializedRowHasher;
+typedef RowHasher<FixedSizeRow<1 /*N*/>> FixedSizeSingleRowHasher;
 
 int getApproximateSize(TypeTags tag, Value val);
 

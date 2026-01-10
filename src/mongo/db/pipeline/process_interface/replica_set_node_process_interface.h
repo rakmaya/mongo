@@ -47,6 +47,7 @@
 #include "mongo/db/timeseries/timeseries_gen.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/executor/task_executor.h"
+#include "mongo/util/modules.h"
 
 #include <list>
 #include <memory>
@@ -62,7 +63,8 @@ namespace mongo {
  * An implementation of the MongoProcessInterface used on replica set nodes when sharding is not
  * enabled.
  */
-class ReplicaSetNodeProcessInterface final : public NonShardServerProcessInterface {
+class MONGO_MOD_PUBLIC ReplicaSetNodeProcessInterface final
+    : public NonShardServerProcessInterface {
 public:
     using NonShardServerProcessInterface::NonShardServerProcessInterface;
 
@@ -94,11 +96,11 @@ public:
 
     ~ReplicaSetNodeProcessInterface() override = default;
 
-    Status insert(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                  const NamespaceString& ns,
-                  std::unique_ptr<write_ops::InsertCommandRequest> insertCommand,
-                  const WriteConcernOptions& wc,
-                  boost::optional<OID> targetEpoch) final;
+    InsertResult insert(const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                        const NamespaceString& ns,
+                        std::unique_ptr<write_ops::InsertCommandRequest> insertCommand,
+                        const WriteConcernOptions& wc,
+                        boost::optional<OID> targetEpoch) final;
 
     StatusWith<UpdateResult> update(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                                     const NamespaceString& ns,
@@ -128,16 +130,24 @@ public:
                               const BSONObj& cmdObj,
                               const TimeseriesOptions& userOpts) override;
 
-    Status insertTimeseries(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                            const NamespaceString& ns,
-                            std::unique_ptr<write_ops::InsertCommandRequest> insertCommand,
-                            const WriteConcernOptions& wc,
-                            boost::optional<OID> targetEpoch) override;
+    InsertResult insertTimeseries(const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                                  const NamespaceString& ns,
+                                  std::unique_ptr<write_ops::InsertCommandRequest> insertCommand,
+                                  const WriteConcernOptions& wc,
+                                  boost::optional<OID> targetEpoch) override;
 
     UUID fetchCollectionUUIDFromPrimary(OperationContext* opCtx,
                                         const NamespaceString& nss) override;
 
 private:
+    /**
+     * Attemps to execute the specified command on the primary. Returns the command response without
+     * parsing the result. May return non-OK status in case of network issues.
+     */
+    StatusWith<BSONObj> _executeCommandOnPrimaryRaw(OperationContext* opCtx,
+                                                    const NamespaceString& ns,
+                                                    const BSONObj& cmdObj,
+                                                    bool attachWriteConcern = true) const;
     /**
      * Attemps to execute the specified command on the primary. Returns the command response upon
      * success or a non-OK status upon a failed command response, a writeConcernError, or any

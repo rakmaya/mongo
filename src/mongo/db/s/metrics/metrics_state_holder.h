@@ -29,6 +29,10 @@
 
 #pragma once
 
+#include "mongo/util/modules.h"
+
+#include <boost/optional/optional.hpp>
+
 namespace mongo {
 
 template <typename StateVariant, typename CumulativeMetricsT>

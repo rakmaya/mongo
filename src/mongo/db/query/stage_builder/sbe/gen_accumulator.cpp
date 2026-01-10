@@ -2072,7 +2072,7 @@ bool AccumOp::hasBuildAddBlockAggs() const {
 }
 
 bool AccumOp::canBuildSinglePurposeAccumulator() const {
-    return bool{_opInfo->buildSinglePurposeAccum};
+    return bool{getOpInfo()->buildSinglePurposeAccum};
 }
 
 SbHashAggAccumulator AccumOp::buildSinglePurposeAccumulator(StageBuilderState& state,
@@ -2080,6 +2080,9 @@ SbHashAggAccumulator AccumOp::buildSinglePurposeAccumulator(StageBuilderState& s
                                                             std::string fieldName,
                                                             SbSlot outSlot,
                                                             SbSlot spillSlot) const {
+    uassert(11618600,
+            str::stream() << "Unsupported Accumulator in SBE accumulator builder: " << _opName,
+            _opInfo != nullptr);
     return _opInfo->buildSinglePurposeAccum(
         *this,
         std::make_unique<AddSingleInput>(std::move(inputExpression)),

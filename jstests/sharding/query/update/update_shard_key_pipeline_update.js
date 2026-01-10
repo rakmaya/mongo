@@ -49,6 +49,7 @@ const changeShardKeyOptions = [
 changeShardKeyOptions.forEach(function (updateConfig) {
     let runInTxn, isFindAndModify, upsert;
     [runInTxn, isFindAndModify, upsert] = [updateConfig[0], updateConfig[1], updateConfig[2]];
+    // TODO SERVER-114994 findAndModify support in UWE.
 
     jsTestLog(
         "Testing changing the shard key using pipeline style update and " +

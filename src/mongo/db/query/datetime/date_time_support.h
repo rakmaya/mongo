@@ -36,15 +36,14 @@
 #include "mongo/db/service_context.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/string_map.h"
 #include "mongo/util/time_support.h"
 
 #include <cstdint>
 #include <cstdlib>
 #include <memory>
-#include <ostream>
 #include <string>
-#include <utility>
 #include <vector>
 
 #include <boost/none.hpp>
@@ -56,7 +55,10 @@ struct _timelib_rel_time;
 struct _timelib_tzdb;
 struct _timelib_tzinfo;
 
-namespace mongo {
+/**
+ * TODO SERVER-114888: Remove external dependencies on this module.
+ */
+namespace MONGO_MOD_NEEDS_REPLACEMENT mongo {
 
 /**
  * Default format values for date-times, e.g. for $dateToString aggregations.
@@ -747,4 +749,4 @@ Date_t truncateDate(Date_t date,
 Date_t truncateDateMillis(Date_t date, Date_t referencePoint, unsigned long long binSizeMillis);
 
 long long getBinSizeInMillis(unsigned long long binSize, TimeUnit unit);
-}  // namespace mongo
+}  // namespace MONGO_MOD_NEEDS_REPLACEMENT mongo

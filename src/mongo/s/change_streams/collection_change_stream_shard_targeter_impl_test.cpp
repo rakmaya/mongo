@@ -32,14 +32,13 @@
 #include "mongo/db/pipeline/change_stream_reader_context_mock.h"
 #include "mongo/db/pipeline/historical_placement_fetcher_mock.h"
 #include "mongo/db/service_context_test_fixture.h"
+#include "mongo/s/change_streams/change_stream_db_absent_state_event_handler.h"
+#include "mongo/s/change_streams/change_stream_db_present_state_event_handler.h"
 #include "mongo/s/change_streams/change_stream_shard_targeter_state_event_handler_mock.h"
-#include "mongo/s/change_streams/collection_change_stream_db_absent_state_event_handler.h"
-#include "mongo/s/change_streams/collection_change_stream_db_present_state_event_handler.h"
 #include "mongo/s/change_streams/control_events.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/unittest/death_test.h"
 #include "mongo/unittest/unittest.h"
-#include "mongo/util/assert_util.h"
 
 #include <memory>
 #include <vector>
@@ -96,7 +95,9 @@ TEST_F(CollectionChangeStreamShardTargeterImplFixture,
     ASSERT_TRUE(readerCtx().openCursorOnConfigServerCalls.empty());
 }
 
-DEATH_TEST_REGEX_F(CollectionChangeStreamShardTargeterImplFixture,
+using CollectionChangeStreamShardTargeterImplFixtureDeathTest =
+    CollectionChangeStreamShardTargeterImplFixture;
+DEATH_TEST_REGEX_F(CollectionChangeStreamShardTargeterImplFixtureDeathTest,
                    Given_FuturePlacement_When_Initialize_Then_Throws,
                    "Tripwire assertion.*10720100") {
     Timestamp clusterTime(20, 1);
@@ -145,7 +146,7 @@ TEST_F(
         targeter().getEventHandler()));
 }
 
-DEATH_TEST_REGEX_F(CollectionChangeStreamShardTargeterImplFixture,
+DEATH_TEST_REGEX_F(CollectionChangeStreamShardTargeterImplFixtureDeathTest,
                    Given_NoEventHandlerSet_When_HandleEvent_Then_Throws,
                    "Tripwire assertion.*10720101") {
     Document event(BSON("operationType" << MoveChunkControlEvent::opType));
@@ -190,7 +191,7 @@ TEST_F(CollectionChangeStreamShardTargeterImplFixture,
     }
 }
 
-DEATH_TEST_REGEX_F(CollectionChangeStreamShardTargeterImplFixture,
+DEATH_TEST_REGEX_F(CollectionChangeStreamShardTargeterImplFixtureDeathTest,
                    When_StartChangeStreamSegmentIsCalled_Then_Throws,
                    "Tripwire assertion.*10783902") {
     targeter().startChangeStreamSegment(opCtx(), Timestamp(99, 0), readerCtx());

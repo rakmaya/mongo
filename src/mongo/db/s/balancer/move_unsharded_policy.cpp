@@ -33,10 +33,10 @@
 #include "mongo/bson/util/bson_extract.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/global_catalog/ddl/sharding_catalog_manager.h"
-#include "mongo/db/local_catalog/ddl/list_collections_gen.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/s/balancer/balancer_chunk_selection_policy.h"
 #include "mongo/db/s/resharding/resharding_server_parameters_gen.h"
+#include "mongo/db/shard_role/ddl/list_collections_gen.h"
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/sharding_environment/sharding_feature_flags_gen.h"
 #include "mongo/db/topology/shard_registry.h"
@@ -179,7 +179,7 @@ boost::optional<std::pair<NamespaceString, ChunkType>> getRandomUntrackedCollect
         auto& collectionUUID = coll.second.getInfo()->getUuid().get();
         ChunkType dummyChunk{collectionUUID,
                              ChunkRange(BSON("_id" << MINKEY), BSON("_id" << MAXKEY)),
-                             ChunkVersion::UNSHARDED(),
+                             ChunkVersion::UNTRACKED(),
                              shardId};
         return std::make_pair(std::move(coll.first), dummyChunk);
     }
@@ -297,6 +297,7 @@ void MoveUnshardedPolicy::applyActionResult(OperationContext* opCtx,
                 case ErrorCodes::CannotCreateIndex:
                 case ErrorCodes::CommandNotSupported:
                 case ErrorCodes::ConflictingOperationInProgress:
+                case ErrorCodes::DatabaseDifferCase:
                 case ErrorCodes::DuplicateKey:
                 case ErrorCodes::FailedToSatisfyReadPreference:
                 // IllegalOperation may happen if moving inconsistent legacy timeseries collections
@@ -314,6 +315,7 @@ void MoveUnshardedPolicy::applyActionResult(OperationContext* opCtx,
                 case ErrorCodes::SnapshotTooOld:
                 case ErrorCodes::StaleDbVersion:
                 case ErrorCodes::TemporarilyUnavailable:
+                case ErrorCodes::TransactionTooLargeForCache:
                 case ErrorCodes::UserWritesBlocked:
                     return true;
                 default:

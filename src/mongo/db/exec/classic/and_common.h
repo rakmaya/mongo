@@ -31,6 +31,7 @@
 
 #include "mongo/bson/simple_bsonobj_comparator.h"
 #include "mongo/db/exec/classic/working_set.h"
+#include "mongo/util/modules.h"
 
 namespace mongo {
 
@@ -61,7 +62,9 @@ public:
         }
 
         if (src.hasObj()) {
-            invariant(src.getState() == WorkingSetMember::RID_AND_OBJ);
+            tassert(11051668,
+                    "Expecting src state to be RID_AND_OBJ",
+                    src.getState() == WorkingSetMember::RID_AND_OBJ);
 
             // 'src' has the full document but 'dest' doesn't so we need to copy it over.
             dest->doc = src.doc;

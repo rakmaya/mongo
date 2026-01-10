@@ -32,23 +32,24 @@
 #include "mongo/bson/bson_validate.h"
 #include "mongo/bson/bson_validate_gen.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_options.h"
-#include "mongo/db/local_catalog/database.h"
-#include "mongo/db/local_catalog/index_catalog_entry.h"
-#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
-#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
-#include "mongo/db/local_catalog/throttle_cursor.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/server_options.h"
+#include "mongo/db/shard_role/lock_manager/d_concurrency.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_options.h"
+#include "mongo/db/shard_role/shard_catalog/database.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog_entry.h"
+#include "mongo/db/shard_role/shard_role.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
+#include "mongo/db/throttle_cursor.h"
 #include "mongo/db/validate/validate_options.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/string_map.h"
 #include "mongo/util/uuid.h"
 
@@ -64,6 +65,13 @@
 namespace mongo {
 
 namespace CollectionValidation {
+
+/**
+ * Returns a scoped object, which holds the 'validateLock' in exclusive mode for
+ * the given scope. It must only be used to coordinate validation with concurrent
+ * oplog batch applications.
+ */
+MONGO_MOD_PUBLIC Lock::ExclusiveLock obtainExclusiveValidationLock(OperationContext* opCtx);
 
 /**
  * Contains information about the collection being validated and the user provided validation
@@ -140,24 +148,6 @@ public:
      */
     void initializeCursors(OperationContext* opCtx);
 
-    boost::optional<Timestamp> getValidateTimestamp() {
-        return _validateTs;
-    }
-
-    /**
-     * Returns a scoped object, which holds the 'validateLock' in exclusive mode for
-     * the given scope. It must only be used to coordinate validation with concurrent
-     * oplog batch applications.
-     */
-    static Lock::ExclusiveLock obtainExclusiveValidationLock(OperationContext* opCtx);
-
-    /**
-     * Returns a scoped object, which holds the 'validateLock' in shared mode for
-     * the given scope. It must only be used to coordinate validation with concurrent
-     * oplog batch applications.
-     */
-    static Lock::SharedLock obtainSharedValidationLock(OperationContext* opCtx);
-
 private:
     ValidateState() = delete;
 
@@ -188,8 +178,6 @@ private:
     RecordId _firstRecordId;
 
     DataThrottle _dataThrottle;
-
-    boost::optional<Timestamp> _validateTs = boost::none;
 };
 
 }  // namespace CollectionValidation

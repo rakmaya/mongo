@@ -48,8 +48,6 @@
 #include "mongo/client/read_preference.h"
 #include "mongo/db/client.h"
 #include "mongo/db/database_name.h"
-#include "mongo/db/global_catalog/catalog_cache/catalog_cache.h"
-#include "mongo/db/global_catalog/catalog_cache/routing_information_cache.h"
 #include "mongo/db/global_catalog/chunk.h"
 #include "mongo/db/global_catalog/chunk_manager.h"
 #include "mongo/db/global_catalog/ddl/shard_util.h"
@@ -63,6 +61,8 @@
 #include "mongo/db/repl/read_concern_level.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/repl/replication_coordinator.h"
+#include "mongo/db/router_role/routing_cache/catalog_cache.h"
+#include "mongo/db/router_role/routing_cache/routing_information_cache.h"
 #include "mongo/db/s/balancer/actions_stream_policy.h"
 #include "mongo/db/s/balancer/auto_merger_policy.h"
 #include "mongo/db/s/balancer/balancer_commands_scheduler.h"
@@ -761,9 +761,9 @@ void Balancer::moveRange(OperationContext* opCtx,
 
     const auto maxChunkSize = getMaxChunkSizeBytes(opCtx, coll);
 
-    sharding::router::CollectionRouter router{opCtx->getServiceContext(), nss};
+    sharding::router::CollectionRouter router(opCtx, nss);
     router.routeWithRoutingContext(
-        opCtx, "moveRange"_sd, [&](OperationContext* opCtx, RoutingContext& unusedRoutingCtx) {
+        "moveRange"_sd, [&](OperationContext* opCtx, RoutingContext& unusedRoutingCtx) {
             unusedRoutingCtx.skipValidation();
 
             const auto cm = uassertStatusOK(getPlacementInfoForShardedCollection(opCtx, nss));

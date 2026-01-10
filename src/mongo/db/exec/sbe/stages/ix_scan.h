@@ -33,7 +33,7 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/ordering.h"
 #include "mongo/bson/util/builder.h"
-#include "mongo/db/admission/execution_admission_context.h"
+#include "mongo/db/admission/execution_control/execution_admission_context.h"
 #include "mongo/db/exec/plan_stats.h"
 #include "mongo/db/exec/sbe/expressions/expression.h"
 #include "mongo/db/exec/sbe/stages/collection_helpers.h"
@@ -43,11 +43,12 @@
 #include "mongo/db/exec/sbe/values/slot.h"
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/db/exec/sbe/vm/vm.h"
-#include "mongo/db/local_catalog/index_catalog_entry.h"
+#include "mongo/db/index/index_access_method.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/compiler/physical_model/index_bounds/index_bounds.h"
 #include "mongo/db/query/compiler/physical_model/query_solution/stage_types.h"
 #include "mongo/db/query/plan_yield_policy.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog_entry.h"
 #include "mongo/db/storage/index_entry_comparison.h"
 #include "mongo/db/storage/key_string/key_string.h"
 #include "mongo/db/storage/record_store.h"
@@ -66,8 +67,11 @@
 namespace mongo::sbe {
 
 /**
- * An abstract index scan stage class to share common code for 'SimpleIndexScanStage' and
- * 'GenericIndexScanStage'.
+ * An index scan stage class to share common code for 'SimpleIndexScanStage' and
+ * 'GenericIndexScanStage'. Virtual methods are defined in 'IndexScanStageBaseImpl', which
+ * 'SimpleIndexScanStage'  and 'GenericIndexScanStage' will inherit from via the curiously recurring
+ * template pattern. Common, hot-path code goes in 'IndexScanStageBaseImpl'. Common, colder code
+ * goes in 'IndexScanStageBase', to reduce binary size and improve icache locality.
  *
  * The "output" slots are
  *   - 'indexKeySlot': the "KeyString" representing the index entry,
@@ -101,7 +105,6 @@ public:
                        bool participateInTrialRunTracking = true);
 
     value::SlotAccessor* getAccessor(CompileCtx& ctx, value::SlotId slot) final;
-    PlanState getNext() final;
     void close() final;
 
     std::unique_ptr<PlanStageStats> getStats(bool includeDebugInfo) const override;
@@ -122,13 +125,6 @@ protected:
         kFinished
     };
 
-    // Seeks and returns the first/next index KeyStringEntry or boost::none if no such key exists.
-    virtual SortedDataKeyValueView seek(RecoveryUnit& ru) = 0;
-    // Returns true if the 'key' is within the bounds and false otherwise. Implementations may set
-    // state internally to reflect whether the scan is done, or whether a new seek point should be
-    // used.
-    virtual bool validateKey(const SortedDataKeyValueView& key) = 0;
-
     void doSaveState() override;
     void doRestoreState() final;
     void doDetachFromOperationContext() final;
@@ -142,7 +138,10 @@ protected:
      */
     void restoreCollectionAndIndex();
     // Bumps '_specificStats.numReads' and calls base class trackRead().
-    void trackIndexRead();
+    inline void trackIndexRead() {
+        ++_specificStats.numReads;
+        trackRead();
+    }
     // Shares the common code for PlanStage::prepare() implementation.
     void prepareImpl(CompileCtx& ctx);
     // Shares the common code for PlanStage::open() implementation.
@@ -201,6 +200,39 @@ protected:
 };
 
 /**
+ * Defines the function getNext. This has been
+ * moved out of IndexScanStageBase because it requires templating in order for
+ * SimpleIndexScanStage and GenericIndexScanStage to inherit from it correctly.
+ */
+template <typename Derived>
+class IndexScanStageBaseImpl : public IndexScanStageBase {
+public:
+    IndexScanStageBaseImpl(StringData stageType,
+                           UUID collUuid,
+                           DatabaseName dbName,
+                           StringData indexName,
+                           bool forward,
+                           boost::optional<value::SlotId> indexKeySlot,
+                           boost::optional<value::SlotId> recordIdSlot,
+                           boost::optional<value::SlotId> snapshotIdSlot,
+                           boost::optional<value::SlotId> indexIdentSlot,
+                           IndexKeysInclusionSet indexKeysToInclude,
+                           value::SlotVector vars,
+                           PlanYieldPolicy* yieldPolicy,
+                           PlanNodeId planNodeId,
+                           bool participateInTrialRunTracking = true);
+
+    PlanState getNext() final;
+
+    inline constexpr Derived* self() noexcept {
+        return static_cast<Derived*>(this);
+    }
+    inline constexpr const Derived* self() const noexcept {
+        return static_cast<const Derived*>(this);
+    }
+};
+
+/**
  * A stage that iterates the entries of a collection index, starting from a bound specified by the
  * value in 'seekKeyLow' and ending (via IS_EOF) with the 'seekKeyHigh' bound. (A null 'seekKeyHigh'
  * scans to the end of the index. Leaving both bounds as null scans the index from beginning to
@@ -217,7 +249,7 @@ protected:
  *   ixseek lowKey highKey indexKeySlot? recordIdSlot? snapshotIdSlot? indexIdentSlot?
  *          [slot_1 = fieldNo_1, ..., slot2 = fieldNo_n] collectionUuid indexName forward
  */
-class SimpleIndexScanStage final : public IndexScanStageBase {
+class SimpleIndexScanStage final : public IndexScanStageBaseImpl<SimpleIndexScanStage> {
 public:
     SimpleIndexScanStage(UUID collUuid,
                          DatabaseName dbName,
@@ -240,17 +272,60 @@ public:
     void prepare(CompileCtx& ctx) override;
     void open(bool reOpen) override;
     std::unique_ptr<PlanStageStats> getStats(bool includeDebugInfo) const override;
-    std::vector<DebugPrinter::Block> debugPrint() const override;
+    void doDebugPrint(std::vector<DebugPrinter::Block>& ret,
+                      DebugPrintInfo& debugPrintInfo) const final;
     size_t estimateCompileTimeSize() const override;
 
 protected:
     void doSaveState() override;
-    SortedDataKeyValueView seek(RecoveryUnit& ru) override;
-    bool validateKey(const SortedDataKeyValueView& key) override;
+    inline SortedDataKeyValueView seek(RecoveryUnit& ru) {
+        auto& query = getSeekKeyLow();
+        return _cursor->seekForKeyValueView(ru, query.getView());
+    }
+    inline bool validateKey(const SortedDataKeyValueView& key) {
+        if (key.isEmpty()) {
+            _scanState = ScanState::kFinished;
+            return false;
+        }
+
+        // Note: we may in the future want to bump 'keysExamined' for comparisons to a key that
+        // result in the stage returning EOF.
+        ++_specificStats.keysExamined;
+
+        // For point bound on unique index, there's only one possible key.
+        _scanState = _pointBound && _uniqueIndex ? ScanState::kFinished : ScanState::kScanning;
+        return true;
+    }
 
 private:
     const key_string::Value& getSeekKeyLow() const;
     const key_string::Value& getSeekKeyHigh() const;
+
+    inline void initializeSeekKeyLow() {
+        value::TagValueMaybeOwned seekKeyLow = _bytecode.run(_seekKeyLowCode.get());
+        uassert(4822851,
+                str::stream() << "seek key is wrong type: " << seekKeyLow.tag(),
+                seekKeyLow.tag() == value::TypeTags::keyString);
+        _seekKeyLowHolder.reset(std::move(seekKeyLow));
+    };
+    inline void initializeSeekKeyHigh() {
+        value::TagValueMaybeOwned seekKeyHigh = _bytecode.run(_seekKeyHighCode.get());
+        uassert(4822852,
+                str::stream() << "seek key is wrong type: " << seekKeyHigh.tag(),
+                seekKeyHigh.tag() == value::TypeTags::keyString);
+
+        _seekKeyHighHolder.reset(std::move(seekKeyHigh));
+    };
+    inline void initializeSeekKeyDefault() {
+        auto sdi = _entry->accessMethod()->asSortedData()->getSortedDataInterface();
+        key_string::Builder kb(sdi->getKeyStringVersion(),
+                               sdi->getOrdering(),
+                               key_string::Discriminator::kExclusiveBefore);
+        kb.appendDiscriminator(key_string::Discriminator::kExclusiveBefore);
+
+        auto [copyTag, copyVal] = value::makeKeyString(kb.getValueCopy());
+        _seekKeyLowHolder.reset(true, copyTag, copyVal);
+    };
 
     std::unique_ptr<EExpression> _seekKeyLow;
     std::unique_ptr<EExpression> _seekKeyHigh;
@@ -263,11 +338,13 @@ private:
     value::OwnedValueAccessor _seekKeyHighHolder;
 
     bool _pointBound{false};
+
+    friend class IndexScanStageBaseImpl<SimpleIndexScanStage>;
 };
 
 /**
- * A stage that finds all keys of a collection index within the given 'IndexBounds'.
- * The index bounds can't be easily resolved to a small set of intervals in advance to use
+ * A stage that finds all keys of a collection index within the given 'IndexBounds'. The index
+ * bounds can't be easily resolved to a small set of intervals in advance to use
  * 'SimpleIndexScanStage', thus this implements a runtime algorithm using the 'IndexBoundsChecker'
  * to calculate a seek point and seek to the beginning of the next interval.
  *
@@ -287,7 +364,7 @@ struct GenericIndexScanStageParams {
     const key_string::Version version;
     const Ordering ord;
 };
-class GenericIndexScanStage final : public IndexScanStageBase {
+class GenericIndexScanStage final : public IndexScanStageBaseImpl<GenericIndexScanStage> {
 public:
     GenericIndexScanStage(UUID collUuid,
                           DatabaseName dbName,
@@ -308,12 +385,18 @@ public:
     void prepare(CompileCtx& ctx) override;
     void open(bool reOpen) override;
 
-    std::vector<DebugPrinter::Block> debugPrint() const override;
+    void doDebugPrint(std::vector<DebugPrinter::Block>& ret,
+                      DebugPrintInfo& debugPrintInfo) const final;
     size_t estimateCompileTimeSize() const override;
 
 protected:
-    SortedDataKeyValueView seek(RecoveryUnit& ru) override;
-    bool validateKey(const SortedDataKeyValueView& key) override;
+    inline SortedDataKeyValueView seek(RecoveryUnit& ru) {
+        key_string::Builder builder(_params.version, _params.ord);
+        return _cursor->seekForKeyValueView(
+            ru,
+            IndexEntryComparison::makeKeyStringFromSeekPointForSeek(_seekPoint, _forward, builder));
+    }
+    bool validateKey(const SortedDataKeyValueView& key);
 
     const GenericIndexScanStageParams _params;
 
@@ -323,5 +406,7 @@ protected:
     boost::optional<IndexBoundsChecker> _checker;
     // The end position for current range, empty if currently not in a valid range.
     key_string::Builder _endKey;
+
+    friend class IndexScanStageBaseImpl<GenericIndexScanStage>;
 };
 }  // namespace mongo::sbe

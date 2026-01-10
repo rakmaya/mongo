@@ -36,24 +36,24 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/client/read_preference.h"
-#include "mongo/db/global_catalog/catalog_cache/catalog_cache.h"
 #include "mongo/db/global_catalog/chunk_constraints.h"
 #include "mongo/db/global_catalog/chunk_manager.h"
 #include "mongo/db/global_catalog/ddl/cluster_ddl.h"
 #include "mongo/db/global_catalog/ddl/sharded_ddl_commands_gen.h"
 #include "mongo/db/global_catalog/ddl/sharding_catalog_manager.h"
-#include "mongo/db/global_catalog/router_role_api/cluster_commands_helpers.h"
-#include "mongo/db/global_catalog/router_role_api/router_role.h"
 #include "mongo/db/global_catalog/sharding_catalog_client.h"
 #include "mongo/db/global_catalog/type_collection.h"
 #include "mongo/db/global_catalog/type_collection_gen.h"
-#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/legacy_runtime_constants_gen.h"
 #include "mongo/db/repl/replication_coordinator.h"
+#include "mongo/db/router_role/cluster_commands_helpers.h"
+#include "mongo/db/router_role/router_role.h"
+#include "mongo/db/router_role/routing_cache/catalog_cache.h"
 #include "mongo/db/session/sessions_collection.h"
+#include "mongo/db/shard_role/lock_manager/d_concurrency.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
 #include "mongo/db/sharding_environment/client/shard.h"
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/topology/shard_registry.h"
@@ -136,9 +136,8 @@ void SessionsCollectionConfigServer::_shardCollectionIfNeeded(OperationContext* 
 
 void SessionsCollectionConfigServer::_generateIndexesIfNeeded(OperationContext* opCtx) {
     const auto nss = NamespaceString::kLogicalSessionsNamespace;
-    sharding::router::CollectionRouter router(opCtx->getServiceContext(), nss);
+    sharding::router::CollectionRouter router(opCtx, nss);
     router.routeWithRoutingContext(
-        opCtx,
         "SessionsCollectionConfigServer::_generateIndexesIfNeeded"_sd,
         [&](OperationContext* opCtx, RoutingContext& routingCtx) {
             const auto& cri = routingCtx.getCollectionRoutingInfo(nss);
@@ -147,7 +146,7 @@ void SessionsCollectionConfigServer::_generateIndexesIfNeeded(OperationContext* 
             // valid routing table.
             uassert(StaleConfigInfo(nss,
                                     cri.getCollectionVersion() /* receivedVersion */,
-                                    ShardVersion::UNSHARDED() /* wantedVersion */,
+                                    ShardVersion::UNTRACKED() /* wantedVersion */,
                                     ShardingState::get(opCtx)->shardId()),
                     str::stream() << "Collection " << nss.toStringForErrorMsg()
                                   << " is not sharded",
@@ -159,7 +158,7 @@ void SessionsCollectionConfigServer::_generateIndexesIfNeeded(OperationContext* 
                 nss,
                 SessionsCollection::generateCreateIndexesCmd(),
                 ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-                Shard::RetryPolicy::kNoRetry,
+                Shard::RetryPolicy::kStrictlyNotIdempotent,
                 BSONObj() /*query*/,
                 BSONObj() /*collation*/,
                 boost::none /*letParameters*/,

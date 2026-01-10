@@ -29,8 +29,8 @@
 
 #include "mongo/db/repl/intent_registry.h"
 
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/repl/replication_coordinator.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/decorable.h"
@@ -87,15 +87,8 @@ IntentRegistry::IntentToken IntentRegistry::registerIntent(IntentRegistry::Inten
     // mutex.
     bool isReplSet =
         repl::ReplicationCoordinator::get(opCtx->getServiceContext())->getSettings().isReplSet();
-    auto state = repl::ReplicationCoordinator::get(opCtx->getServiceContext())->getMemberState();
 
     std::shared_lock lock(_stateMutex);
-
-    // Downgrade Write intent to LocalWrite during initial sync.
-    if (intent == Intent::Write && isReplSet &&
-        (state == repl::MemberState::RS_STARTUP2 || state == repl::MemberState::RS_REMOVED)) {
-        intent = Intent::LocalWrite;
-    }
 
     // Do not interrupt if the killing opCtx is performing work or we are inside an
     // UninterruptibleLockGuard.
@@ -110,12 +103,14 @@ IntentRegistry::IntentToken IntentRegistry::registerIntent(IntentRegistry::Inten
                 ClientLock lock(client);
                 serviceCtx->killOperation(lock, opCtx, ErrorCodes::InterruptedAtShutdown);
             }
-            uassert(ErrorCodes::InterruptedAtShutdown,
-                    "Cannot register intent due to Shutdown.",
-                    validIntent);
+            uassert(
+                ErrorCodes::InterruptedAtShutdown,
+                fmt::format("Cannot register {} intent due to Shutdown.", intentToString(intent)),
+                validIntent);
         } else {
             uassert(ErrorCodes::InterruptedDueToReplStateChange,
-                    "Cannot register intent due to ReplStateChange.",
+                    fmt::format("Cannot register {} intent due to ReplStateChange.",
+                                intentToString(intent)),
                     validIntent);
         }
 
@@ -200,7 +195,8 @@ stdx::future<ReplicationStateTransitionGuard> IntentRegistry::killConflictingOpe
     auto timeOutSec = stdx::chrono::seconds(
         timeout_sec ? *timeout_sec : repl::fassertOnLockTimeoutForStepUpDown.load());
 
-    _waitForDrain(Intent::BlockingWrite, stdx::chrono::milliseconds(0));
+    _waitForDrain(Intent::BlockingWrite,
+                  stdx::chrono::duration_cast<stdx::chrono::milliseconds>(timeOutSec));
     {
         stdx::unique_lock lock(_stateMutex);
         if (_interruptionCtx) {
@@ -362,7 +358,15 @@ void IntentRegistry::_waitForDrain(IntentRegistry::Intent intent,
                   "token_id"_attr = token,
                   "client"_attr = opCtx->getClient()->desc());
         }
-        LOGV2(9795404, "Timeout while waiting on intent queue to drain");
+        LOGV2_FATAL_CONTINUE(9795404,
+                             "Timeout while waiting on intent queue to drain, printing stack "
+                             "traces then calling abort() to allow the cluster to progress.");
+
+#if defined(MONGO_STACKTRACE_CAN_DUMP_ALL_THREADS)
+        // Dump the stack of each thread.
+        printAllThreadStacksBlocking();
+#endif
+
         fasserted(9795401);
     } else if (!timeout.count()) {
         tokenMap.cv.wait(lock, [&tokenMap] { return tokenMap.map.empty(); });

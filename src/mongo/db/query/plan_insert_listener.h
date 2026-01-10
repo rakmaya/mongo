@@ -31,7 +31,6 @@
 
 #include "mongo/base/status.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/canonical_query.h"
@@ -39,11 +38,13 @@
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/wait_for_majority_service.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/future.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/time_support.h"
 
 #include <cstdint>
@@ -77,10 +78,11 @@ public:
 class LocalCappedInsertNotifier final : public Notifier {
 public:
     LocalCappedInsertNotifier(std::shared_ptr<CappedInsertNotifier> notifier)
-        : _notifier(std::move(notifier)) {}
+        : _notifier(std::move(notifier)) {
+        tassert(11321505, "notifier must not be null", _notifier);
+    }
 
     void prepareForWait(OperationContext* opCtx) final {
-        invariant(_notifier);
         _currentVersion = _notifier->getVersion();
     }
 
@@ -108,7 +110,7 @@ public:
     // Computes the OpTime to wait on by incrementing the current read timestamp.
     void prepareForWait(OperationContext* opCtx) final {
         auto readTs = shard_role_details::getRecoveryUnit(opCtx)->getPointInTimeReadTimestamp();
-        invariant(readTs);
+        tassert(11321506, "readTs must not be none", readTs);
         _opTimeToBeMajorityCommitted =
             repl::OpTime(*readTs + 1, repl::ReplicationCoordinator::get(opCtx)->getTerm());
     }
@@ -153,9 +155,10 @@ bool shouldWaitForInserts(OperationContext* opCtx,
 /**
  * Returns an insert notifier for a capped collection.
  */
-std::unique_ptr<Notifier> getCappedInsertNotifier(OperationContext* opCtx,
-                                                  const NamespaceString& nss,
-                                                  PlanYieldPolicy* yieldPolicy);
+std::unique_ptr<Notifier> getCappedInsertNotifier(
+    OperationContext* opCtx,
+    const boost::optional<CollectionAcquisition>& collection,
+    PlanYieldPolicy* yieldPolicy);
 
 /**
  * Called for tailable and awaitData cursors in order to yield locks and waits for inserts to

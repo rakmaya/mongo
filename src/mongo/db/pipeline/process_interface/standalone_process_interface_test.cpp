@@ -32,10 +32,10 @@
 #include "mongo/base/string_data.h"
 #include "mongo/bson/oid.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_runtime.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/pipeline/field_path.h"
+#include "mongo/db/shard_role/shard_catalog/collection_sharding_runtime.h"
 #include "mongo/db/sharding_environment/shard_server_test_fixture.h"
 #include "mongo/db/versioning_protocol/chunk_version.h"
 #include "mongo/unittest/unittest.h"
@@ -86,11 +86,11 @@ protected:
         return _expCtx;
     }
 
-    void installUnshardedCollectionMetadata(OperationContext* opCtx, const NamespaceString& nss) {
-        const auto unshardedCollectionMetadata = CollectionMetadata::UNTRACKED();
+    void installUntrackedCollectionMetadata(OperationContext* opCtx, const NamespaceString& nss) {
+        const auto untrackedCollectionMetadata = CollectionMetadata::UNTRACKED();
         AutoGetCollection coll(opCtx, nss, MODE_IX);
         CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(opCtx, nss)
-            ->setFilteringMetadata(opCtx, unshardedCollectionMetadata);
+            ->setFilteringMetadata(opCtx, untrackedCollectionMetadata);
     }
 
     void setUp() override {
@@ -110,7 +110,7 @@ protected:
             underlyingNss = viewDefinition->viewOn();
         }
 
-        installUnshardedCollectionMetadata(opCtx(), underlyingNss);
+        installUntrackedCollectionMetadata(opCtx(), underlyingNss);
     }
 
     auto makeProcessInterface() {

@@ -29,21 +29,22 @@
 
 #pragma once
 
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/catalog_repair.h"
-#include "mongo/db/local_catalog/collection_catalog.h"
-#include "mongo/db/local_catalog/collection_impl.h"
-#include "mongo/db/local_catalog/durable_catalog.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/repl/storage_interface_impl.h"
 #include "mongo/db/rss/replicated_storage_service.h"
 #include "mongo/db/service_context_d_test_fixture.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_repair.h"
+#include "mongo/db/shard_role/shard_catalog/collection_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/collection_impl.h"
+#include "mongo/db/shard_role/shard_catalog/durable_catalog.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/kv/kv_engine.h"
 #include "mongo/db/storage/mdb_catalog.h"
 #include "mongo/db/storage/spill_table.h"
 #include "mongo/db/storage/storage_engine_impl.h"
 #include "mongo/db/storage/storage_repair_observer.h"
 #include "mongo/logv2/log.h"
+#include "mongo/util/modules.h"
 
 #include <boost/iterator/transform_iterator.hpp>
 
@@ -51,7 +52,7 @@
 
 namespace mongo {
 
-class StorageEngineTest : public ServiceContextMongoDTest {
+class MONGO_MOD_OPEN StorageEngineTest : public ServiceContextMongoDTest {
 public:
     explicit StorageEngineTest(Options options = {})
         : ServiceContextMongoDTest(std::move(options)),
@@ -119,8 +120,9 @@ public:
     Status createCollTable(OperationContext* opCtx, NamespaceString collName) {
         const std::string identName = _storageEngine->generateNewCollectionIdent(collName.dbName());
         auto& provider = rss::ReplicatedStorageService::get(opCtx).getPersistenceProvider();
+        auto& ru = *shard_role_details::getRecoveryUnit(opCtx);
         return _storageEngine->getEngine()->createRecordStore(
-            provider, collName, identName, RecordStore::Options{});
+            provider, ru, collName, identName, RecordStore::Options{});
     }
 
     Status dropIndexTable(OperationContext* opCtx, NamespaceString nss, StringData indexName) {
@@ -231,7 +233,7 @@ public:
     StorageEngine* _storageEngine;
 };
 
-class StorageEngineRepairTest : public StorageEngineTest {
+class MONGO_MOD_OPEN StorageEngineRepairTest : public StorageEngineTest {
 public:
     StorageEngineRepairTest() : StorageEngineTest(Options{}.enableRepair().inMemory(false)) {
         repl::StorageInterface::set(getServiceContext(),
@@ -254,7 +256,7 @@ public:
     }
 };
 
-class StorageEngineTestNotEphemeral : public StorageEngineTest {
+class MONGO_MOD_OPEN StorageEngineTestNotEphemeral : public StorageEngineTest {
 public:
     StorageEngineTestNotEphemeral() : StorageEngineTest(Options{}.inMemory(false)) {}
 };

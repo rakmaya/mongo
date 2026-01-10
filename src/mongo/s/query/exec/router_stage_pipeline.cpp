@@ -32,7 +32,6 @@
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/exec/agg/pipeline_builder.h"
 #include "mongo/db/exec/document_value/document_metadata_fields.h"
@@ -44,9 +43,7 @@
 
 #include <utility>
 
-#include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/smart_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
@@ -58,6 +55,12 @@ RouterStagePipeline::RouterStagePipeline(std::unique_ptr<Pipeline> mergePipeline
     tassert(11052348, "Merge pipeline cannot be empty", !_mergePipeline->getSources().empty());
     _mergeCursorsStage =
         dynamic_cast<exec::agg::MergeCursorsStage*>(_mergeExecPipeline->getStages().front().get());
+
+    // If there is an initial post batch resume token, set it on the merge cursors stage.
+    if (auto pbrt = _mergePipeline->getContext()->getInitialPostBatchResumeToken();
+        !pbrt.isEmpty()) {
+        _mergeCursorsStage->setInitialHighWaterMark(pbrt.getOwned());
+    }
 }
 
 StatusWith<ClusterQueryResult> RouterStagePipeline::next() {

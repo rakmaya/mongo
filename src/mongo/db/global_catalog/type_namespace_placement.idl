@@ -28,6 +28,7 @@
 
 global:
     cpp_namespace: "mongo"
+    mod_visibility: needs_replacement
 
 imports:
     - "mongo/db/basic_types.idl"
@@ -94,7 +95,44 @@ structs:
                 type: array<shard_id>
                 description:
                     "The set of shard IDs containing data on the requested nss/cluster at
-                    the point in time"
+                    the point in time.
+                    In 'ignoreRemovedShards' mode, all shards that are not present anymore in the
+                    current cluster topology will be removed from the result, i.e. only shard IDs of
+                    currently still-present shards are returned."
             status:
                 type: HistoricalPlacementStatus
                 description: "The status of historical placement information"
+            anyRemovedShardDetected:
+                type: bool
+                description:
+                    "When true, indicates that at least one shard that contained data for the
+                    requested nss/cluster existed in the past, but has been removed from the cluster
+                    topology afterwards.
+                    This means that data from those shards is unavailable, so any change stream
+                    used to retrieve data for this segment will only return partial data, or even no
+                    data at all.
+                    This field is only populated in 'ignoreRemovedShards' mode."
+                optional: true
+            openCursorAt:
+                type: timestamp
+                description:
+                    "Contains the timestamp of the next placement information following the
+                    requested timestamp that is available for the requested namespace/cluster, for
+                    which at least one shard is still available in the cluster's current topology.
+                    The information returned in this field allows a change stream reader to skip a
+                    time range (also called 'segment') for which there are no shards available
+                    anymore in the cluster's current topology. The segment's start and end
+                    timestamps are denoted by the values returned in the 'openCursorAt' and
+                    'nextPlacementChangedAt' field, where the latter can be left empty if the
+                    segment is unbounded.
+                    This field is only populated in 'ignoreRemovedShards' mode."
+                optional: true
+            nextPlacementChangedAt:
+                type: timestamp
+                description:
+                    "Contains the timestamp of the next placement information following the
+                    timestamp in the 'openCursorAt' return value that is available for the requested
+                    namespace/cluster.
+                    This field is only populated in 'ignoreRemovedShards' mode, and only if there is
+                    a value returned in the 'openCursorAt' field."
+                optional: true

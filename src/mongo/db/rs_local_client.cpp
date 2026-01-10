@@ -33,13 +33,13 @@
 #include "mongo/bson/timestamp.h"
 #include "mongo/client/dbclient_cursor.h"
 #include "mongo/db/dbdirectclient.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/read_concern.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/scoped_read_concern.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/rpc/op_msg.h"
@@ -248,8 +248,17 @@ Status RSLocalClient::runAggregation(
         // don't allow specifying a future timestamp for normal operations.
         if (const auto lastOp = _getLastOpTime();
             afterClusterTime->asTimestamp() < lastOp.getTimestamp()) {
+            auto level = requestReadConcernArgs.getLevel();
+            if (level == repl::ReadConcernLevel::kSnapshotReadConcern) {
+                // Snapshot read concern can not be used to wait for an opTime as it is only valid
+                // with logical times (such as clusterTimes). As a result, we need to convert the
+                // user requested level to majority read concern. This is sufficient for the
+                // pre-wait because we only need to ensure _lastOpTime is majority-committed/visible
+                // before proceeding.
+                level = repl::ReadConcernLevel::kMajorityReadConcern;
+            }
             auto status = repl::ReplicationCoordinator::get(opCtx)->waitUntilOpTimeForRead(
-                opCtx, repl::ReadConcernArgs{lastOp, requestReadConcernArgs.getLevel()});
+                opCtx, repl::ReadConcernArgs{lastOp, level});
             if (!status.isOK())
                 return status;
         }

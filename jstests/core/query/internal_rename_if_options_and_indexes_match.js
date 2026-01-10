@@ -15,6 +15,9 @@
 //   # this test dislikes.
 //   exclude_when_record_ids_replicated,
 //   requires_getmore,
+//   # TODO(SERVER-113810): Check accessing sharded cluster components on replicasets running with
+//   # --shardsvr
+//   transitioning_replicaset_incompatible,
 // ]
 
 const sourceColl = db.irap_cmd;

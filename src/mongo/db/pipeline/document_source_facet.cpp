@@ -43,6 +43,7 @@
 #include "mongo/db/pipeline/field_path.h"
 #include "mongo/db/pipeline/optimization/optimize.h"
 #include "mongo/db/pipeline/pipeline.h"
+#include "mongo/db/pipeline/pipeline_factory.h"
 #include "mongo/db/query/allowed_contexts.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
@@ -61,6 +62,14 @@ using boost::intrusive_ptr;
 using std::pair;
 using std::string;
 using std::vector;
+
+REGISTER_LITE_PARSED_DOCUMENT_SOURCE(facet,
+                                     DocumentSourceFacet::LiteParsed::parse,
+                                     AllowedWithApiStrict::kAlways);
+
+REGISTER_DOCUMENT_SOURCE_WITH_STAGE_PARAMS_DEFAULT(facet, DocumentSourceFacet, FacetStageParams);
+
+ALLOCATE_DOCUMENT_SOURCE_ID(facet, DocumentSourceFacet::id);
 
 DocumentSourceFacet::DocumentSourceFacet(std::vector<FacetPipeline> facetPipelines,
                                          const intrusive_ptr<ExpressionContext>& expCtx,
@@ -156,15 +165,8 @@ std::unique_ptr<DocumentSourceFacet::LiteParsed> DocumentSourceFacet::LiteParsed
         liteParsedPipelines.emplace_back(nss, rawPipeline.second);
     }
 
-    return std::make_unique<DocumentSourceFacet::LiteParsed>(spec.fieldName(),
-                                                             std::move(liteParsedPipelines));
+    return std::make_unique<DocumentSourceFacet::LiteParsed>(spec, std::move(liteParsedPipelines));
 }
-
-REGISTER_DOCUMENT_SOURCE(facet,
-                         DocumentSourceFacet::LiteParsed::parse,
-                         DocumentSourceFacet::createFromBson,
-                         AllowedWithApiStrict::kAlways);
-ALLOCATE_DOCUMENT_SOURCE_ID(facet, DocumentSourceFacet::id)
 
 intrusive_ptr<DocumentSourceFacet> DocumentSourceFacet::create(
     std::vector<FacetPipeline> facetPipelines,
@@ -322,8 +324,8 @@ intrusive_ptr<DocumentSource> DocumentSourceFacet::createFromBson(
     for (auto&& rawFacet : extractRawPipelines(elem)) {
         const auto facetName = rawFacet.first;
 
-        auto pipeline =
-            Pipeline::parseFacetPipeline(rawFacet.second, expCtx, [](const Pipeline& pipeline) {
+        auto pipeline = pipeline_factory::makeFacetPipeline(
+            rawFacet.second, expCtx, [](const Pipeline& pipeline) {
                 const auto& sources = pipeline.getSources();
                 for (auto& stage : sources) {
                     auto stageConstraints = stage->constraints();
@@ -334,9 +336,15 @@ intrusive_ptr<DocumentSource> DocumentSourceFacet::createFromBson(
                                       << " is not allowed to be used within a $facet stage");
                     }
                     // We expect a stage within a $facet stage to have these properties.
-                    invariant(stageConstraints.requiredPosition ==
-                              StageConstraints::PositionRequirement::kNone);
-                    invariant(!stageConstraints.isIndependentOfAnyCollection);
+                    tassert(11294804,
+                            str::stream()
+                                << "Expecting $facet stage to have no position requirement, got "
+                                << static_cast<int>(stageConstraints.requiredPosition),
+                            stageConstraints.requiredPosition ==
+                                StageConstraints::PositionRequirement::kNone);
+                    tassert(11294803,
+                            "Expecting $facet stage not to be independent of any collection",
+                            !stageConstraints.isIndependentOfAnyCollection);
                 }
             });
 

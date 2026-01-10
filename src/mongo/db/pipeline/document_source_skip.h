@@ -51,6 +51,8 @@
 
 namespace mongo {
 
+DEFINE_LITE_PARSED_STAGE_DEFAULT_DERIVED(Skip);
+
 class DocumentSourceSkip final : public DocumentSource {
 public:
     static constexpr StringData kStageName = "$skip"_sd;
@@ -94,12 +96,12 @@ public:
      * Attempts to move a subsequent $limit before the skip, potentially allowing for forther
      * optimizations earlier in the pipeline.
      */
-    DocumentSourceContainer::iterator doOptimizeAt(DocumentSourceContainer::iterator itr,
-                                                   DocumentSourceContainer* container) final;
+    DocumentSourceContainer::iterator optimizeAt(DocumentSourceContainer::iterator itr,
+                                                 DocumentSourceContainer* container);
 
     Value serialize(const SerializationOptions& opts = SerializationOptions{}) const final;
 
-    boost::intrusive_ptr<DocumentSource> optimize() final;
+    boost::intrusive_ptr<DocumentSource> optimize();
 
     DepsTracker::State getDependencies(DepsTracker* deps) const final {
         return DepsTracker::State::SEE_NEXT;  // This doesn't affect needed fields

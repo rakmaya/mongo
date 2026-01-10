@@ -12,7 +12,7 @@ Other operations are to be targeted to whichever shard(s) own data (or relevant 
 
 When a shard receives the request, it will check this token to make sure that it matches the shard's local information. If it matches, then the request will proceed. If the version does not match, the shard will throw [an exception](https://github.com/mongodb/mongo/blob/r6.0.0/src/mongo/s/stale_exception.h).
 
-When the router receives this exception, it knows that the routing information must have changed, and so it will [perform a refresh](#routing-information-refreshes) to get more recent information before sending the request again.
+When the router receives this exception, it knows that the routing information must have changed, and so it will [perform a refresh](#routing-aka-placement-information-refreshes) to get more recent information before sending the request again.
 
 The following diagram depicts a simple example of the shard versioning protocol in action. It assumes that the router is a shard server primary, thus the refresh is simply fetching newer information from the config server.
 
@@ -98,7 +98,7 @@ A placement version change indicates that something has changed about what data 
 
 ## Routing (a.k.a. Placement) Information Refreshes
 
-For sharded collections, routing is driven by the chunk placement information, for which the config server represents the [authoritative source](../local_catalog/README_sharding_catalog.md#authoritative-containers).
+For sharded collections, routing is driven by the chunk placement information, for which the config server represents the [authoritative source](../shard_role/shard_catalog/README_sharding_catalog.md#authoritative-containers).
 
 MongoS and shard primaries refresh their placement information from the config server. Shard secondaries, however, refresh from the shard primaries through a component called the Shard Server Catalog Cache Loader. When a shard primary refreshes from a config server, it persists the refreshed information to disk. This information is then replicated to secondaries who will refresh their cache from this on-disk information.
 

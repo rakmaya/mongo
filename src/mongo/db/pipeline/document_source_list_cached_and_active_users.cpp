@@ -52,9 +52,12 @@ Document makeDocumentFromCachedUserInfo(const AuthorizationRouter::CachedUserInf
 }
 }  // namespace
 
-REGISTER_TEST_DOCUMENT_SOURCE(listCachedAndActiveUsers,
-                              DocumentSourceListCachedAndActiveUsers::LiteParsed::parse,
-                              DocumentSourceListCachedAndActiveUsers::createFromBson);
+REGISTER_TEST_LITE_PARSED_DOCUMENT_SOURCE(
+    listCachedAndActiveUsers, DocumentSourceListCachedAndActiveUsers::LiteParsed::parse);
+
+REGISTER_DOCUMENT_SOURCE_WITH_STAGE_PARAMS_DEFAULT(listCachedAndActiveUsers,
+                                                   DocumentSourceListCachedAndActiveUsers,
+                                                   ListCachedAndActiveUsersStageParams);
 
 boost::intrusive_ptr<DocumentSource> DocumentSourceListCachedAndActiveUsers::createFromBson(
     BSONElement spec, const boost::intrusive_ptr<ExpressionContext>& pExpCtx) {

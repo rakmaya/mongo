@@ -24,6 +24,7 @@ import {
     metaFieldName,
     setUpShardedCluster,
     tearDownShardedCluster,
+    testDB,
     testFindOneAndUpdateOnShardedCollection,
     timeFieldName,
 } from "jstests/core/timeseries/libs/timeseries_writes_util.js";
@@ -202,6 +203,7 @@ const replacementDoc = {
 // Query on the 'f' field leads to a two phase update. Replacement-style update. The meta value
 // makes the measurement belong to a different shard and the request runs in a transaction. This
 // should succeed.
+
 (function testTwoPhaseShardKeyUpdateByFieldFilter() {
     testFindOneAndUpdateOnShardedCollection({
         initialDocList: docs,
@@ -252,6 +254,7 @@ const replacementDoc = {
 // Meta filter matches all docs with tag: "B" but only update one. The replacement doc has tag: "A"
 // and so, the measurement will be moved to a different shard. This should run in a transaction and
 // succeed.
+
 (function testTargetedShardKeyUpdateByMetaFilter() {
     testFindOneAndUpdateOnShardedCollection({
         initialDocList: docs,
@@ -340,6 +343,7 @@ const replacementDoc = {
     const resultDocList = docs.map((doc) => Object.assign({}, doc));
     resultDocList.push(replacementDoc);
 
+    // TODO SERVER-114994 findAndModify support in UWE.
     testFindOneAndUpdateOnShardedCollection({
         initialDocList: docs,
         cmd: {

@@ -213,7 +213,7 @@ StreamableReplicaSetMonitor::StreamableReplicaSetMonitor(
     // provided seed address contains a ReplicaSet with different name (deployment mistake).
     _sdamConfig =
         SdamConfiguration(seedsNoDups, TopologyType::kReplicaSetNoPrimary, _uri.getSetName());
-    _serverSelector = std::make_unique<SdamServerSelector>(_sdamConfig);
+    _serverSelector = std::make_unique<ServerSelector>(_sdamConfig);
 }
 
 StreamableReplicaSetMonitor::~StreamableReplicaSetMonitor() {
@@ -309,45 +309,16 @@ void StreamableReplicaSetMonitor::drop() {
     LOGV2(4333210, "Done closing Replica Set Monitor", "replicaSet"_attr = getName());
 }
 
-SemiFuture<HostAndPort> StreamableReplicaSetMonitor::getHostOrRefresh(
+Future<HostAndPort> StreamableReplicaSetMonitor::getHostOrRefresh(
     const ReadPreferenceSetting& criteria,
-    const std::vector<HostAndPort>& excludedHosts,
+    const TargetingMetadata& targetingMetadata,
     const CancellationToken& cancelToken) {
-    return getHostsOrRefresh(criteria, excludedHosts, cancelToken)
-        .thenRunOn(_executor)
+    return getHostsOrRefresh(criteria, targetingMetadata, cancelToken)
         .then([self = shared_from_this()](const std::vector<HostAndPort>& result) {
             invariant(!result.empty());
             // We do a random shuffle when we get the hosts so we can just pick the first one
             return result[0];
-        })
-        .semi();
-}
-
-SemiFuture<HostAndPort> StreamableReplicaSetMonitor::getAtLeastOneHostOrRefresh(
-    const ReadPreferenceSetting& criteria,
-    const stdx::unordered_set<HostAndPort>& deprioritizedServers,
-    const CancellationToken& cancelToken) {
-    return getHostsOrRefresh(criteria, {}, cancelToken)
-        .thenRunOn(_executor)
-        .then([self = shared_from_this(),
-               deprioritizedServers](const std::vector<HostAndPort>& result) -> HostAndPort {
-            invariant(!result.empty());
-            // We do a random shuffle when we get the hosts so we can just pick the first one
-            if (!deprioritizedServers.empty()) {
-                const auto notDeprioritized = [&](const HostAndPort& server) {
-                    return !deprioritizedServers.contains(server);
-                };
-
-                if (auto it = std::ranges::find_if(result, notDeprioritized); it != result.end()) {
-                    return *it;
-                }
-                // All available servers are in deprioritizedServers set, fallback to first server
-            }
-            // Return first server (either no deprioritized servers specified, or all servers are
-            // deprioritized)
-            return result[0];
-        })
-        .semi();
+        });
 }
 
 std::vector<HostAndPort> StreamableReplicaSetMonitor::_extractHosts(
@@ -359,9 +330,9 @@ std::vector<HostAndPort> StreamableReplicaSetMonitor::_extractHosts(
     return result;
 }
 
-SemiFuture<std::vector<HostAndPort>> StreamableReplicaSetMonitor::getHostsOrRefresh(
+Future<std::vector<HostAndPort>> StreamableReplicaSetMonitor::getHostsOrRefresh(
     const ReadPreferenceSetting& criteria,
-    const std::vector<HostAndPort>& excludedHosts,
+    const TargetingMetadata& targetingMetadata,
     const CancellationToken& cancelToken) {
     // In the fast case (stable topology), we avoid mutex acquisition.
     if (_isDropped.load()) {
@@ -373,7 +344,7 @@ SemiFuture<std::vector<HostAndPort>> StreamableReplicaSetMonitor::getHostsOrRefr
         _executor->now() + Milliseconds(gDefaultFindReplicaSetHostTimeoutMS.load());
 
     // try to satisfy query immediately
-    auto immediateResult = _getHosts(criteria, excludedHosts);
+    auto immediateResult = _getHosts(criteria, targetingMetadata);
     if (immediateResult) {
         return {*immediateResult};
     }
@@ -394,41 +365,41 @@ SemiFuture<std::vector<HostAndPort>> StreamableReplicaSetMonitor::getHostsOrRefr
         return makeUnsatisfiedReadPrefError(getName(), criteria);
     }
 
-    return _topologyManager->executeWithLock([this, criteria, cancelToken, deadline, excludedHosts](
-                                                 const TopologyDescriptionPtr& topologyDescription)
-                                                 -> SemiFuture<std::vector<HostAndPort>> {
-        stdx::lock_guard lk(_mutex);
+    return _topologyManager->executeWithLock(
+        [this, criteria, cancelToken, deadline, targetingMetadata](
+            const TopologyDescriptionPtr& topologyDescription) -> Future<std::vector<HostAndPort>> {
+            stdx::lock_guard lk(_mutex);
 
-        // We check if we are closed under the mutex here since someone could have called
-        // close() concurrently with the code above.
-        if (_isDropped.load()) {
-            return makeReplicaSetMonitorRemovedError(getName());
-        }
-        // try to satisfy the query again while holding both the StreamableRSM mutex and
-        // TopologyManager mutex to avoid missing any topology change that has occurred
-        // since the last check.
-        auto immediateResult = _getHosts(topologyDescription, criteria, excludedHosts);
-        if (immediateResult) {
-            return {*immediateResult};
-        }
+            // We check if we are closed under the mutex here since someone could have called
+            // close() concurrently with the code above.
+            if (_isDropped.load()) {
+                return makeReplicaSetMonitorRemovedError(getName());
+            }
+            // try to satisfy the query again while holding both the StreamableRSM mutex and
+            // TopologyManager mutex to avoid missing any topology change that has occurred
+            // since the last check.
+            auto immediateResult = _getHosts(topologyDescription, criteria, targetingMetadata);
+            if (immediateResult) {
+                return {*immediateResult};
+            }
 
-        return _enqueueOutstandingQuery(lk, criteria, excludedHosts, cancelToken, deadline);
-    });
+            return _enqueueOutstandingQuery(lk, criteria, targetingMetadata, cancelToken, deadline);
+        });
 }
 
-SemiFuture<std::vector<HostAndPort>> StreamableReplicaSetMonitor::_enqueueOutstandingQuery(
+Future<std::vector<HostAndPort>> StreamableReplicaSetMonitor::_enqueueOutstandingQuery(
     WithLock,
     const ReadPreferenceSetting& criteria,
-    const std::vector<HostAndPort>& excludedHosts,
+    const TargetingMetadata& targetingMetadata,
     const CancellationToken& cancelToken,
     const Date_t& deadline) {
 
     auto query = std::make_shared<HostQuery>(_stats);
     query->criteria = criteria;
-    query->excludedHosts = excludedHosts;
+    query->targetingMetadata = targetingMetadata;
 
-    auto pf = makePromiseFuture<std::vector<HostAndPort>>();
-    query->promise = std::move(pf.promise);
+    auto [promise, future] = makePromiseFuture<std::vector<HostAndPort>>();
+    query->promise = std::move(promise);
 
     // Make the deadline task cancelable for when the query is satisfied or when the input
     // cancelToken is canceled.
@@ -466,27 +437,28 @@ SemiFuture<std::vector<HostAndPort>> StreamableReplicaSetMonitor::_enqueueOutsta
             }
         });
 
-    return std::move(pf.future).semi();
+    return std::move(future);
 }
 
 boost::optional<std::vector<HostAndPort>> StreamableReplicaSetMonitor::_getHosts(
     const TopologyDescriptionPtr& topology,
     const ReadPreferenceSetting& criteria,
-    const std::vector<HostAndPort>& excludedHosts) {
-    auto result = _serverSelector->selectServers(topology, criteria, excludedHosts);
+    const TargetingMetadata& targetingMetadata) {
+    auto result = _serverSelector->selectServers(topology, criteria, targetingMetadata);
     if (!result)
         return boost::none;
     return _extractHosts(*result);
 }
 
 boost::optional<std::vector<HostAndPort>> StreamableReplicaSetMonitor::_getHosts(
-    const ReadPreferenceSetting& criteria, const std::vector<HostAndPort>& excludedHosts) {
-    return _getHosts(_currentTopology(), criteria, excludedHosts);
+    const ReadPreferenceSetting& criteria, const TargetingMetadata& targetingMetadata) {
+    return _getHosts(_currentTopology(), criteria, targetingMetadata);
 }
 
 HostAndPort StreamableReplicaSetMonitor::getPrimaryOrUassert() {
-    return ReplicaSetMonitorInterface::getHostOrRefresh(kPrimaryOnlyReadPreference,
-                                                        CancellationToken::uncancelable())
+    return getHostOrRefresh(kPrimaryOnlyReadPreference,
+                            {} /* targetingMetadata */,
+                            CancellationToken::uncancelable())
         .get();
 }
 
@@ -850,7 +822,7 @@ void StreamableReplicaSetMonitor::_processOutstanding(
 
         // If query has not been canceled yet, try to satisfy it.
         if (!query->hasBeenResolved()) {
-            auto result = _getHosts(topologyDescription, query->criteria, query->excludedHosts);
+            auto result = _getHosts(topologyDescription, query->criteria, query->targetingMetadata);
             if (result) {
                 if (query->tryResolveWithSuccess(std::move(*result))) {
                     const auto latency = _executor->now() - query->start;

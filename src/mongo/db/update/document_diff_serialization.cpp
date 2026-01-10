@@ -30,7 +30,6 @@
 #include <boost/container/flat_map.hpp>
 #include <boost/container/static_vector.hpp>
 #include <boost/container/vector.hpp>
-#include <fmt/format.h>
 // IWYU pragma: no_include "boost/intrusive/detail/iterator.hpp"
 // IWYU pragma: no_include "boost/move/algo/detail/set_difference.hpp"
 #include "mongo/base/checked_cast.h"
@@ -660,5 +659,37 @@ DocumentDiffReader::nextSubDiff() {
 
     return {{fieldName.substr(1, fieldName.size()), getReader(next.embeddedObject())}};
 }
+
+boost::optional<DocumentDiffReader::Modification> DocumentDiffReader::next() {
+    // Exhaust nextDelete.
+    if (boost::optional<StringData> del = nextDelete(); del.has_value()) {
+        return boost::make_optional(DocumentDiffReader::Modification{*del});
+    }
+
+    // Exhaust nextUpdate.
+    if (boost::optional<BSONElement> update = nextUpdate(); update.has_value()) {
+        return boost::make_optional(DocumentDiffReader::Modification{*update});
+    }
+
+    // Exhaust nextInsert.
+    if (boost::optional<BSONElement> insert = nextInsert(); insert.has_value()) {
+        return boost::make_optional(DocumentDiffReader::Modification{*insert});
+    }
+
+    // Exhaust nextBinary.
+    if (boost::optional<BSONElement> binary = nextBinary(); binary.has_value()) {
+        return boost::make_optional(DocumentDiffReader::Modification{*binary});
+    }
+
+    // Exhaust nextSubDiff.
+    if (boost::optional<std::pair<StringData, std::variant<DocumentDiffReader, ArrayDiffReader>>>
+            subDiff = nextSubDiff();
+        subDiff.has_value()) {
+        return boost::make_optional(DocumentDiffReader::Modification{*subDiff});
+    }
+
+    return boost::none;
+}
+
 }  // namespace doc_diff
 }  // namespace mongo

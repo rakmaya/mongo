@@ -40,14 +40,15 @@
 #include "mongo/db/collection_crud/capped_utils.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/database_name.h"
-#include "mongo/db/local_catalog/database_holder.h"
-#include "mongo/db/local_catalog/ddl/replica_set_ddl_tracker.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/ddl/replica_set_ddl_tracker.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/database_holder.h"
+#include "mongo/db/shard_role/shard_catalog/operation_sharding_state.h"
+#include "mongo/db/shard_role/shard_role.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/namespace_string_util.h"
 #include "mongo/util/str.h"
@@ -136,6 +137,10 @@ public:
 
         ReplicaSetDDLTracker::ScopedReplicaSetDDL scopedReplicaSetDDL(
             opCtx, std::vector<NamespaceString>{fromNs, toNs});
+        // Similarly to other DDL commands, e.g., CmdCreate, the collection creation for the
+        // specified toNs namespace is legitimate since it is part of the command intended
+        // functionality.
+        OperationShardingState::ScopedAllowImplicitCollectionCreate_UNSAFE allowCreate(opCtx, toNs);
 
         CollectionAcquisitionRequests acquisitionRequests = {
             CollectionAcquisitionRequest::fromOpCtx(

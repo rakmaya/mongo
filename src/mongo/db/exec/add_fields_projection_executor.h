@@ -45,6 +45,7 @@
 #include "mongo/db/query/compiler/logical_model/projection/projection_policies.h"
 #include "mongo/db/query/explain_options.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/string_map.h"
 
 #include <memory>
@@ -123,6 +124,14 @@ public:
      */
     void optimize() final {
         _root->optimize();
+    }
+
+    /**
+     * Checks whether the projection is a noop.
+     */
+    bool isNoop() const final {
+        // The $addFields projection is noop if no fields are going to be added.
+        return _root->isAdditionSetEmpty();
     }
 
     DepsTracker::State addDependencies(DepsTracker* deps) const final {

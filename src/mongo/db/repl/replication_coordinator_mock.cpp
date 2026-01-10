@@ -418,7 +418,12 @@ int ReplicationCoordinatorMock::getMyId() const {
 }
 
 HostAndPort ReplicationCoordinatorMock::getMyHostAndPort() const {
-    return HostAndPort();
+    // Set to a non-empty value to satisfy the deserializer parser.
+    return HostAndPort("test1", 1234);
+}
+
+boost::optional<int> ReplicationCoordinatorMock::getMyMaintenancePort() const {
+    return boost::none;
 }
 
 Status ReplicationCoordinatorMock::setFollowerMode(const MemberState& newState) {
@@ -452,6 +457,10 @@ StatusWith<BSONObj> ReplicationCoordinatorMock::prepareReplSetUpdatePositionComm
     BSONObjBuilder cmdBuilder;
     cmdBuilder.append("replSetUpdatePosition", 1);
     return cmdBuilder.obj();
+}
+
+ThreadPool* ReplicationCoordinatorMock::getDbWorkThreadPool() const noexcept {
+    return nullptr;
 }
 
 ReplSetConfig ReplicationCoordinatorMock::getConfig() const {

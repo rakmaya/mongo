@@ -35,19 +35,18 @@
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/client.h"
 #include "mongo/db/dbdirectclient.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/repl/repl_server_parameters_gen.h"
 #include "mongo/db/repl/replica_set_aware_service.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/wait_for_majority_service.h"
 #include "mongo/db/service_context.h"
-#include "mongo/db/vector_clock/vector_clock_metadata_hook.h"
+#include "mongo/db/shard_role/transaction_resources.h"
+#include "mongo/db/topology/vector_clock/vector_clock_metadata_hook.h"
 #include "mongo/executor/network_connection_hook.h"
 #include "mongo/executor/network_interface_factory.h"
 #include "mongo/executor/thread_pool_task_executor.h"
 #include "mongo/logv2/log.h"
-#include "mongo/otel/telemetry_context_metadata_hook.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/rpc/metadata/egress_metadata_hook_list.h"
 #include "mongo/rpc/metadata/metadata_hook.h"
@@ -88,9 +87,18 @@ MONGO_FAIL_POINT_DEFINE(PrimaryOnlyServiceHangBeforeLaunchingStepUpLogic);
 namespace {
 const auto _registryDecoration = ServiceContext::declareDecoration<PrimaryOnlyServiceRegistry>();
 
+// Services that inherit from the PrimaryOnlyService class do not have a way to specify their
+// dependencies. This is because PrimaryOnlyService acts as a container for all of them, thus all
+// instances appear as a single node in the initialization graph.
+// Some of these services are Resharding and the ConfigsvrCoordinatorService. Since those have a
+// dependency on sharding state we have to make PrimaryOnlyService also depend on it. This is fine
+// since both services are (and should) only ever used in mongod.
+//
+// TODO SERVER-114562: Move prerequisites to services that actually need them rather than making POS
+// depend on them.
 const auto _registryRegisterer =
     ReplicaSetAwareServiceRegistry::Registerer<PrimaryOnlyServiceRegistry>(
-        "PrimaryOnlyServiceRegistry");
+        "PrimaryOnlyServiceRegistry", {"ShardingInitializationMongoDRegistry"});
 
 const Status kExecutorShutdownStatus(ErrorCodes::CallbackCanceled,
                                      "PrimaryOnlyService executor shut down due to stepDown");
@@ -360,10 +368,6 @@ void PrimaryOnlyService::startup(OperationContext* opCtx) {
 
     auto hookList = std::make_unique<rpc::EgressMetadataHookList>();
     hookList->addHook(std::make_unique<rpc::VectorClockMetadataHook>(opCtx->getServiceContext()));
-#ifdef MONGO_CONFIG_OTEL
-    hookList->addHook(
-        std::make_unique<otel::TelemetryContextMetadataHook>(opCtx->getServiceContext()));
-#endif
 
     stdx::lock_guard lk(_mutex);
     if (_state == State::kShutdown) {

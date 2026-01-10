@@ -30,16 +30,12 @@
 #include "mongo/db/exec/expression_bm_fixture.h"
 
 #include "mongo/base/string_data.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/json.h"
 #include "mongo/db/pipeline/expression.h"
-#include "mongo/db/server_options.h"
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/platform/decimal128.h"
 #include "mongo/util/time_support.h"
 
-#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <random>
@@ -1915,6 +1911,270 @@ void ExpressionBenchmarkFixture::benchmarkSortArray2D(benchmark::State& state) {
                                                           << "sortBy" << BSON("a" << 1))),
                         state,
                         std::vector<Document>(1, {{"array"_sd, vectorToBSON<BSONArray>(v)}}));
+}
+
+/**
+ * Tests performance of $topN on array of random ints.
+ */
+void ExpressionBenchmarkFixture::benchmarkTopNIntRandom(benchmark::State& state) {
+    int n = 500;
+    std::vector<int> vectorOfInts;
+    vectorOfInts.reserve(n);
+    for (int i = 0; i < n; i++) {
+        vectorOfInts.push_back(random.nextInt32());
+    }
+    benchmarkExpression(BSON("$topN" << BSON("n" << 10 << "input"
+                                                 << "$array"
+                                                 << "sortBy" << 1)),
+                        state,
+                        std::vector<Document>(1, {{"array"_sd, vectorToBSON<int>(vectorOfInts)}}));
+}
+
+/**
+ * Tests performance of $topN on array of sequential ints.
+ */
+void ExpressionBenchmarkFixture::benchmarkTopNIntSequential(benchmark::State& state) {
+    int n = 500;
+    std::vector<int> vectorOfInts;
+    vectorOfInts.reserve(n);
+    for (int i = 0; i < n; i++) {
+        vectorOfInts.push_back(i);
+    }
+    benchmarkExpression(BSON("$topN" << BSON("n" << 10 << "input"
+                                                 << "$array"
+                                                 << "sortBy" << 1)),
+                        state,
+                        std::vector<Document>(1, {{"array"_sd, vectorToBSON<int>(vectorOfInts)}}));
+}
+
+/**
+ * Tests performance of $topN on array of strings.
+ */
+void ExpressionBenchmarkFixture::benchmarkTopNString(benchmark::State& state) {
+    int n = 500;
+    std::vector<std::string> v;
+    v.reserve(n);
+    for (int i = 0; i < n; i++) {
+        v.push_back("This is a long string that will provide another set of benchmarks");
+    }
+    benchmarkExpression(BSON("$topN" << BSON("n" << 10 << "input"
+                                                 << "$array"
+                                                 << "sortBy" << 1)),
+                        state,
+                        std::vector<Document>(1, {{"array"_sd, vectorToBSON<std::string>(v)}}));
+}
+
+/**
+ * Tests performance of $topN on array of BSONObj.
+ */
+void ExpressionBenchmarkFixture::benchmarkTopNBSONObj(benchmark::State& state) {
+    int n = 500;
+    std::vector<BSONObj> v;
+    v.reserve(n);
+    for (int i = 0; i < n; i++) {
+        v.push_back(BSON("a" << random.nextInt32()));
+    }
+    benchmarkExpression(BSON("$topN" << BSON("n" << 10 << "input"
+                                                 << "$array"
+                                                 << "sortBy" << BSON("a" << 1))),
+                        state,
+                        std::vector<Document>(1, {{"array"_sd, vectorToBSON<BSONObj>(v)}}));
+}
+
+/**
+ * Tests performance of $bottomN on array of random ints.
+ */
+void ExpressionBenchmarkFixture::benchmarkBottomNIntRandom(benchmark::State& state) {
+    int n = 500;
+    std::vector<int> vectorOfInts;
+    vectorOfInts.reserve(n);
+    for (int i = 0; i < n; i++) {
+        vectorOfInts.push_back(random.nextInt32());
+    }
+    benchmarkExpression(BSON("$bottomN" << BSON("n" << 10 << "input"
+                                                    << "$array"
+                                                    << "sortBy" << 1)),
+                        state,
+                        std::vector<Document>(1, {{"array"_sd, vectorToBSON<int>(vectorOfInts)}}));
+}
+
+/**
+ * Tests performance of $bottomN on array of sequential ints.
+ */
+void ExpressionBenchmarkFixture::benchmarkBottomNIntSequential(benchmark::State& state) {
+    int n = 500;
+    std::vector<int> vectorOfInts;
+    vectorOfInts.reserve(n);
+    for (int i = 0; i < n; i++) {
+        vectorOfInts.push_back(i);
+    }
+    benchmarkExpression(BSON("$bottomN" << BSON("n" << 10 << "input"
+                                                    << "$array"
+                                                    << "sortBy" << 1)),
+                        state,
+                        std::vector<Document>(1, {{"array"_sd, vectorToBSON<int>(vectorOfInts)}}));
+}
+
+/**
+ * Tests performance of $bottomN on array of strings.
+ */
+void ExpressionBenchmarkFixture::benchmarkBottomNString(benchmark::State& state) {
+    int n = 500;
+    std::vector<std::string> v;
+    v.reserve(n);
+    for (int i = 0; i < n; i++) {
+        v.push_back("This is a long string that will provide another set of benchmarks");
+    }
+    benchmarkExpression(BSON("$bottomN" << BSON("n" << 10 << "input"
+                                                    << "$array"
+                                                    << "sortBy" << 1)),
+                        state,
+                        std::vector<Document>(1, {{"array"_sd, vectorToBSON<std::string>(v)}}));
+}
+
+/**
+ * Tests performance of $bottomN on array of BSONObj.
+ */
+void ExpressionBenchmarkFixture::benchmarkBottomNBSONObj(benchmark::State& state) {
+    int n = 500;
+    std::vector<BSONObj> v;
+    v.reserve(n);
+    for (int i = 0; i < n; i++) {
+        v.push_back(BSON("a" << random.nextInt32()));
+    }
+    benchmarkExpression(BSON("$bottomN" << BSON("n" << 10 << "input"
+                                                    << "$array"
+                                                    << "sortBy" << BSON("a" << 1))),
+                        state,
+                        std::vector<Document>(1, {{"array"_sd, vectorToBSON<BSONObj>(v)}}));
+}
+
+/**
+ * Tests performance of $top on array of random ints.
+ */
+void ExpressionBenchmarkFixture::benchmarkTopIntRandom(benchmark::State& state) {
+    int n = 500;
+    std::vector<int> vectorOfInts;
+    vectorOfInts.reserve(n);
+    for (int i = 0; i < n; i++) {
+        vectorOfInts.push_back(random.nextInt32());
+    }
+    benchmarkExpression(BSON("$top" << BSON("input" << "$array"
+                                                    << "sortBy" << 1)),
+                        state,
+                        std::vector<Document>(1, {{"array"_sd, vectorToBSON<int>(vectorOfInts)}}));
+}
+
+/**
+ * Tests performance of $top on array of sequential ints.
+ */
+void ExpressionBenchmarkFixture::benchmarkTopIntSequential(benchmark::State& state) {
+    int n = 500;
+    std::vector<int> vectorOfInts;
+    vectorOfInts.reserve(n);
+    for (int i = 0; i < n; i++) {
+        vectorOfInts.push_back(i);
+    }
+    benchmarkExpression(BSON("$top" << BSON("input" << "$array"
+                                                    << "sortBy" << 1)),
+                        state,
+                        std::vector<Document>(1, {{"array"_sd, vectorToBSON<int>(vectorOfInts)}}));
+}
+
+/**
+ * Tests performance of $top on array of strings.
+ */
+void ExpressionBenchmarkFixture::benchmarkTopString(benchmark::State& state) {
+    int n = 500;
+    std::vector<std::string> v;
+    v.reserve(n);
+    for (int i = 0; i < n; i++) {
+        v.push_back("This is a long string that will provide another set of benchmarks");
+    }
+    benchmarkExpression(BSON("$top" << BSON("input" << "$array"
+                                                    << "sortBy" << 1)),
+                        state,
+                        std::vector<Document>(1, {{"array"_sd, vectorToBSON<std::string>(v)}}));
+}
+
+/**
+ * Tests performance of $top on array of BSONObj.
+ */
+void ExpressionBenchmarkFixture::benchmarkTopBSONObj(benchmark::State& state) {
+    int n = 500;
+    std::vector<BSONObj> v;
+    v.reserve(n);
+    for (int i = 0; i < n; i++) {
+        v.push_back(BSON("a" << random.nextInt32()));
+    }
+    benchmarkExpression(BSON("$top" << BSON("input" << "$array"
+                                                    << "sortBy" << BSON("a" << 1))),
+                        state,
+                        std::vector<Document>(1, {{"array"_sd, vectorToBSON<BSONObj>(v)}}));
+}
+
+/**
+ * Tests performance of $bottom on array of random ints.
+ */
+void ExpressionBenchmarkFixture::benchmarkBottomIntRandom(benchmark::State& state) {
+    int n = 500;
+    std::vector<int> vectorOfInts;
+    vectorOfInts.reserve(n);
+    for (int i = 0; i < n; i++) {
+        vectorOfInts.push_back(random.nextInt32());
+    }
+    benchmarkExpression(BSON("$bottom" << BSON("input" << "$array"
+                                                       << "sortBy" << 1)),
+                        state,
+                        std::vector<Document>(1, {{"array"_sd, vectorToBSON<int>(vectorOfInts)}}));
+}
+
+/**
+ * Tests performance of $bottom on array of sequential ints.
+ */
+void ExpressionBenchmarkFixture::benchmarkBottomIntSequential(benchmark::State& state) {
+    int n = 500;
+    std::vector<int> vectorOfInts;
+    vectorOfInts.reserve(n);
+    for (int i = 0; i < n; i++) {
+        vectorOfInts.push_back(i);
+    }
+    benchmarkExpression(BSON("$bottom" << BSON("input" << "$array"
+                                                       << "sortBy" << 1)),
+                        state,
+                        std::vector<Document>(1, {{"array"_sd, vectorToBSON<int>(vectorOfInts)}}));
+}
+
+/**
+ * Tests performance of $bottom on array of strings.
+ */
+void ExpressionBenchmarkFixture::benchmarkBottomString(benchmark::State& state) {
+    int n = 500;
+    std::vector<std::string> v;
+    v.reserve(n);
+    for (int i = 0; i < n; i++) {
+        v.push_back("This is a long string that will provide another set of benchmarks");
+    }
+    benchmarkExpression(BSON("$bottom" << BSON("input" << "$array"
+                                                       << "sortBy" << 1)),
+                        state,
+                        std::vector<Document>(1, {{"array"_sd, vectorToBSON<std::string>(v)}}));
+}
+
+/**
+ * Tests performance of $bottom on array of BSONObj.
+ */
+void ExpressionBenchmarkFixture::benchmarkBottomBSONObj(benchmark::State& state) {
+    int n = 500;
+    std::vector<BSONObj> v;
+    v.reserve(n);
+    for (int i = 0; i < n; i++) {
+        v.push_back(BSON("a" << random.nextInt32()));
+    }
+    benchmarkExpression(BSON("$bottom" << BSON("input" << "$array"
+                                                       << "sortBy" << BSON("a" << 1))),
+                        state,
+                        std::vector<Document>(1, {{"array"_sd, vectorToBSON<BSONObj>(v)}}));
 }
 
 /**

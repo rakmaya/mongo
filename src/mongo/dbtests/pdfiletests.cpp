@@ -31,33 +31,28 @@
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/client.h"
-#include "mongo/db/collection_crud/collection_write_path.h"
 #include "mongo/db/curop.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_catalog.h"
-#include "mongo/db/local_catalog/database.h"
-#include "mongo/db/local_catalog/database_holder.h"
-#include "mongo/db/local_catalog/db_raii.h"
-#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
+#include "mongo/db/dbhelpers.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/write_ops/insert.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/lock_manager/d_concurrency.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/database.h"
+#include "mongo/db/shard_role/shard_catalog/database_holder.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/dbtests/dbtests.h"  // IWYU pragma: keep
 #include "mongo/unittest/unittest.h"
 
 #include <memory>
 #include <string>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
 
 namespace mongo {
 namespace PdfileTests {
@@ -104,16 +99,13 @@ public:
             coll = CollectionPtr::CollectionPtr_UNSAFE(_db->createCollection(&_opCtx, nss()));
         }
         ASSERT(coll);
-        OpDebug* const nullOpDebug = nullptr;
-        ASSERT_NOT_OK(collection_internal::insertDocument(
-            &_opCtx, coll, InsertStatement(x), nullOpDebug, true));
+        ASSERT_NOT_OK(Helpers::insert(&_opCtx, coll, x));
 
         StatusWith<BSONObj> fixed = fixDocumentForInsert(&_opCtx, x);
         ASSERT(fixed.isOK());
         x = fixed.getValue();
         ASSERT(x["_id"].type() == BSONType::oid);
-        ASSERT_OK(collection_internal::insertDocument(
-            &_opCtx, coll, InsertStatement(x), nullOpDebug, true));
+        ASSERT_OK(Helpers::insert(&_opCtx, coll, x));
         wunit.commit();
     }
 };

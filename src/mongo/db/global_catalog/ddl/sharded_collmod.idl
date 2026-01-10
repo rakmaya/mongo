@@ -26,10 +26,11 @@
 # it in the license file.
 #
 global:
+    mod_visibility: private
     cpp_namespace: "mongo"
 
 imports:
-    - "mongo/db/local_catalog/ddl/coll_mod.idl"
+    - "mongo/db/shard_role/ddl/coll_mod.idl"
     - "mongo/db/basic_types.idl"
 
 commands:

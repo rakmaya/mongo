@@ -126,7 +126,7 @@ format_process_env(void)
  * locks_init --
  *     Initialize locks to single-thread backups and timestamps.
  */
-static void
+void
 locks_init(WT_CONNECTION *conn)
 {
     WT_SESSION *session;
@@ -349,6 +349,7 @@ main(int argc, char *argv[])
         testutil_assert(ret == 0 || ret == WT_NOTFOUND);
         ret = timestamp_query("get=stable_timestamp", &g.stable_timestamp);
         testutil_assert(ret == 0 || ret == WT_NOTFOUND);
+        locks_init(g.wts_conn);
     } else {
         wts_create_home();
         config_print(false);
@@ -357,9 +358,7 @@ main(int argc, char *argv[])
         wts_open(g.home, &g.wts_conn, true);
         timestamp_init();
     }
-
     wts_prepare_discover(g.wts_conn);
-    locks_init(g.wts_conn);
 
     /*
      * Initialize key/value information. Load and verify initial records (at least a brief scan if
@@ -405,7 +404,7 @@ main(int argc, char *argv[])
         for (reps = 1; reps <= (FORMAT_OPERATION_REPS * 2); ++reps) {
             ops_seconds = g.disagg_leader ? leader_ops_seconds : DISAGG_SWITCH_FOLLOWER_OPS_SEC;
             operations(ops_seconds, reps, (FORMAT_OPERATION_REPS * 2));
-            testutil_check(disagg_switch_roles());
+            disagg_switch_roles();
         }
     }
 

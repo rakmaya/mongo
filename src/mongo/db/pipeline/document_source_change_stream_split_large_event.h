@@ -40,6 +40,7 @@
 #include "mongo/db/pipeline/stage_constraints.h"
 #include "mongo/db/pipeline/variables.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
+#include "mongo/util/modules.h"
 
 #include <set>
 
@@ -48,6 +49,8 @@
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
+
+DEFINE_LITE_PARSED_STAGE_DEFAULT_DERIVED(ChangeStreamSplitLargeEvent);
 
 class DocumentSourceChangeStreamSplitLargeEvent final : public DocumentSource {
 public:
@@ -87,9 +90,8 @@ public:
         return id;
     }
 
-protected:
-    DocumentSourceContainer::iterator doOptimizeAt(DocumentSourceContainer::iterator itr,
-                                                   DocumentSourceContainer* container) final;
+    DocumentSourceContainer::iterator optimizeAt(DocumentSourceContainer::iterator itr,
+                                                 DocumentSourceContainer* container);
 
 private:
     friend boost::intrusive_ptr<exec::agg::Stage>

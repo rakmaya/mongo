@@ -68,8 +68,9 @@ const expectedParamDefaults = {
     internalQueryDisablePlanCache: false,
     internalQueryFindCommandBatchSize: 101,
     internalQuerySlotBasedExecutionHashAggIncreasedSpilling: "inDebug",
-    internalQueryUnifiedWriteExecutor: false,
-    internalOrStageMaxMemoryBytes: 100 * 1024 * 1024,
+    internalMaxNodesInJoinGraph: 10,
+    internalMaxEdgesInJoinGraph: 256,
+    internalMaxNumberNodesConsideredForImplicitEdges: 4,
 };
 
 function assertDefaultParameterValues() {
@@ -308,11 +309,23 @@ assertSetParameterSucceeds("internalQuerySlotBasedExecutionHashAggIncreasedSpill
 assertSetParameterSucceeds("internalQuerySlotBasedExecutionHashAggIncreasedSpilling", "inDebug");
 assertSetParameterFails("internalQuerySlotBasedExecutionHashAggIncreasedSpilling", "random");
 
-assertSetParameterSucceeds("internalQueryUnifiedWriteExecutor", true);
-assertSetParameterSucceeds("internalQueryUnifiedWriteExecutor", false);
-
 assertSetParameterSucceeds("internalOrStageMaxMemoryBytes", 11);
 assertSetParameterFails("internalOrStageMaxMemoryBytes", 0);
 assertSetParameterFails("internalOrStageMaxMemoryBytes", -1);
+
+assertSetParameterFails("internalMaxNodesInJoinGraph", 1);
+assertSetParameterSucceeds("internalMaxNodesInJoinGraph", 2);
+assertSetParameterSucceeds("internalMaxNodesInJoinGraph", 64);
+assertSetParameterFails("internalMaxNodesInJoinGraph", 65);
+
+assertSetParameterFails("internalMaxEdgesInJoinGraph", 0);
+assertSetParameterSucceeds("internalMaxEdgesInJoinGraph", 1);
+assertSetParameterSucceeds("internalMaxEdgesInJoinGraph", 4096);
+assertSetParameterFails("internalMaxEdgesInJoinGraph", 4097);
+
+assertSetParameterFails("internalMaxNumberNodesConsideredForImplicitEdges", -1);
+assertSetParameterSucceeds("internalMaxNumberNodesConsideredForImplicitEdges", 0);
+assertSetParameterSucceeds("internalMaxNumberNodesConsideredForImplicitEdges", 10);
+assertSetParameterFails("internalMaxNumberNodesConsideredForImplicitEdges", 11);
 
 MongoRunner.stopMongod(conn);

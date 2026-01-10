@@ -32,7 +32,6 @@
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/exec/add_fields_projection_executor.h"
 #include "mongo/db/pipeline/document_source_single_document_transformation.h"
-#include "mongo/db/pipeline/lite_parsed_document_source.h"
 #include "mongo/db/pipeline/transformer_interface.h"
 #include "mongo/db/query/allowed_contexts.h"
 #include "mongo/util/assert_util.h"
@@ -47,14 +46,16 @@
 namespace mongo {
 using boost::intrusive_ptr;
 
-REGISTER_DOCUMENT_SOURCE(addFields,
-                         LiteParsedDocumentSourceDefault::parse,
-                         DocumentSourceAddFields::createFromBson,
-                         AllowedWithApiStrict::kAlways);
-REGISTER_DOCUMENT_SOURCE(set,
-                         LiteParsedDocumentSourceDefault::parse,
-                         DocumentSourceAddFields::createFromBson,
-                         AllowedWithApiStrict::kAlways);
+REGISTER_LITE_PARSED_DOCUMENT_SOURCE(addFields,
+                                     AddFieldsLiteParsed::parse,
+                                     AllowedWithApiStrict::kAlways);
+REGISTER_LITE_PARSED_DOCUMENT_SOURCE(set,
+                                     AddFieldsLiteParsed::parse,
+                                     AllowedWithApiStrict::kAlways);
+
+REGISTER_DOCUMENT_SOURCE_WITH_STAGE_PARAMS_DEFAULT(addFields,
+                                                   DocumentSourceAddFields,
+                                                   AddFieldsStageParams);
 
 intrusive_ptr<DocumentSource> DocumentSourceAddFields::create(
     BSONObj addFieldsSpec,
@@ -96,7 +97,10 @@ intrusive_ptr<DocumentSource> DocumentSourceAddFields::create(
 intrusive_ptr<DocumentSource> DocumentSourceAddFields::createFromBson(
     BSONElement elem, const intrusive_ptr<ExpressionContext>& expCtx) {
     const auto specifiedName = elem.fieldNameStringData();
-    invariant(specifiedName == kStageName || specifiedName == kAliasNameSet);
+    tassert(11294811,
+            str::stream() << "Attempting to parse DocumentSourceAddFields from neither "
+                          << kStageName << ", nor " << kAliasNameSet << " BSON object",
+            specifiedName == kStageName || specifiedName == kAliasNameSet);
 
     uassert(40272,
             str::stream() << specifiedName << " specification stage must be an object, got "

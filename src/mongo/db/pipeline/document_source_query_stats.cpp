@@ -50,11 +50,15 @@
 
 namespace mongo {
 
-REGISTER_DOCUMENT_SOURCE_WITH_FEATURE_FLAG(queryStats,
-                                           DocumentSourceQueryStats::LiteParsed::parse,
-                                           DocumentSourceQueryStats::createFromBson,
-                                           AllowedWithApiStrict::kNeverInVersion1,
-                                           &feature_flags::gFeatureFlagQueryStats);
+REGISTER_LITE_PARSED_DOCUMENT_SOURCE_WITH_FEATURE_FLAG(queryStats,
+                                                       DocumentSourceQueryStats::LiteParsed::parse,
+                                                       AllowedWithApiStrict::kNeverInVersion1,
+                                                       &feature_flags::gFeatureFlagQueryStats);
+
+REGISTER_DOCUMENT_SOURCE_WITH_STAGE_PARAMS_DEFAULT(queryStats,
+                                                   DocumentSourceQueryStats,
+                                                   QueryStatsStageParams);
+
 ALLOCATE_DOCUMENT_SOURCE_ID(queryStats, DocumentSourceQueryStats::id)
 
 namespace {
@@ -96,7 +100,7 @@ std::unique_ptr<DocumentSourceQueryStats::LiteParsed> DocumentSourceQueryStats::
     const NamespaceString& nss, const BSONElement& spec, const LiteParserOptions& options) {
     return parseSpec(spec, [&](TransformAlgorithmEnum algorithm, std::string hmacKey) {
         return std::make_unique<DocumentSourceQueryStats::LiteParsed>(
-            spec.fieldName(), nss.tenantId(), algorithm, hmacKey);
+            spec, nss.tenantId(), algorithm, hmacKey);
     });
 }
 

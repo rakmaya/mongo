@@ -43,6 +43,7 @@
 #include "mongo/db/storage/wiredtiger/wiredtiger_stats.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/timer.h"
 
 #include <cstdint>
@@ -116,6 +117,14 @@ public:
 
     Timestamp getPrepareTimestamp() const override;
 
+    void setPreparedId(uint64_t preparedId) override;
+
+    boost::optional<uint64_t> getPreparedId() const override;
+
+    void setRollbackTimestamp(Timestamp timestamp) override;
+
+    Timestamp getRollbackTimestamp() const override;
+
     void setPrepareConflictBehavior(PrepareConflictBehavior behavior) override;
 
     PrepareConflictBehavior getPrepareConflictBehavior() const override;
@@ -176,6 +185,11 @@ public:
     }
 
     void setCacheMaxWaitTimeout(Milliseconds) override;
+
+    void optOutOfCacheEviction() override {
+        // 1 is a magic number in WiredTiger that opts this thread out of all optional eviction.
+        setCacheMaxWaitTimeout(Milliseconds(1));
+    }
 
     size_t getCacheDirtyBytes() override;
 
@@ -291,6 +305,8 @@ private:
     Timestamp _commitTimestamp;
     Timestamp _durableTimestamp;
     Timestamp _prepareTimestamp;
+    boost::optional<uint64_t> _preparedId;
+    Timestamp _rollbackTimestamp;
     boost::optional<Timestamp> _lastTimestampSet;
     Timestamp _readAtTimestamp;
     UntimestampedWriteAssertionLevel _untimestampedWriteAssertionLevel =

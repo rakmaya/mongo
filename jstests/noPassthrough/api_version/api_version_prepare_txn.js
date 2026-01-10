@@ -1,7 +1,7 @@
 /**
  * Tests prepared transactions with an explicitly set apiVersion.
  */
-// TODO (SERVER-106141): Move this test to 'replsets' to be part of passthrough suites.
+// TODO (SERVER-111718): Remove this test if it will be covered elsewhere, or relocate it.
 import {PrepareHelpers} from "jstests/core/txns/libs/prepare_helpers.js";
 import {ReplSetTest} from "jstests/libs/replsettest.js";
 
@@ -55,6 +55,10 @@ const runTest = function (failover, commit) {
 
     const newPrimary = rst.getPrimary();
     assert.eq(failover ? secondary : primary, newPrimary, "Wrong primary");
+    // The prepare entry must be majority committed on the new primary before we commit the
+    // prepared transaction, so we wait for the 'lastCommitted' OpTime to encompass the
+    // 'prepareTimestamp'.
+    PrepareHelpers.awaitMajorityCommitted(rst, prepareTimestamp);
 
     if (commit) {
         // Commit the prepared transaction on the new primary.

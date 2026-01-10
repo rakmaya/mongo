@@ -37,6 +37,7 @@
 #include "mongo/db/repl/optime.h"
 #include "mongo/rpc/topology_version_gen.h"
 #include "mongo/util/clock_source.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/time_support.h"
 
@@ -54,7 +55,8 @@
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
 
-namespace mongo::sdam {
+namespace mongo {
+namespace MONGO_MOD_PUBLIC sdam {
 class ServerDescription {
     ServerDescription() = delete;
 
@@ -210,7 +212,7 @@ private:
 
     // The topology description of that we are a part of. Since this is a weak_ptr, code that
     // accesses this variable should ensure that the TopologyDescription cannot be destroyed by
-    // holding a copy of it's shared_ptr. The SdamServerSelector uses this variable when calculating
+    // holding a copy of it's shared_ptr. The ServerSelector uses this variable when calculating
     // staleness.
     boost::optional<std::weak_ptr<TopologyDescription>> _topologyDescription;
 
@@ -222,4 +224,5 @@ bool operator==(const mongo::sdam::ServerDescription& a, const mongo::sdam::Serv
 bool operator!=(const mongo::sdam::ServerDescription& a, const mongo::sdam::ServerDescription& b);
 std::ostream& operator<<(std::ostream& os, const ServerDescriptionPtr& description);
 std::ostream& operator<<(std::ostream& os, const ServerDescription& description);
-};  // namespace mongo::sdam
+}  // namespace MONGO_MOD_PUBLIC sdam
+}  // namespace mongo

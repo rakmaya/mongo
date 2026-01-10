@@ -50,6 +50,7 @@
 #include "mongo/db/storage/wiredtiger/wiredtiger_event_handler.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_extensions.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_oplog_manager.h"
+#include "mongo/db/storage/wiredtiger/wiredtiger_prepared_transactions_iterator.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_record_store.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_session.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_size_storer.h"
@@ -62,6 +63,7 @@
 #include "mongo/util/clock_source.h"
 #include "mongo/util/concurrency/with_lock.h"
 #include "mongo/util/elapsed_tracker.h"
+#include "mongo/util/modules.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -226,8 +228,6 @@ public:
         bool providerSupportsUnstableCheckpoints{true};
         // Specifies whether it is safe to take duplicate checkpoints on the same stable timestamp.
         bool safeToTakeDuplicateCheckpoints{true};
-        // Specifies whether the value for the flatten_leaf_page_delta configuration parameter.
-        int flattenLeafPageDelta{1};
         // This specifies the value for the log.compressor configuration parameter.
         std::string logCompressor{"snappy"};
         // This specifies the value for the live_restore.path configuration parameter.
@@ -238,6 +238,8 @@ public:
         int32_t liveRestoreReadSizeMB{1};
         // This specifies the value for the statistics_log.wait configuration parameter.
         int32_t statisticsLogWaitSecs{0};
+        // This specifies the statistics collection mode.
+        std::string statisticsSetting{"fast"};
         // This specifies the value for the builtin_extension_config.zstd.compression_level
         // configuration parameter.
         int32_t zstdCompressorLevel{6};
@@ -319,6 +321,9 @@ public:
         return boost::none;
     }
 
+    std::unique_ptr<PreparedTransactionsIterator>
+    getUnclaimedPreparedTransactionsForStartupRecovery(OperationContext* opCtx) const override;
+
 protected:
     /**
      * Returns true if the given table uri exists in this WiredTiger instance.
@@ -395,11 +400,13 @@ public:
     std::unique_ptr<RecoveryUnit> newRecoveryUnit() override;
 
     Status createRecordStore(const rss::PersistenceProvider& provider,
+                             RecoveryUnit& ru,
                              const NamespaceString& ns,
                              StringData ident,
                              const RecordStore::Options& options) override {
         // Parameters required for a standard WiredTigerRecordStore.
         return _createRecordStore(provider,
+                                  ru,
                                   ns,
                                   ident,
                                   options.keyFormat,
@@ -448,7 +455,8 @@ public:
      * latest checkpoint. This requires reading the entire table and should only be used when
      * absolutely required to ensure the import succeeds
      */
-    Status importRecordStore(StringData ident,
+    Status importRecordStore(RecoveryUnit& ru,
+                             StringData ident,
                              const BSONObj& storageMetadata,
                              bool panicOnCorruptWtMetadata,
                              bool repair) override;
@@ -500,6 +508,7 @@ public:
     Status repairIdent(RecoveryUnit& ru, StringData ident) override;
 
     Status recoverOrphanedIdent(const rss::PersistenceProvider&,
+                                RecoveryUnit& ru,
                                 const NamespaceString& nss,
                                 StringData ident,
                                 const RecordStore::Options& options) override;
@@ -527,8 +536,6 @@ public:
     void setInitialDataTimestamp(Timestamp initialDataTimestamp) override;
 
     Timestamp getInitialDataTimestamp() const override;
-
-    void setOldestTimestampFromStable() override;
 
     /**
      * Sets the oldest timestamp for which the storage engine must maintain snapshot history
@@ -743,6 +750,7 @@ private:
     };
 
     Status _createRecordStore(const rss::PersistenceProvider& provider,
+                              RecoveryUnit& ru,
                               const NamespaceString& ns,
                               StringData ident,
                               KeyFormat keyFormat,
@@ -914,6 +922,7 @@ private:
 /**
  * Generates config string for wiredtiger_open() from the given config options.
  */
+MONGO_MOD_USE_REPLACEMENT(jstest)
 std::string generateWTOpenConfigString(const WiredTigerKVEngineBase::WiredTigerConfig& wtConfig,
                                        StringData extensionsConfig,
                                        StringData providerConfig);
@@ -922,6 +931,7 @@ std::string generateWTOpenConfigString(const WiredTigerKVEngineBase::WiredTigerC
  * Returns a WiredTigerKVEngineBase::WiredTigerConfig populated with config values provided at
  * startup.
  */
+MONGO_MOD_USE_REPLACEMENT(jstest)
 WiredTigerKVEngineBase::WiredTigerConfig getWiredTigerConfigFromStartupOptions(
     const rss::PersistenceProvider&);
 

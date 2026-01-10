@@ -40,21 +40,21 @@
 #include "mongo/db/basic_types_gen.h"
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/index/multikey_paths.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_options.h"
-#include "mongo/db/local_catalog/collection_options_gen.h"
-#include "mongo/db/local_catalog/index_catalog.h"
-#include "mongo/db/local_catalog/index_catalog_entry.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
-#include "mongo/db/local_catalog/index_key_validate.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
+#include "mongo/db/index_key_validate.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/server_feature_flags_gen.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_options.h"
+#include "mongo/db/shard_role/shard_catalog/collection_options_gen.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog_entry.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/storage_options.h"
@@ -159,22 +159,28 @@ void _validateIndexes(OperationContext* opCtx,
         const std::string indexName = validateState->getCollection()
                                           ->getIndexCatalog()
                                           ->findIndexByIdent(opCtx, indexIdent)
+                                          ->descriptor()
                                           ->indexName();
+
+        const IndexType indexType = validateState->getCollection()
+                                        ->getIndexCatalog()
+                                        ->findIndexByIdent(opCtx, indexIdent)
+                                        ->descriptor()
+                                        ->getIndexType();
 
         LOGV2_PROD_ONLY_OPTIONS(20296,
                                 {LogComponent::kIndex},
                                 "Validating index consistency",
-                                "index"_attr = indexName,
+                                "indexName"_attr = indexName,
+                                "indexType"_attr = indexType,
                                 logAttrs(validateState->nss()));
 
         int64_t numTraversedKeys;
-        indexValidator->traverseIndex(opCtx,
-                                      validateState->getCollection()
-                                          ->getIndexCatalog()
-                                          ->findIndexByIdent(opCtx, indexIdent)
-                                          ->getEntry(),
-                                      &numTraversedKeys,
-                                      results);
+        indexValidator->traverseIndex(
+            opCtx,
+            validateState->getCollection()->getIndexCatalog()->findIndexByIdent(opCtx, indexIdent),
+            &numTraversedKeys,
+            results);
 
         auto& curIndexResults = results->getIndexValidateResult(indexName);
         curIndexResults.addKeysTraversed(numTraversedKeys);
@@ -182,8 +188,15 @@ void _validateIndexes(OperationContext* opCtx,
         BSONObj infoObj = validateState->getCollection()
                               ->getIndexCatalog()
                               ->findIndexByIdent(opCtx, indexIdent)
+                              ->descriptor()
                               ->infoObj();
         curIndexResults.setSpec(std::move(infoObj));
+
+        const bool isMultiKey = validateState->getCollection()
+                                    ->getIndexCatalog()
+                                    ->findIndexByIdent(opCtx, indexIdent)
+                                    ->isMultikey(opCtx, validateState->getCollection());
+        curIndexResults.setIsMultikey(isMultiKey);
     }
 }
 
@@ -223,24 +236,25 @@ void _gatherIndexEntryErrors(OperationContext* opCtx,
     for (const auto& indexIdent : validateState->getIndexIdents()) {
         opCtx->checkForInterrupt();
 
-        const IndexDescriptor* descriptor =
+        const auto indexEntry =
             validateState->getCollection()->getIndexCatalog()->findIndexByIdent(opCtx, indexIdent);
 
-        const auto& indexValidateResult = result->getIndexValidateResult(descriptor->indexName());
+        const auto& indexValidateResult =
+            result->getIndexValidateResult(indexEntry->descriptor()->indexName());
         if (!indexValidateResult.continueValidation()) {
             LOGV2(7697700,
                   "Skipping validation of index due to existing errors",
-                  "indexName"_attr = descriptor->indexName());
+                  "indexName"_attr = indexEntry->descriptor()->indexName());
             continue;
         }
 
         LOGV2_OPTIONS(20300,
                       {LogComponent::kIndex},
                       "Traversing through the index entries",
-                      "index"_attr = descriptor->indexName());
+                      "index"_attr = indexEntry->descriptor()->indexName());
 
         indexValidator->traverseIndex(opCtx,
-                                      descriptor->getEntry(),
+                                      indexEntry,
                                       /*numTraversedKeys=*/nullptr,
                                       result);
     }
@@ -264,12 +278,12 @@ void _validateIndexKeyCount(OperationContext* opCtx,
                             ValidateAdaptor* indexValidator,
                             ValidateResultsMap* indexNsResultsMap) {
     for (const auto& indexIdent : validateState->getIndexIdents()) {
-        const IndexDescriptor* descriptor =
+        const auto indexEntry =
             validateState->getCollection()->getIndexCatalog()->findIndexByIdent(opCtx, indexIdent);
-        auto& curIndexResults = (*indexNsResultsMap)[descriptor->indexName()];
+        auto& curIndexResults = (*indexNsResultsMap)[indexEntry->descriptor()->indexName()];
 
         if (curIndexResults.continueValidation()) {
-            indexValidator->validateIndexKeyCount(opCtx, descriptor->getEntry(), curIndexResults);
+            indexValidator->validateIndexKeyCount(opCtx, indexEntry, curIndexResults);
         }
     }
 }
@@ -283,10 +297,9 @@ void _logInvalidIndices(OperationContext* opCtx,
     }
     for (auto& [indexName, ivr] : results->getIndexResultsMap()) {
         if (!ivr.isValid()) {
-            const IndexDescriptor* descriptor =
-                validateState->getCollection()->getIndexCatalog()->findIndexByName(opCtx,
-                                                                                   indexName);
-            auto indexSpec = descriptor->infoObj();
+            const auto entry = validateState->getCollection()->getIndexCatalog()->findIndexByName(
+                opCtx, indexName);
+            auto indexSpec = entry->descriptor()->infoObj();
             LOGV2_ERROR(7463100, "Index failed validation", "spec"_attr = indexSpec);
         }
     }
@@ -733,6 +746,39 @@ ValidationOptions parseValidateOptions(OperationContext* opCtx,
         CollectionValidation::validateHashes(*revealHashedIds, /*equalLength=*/false);
     }
 
+    boost::optional<Timestamp> timestamp = boost::none;
+    if (cmdObj["atClusterTime"]) {
+        if (background) {
+            uasserted(ErrorCodes::InvalidOptions,
+                      str::stream() << "Running the validate command with { background: true } "
+                                       "cannot be done with {atClusterTime: ...} because "
+                                       "background already sets a read timestamp.");
+        }
+        if (!nss.isReplicated()) {
+            uasserted(ErrorCodes::CommandNotSupported,
+                      str::stream() << "Running the validate command with { atClusterTime: ... } "
+                                    << "is not supported on unreplicated collections");
+        }
+        timestamp = cmdObj["atClusterTime"].timestamp();
+        // Not allowed to set read timestamp to 0,0.
+        if (timestamp->isNull()) {
+            uasserted(ErrorCodes::CommandNotSupported,
+                      str::stream()
+                          << "Running the validate command with { atClusterTime: Timestamp(0,0) } "
+                          << "is not supported");
+        }
+    }
+    if (background) {
+        // Background validation reads data from the last stable checkpoint.
+        timestamp =
+            opCtx->getServiceContext()->getStorageEngine()->getLastStableRecoveryTimestamp();
+        if (!timestamp) {
+            uasserted(ErrorCodes::NamespaceNotFound,
+                      fmt::format("Cannot run background validation on collection because there "
+                                  "is no checkpoint yet"));
+        }
+    }
+
     const auto validateMode = [&] {
         if (metadata) {
             return CollectionValidation::ValidateMode::kMetadata;
@@ -801,6 +847,7 @@ ValidationOptions parseValidateOptions(OperationContext* opCtx,
             getTestCommandsEnabled() ? (ValidationVersion)bsonTestValidationVersion
                                      : currentValidationVersion,
             getConfigOverrideOrThrow(rawConfigOverride),
+            timestamp,
             hashPrefixes,
             revealHashedIds};
 }
@@ -872,7 +919,7 @@ Status validate(OperationContext* opCtx,
 
     results->setNamespaceString(validateState.nss());
     results->setUUID(validateState.uuid());
-    results->setReadTimestamp(validateState.getValidateTimestamp());
+    results->setReadTimestamp(validateState.getReadTimestamp());
 
     try {
         invariant(!validateState.isFullIndexValidation() ||

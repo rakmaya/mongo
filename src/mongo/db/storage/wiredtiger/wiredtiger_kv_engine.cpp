@@ -38,13 +38,13 @@
 #include "mongo/db/client.h"
 #include "mongo/db/commands/server_status/server_status_metric.h"
 #include "mongo/db/index_names.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/rss/replicated_storage_service.h"
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/server_parameter.h"
 #include "mongo/db/server_recovery.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/ident.h"
 #include "mongo/db/storage/journal_listener.h"
 #include "mongo/db/storage/key_format.h"
@@ -367,7 +367,7 @@ std::string generateWTOpenConfigString(const WiredTigerKVEngineBase::WiredTigerC
            << static_cast<size_t>(gWiredTigerCheckpointCleanupPeriodSeconds) << "),";
 
     ss << "config_base=false,";
-    ss << "statistics=(fast),";
+    ss << "statistics=(" << wtConfig.statisticsSetting << "),";
 
     // TODO: SERVER-109794 move this block into the corresponding persistence providers.
     if (wtConfig.inMemory) {
@@ -644,6 +644,13 @@ std::vector<std::string> WiredTigerKVEngineBase::_wtGetAllIdents(WiredTigerSessi
     return all;
 }
 
+std::unique_ptr<PreparedTransactionsIterator>
+WiredTigerKVEngineBase::getUnclaimedPreparedTransactionsForStartupRecovery(
+    OperationContext* opCtx) const {
+    return std::make_unique<WiredTigerPreparedTransactionsIterator>(
+        _connection->getSession(*opCtx));
+}
+
 WiredTigerKVEngine::WiredTigerKVEngine(const std::string& canonicalName,
                                        const std::string& path,
                                        ClockSource* clockSource,
@@ -681,10 +688,8 @@ WiredTigerKVEngine::WiredTigerKVEngine(const std::string& canonicalName,
         }
     }
 
-    std::string config =
-        generateWTOpenConfigString(_wtConfig,
-                                   wtExtensions.getOpenExtensionsConfig(),
-                                   provider.getWiredTigerConfig(_wtConfig.flattenLeafPageDelta));
+    std::string config = generateWTOpenConfigString(
+        _wtConfig, wtExtensions.getOpenExtensionsConfig(), provider.getWiredTigerConfig());
     LOGV2(22315, "Opening WiredTiger", "config"_attr = config);
 
     auto startTime = Date_t::now();
@@ -1618,12 +1623,14 @@ void WiredTigerKVEngine::setSortedDataInterfaceExtraOptions(const std::string& o
 }
 
 Status WiredTigerKVEngine::_createRecordStore(const rss::PersistenceProvider& provider,
+                                              RecoveryUnit& ru,
                                               const NamespaceString& nss,
                                               StringData ident,
                                               KeyFormat keyFormat,
                                               const BSONObj& storageEngineCollectionOptions,
                                               boost::optional<std::string> customBlockCompressor) {
-    WiredTigerSession session(_connection.get());
+    auto& wtRu = WiredTigerRecoveryUnit::get(ru);
+    auto& session = *wtRu.getSessionNoTxn();
 
     WiredTigerRecordStore::WiredTigerTableConfig wtTableConfig;
     wtTableConfig.keyFormat = keyFormat;
@@ -1650,6 +1657,10 @@ Status WiredTigerKVEngine::_createRecordStore(const rss::PersistenceProvider& pr
     wtTableConfig.extraCreateOptions = str::stream()
         << _rsOptions << "," << customConfigString.getValue();
 
+    if (nss.isOplog()) {
+        wtTableConfig.memoryPageMax = provider.getWTMemoryPageMaxForOplogStrValue();
+    }
+
     std::string config = WiredTigerRecordStore::generateCreateString(
         NamespaceStringUtil::serializeForCatalog(nss), wtTableConfig, nss.isOplog());
     string uri = WiredTigerUtil::buildTableUri(ident);
@@ -1663,11 +1674,13 @@ Status WiredTigerKVEngine::_createRecordStore(const rss::PersistenceProvider& pr
     return wtRCToStatus(session.create(uri.c_str(), config.c_str()), session);
 }
 
-Status WiredTigerKVEngine::importRecordStore(StringData ident,
+Status WiredTigerKVEngine::importRecordStore(RecoveryUnit& ru,
+                                             StringData ident,
                                              const BSONObj& storageMetadata,
                                              bool panicOnCorruptWtMetadata,
                                              bool repair) {
-    WiredTigerSession session(_connection.get());
+    auto& wtRu = WiredTigerRecoveryUnit::get(ru);
+    auto& session = *wtRu.getSessionNoTxn();
 
     std::string config = uassertStatusOK(WiredTigerUtil::generateImportString(
         ident, storageMetadata, panicOnCorruptWtMetadata, repair));
@@ -1684,6 +1697,7 @@ Status WiredTigerKVEngine::importRecordStore(StringData ident,
 }
 
 Status WiredTigerKVEngine::recoverOrphanedIdent(const rss::PersistenceProvider& provider,
+                                                RecoveryUnit& ru,
                                                 const NamespaceString& nss,
                                                 StringData ident,
                                                 const RecordStore::Options& options) {
@@ -1718,7 +1732,7 @@ Status WiredTigerKVEngine::recoverOrphanedIdent(const rss::PersistenceProvider& 
 
     LOGV2(22333, "Creating new RecordStore", logAttrs(nss));
 
-    status = createRecordStore(provider, nss, ident, options);
+    status = createRecordStore(provider, ru, nss, ident, options);
     if (!status.isOK()) {
         return status;
     }
@@ -1973,7 +1987,8 @@ std::unique_ptr<RecordStore> WiredTigerKVEngine::getTemporaryRecordStore(Recover
 std::unique_ptr<RecordStore> WiredTigerKVEngine::makeTemporaryRecordStore(RecoveryUnit& ru,
                                                                           StringData ident,
                                                                           KeyFormat keyFormat) {
-    WiredTigerSession session(_connection.get());
+    auto& wtRu = WiredTigerRecoveryUnit::get(ru);
+    auto& session = *wtRu.getSessionNoTxn();
 
     WiredTigerRecordStore::WiredTigerTableConfig wtTableConfig;
     wtTableConfig.keyFormat = keyFormat;
@@ -2052,6 +2067,8 @@ Status WiredTigerKVEngine::dropIdent(RecoveryUnit& ru,
     auto& wtRu = WiredTigerRecoveryUnit::get(ru);
     wtRu.getSessionNoTxn()->closeAllCursors(uri);
 
+    // Use a separate session to avoid transactional issues, because a drop may impact the
+    // in-progress transaction.
     WiredTigerSession session(_connection.get());
 
     Status status = _drop(session, uri.c_str(), "checkpoint_wait=false");
@@ -2086,6 +2103,8 @@ void WiredTigerKVEngine::dropIdentForImport(Interruptible& interruptible,
     WiredTigerRecoveryUnit* wtRu = checked_cast<WiredTigerRecoveryUnit*>(&ru);
     wtRu->getSessionNoTxn()->closeAllCursors(uri);
 
+    // Use a separate session to avoid transactional issues, because a drop may impact the
+    // in-progress transaction.
     WiredTigerSession session(_connection.get());
 
     // Don't wait for the global checkpoint lock to be obtained in WiredTiger as it can take a
@@ -2408,13 +2427,6 @@ void WiredTigerKVEngine::setStableTimestamp(Timestamp stableTimestamp, bool forc
     if (force) {
         return;
     }
-
-    // Forward the oldest timestamp so that WiredTiger can clean up earlier timestamp data.
-    setOldestTimestampFromStable();
-}
-
-void WiredTigerKVEngine::setOldestTimestampFromStable() {
-    Timestamp stableTimestamp(_stableTimestamp.load());
 
     // Set the oldest timestamp to the stable timestamp to ensure that there is no lag window
     // between the two.
@@ -3240,11 +3252,11 @@ WiredTigerKVEngineBase::WiredTigerConfig getWiredTigerConfigFromStartupOptions(
     wtConfig.liveRestoreThreadsMax = wiredTigerGlobalOptions.liveRestoreThreads;
     wtConfig.liveRestoreReadSizeMB = wiredTigerGlobalOptions.liveRestoreReadSizeMB;
     wtConfig.statisticsLogWaitSecs = wiredTigerGlobalOptions.statisticsLogDelaySecs;
+    wtConfig.statisticsSetting = wiredTigerGlobalOptions.statisticsSetting;
     wtConfig.evictionThreadsMax = gWiredTigerEvictionThreadsMax.load();
     wtConfig.evictionThreadsMin = gWiredTigerEvictionThreadsMin.load();
     wtConfig.providerSupportsUnstableCheckpoints = provider.supportsUnstableCheckpoints();
     wtConfig.safeToTakeDuplicateCheckpoints = !provider.shouldAvoidDuplicateCheckpoints();
-    wtConfig.flattenLeafPageDelta = wiredTigerGlobalOptions.flattenLeafPageDelta;
 
     wtConfig.extraOpenOptions = wiredTigerGlobalOptions.engineConfig;
     if (wtConfig.extraOpenOptions.find("session_max=") != std::string::npos) {

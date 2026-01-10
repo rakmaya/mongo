@@ -30,7 +30,6 @@
 #include "mongo/db/update/v2_log_builder.h"
 
 #include "mongo/base/string_data.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/json.h"
@@ -319,7 +318,7 @@ TEST(V2LogBuilder, ImplicityArrayElementCreationAllowed) {
         lb.serialize());
 }
 
-DEATH_TEST(V2LogBuilder, ImplicityArrayCreationDisallowed, "invariant") {
+DEATH_TEST(V2LogBuilderDeathTest, ImplicityArrayCreationDisallowed, "invariant") {
     mmb::Document doc;
     V2LogBuilder lb;
 

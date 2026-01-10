@@ -31,7 +31,6 @@
 #include "mongo/db/global_catalog/ddl/refine_collection_shard_key_coordinator.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/simple_bsonobj_comparator.h"
 #include "mongo/client/read_preference.h"
 #include "mongo/db/client.h"
@@ -43,27 +42,26 @@
 #include "mongo/db/global_catalog/ddl/sharded_ddl_commands_gen.h"
 #include "mongo/db/global_catalog/ddl/sharding_ddl_util.h"
 #include "mongo/db/global_catalog/ddl/sharding_util.h"
-#include "mongo/db/global_catalog/router_role_api/router_role.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/lock_manager/exception_util.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_runtime.h"
-#include "mongo/db/local_catalog/shard_role_catalog/participant_block_gen.h"
-#include "mongo/db/local_catalog/shard_role_catalog/shard_filtering_metadata_refresh.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer.h"
+#include "mongo/db/router_role/router_role.h"
+#include "mongo/db/shard_role/lock_manager/exception_util.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/collection_sharding_runtime.h"
+#include "mongo/db/shard_role/shard_catalog/participant_block_gen.h"
+#include "mongo/db/shard_role/shard_catalog/shard_filtering_metadata_refresh.h"
 #include "mongo/db/sharding_environment/client/shard.h"
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/sharding_environment/sharding_feature_flags_gen.h"
 #include "mongo/db/sharding_environment/sharding_logging.h"
 #include "mongo/db/topology/shard_registry.h"
-#include "mongo/db/vector_clock/vector_clock.h"
-#include "mongo/db/vector_clock/vector_clock_mutable.h"
+#include "mongo/db/topology/vector_clock/vector_clock.h"
+#include "mongo/db/topology/vector_clock/vector_clock_mutable.h"
 #include "mongo/db/versioning_protocol/chunk_version.h"
 #include "mongo/logv2/log.h"
 
 #include <string>
-#include <tuple>
 #include <utility>
 
 #include <boost/move/utility_core.hpp>
@@ -211,6 +209,12 @@ ExecutorFuture<void> RefineCollectionShardKeyCoordinator::_runImpl(
                     _doc.setOldKey(
                         metadata->getChunkManager()->getShardKeyPattern().getKeyPattern());
 
+                    if (auto ts = metadata->getTimeseriesFields()) {
+                        auto bucketsKey = shardkeyutil::validateAndTranslateTimeseriesShardKey(
+                            ts->getTimeseriesOptions(), _doc.getNewShardKey().toBSON());
+                        _doc.setNewShardKey(KeyPattern(bucketsKey));
+                    }
+
                     // No need to keep going if the shard key is already refined.
                     if (SimpleBSONObjComparator::kInstance.evaluate(
                             _doc.getOldKey()->toBSON() == _doc.getNewShardKey().toBSON())) {
@@ -240,9 +244,8 @@ ExecutorFuture<void> RefineCollectionShardKeyCoordinator::_runImpl(
                     _performNoopWriteOnDataShardsAndConfigServer(opCtx, nss(), session, **executor);
                 }
 
-                // Stop migrations before checking indexes considering any concurrent index
-                // creation/drop with migrations could leave the cluster with inconsistent indexes,
-                // PM-2077 should address that.
+                // Stop migrations during most of the execution of the coordinator to guarantee a
+                // stable placement.
                 {
                     const auto session = getNewSession(opCtx);
                     sharding_ddl_util::stopMigrations(
@@ -250,7 +253,6 @@ ExecutorFuture<void> RefineCollectionShardKeyCoordinator::_runImpl(
                 }
 
                 const auto& ns = nss();
-                auto const shardsWithData = getShardsWithDataForCollection(opCtx, ns);
 
                 // fetch the collection metadata and install it on each shard
                 if (feature_flags::gShardAuthoritativeCollMetadata.isEnabled(
@@ -263,28 +265,31 @@ ExecutorFuture<void> RefineCollectionShardKeyCoordinator::_runImpl(
 
                     const auto session = getNewSession(opCtx);
                     sharding_ddl_util::sendFetchCollMetadataToShards(
-                        opCtx, ns, shardsWithData, session, executor, token);
+                        opCtx,
+                        ns,
+                        getShardsWithDataForCollection(opCtx, ns),
+                        session,
+                        executor,
+                        token);
                 }
 
-                sharding::router::CollectionRouter router(opCtx->getServiceContext(), ns);
-                router.route(opCtx,
-                             "validating indexes for refineCollectionShardKey"_sd,
-                             [&](OperationContext* opCtx, const CollectionRoutingInfo& cri) {
-                                 ShardsvrValidateShardKeyCandidate validateRequest(ns);
-                                 validateRequest.setKey(_doc.getNewShardKey());
-                                 validateRequest.setEnforceUniquenessCheck(
-                                     _request.getEnforceUniquenessCheck());
-                                 validateRequest.setDbName(DatabaseName::kAdmin);
+                auto opts = [&] {
+                    ShardsvrValidateShardKeyCandidate validateRequest(ns);
+                    validateRequest.setKey(_doc.getNewShardKey());
+                    validateRequest.setEnforceUniquenessCheck(_request.getEnforceUniquenessCheck());
+                    validateRequest.setDbName(DatabaseName::kAdmin);
+                    return std::make_shared<
+                        async_rpc::AsyncRPCOptions<ShardsvrValidateShardKeyCandidate>>(
+                        **executor, token, std::move(validateRequest));
+                }();
 
-                                 sharding_util::sendCommandToShardsWithVersion(
-                                     opCtx,
-                                     ns.dbName(),
-                                     validateRequest.toBSON(),
-                                     shardsWithData,
-                                     **executor,
-                                     cri,
-                                     true /* throwOnError */);
-                             });
+                sharding::router::CollectionRouter router(opCtx, ns);
+                router.routeWithRoutingContext(
+                    "validating indexes for refineCollectionShardKey"_sd,
+                    [&](OperationContext* opCtx, RoutingContext& routingCtx) {
+                        sharding_ddl_util::sendAuthenticatedVersionedCommandTargetedByRoutingTable(
+                            opCtx, opts, routingCtx, ns);
+                    });
             }))
         .then(_buildPhaseHandler(
             Phase::kBlockCrud,

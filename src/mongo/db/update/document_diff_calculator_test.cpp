@@ -32,7 +32,6 @@
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bson_depth.h"
 #include "mongo/bson/bson_validate.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/json.h"
 #include "mongo/bson/unordered_fields_bsonobj_comparator.h"
@@ -671,7 +670,7 @@ TEST(IndexUpdateIdentifierTest, BinaryDiffForSingleIndexDottedField) {
     }
 }
 
-DEATH_TEST_REGEX(IndexUpdateIdentifierTest,
+DEATH_TEST_REGEX(IndexUpdateIdentifierTestDeathTest,
                  FailsWhenAnIndexIsAddedWIthWrongCounter,
                  R"#(Tripwire assertion.*7639000.*indexCounter should be less than _numIndexes)#") {
     doc_diff::IndexUpdateIdentifier updateIdentifier(1 /* numIndexes */);

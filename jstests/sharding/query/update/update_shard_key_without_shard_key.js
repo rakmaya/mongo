@@ -135,6 +135,7 @@ runAllTestsForConfig({replacementUpdate: true});
 runAllTestsForConfig({upsert: true, replacementUpdate: true});
 
 // Test the "findAndModify" command.
+// TODO SERVER-114994: Add findAndModify support to UWE.
 runAllTestsForConfig({findAndModify: true});
 runAllTestsForConfig({findAndModify: true, upsert: true});
 runAllTestsForConfig({findAndModify: true, replacementUpdate: true});

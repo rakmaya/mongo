@@ -54,6 +54,15 @@ parameters:
     description: >-
       Automatically disables symbolizing stack traces from Resmoke tasks. If this is set to false, the steps on how to manually symbolize the unsymbolized stacktraces will not be generated.
 
+  - key: schedule_antithesis_tests
+    description: >-
+      Automatically schedules your antithesis tasks to run in antithesis.
+      Please only schedule one or two antithesis tasks when specifying this parameter.
+
+  - key: resmoke_test_targets
+    description: "Bazel targets to test in the resmoke_tests task. Subject to further filtering based on tags."
+    value: "//..."
+
   ## Cron parameters.
   - key: project_required_suggested_cron
     value: "0 */4 * * *" # Every 4 hours starting at 0000 UTC
@@ -107,6 +116,7 @@ post:
   - func: "debug full disk"
   - func: "upload npm logs"
   - func: "generate clang-tidy report"
+  - func: "generate symbol-check report"
   - func: "attach local resmoke invocation"
   - func: "attach bazel invocation"
   - func: "create bazel test report"
@@ -122,6 +132,7 @@ post:
   - func: "attach docker logs"
   - func: "upload jstestfuzz minimized output"
   - func: "generate and upload network diagnostics"
+  - func: "save tracing data"
   - func: "kill processes"
   - func: "save code coverage data"
   - func: "save local client logs"
@@ -129,7 +140,8 @@ post:
   - func: "save unsymbolized stacktraces and local invocation"
   - func: "save mongo coredumps"
   - func: "generate hang analyzer tasks"
-  - func: "save failed unittests"
+  - func: "attach bazel invocation text"
+  - func: "save failed tests"
   - func: "save hang analyzer debugger files"
   - func: "save disk statistics"
   - func: "save system resource information"
@@ -142,9 +154,9 @@ post:
         src/gcov-intermediate-files.tgz
         src/*.core src/*.mdmp src/*.core.gz src/*.mdmp.gz
         mongo-coredumps.json
-        src/dist-unittests/bin/*
-        src/dist-unittests/lib/*
-        mongo-unittests.tgz
+        src/dist-tests/bin/*
+        src/dist-tests/lib/*
+        mongo-tests.tgz
         src/debugger*.*
         src/mongo-hanganalyzer.tgz
         diskstats.tgz
@@ -152,6 +164,8 @@ post:
         ${report_file|src/report.json}
         ${archive_file|src/archive.json}
         src/network_diagnostics.txt
+        ${workdir}/build/OTelTraces/*trace.jsonl
+        tracing-data.tgz
   - func: "umount tmp directory"
   - func: "cleanup FUSE watchdog"
   - func: "cleanup environment"

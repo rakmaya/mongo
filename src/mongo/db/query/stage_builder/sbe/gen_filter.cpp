@@ -85,8 +85,6 @@
 #include <memory>
 #include <set>
 
-#include <s2cellid.h>
-
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
@@ -327,16 +325,14 @@ SbExpr generateTraverseF(SbExpr inputExpr,
         // If the result of getField() was Nothing or a scalar value, then don't bother traversing
         // the remaining levels of the path and just decide now if we should return true or false
         // for this value.
-        traverseFExpr = b.makeIf(
-            b.makeFillEmptyFalse(
-                b.makeFunction("typeMatch",
-                               fieldExpr.clone(),
-                               b.makeInt32Constant(getBSONTypeMask(BSONType::array) |
-                                                   getBSONTypeMask(BSONType::object)))),
-            std::move(traverseFExpr),
-            !inputExpr.isNull()
-                ? b.makeNot(b.makeFillEmptyFalse(b.makeFunction("isArray", inputExpr.clone())))
-                : b.makeBoolConstant(true));
+        traverseFExpr = b.makeIf(b.makeFillEmptyFalse(b.makeFunction(
+                                     "typeMatch",
+                                     fieldExpr.clone(),
+                                     b.makeInt32Constant(getBSONTypeMask(BSONType::array) |
+                                                         getBSONTypeMask(BSONType::object)))),
+                                 std::move(traverseFExpr),
+                                 !inputExpr.isNull() ? b.makeFunction("exists", inputExpr.clone())
+                                                     : b.makeBoolConstant(true));
     }
 
     if (frameId) {

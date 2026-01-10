@@ -39,13 +39,13 @@
 #include "mongo/db/exec/classic/mock_stage.h"
 #include "mongo/db/exec/classic/working_set.h"
 #include "mongo/db/exec/classic/working_set_common.h"
-#include "mongo/db/local_catalog/create_collection.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/service_context_d_test_fixture.h"
+#include "mongo/db/shard_role/shard_catalog/create_collection.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 
@@ -150,15 +150,14 @@ public:
         textOr.addChild(std::move(childStage));
 
         // Register the index.
-        const IndexDescriptor* indexDescriptor = getIndexDescriptor(indexName);
-        WorkingSetRegisteredIndexId indexId =
-            _ws.registerIndexIdent(indexDescriptor->getEntry()->getIdent());
+        const auto indexEntry = getIndexEntry(indexName);
+        WorkingSetRegisteredIndexId indexId = _ws.registerIndexIdent(indexEntry->getIdent());
 
         WorkingSetID wsid = _ws.allocate();
         WorkingSetMember* member = _ws.get(wsid);
         member->recordId = recordId;
         member->keyData.push_back(
-            IndexKeyDatum(indexDescriptor->keyPattern(),
+            IndexKeyDatum(indexEntry->descriptor()->keyPattern(),
                           BSON("" << 1 << "" << term << "" << score << ""
                                   << "english"),
                           indexId,
@@ -171,7 +170,7 @@ public:
         stagePtr.enqueueAdvanced(wsid);
     }
 
-    const IndexDescriptor* getIndexDescriptor(StringData name) {
+    const IndexCatalogEntry* getIndexEntry(StringData name) {
         return acquireCollForRead(kNss).getCollectionPtr()->getIndexCatalog()->findIndexByName(
             _opCtx.get(), name);
     }
@@ -180,7 +179,7 @@ public:
         return acquireCollection(
             _opCtx.get(),
             CollectionAcquisitionRequest(nss,
-                                         PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                         PlacementConcern(boost::none, ShardVersion::UNTRACKED()),
                                          repl::ReadConcernArgs::get(_opCtx.get()),
                                          AcquisitionPrerequisites::kRead),
             MODE_IS);

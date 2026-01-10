@@ -39,22 +39,18 @@
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/exec/agg/pipeline_builder.h"
 #include "mongo/db/exec/document_value/document.h"
-#include "mongo/db/global_catalog/catalog_cache/catalog_cache_mock.h"
 #include "mongo/db/global_catalog/chunk_manager.h"
 #include "mongo/db/global_catalog/type_chunk.h"
 #include "mongo/db/global_catalog/type_collection_common_types_gen.h"
 #include "mongo/db/hasher.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/create_collection.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_catalog/operation_sharding_state.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_mock.h"
+#include "mongo/db/pipeline/pipeline_factory.h"
 #include "mongo/db/pipeline/process_interface/stub_mongo_process_interface.h"
 #include "mongo/db/pipeline/sharded_agg_helpers_targeting_policy.h"
 #include "mongo/db/query/collation/collator_interface.h"
+#include "mongo/db/router_role/routing_cache/catalog_cache_mock.h"
 #include "mongo/db/s/resharding/recipient_resume_document_gen.h"
 #include "mongo/db/s/resharding/resharding_data_copy_util.h"
 #include "mongo/db/s/resharding/resharding_metrics.h"
@@ -62,6 +58,11 @@
 #include "mongo/db/s/resharding/resharding_util.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/session_catalog_mongod.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/create_collection.h"
+#include "mongo/db/shard_role/shard_catalog/operation_sharding_state.h"
 #include "mongo/db/sharding_environment/shard_server_test_fixture.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/versioning_protocol/chunk_version.h"
@@ -192,7 +193,8 @@ protected:
 
         auto [rawPipeline, expCtx] = _cloner->makeRawNaturalOrderPipeline(
             operationContext(), std::make_shared<MockMongoInterface>(configCacheChunksData));
-        _pipeline = Pipeline::parse(rawPipeline, expCtx);
+        _pipeline =
+            pipeline_factory::makePipeline(rawPipeline, expCtx, pipeline_factory::kOptionsMinimal);
 
         _pipeline->addInitialSource(
             DocumentSourceMock::createForTest(sourceCollectionData, _pipeline->getContext()));
@@ -226,7 +228,7 @@ protected:
         ShardServerTestFixtureWithCatalogCacheMock::tearDown();
     }
 
-    ChunkManager createChunkManager(
+    CurrentChunkManager createChunkManager(
         const ShardKeyPattern& shardKeyPattern,
         std::deque<DocumentSource::GetNextResult> configCacheChunksData) {
         const OID epoch = OID::gen();
@@ -255,7 +257,7 @@ protected:
                                                false,
                                                chunks);
 
-        return ChunkManager(makeStandaloneRoutingTableHistory(std::move(rt)), boost::none);
+        return CurrentChunkManager(makeStandaloneRoutingTableHistory(std::move(rt)));
     }
 
     /**

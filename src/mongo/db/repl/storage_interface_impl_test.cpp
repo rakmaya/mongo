@@ -30,25 +30,11 @@
 #include "mongo/db/repl/storage_interface_impl.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/client.h"
-#include "mongo/db/collection_crud/collection_write_path.h"
+#include "mongo/db/dbhelpers.h"
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/index/index_constants.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/clustered_collection_options_gen.h"
-#include "mongo/db/local_catalog/clustered_collection_util.h"
-#include "mongo/db/local_catalog/collection_options.h"
-#include "mongo/db/local_catalog/database.h"
-#include "mongo/db/local_catalog/db_raii.h"
-#include "mongo/db/local_catalog/document_validation.h"
-#include "mongo/db/local_catalog/index_catalog.h"
-#include "mongo/db/local_catalog/index_catalog_entry.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
-#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
-#include "mongo/db/local_catalog/lock_manager/exception_util.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/member_state.h"
@@ -59,6 +45,19 @@
 #include "mongo/db/repl/replication_coordinator_mock.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context_d_test_fixture.h"
+#include "mongo/db/shard_role/lock_manager/d_concurrency.h"
+#include "mongo/db/shard_role/lock_manager/exception_util.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/clustered_collection_options_gen.h"
+#include "mongo/db/shard_role/shard_catalog/clustered_collection_util.h"
+#include "mongo/db/shard_role/shard_catalog/collection_options.h"
+#include "mongo/db/shard_role/shard_catalog/database.h"
+#include "mongo/db/shard_role/shard_catalog/db_raii.h"
+#include "mongo/db/shard_role/shard_catalog/document_validation.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog_entry.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/platform/compiler.h"
@@ -189,9 +188,8 @@ TimestampedBSONObj makeOplogEntry(OpTime opTime) {
  */
 int64_t getIndexKeyCount(OperationContext* opCtx,
                          const IndexCatalog* cat,
-                         const IndexDescriptor* desc) {
-    return cat->getEntry(desc)->accessMethod()->numKeys(
-        opCtx, *shard_role_details::getRecoveryUnit(opCtx));
+                         const IndexCatalogEntry* entry) {
+    return entry->accessMethod()->numKeys(opCtx, *shard_role_details::getRecoveryUnit(opCtx));
 }
 
 std::vector<InsertStatement> transformInserts(std::vector<BSONObj> docs) {
@@ -257,7 +255,7 @@ CollectionAcquisition getCollectionForRead(OperationContext* opCtx, const Namesp
     return acquireCollection(
         opCtx,
         CollectionAcquisitionRequest(nss,
-                                     PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                     PlacementConcern(boost::none, ShardVersion::UNTRACKED()),
                                      repl::ReadConcernArgs::get(opCtx),
                                      mongo::AcquisitionPrerequisites::kRead),
         MODE_IS);
@@ -464,21 +462,20 @@ TEST_F(StorageInterfaceImplTest,
     createCollection(opCtx, nss, options);
     // StorageInterfaceImpl::insertDocuments should fall back on inserting the batch one at a time.
     StorageInterfaceImpl storage;
-    auto doc1 = InsertStatement(BSON("_id" << 1));
-    auto doc2 = InsertStatement(BSON("_id" << 2));
-    std::vector<InsertStatement> docs{doc1, doc2};
+    auto doc1 = BSON("_id" << 1);
+    auto doc2 = BSON("_id" << 2);
     // Confirm that Collection::insertDocuments fails to insert the batch all at once.
     {
         AutoGetCollection autoCollection(opCtx, nss, MODE_IX);
         WriteUnitOfWork wunit(opCtx);
         ASSERT_EQUALS(ErrorCodes::OperationCannotBeBatched,
-                      collection_internal::insertDocuments(
-                          opCtx, *autoCollection, docs.cbegin(), docs.cend(), nullptr, false));
+                      Helpers::insert(opCtx, *autoCollection, std::vector{doc1, doc2}));
     }
-    ASSERT_OK(storage.insertDocuments(opCtx, nss, docs));
+    ASSERT_OK(storage.insertDocuments(
+        opCtx, nss, std::vector{InsertStatement{doc1}, InsertStatement{doc2}}));
 
     // Check collection contents.
-    _assertDocumentsInCollectionEquals(opCtx, nss, {doc1.doc, doc2.doc});
+    _assertDocumentsInCollectionEquals(opCtx, nss, {doc1, doc2});
 }
 
 TEST_F(StorageInterfaceImplTest, InsertDocumentsSavesOperationsReturnsOpTimeOfLastOperation) {
@@ -612,8 +609,8 @@ TEST_F(StorageInterfaceImplTest, CreateCollectionWithIDIndexCommits) {
     const auto& collPtr = coll.getCollectionPtr();
     ASSERT_EQ(collPtr->getRecordStore()->numRecords(), 2LL);
     auto collIdxCat = collPtr->getIndexCatalog();
-    auto idIdxDesc = collIdxCat->findIdIndex(opCtx);
-    auto count = getIndexKeyCount(opCtx, collIdxCat, idIdxDesc);
+    auto idIdxEntry = collIdxCat->findIdIndex(opCtx);
+    auto count = getIndexKeyCount(opCtx, collIdxCat, idIdxEntry);
     ASSERT_EQ(count, 2LL);
 }
 
@@ -3450,7 +3447,7 @@ TEST_F(StorageInterfaceImplTest, SetIndexIsMultikeySucceeds) {
     ASSERT_TRUE(coll.exists());
     const auto& collPtr = coll.getCollectionPtr();
     auto indexCatalog = collPtr->getIndexCatalog();
-    auto entry = indexCatalog->findIndexByName(opCtx, indexName)->getEntry();
+    auto entry = indexCatalog->findIndexByName(opCtx, indexName);
     ASSERT(entry->isMultikey(opCtx, collPtr));
     ASSERT(paths == entry->getMultikeyPaths(opCtx, collPtr));
 }

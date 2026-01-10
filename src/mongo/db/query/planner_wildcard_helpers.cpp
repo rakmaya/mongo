@@ -38,7 +38,6 @@
 #include <boost/optional/optional.hpp>
 // IWYU pragma: no_include "ext/alloc_traits.h"
 #include "mongo/base/string_data.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
@@ -47,7 +46,6 @@
 #include "mongo/db/field_ref.h"
 #include "mongo/db/index/multikey_paths.h"
 #include "mongo/db/index_names.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
 #include "mongo/db/query/compiler/physical_model/index_bounds/index_bounds.h"
 #include "mongo/db/query/compiler/physical_model/interval/interval.h"
 #include "mongo/db/query/compiler/physical_model/query_solution/stage_types.h"
@@ -212,9 +210,15 @@ std::set<FieldRef> generateFieldNameOrArrayIndexPathSet(const MultikeyComponents
     // We iterate over the power set of array index positions to generate all necessary paths.
     // The algorithm is unavoidably O(n2^n), but we enforce that 'n' is never more than single
     // digits during the planner's index selection phase.
+    constexpr auto kMaxPotentialArrayIndicesSize =
+        std::min(kWildcardMaxArrayIndexTraversalDepth + 1, sizeof(size_t) * 8u);
     const auto potentialArrayIndices = findArrayIndexPathComponents(multikeyPaths, queryPath);
-    invariant(potentialArrayIndices.size() <= kWildcardMaxArrayIndexTraversalDepth);
-    invariant(potentialArrayIndices.size() < sizeof(size_t) * 8u);
+    tassert(
+        11321100,
+        fmt::format("The size of 'potentialArrayIndices' must not exceed {}, but found {} elements",
+                    kMaxPotentialArrayIndicesSize,
+                    potentialArrayIndices.size()),
+        potentialArrayIndices.size() < kMaxPotentialArrayIndicesSize);
     // We iterate over every value [0..2^n), where 'n' is the size of 'potentialArrayIndices',
     // treating each value as a 'bitMask' of 'n' bits. Each bit in 'bitMask' represents the
     // entry at the equivalent position in the 'potentialArrayIndices' vector. When a given bit
@@ -351,7 +355,11 @@ bool validateNumericPathComponents(const MultikeyPaths& multikeyPaths,
         includedPaths.begin(), includedPaths.end(), [&queryPath](const auto& includedPath) {
             return includedPath.isPrefixOfOrEqualTo(queryPath);
         });
-    invariant(std::next(includePath) == includedPaths.end() || *std::next(includePath) > queryPath);
+    tassert(11321101,
+            fmt::format("Expected includePath='{}' to be greater than queryPath='{}'",
+                        includePath->dottedField(),
+                        queryPath.dottedField()),
+            std::next(includePath) == includedPaths.end() || *std::next(includePath) > queryPath);
 
     // If the projectedPath responsible for including this queryPath prefixes it up to and including
     // the numerical array index field, then the queryPath lies along a projection through the array
@@ -379,6 +387,11 @@ std::pair<BSONObj, size_t> expandWildcardIndexKeyPattern(const BSONObj& wildcard
             builder.appendAs(field, expandFieldName);
             wildcardFieldPos = fieldPos;
         } else {
+            tassert(11390001,
+                    str::stream() << "Expansion of wildcard index " << wildcardKeyPattern
+                                  << " would result in duplicate field: " << expandFieldName,
+                    fieldName != expandFieldName);
+
             builder.append(field);
         }
         ++fieldPos;
@@ -435,9 +448,7 @@ boost::optional<IndexEntry> createExpandedIndexEntry(const IndexEntry& wildcardI
                      true,   // sparse
                      false,  // unique
                      {wildcardIndex.identifier.catalogName, fieldName},
-                     wildcardIndex.filterExpr,
                      wildcardIndex.infoObj,
-                     wildcardIndex.collator,
                      wildcardIndex.indexPathProjection,
                      wildcardIndex.indexCatalogEntryStorage,
                      wildcardFieldPos);
@@ -558,7 +569,12 @@ void finalizeWildcardIndexScanConfiguration(
     IndexBounds* bounds = &scan->bounds;
 
     // We should only ever reach this point when processing a $** index. Sanity check the arguments.
-    invariant(index && index->type == IndexType::INDEX_WILDCARD);
+    tassert(11321102, "index must not be null", index);
+    tassert(11052103,
+            fmt::format("Expected the index type to be INDEX_WILDCARD for {} but found {}",
+                        index->identifier.toString(),
+                        static_cast<int>(index->type)),
+            index->type == IndexType::INDEX_WILDCARD);
 
     // For $** indexes, the IndexEntry key pattern is {..., 'path.to.field': 1, ...} but the actual
     // keys in the index are of the form {..., '$_path': 1, 'path.to.field': 1, ...}, where the

@@ -1,5 +1,9 @@
 version: 1.0.0
 filters:
+  - "OWNERS.yml":
+    approvers:
+      - 10gen/server-programmability
+      - 10gen/server-networking-and-observability
   - "api_parameters*":
     approvers:
       - 10gen/query-optimization
@@ -8,7 +12,7 @@ filters:
       - 10gen/server-programmability
   - "baton.*":
     approvers:
-      - 10gen/server-networking-and-observability
+      - 10gen/server-programmability
   - "cancelable_operation_context*":
     approvers:
       - 10gen/server-programmability
@@ -44,11 +48,11 @@ filters:
       - 10gen/server-networking-and-observability
   - "default_baton*":
     approvers:
-      - 10gen/server-networking-and-observability
+      - 10gen/server-programmability
   - "diagnostic_printers_test.cpp":
     approvers:
       - 10gen/query-integration-observability
-  - "keypattern.h":
+  - "keypattern*":
     approvers:
       - 10gen/query-optimization
       - 10gen/query-execution
@@ -59,6 +63,9 @@ filters:
     approvers:
       - 10gen/server-programmability
   - "generic_argument_util.*":
+    approvers:
+      - 10gen/server-programmability
+  - "ifr_flag_retry_info*":
     approvers:
       - 10gen/server-programmability
   - "index_names.*":
@@ -130,9 +137,6 @@ filters:
   - "record_id*":
     approvers:
       - 10gen/server-storage-engine-integration
-  - "replica_set_endpoint*":
-    approvers:
-      - 10gen/server-cluster-scalability
   - "repair*":
     approvers:
       - 10gen/server-storage-engine-integration
@@ -213,9 +217,6 @@ filters:
   - "feature_compatibility*":
     approvers:
       - 10gen/server-fcv
-  - "catalog_shard_feature_flag.idl":
-    approvers:
-      - 10gen/server-cluster-scalability
   - "traffic*":
     approvers:
       - 10gen/query-optimization
@@ -300,9 +301,6 @@ filters:
   - "tenant_id*":
     approvers:
       - 10gen/server-security
-  - "deferred_writer*":
-    approvers:
-      - 10gen/server-dbcheck
   - "flow_control_ticketholder*":
     approvers:
       - 10gen/server-workload-resilience
@@ -312,3 +310,33 @@ filters:
   - "local_executor*":
     approvers:
       - 10gen/server-catalog-and-routing-routing-and-topology
+  - "collection_compact*":
+    approvers:
+      - 10gen/server-compact
+  - "import*":
+    approvers:
+      - 10gen/server-storage-engine-integration
+      - 10gen/server-catalog-and-routing-shard-catalog
+  - "index_key_validate*":
+    approvers:
+      - 10gen/server-index-builds
+  - "index_spec_validate*":
+    approvers:
+      - 10gen/server-index-builds
+  - "index_repair*":
+    approvers:
+      - 10gen/server-index-builds
+  - "throttle_cursor*":
+    approvers:
+      - 10gen/server-validate
+  - "cleanup_structured*":
+    approvers:
+      - 10gen/server-catalog-and-routing-ddl
+      - 10gen/server-security
+  - "compact_structured*":
+    approvers:
+      - 10gen/server-catalog-and-routing-ddl
+      - 10gen/server-security
+  - "partitioned*":
+    approvers:
+      - 10gen/server-programmability

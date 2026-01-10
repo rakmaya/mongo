@@ -27,8 +27,8 @@ selector:
     - jstests/sharding/advance_cluster_time_action_type.js
     - jstests/sharding/mongod_returns_no_cluster_time_without_keys.js
     # Count/write/aggregate commands against the config shard do not support retries yet
-    - jstests/sharding/addshard1.js
-    - jstests/sharding/addshard2.js
+    - jstests/sharding/add_shard_1.js
+    - jstests/sharding/add_shard_2.js
     - jstests/sharding/basic_merge.js
     - jstests/sharding/query/count/count1.js
     - jstests/sharding/query/count/count2.js
@@ -51,7 +51,7 @@ selector:
     - jstests/sharding/prefix_shard_key.js
     - jstests/sharding/query/query_config.js
     - jstests/sharding/range_deleter_interacts_correctly_with_refine_shard_key.js
-    - jstests/sharding/remove1.js
+    - jstests/sharding/remove_shard_1.js
     - jstests/sharding/shard2.js
     - jstests/sharding/shard3.js
     - jstests/sharding/tag_range.js
@@ -71,7 +71,7 @@ selector:
     - jstests/sharding/catalog_shard_mongos_ops_on_config_and_admin.js
     # Balancer writes (direct write to config database with no retries)
     - jstests/sharding/convert_to_and_from_sharded.js
-    - jstests/sharding/remove2.js
+    - jstests/sharding/remove_shard_2.js
     - jstests/sharding/features3.js
     - jstests/sharding/query/in_memory_sort_limit.js
     - jstests/sharding/parallel.js
@@ -103,6 +103,7 @@ selector:
     - jstests/sharding/multi_collection_transaction_placement_conflict_workaround.js # sets a failpoint on the config primary
     - jstests/sharding/refine_collection_shard_key_atomic.js # sets a failpoint on the config primary
     - jstests/sharding/restart_transactions.js
+    - jstests/sharding/retryable_writes.js
     - jstests/sharding/txn_two_phase_commit_commands_basic_requirements.js
     - jstests/sharding/txn_two_phase_commit_coordinator_shutdown_and_restart.js
     - jstests/sharding/txn_two_phase_commit_failover.js
@@ -163,16 +164,16 @@ selector:
     # it may not be sent if the config server primary steps down just before sending it.
     - jstests/sharding/database_versioning_all_commands.js
     # Calls removeShard/removeshard which is not idempotent and these tests expect it to be run an exact number of times
-    - jstests/sharding/addshard5.js
+    - jstests/sharding/add_shard_5.js
     - jstests/sharding/auth_add_shard.js
-    - jstests/sharding/remove3.js
+    - jstests/sharding/remove_shard_3.js
     - jstests/sharding/authCommands.js
-    #  - jstests/sharding/addshard2.js
+    #  - jstests/sharding/add_shard_2.js
     #  - jstests/sharding/configsvr_metadata_commands_require_majority_write_concern.js
     #  - jstests/sharding/convert_to_and_from_sharded.js
     #  - jstests/sharding/names.js
-    #  - jstests/sharding/remove1.js
-    #  - jstests/sharding/remove2.js
+    #  - jstests/sharding/remove_shard_1.js
+    #  - jstests/sharding/remove_shard_2.js
 
     # Moves a chunk before continuing a transaction, which can lead to snapshot errors if the
     # CSRS failovers are sufficiently slow.
@@ -192,6 +193,7 @@ selector:
     - jstests/sharding/read_write_concern_defaults_propagation.js
     - jstests/sharding/live_shard_startup_recovery_config_server.js
     - jstests/sharding/live_shard_logical_initial_sync_config_server.js
+    - jstests/sharding/read_pref_cmd.js
 
     # On stepdown there is not gurantee that changelog entries have been inserted [SERVER-45655]
     - jstests/sharding/refine_collection_shard_key_changelog.js
@@ -222,6 +224,8 @@ selector:
     - jstests/sharding/**/*reshard*.js
     - jstests/sharding/**/*move*collection*.js
     - jstests/sharding/**/*unshard_collection*.js
+    - jstests/sharding/move_primary_failpoint.js
+    - jstests/sharding/catalog_shard_secondary_reads.js
 
     # Expects reshardCollection executes without config server stepdown
     - jstests/sharding/shard_encrypted_collection.js
@@ -265,6 +269,7 @@ selector:
     # then remove them from the exclusion list.
     - jstests/sharding/query/api_version/api_version_stage_allowance_checks.js
     - jstests/sharding/query/log_remote_op_wait.js
+    - jstests/sharding/query/change_streams/projection_fakes_internal_event.js
     - jstests/sharding/query/change_streams/change_stream_against_shard_mongod.js
     - jstests/sharding/query/change_streams/change_stream_chunk_migration.js
     - jstests/sharding/query/change_streams/change_stream_empty_apply_ops.js
@@ -292,6 +297,20 @@ selector:
     - jstests/sharding/resharding_change_stream_namespace_filtering.js
     - jstests/sharding/resharding_oplog_sync_agg_resume_token.js
     - jstests/sharding/timeseries/timeseries_change_stream_no_orphans.js
+
+    # TODO (SERVER-115616): Enable after retrying addShard cmd on retriable network errors.
+    - jstests/sharding/add_shard_4.js
+
+    # These tests shutdown shard or kill shard and expect FailedToSatisfyReadPreference errors
+    # implicitly or explicitly. We have a retry override for this error in
+    # implicitly_retry_on_config_stepdowns.js and it fails to reach the test control flow.
+    - jstests/sharding/index_and_collection_option_propagation.js
+    - jstests/sharding/mongos_rs_shard_failure_tolerance.js
+    - jstests/sharding/mongos_shard_failure_tolerance.js
+    - jstests/sharding/read_pref.js
+    - jstests/sharding/query/change_streams/config_server_data_shard_error_handling.js
+    - jstests/sharding/query/count/count_secondaryok.js
+    - jstests/sharding/query/allow_partial_results.js
 
   exclude_with_any_tags:
     - does_not_support_stepdowns

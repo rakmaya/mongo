@@ -94,12 +94,12 @@ groups:
   # Core Server Team VP orgs as described on https://wiki.corp.mongodb.com/pages/viewpage.action?spaceKey=KERNEL&title=Server+Home
   - name: "Clusters & Integrations"
     teams:
-      - "Server Security"
-      - "Networking & Observability"
-      - "Workload Scheduling"
-      - "Server Programmability"
-      - "Cluster Scalability"
       - "Catalog and Routing"
+      - "Cluster Scalability"
+      - "Networking & Observability"
+      - "Server Programmability"
+      - "Server Security"
+      - "Workload Resilience"
     slack_tags:
       - "<@U03J9P66LRW>" # tyler.brock@mongodb.com - VP
       - "<@U23L5FVFH>" # ryan.chipman@mongodb.com - Director
@@ -107,10 +107,15 @@ groups:
       - "<@U01ALSK50HH>" # sergi.mateo-bellido@mongodb.com - Director
   - name: "Durable Transactions & Availability"
     teams:
+      - "RSSD"
       - "Replication"
       - "Storage Execution"
-      - "RSS Sydney"
       - "Storage Engines"
+      - "Storage Engines - Server Integration"
+      - "Storage Engines - Foundations"
+      - "Storage Engines - Transactions"
+      - "Storage Engines - Persistence"
+      - "Storage Layer Services"
     slack_tags:
       - "<@U032DKCUWQ4>" # mick.graham@mongodb.com - VP
       - "<@U0XPWJ72R>" # geert.bosch@mongodb.com - Director
@@ -127,16 +132,17 @@ groups:
       - "<@U0294T002>" # james.wahlin@mongodb.com - Director
   - name: "Developer Productivity"
     teams:
-      - "DevProd Evergreen UI"
-      - "DevProd Evergreen App"
-      - "DevProd Services & Integrations"
-      - "DevProd Runtime Environments"
-      - "DevProd Infrastructure"
-      - "DevProd Release Infrastructure"
-      - "DevProd Performance Infrastructure"
-      - "DevProd Performance Analysis"
       - "DevProd Build"
       - "DevProd Correctness"
+      - "DevProd Evergreen App"
+      - "DevProd Evergreen UI"
+      - "DevProd Infrastructure"
+      - "DevProd Last Mile"
+      - "DevProd Performance Analysis"
+      - "DevProd Performance Infrastructure"
+      - "DevProd Release Infrastructure"
+      - "DevProd Runtime Environments"
+      - "DevProd Services & Integrations"
     slack_tags:
       - "<@U03F4KZUYP5>" # tara.hernandez@mongodb.com - VP
       - "<@U05RNJZ9212>" # byron.hood@mongodb.com - Director
@@ -154,24 +160,33 @@ teams:
   #######################################################################
 
   # Core Server Teams as described on https://wiki.corp.mongodb.com/pages/viewpage.action?spaceKey=KERNEL&title=Server+Home
-  - name: "Server Security"
-    slack_tags:
-      - "<@U23L5FVFH>" # ryan.chipman@mongodb.com - Director
-  - name: "Networking & Observability"
-    slack_tags:
-      - "<@U23L5FVFH>" # ryan.chipman@mongodb.com - Director
-  - name: "Workload Scheduling"
-    slack_tags:
-      - "<@U23L5FVFH>" # ryan.chipman@mongodb.com - Director
-  - name: "Server Programmability"
-    slack_tags:
-      - "<@U0V2RMB1N>" # judah.schvimer@mongodb.com - Director
-  - name: "Cluster Scalability"
-    slack_tags:
-      - "<@U0V2RMB1N>" # judah.schvimer@mongodb.com - Director
+
+  # Clusters & Integrations teams
   - name: "Catalog and Routing"
     slack_tags:
       - "<@U01ALSK50HH>" # sergi.mateo-bellido@mongodb.com - Director
+  - name: "Cluster Scalability"
+    slack_tags:
+      - "<@U0V2RMB1N>" # judah.schvimer@mongodb.com - Director
+  - name: "Networking & Observability"
+    slack_tags:
+      - "<@U0V2RMB1N>" # judah.schvimer@mongodb.com - Director
+  - name: "Server Programmability"
+    slack_tags:
+      - "<@U23L5FVFH>" # ryan.chipman@mongodb.com - Director
+  - name: "Server Security"
+    slack_tags:
+      - "<@U23L5FVFH>" # ryan.chipman@mongodb.com - Director
+      - "<@U02HWKGMAQL>" # adam.rayner@mongodb.com - Lead
+  - name: "Workload Resilience"
+    slack_tags:
+      - "<@U0V2RMB1N>" # judah.schvimer@mongodb.com - Director
+
+  # Durable Transactions & Availability teams
+  - name: "RSSD"
+    slack_tags:
+      - "<@U0XPWJ72R>" # geert.bosch@mongodb.com - Director
+      - "<@U08102DKT3M>" # austin.miller@mongodb.com - Lead
   - name: "Replication"
     slack_tags:
       - "<@U0XPWJ72R>" # geert.bosch@mongodb.com - Director
@@ -180,14 +195,47 @@ teams:
     slack_tags:
       - "<@U0XPWJ72R>" # geert.bosch@mongodb.com - Director
       - "<!subteam^S02P8DH4XNH>" # @leads-storage-execution - Leads
-  - name: "RSS Sydney"
-    slack_tags:
-      - "<@U0XPWJ72R>" # geert.bosch@mongodb.com - Director
-      - "<@UCBGYHB6X>" # gregory.wlodarek@mongodb.com - Lead
   - name: "Storage Engines"
     slack_tags:
-      - "<@U06QP4BJRD2>" # jonas.bergler@mongodb.com - Director
       - "<!subteam^S05UGLCB76U>" # @leads-storage-engines - Leads
+      - "<!subteam^S08DQ4QBP6K>" # @storage-engines-wiredtiger-primary - Triager
+    thresholds: # triage should route these elsewhere quickly (ie faster than the cooldown)
+      hot: 0
+      cold: 0
+  - name: "Storage Engines - Server Integration"
+    slack_tags:
+      - "<@U06QP4BJRD2>" # jonas.bergler@mongodb.com - Director
+      - "<@U09EG3B1MR6>" # nick.beckenham@mongodb.com - Lead
+    thresholds: # Reduced Quotas for Storage Engines
+      hot: 3
+      cold: 5
+  - name: "Storage Engines - Foundations"
+    slack_tags:
+      - "<@U06QP4BJRD2>" # jonas.bergler@mongodb.com - Director
+      - "<@U094DFQ4JGL>" # radoslav.kardum@mongodb.com - Lead
+    thresholds: # Reduced Quotas for Storage Engines
+      hot: 3
+      cold: 5
+  - name: "Storage Engines - Transactions"
+    slack_tags:
+      - "<@U06QP4BJRD2>" # jonas.bergler@mongodb.com - Director
+      - "<@UKGR8F9C7>" # haribabu.kommi@mongodb.com - Lead
+    thresholds: # Reduced Quotas for Storage Engines
+      hot: 3
+      cold: 5
+  - name: "Storage Engines - Persistence"
+    slack_tags:
+      - "<@U06QP4BJRD2>" # jonas.bergler@mongodb.com - Director
+      - "<@U01JK626XEY>" # etienne.petrel@mongodb.com - Lead
+    thresholds: # Reduced Quotas for Storage Engines
+      hot: 3
+      cold: 5
+  - name: "Storage Layer Services"
+    slack_tags:
+      - "<@U06QP4BJRD2>" # jonas.bergler@mongodb.com - Director
+      - "<!subteam^S08RZGCJWT0>" # @sls-leaders - Leads
+
+  # Query teams
   - name: "Query Execution"
     slack_tags:
       - "<@U0X6DK154>" # bernard.gorman@mongodb.com - Director
@@ -200,50 +248,57 @@ teams:
     slack_tags:
       - "<@U0294T002>" # james.wahlin@mongodb.com - Director
       - "<!subteam^S080PEJEYUW>" # @leads-staff-query-integration - Leads + Staff
-  - name: "Atlas Streams"
-    slack_tags:
-      - "<!subteam^S07M9UNSX5J>" # @streams-engine-team
-  - name: "Server Triage"
+
+  # Release Quality teams
+  - name: "Build Baron"
     slack_tags:
       - "<@U0V9XLF8R>" # kelsey.schubert@mongodb.com - Director
   - name: "Product Performance"
     slack_tags:
       - "<@U0V9XLF8R>" # kelsey.schubert@mongodb.com - Director
-  - name: "Build Baron"
-    slack_tags:
-      - "<@U0V9XLF8R>" # kelsey.schubert@mongodb.com - Director
   - name: "Server Release"
     slack_tags:
       - "<@U0V9XLF8R>" # kelsey.schubert@mongodb.com - Director
+  - name: "Server Triage"
+    slack_tags:
+      - "<@U0V9XLF8R>" # kelsey.schubert@mongodb.com - Director
+
+  # Other teams
+  - name: "Atlas Streams"
+    slack_tags:
+      - "<!subteam^S07M9UNSX5J>" # @streams-engine-team
 
   # R&D Productivity Teams as described on https://wiki.corp.mongodb.com/pages/viewpage.action?pageId=88587938
-  - name: "DevProd Evergreen UI"
-    slack_tags:
-      - "<@U05RNJZ9212>" # byron.hood@mongodb.com - Director
-  - name: "DevProd Evergreen App"
-    slack_tags:
-      - "<@U05RNJZ9212>" # byron.hood@mongodb.com - Director
-  - name: "DevProd Services & Integrations"
-    slack_tags:
-      - "<@U05RNJZ9212>" # byron.hood@mongodb.com - Director
-  - name: "DevProd Runtime Environments"
-    slack_tags:
-      - "<@U064RTDGS2W>" # stacey.kingpoling@mongodb.com - Director
-  - name: "DevProd Infrastructure"
-    slack_tags:
-      - "<@U064RTDGS2W>" # stacey.kingpoling@mongodb.com - Director
-  - name: "DevProd Release Infrastructure"
-    slack_tags:
-      - "<@U064RTDGS2W>" # stacey.kingpoling@mongodb.com - Director
-  - name: "DevProd Performance Infrastructure"
-    slack_tags:
-      - "<@U03D3JHNB1C>" # alex.neben@mongodb.com - Director
-  - name: "DevProd Performance Analysis"
-    slack_tags:
-      - "<@U03D3JHNB1C>" # alex.neben@mongodb.com - Director
   - name: "DevProd Build"
     slack_tags:
       - "<@U03D3JHNB1C>" # alex.neben@mongodb.com - Director
   - name: "DevProd Correctness"
     slack_tags:
       - "<@U03D3JHNB1C>" # alex.neben@mongodb.com - Director
+  - name: "DevProd Evergreen App"
+    slack_tags:
+      - "<@U05RNJZ9212>" # byron.hood@mongodb.com - Director
+  - name: "DevProd Evergreen UI"
+    slack_tags:
+      - "<@U05RNJZ9212>" # byron.hood@mongodb.com - Director
+  - name: "DevProd Infrastructure"
+    slack_tags:
+      - "<@U064RTDGS2W>" # stacey.kingpoling@mongodb.com - Director
+  - name: "DevProd Last Mile"
+    slack_tags:
+      - "<@U03D3JHNB1C>" # alex.neben@mongodb.com - Director
+  - name: "DevProd Performance Analysis"
+    slack_tags:
+      - "<@U03D3JHNB1C>" # alex.neben@mongodb.com - Director
+  - name: "DevProd Performance Infrastructure"
+    slack_tags:
+      - "<@U03D3JHNB1C>" # alex.neben@mongodb.com - Director
+  - name: "DevProd Release Infrastructure"
+    slack_tags:
+      - "<@U064RTDGS2W>" # stacey.kingpoling@mongodb.com - Director
+  - name: "DevProd Runtime Environments"
+    slack_tags:
+      - "<@U064RTDGS2W>" # stacey.kingpoling@mongodb.com - Director
+  - name: "DevProd Services & Integrations"
+    slack_tags:
+      - "<@U05RNJZ9212>" # byron.hood@mongodb.com - Director

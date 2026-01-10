@@ -36,7 +36,7 @@
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/admission/execution_admission_context.h"
+#include "mongo/db/admission/execution_control/execution_admission_context.h"
 #include "mongo/db/client.h"
 #include "mongo/db/collection_crud/collection_write_path.h"
 #include "mongo/db/curop.h"
@@ -48,21 +48,7 @@
 #include "mongo/db/index/index_constants.h"
 #include "mongo/db/index_builds/index_builds_coordinator.h"
 #include "mongo/db/keypattern.h"
-#include "mongo/db/local_catalog/catalog_control.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/clustered_collection_options_gen.h"
-#include "mongo/db/local_catalog/collection_catalog_helper.h"
-#include "mongo/db/local_catalog/database.h"
-#include "mongo/db/local_catalog/database_holder.h"
-#include "mongo/db/local_catalog/db_raii.h"
-#include "mongo/db/local_catalog/document_validation.h"
-#include "mongo/db/local_catalog/index_catalog.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
-#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
-#include "mongo/db/local_catalog/lock_manager/exception_util.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
+#include "mongo/db/matcher/extensions_callback_real.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/periodic_runner_cache_pressure_rollback.h"
 #include "mongo/db/query/canonical_query.h"
@@ -72,19 +58,35 @@
 #include "mongo/db/query/plan_yield_policy.h"
 #include "mongo/db/query/query_utils.h"
 #include "mongo/db/query/record_id_bound.h"
+#include "mongo/db/query/write_ops/canonical_update.h"
 #include "mongo/db/query/write_ops/delete_request_gen.h"
 #include "mongo/db/query/write_ops/parsed_delete.h"
-#include "mongo/db/query/write_ops/parsed_update.h"
 #include "mongo/db/query/write_ops/update_request.h"
 #include "mongo/db/query/write_ops/write_ops_parsers.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/record_id_helpers.h"
 #include "mongo/db/repl/collection_bulk_loader_impl.h"
+#include "mongo/db/repl/intent_registry.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/rollback_gen.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/lock_manager/d_concurrency.h"
+#include "mongo/db/shard_role/lock_manager/exception_util.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_control.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/clustered_collection_options_gen.h"
+#include "mongo/db/shard_role/shard_catalog/collection_catalog_helper.h"
+#include "mongo/db/shard_role/shard_catalog/database.h"
+#include "mongo/db/shard_role/shard_catalog/database_holder.h"
+#include "mongo/db/shard_role/shard_catalog/db_raii.h"
+#include "mongo/db/shard_role/shard_catalog/document_validation.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
+#include "mongo/db/shard_role/shard_role.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/checkpointer.h"
 #include "mongo/db/storage/control/journal_flusher.h"
 #include "mongo/db/storage/control/storage_control.h"
@@ -340,7 +342,12 @@ Status insertDocumentsSingleBatch(OperationContext* opCtx,
 
     if (nsOrUUID.isNamespaceString() && nsOrUUID.nss().isOplog()) {
         // Simplify locking rules for oplog collection.
-        autoOplog.emplace(opCtx, OplogAccessMode::kWrite);
+        autoOplog.emplace(
+            opCtx,
+            OplogAccessMode::kWrite,
+            Date_t::max(),
+            AutoGetOplogFastPathOptions{.explicitIntent =
+                                            rss::consensus::IntentRegistry::Intent::LocalWrite});
         collection = &autoOplog->getCollection();
         if (!*collection) {
             return {ErrorCodes::NamespaceNotFound, "Oplog collection does not exist"};
@@ -681,10 +688,10 @@ StatusWith<std::vector<BSONObj>> _findOrDeleteDocuments(
     BoundInclusion boundInclusion,
     std::size_t limit,
     FindDeleteMode mode) {
-    auto isFind = mode == FindDeleteMode::kFind;
+    const bool isFind = mode == FindDeleteMode::kFind;
     auto opStr = isFind ? "StorageInterfaceImpl::find" : "StorageInterfaceImpl::delete";
 
-    return writeConflictRetry(opCtx, opStr, nsOrUUID, [&]() -> StatusWith<std::vector<BSONObj>> {
+    auto doFindOrDeleteDocuments = [&]() -> StatusWith<std::vector<BSONObj>> {
         // We need to explicitly use this in a few places to help the type inference.  Use a
         // shorthand.
         using Result = StatusWith<std::vector<BSONObj>>;
@@ -792,14 +799,17 @@ StatusWith<std::vector<BSONObj>> _findOrDeleteDocuments(
             // Use index scan.
             auto indexCatalog = collection.getCollectionPtr()->getIndexCatalog();
             invariant(indexCatalog);
-            const IndexDescriptor* indexDescriptor = indexCatalog->findIndexByName(
+            const auto indexEntry = indexCatalog->findIndexByName(
                 opCtx, *indexName, IndexCatalog::InclusionPolicy::kReady);
-            if (!indexDescriptor) {
+            if (!indexEntry) {
                 return Result(ErrorCodes::IndexNotFound,
                               str::stream()
                                   << "Index not found, ns:" << nsOrUUID.toStringForErrorMsg()
                                   << ", index: " << *indexName);
             }
+
+            const auto indexDescriptor = indexEntry->descriptor();
+
             if (indexDescriptor->isPartial()) {
                 return Result(ErrorCodes::IndexOptionsConflict,
                               str::stream()
@@ -821,7 +831,7 @@ StatusWith<std::vector<BSONObj>> _findOrDeleteDocuments(
             planExecutor = isFind
                 ? InternalPlanner::indexScan(opCtx,
                                              collection,
-                                             indexDescriptor,
+                                             indexEntry,
                                              bounds.first,
                                              bounds.second,
                                              boundInclusion,
@@ -831,7 +841,7 @@ StatusWith<std::vector<BSONObj>> _findOrDeleteDocuments(
                 : InternalPlanner::deleteWithIndexScan(opCtx,
                                                        collection,
                                                        makeDeleteStageParamsForDeleteDocuments(),
-                                                       indexDescriptor,
+                                                       indexEntry,
                                                        bounds.first,
                                                        bounds.second,
                                                        boundInclusion,
@@ -857,7 +867,10 @@ StatusWith<std::vector<BSONObj>> _findOrDeleteDocuments(
         }
 
         return Result{docs};
-    });
+    };
+
+    return isFind ? doFindOrDeleteDocuments()
+                  : writeConflictRetry(opCtx, opStr, nsOrUUID, doFindOrDeleteDocuments);
 }
 
 StatusWith<BSONObj> _findOrDeleteById(OperationContext* opCtx,
@@ -1004,14 +1017,28 @@ Status _updateWithQuery(OperationContext* opCtx,
                               << " using query " << request.getQuery()};
         }
 
-        // ParsedUpdate needs to be inside the write conflict retry loop because it may create a
+        auto [collatorToUse, expCtxCollationMatchesDefault] =
+            resolveCollator(opCtx, request.getCollation(), collection.getCollectionPtr());
+
+        auto expCtx = ExpressionContextBuilder{}
+                          .fromRequest(opCtx, request)
+                          .collator(std::move(collatorToUse))
+                          .collationMatchesDefault(expCtxCollationMatchesDefault)
+                          .build();
+
+        // CanonicalUpdate needs to be inside the write conflict retry loop because it may create a
         // CanonicalQuery whose ownership will be transferred to the plan executor in
         // getExecutorUpdate().
-        ParsedUpdate parsedUpdate(opCtx, &request, collection.getCollectionPtr());
-        auto parsedUpdateStatus = parsedUpdate.parseRequest();
-        if (!parsedUpdateStatus.isOK()) {
-            return parsedUpdateStatus;
+        auto swParsedUpdate = parsed_update_command::parse(
+            expCtx,
+            &request,
+            makeExtensionsCallback<ExtensionsCallbackReal>(opCtx, &request.getNsString()));
+        if (!swParsedUpdate.isOK()) {
+            return swParsedUpdate.getStatus();
         }
+
+        auto canonicalUpdate = uassertStatusOK(CanonicalUpdate::make(
+            expCtx, std::move(swParsedUpdate.getValue()), collection.getCollectionPtr()));
 
         WriteUnitOfWork wuow(opCtx);
         if (!ts.isNull()) {
@@ -1020,7 +1047,7 @@ Status _updateWithQuery(OperationContext* opCtx,
         }
 
         auto planExecutorResult = mongo::getExecutorUpdate(
-            nullptr, collection, &parsedUpdate, boost::none /* verbosity */);
+            nullptr, collection, canonicalUpdate.get(), boost::none /* verbosity */);
         if (!planExecutorResult.isOK()) {
             return planExecutorResult.getStatus();
         }
@@ -1079,12 +1106,23 @@ Status StorageInterfaceImpl::upsertById(OperationContext* opCtx,
         invariant(!request.shouldReturnAnyDocs());
         invariant(PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY == request.getYieldPolicy());
 
-        // ParsedUpdate needs to be inside the write conflict retry loop because it contains
+        auto [collatorToUse, expCtxCollationMatchesDefault] =
+            resolveCollator(opCtx, request.getCollation(), collection.getCollectionPtr());
+
+        auto expCtx = ExpressionContextBuilder{}
+                          .fromRequest(opCtx, request)
+                          .collator(std::move(collatorToUse))
+                          .collationMatchesDefault(expCtxCollationMatchesDefault)
+                          .build();
+
+        // CanonicalUpdate needs to be inside the write conflict retry loop because it contains
         // the UpdateDriver whose state may be modified while we are applying the update.
-        ParsedUpdate parsedUpdate(opCtx, &request, collection.getCollectionPtr());
-        auto parsedUpdateStatus = parsedUpdate.parseRequest();
-        if (!parsedUpdateStatus.isOK()) {
-            return parsedUpdateStatus;
+        auto swParsedUpdate = parsed_update_command::parse(
+            expCtx,
+            &request,
+            makeExtensionsCallback<ExtensionsCallbackReal>(opCtx, &request.getNsString()));
+        if (!swParsedUpdate.isOK()) {
+            return swParsedUpdate.getStatus();
         }
 
         // We're using the ID hack to perform the update so we have to disallow collections
@@ -1096,13 +1134,14 @@ Status StorageInterfaceImpl::upsertById(OperationContext* opCtx,
         }
 
         UpdateStageParams updateStageParams(
-            parsedUpdate.getRequest(), parsedUpdate.getDriver(), nullptr);
-        auto planExecutor = InternalPlanner::updateWithIdHack(opCtx,
-                                                              collection,
-                                                              updateStageParams,
-                                                              descriptor,
-                                                              idKey.wrap(""),
-                                                              parsedUpdate.yieldPolicy());
+            swParsedUpdate.getValue().getRequest(), swParsedUpdate.getValue().getDriver(), nullptr);
+        auto planExecutor =
+            InternalPlanner::updateWithIdHack(opCtx,
+                                              collection,
+                                              updateStageParams,
+                                              descriptor,
+                                              idKey.wrap(""),
+                                              swParsedUpdate.getValue().yieldPolicy());
 
         try {
             // The update result is ignored.
@@ -1356,6 +1395,11 @@ Timestamp StorageInterfaceImpl::getLatestOplogTimestamp(OperationContext* opCtx)
                             << statusWithTimestamp.getStatus());
 
     return statusWithTimestamp.getValue();
+}
+
+Timestamp StorageInterfaceImpl::getOldestTimestamp(ServiceContext* serviceCtx) {
+    StorageEngine* storageEngine = serviceCtx->getStorageEngine();
+    return storageEngine->getOldestTimestamp();
 }
 
 StatusWith<StorageInterface::CollectionSize> StorageInterfaceImpl::getCollectionSize(

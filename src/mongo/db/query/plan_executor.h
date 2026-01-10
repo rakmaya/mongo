@@ -35,8 +35,6 @@
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/plan_stats.h"
-#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
-#include "mongo/db/local_catalog/shard_role_catalog/scoped_collection_metadata.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/canonical_query.h"
@@ -47,13 +45,15 @@
 #include "mongo/db/record_id.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/optime.h"
+#include "mongo/db/shard_role/shard_catalog/scoped_collection_metadata.h"
+#include "mongo/db/shard_role/shard_role.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/future.h"
+#include "mongo/util/modules.h"
 
 #include <exception>
 #include <string>
-#include <variant>
 #include <vector>
 
 #include <boost/none.hpp>
@@ -101,7 +101,7 @@ extern const OperationContext::Decoration<PlanExecutorShardingState> planExecuto
  * Executes a plan. Calls work() on a plan until a result is produced. Stops when the plan is
  * EOF or if the plan errors.
  */
-class PlanExecutor {
+class MONGO_MOD_PUBLIC PlanExecutor {
 public:
     enum ExecState {
         // Successfully returned the next document and/or record id.

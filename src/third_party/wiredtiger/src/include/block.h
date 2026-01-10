@@ -19,6 +19,12 @@
 #define WT_BLOCK_INVALID_OFFSET 0
 
 /*
+ * The max corrupt block size that we'll attempt to detect bitflips for. Essentially default
+ * leaf_page_max with a buffer.
+ */
+#define WT_BITFLIP_MAX_SIZE (WT_KILOBYTE * 33) /* 33KB */
+
+/*
  * The block manager maintains three per-checkpoint extent lists:
  *	alloc:	 the extents allocated in this checkpoint
  *	avail:	 the extents available for allocation
@@ -50,8 +56,8 @@
 struct __wt_extlist {
     char *name; /* Name */
 
-    uint64_t bytes;   /* Byte count */
-    uint32_t entries; /* Entry count */
+    wt_shared uint64_t bytes; /* Byte count */
+    uint32_t entries;         /* Entry count */
 
     uint32_t objectid; /* Written object ID */
     wt_off_t offset;   /* Written extent offset */

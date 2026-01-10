@@ -45,10 +45,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
-#include <limits>
-#include <memory>
 #include <utility>
-#include <vector>
 
 #include <boost/optional/optional.hpp>
 
@@ -129,7 +126,7 @@ public:
     MONGO_COMPILER_ALWAYS_INLINE StringData fieldName() const {
         return _name;
     }
-    MONGO_COMPILER_ALWAYS_INLINE std::pair<value::TypeTags, value::Value> value() const {
+    MONGO_COMPILER_ALWAYS_INLINE value::TagValueView value() const {
         return _objRoot->getAt(_idx);
     }
     MONGO_COMPILER_ALWAYS_INLINE void appendTo(BsonObjWriter& bob) const {

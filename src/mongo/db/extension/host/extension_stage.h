@@ -31,23 +31,35 @@
 
 #include "mongo/base/string_data.h"
 #include "mongo/db/exec/agg/stage.h"
+#include "mongo/db/extension/shared/get_next_result.h"
+#include "mongo/db/extension/shared/handle/aggregation_stage/executable_agg_stage.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/util/modules.h"
 
 namespace mongo {
 namespace exec {
-namespace MONGO_MOD_FILE_PRIVATE agg {
+namespace agg {
 /**
  * A Stage implementation for an extension aggregation stage. ExtensionStage is a facade around
  * handles to extension API objects.
  */
 class ExtensionStage final : public Stage {
 public:
-    ExtensionStage(StringData name, const boost::intrusive_ptr<ExpressionContext>& pExpCtx);
+    ExtensionStage(StringData name,
+                   const boost::intrusive_ptr<ExpressionContext>& pExpCtx,
+                   extension::ExecAggStageHandle execAggStageHandle);
+    void setSource(Stage* source) override;
+
+    Document getExplainOutput(
+        const SerializationOptions& opts = SerializationOptions{}) const override;
 
 private:
     GetNextResult doGetNext() final;
+
+    extension::ExecAggStageHandle _execAggStageHandle{nullptr};
+    extension::ExecAggStageHandle _sourceAggStageHandle{nullptr};
+    extension::ExtensionGetNextResult _lastGetNextResult;
 };
-}  // namespace MONGO_MOD_FILE_PRIVATE agg
+}  // namespace agg
 }  // namespace exec
 }  // namespace mongo

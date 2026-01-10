@@ -31,7 +31,7 @@
 
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/curop.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/stats/top.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/storage_stats.h"
@@ -192,7 +192,7 @@ void TransactionMetricsObserver::onTransactionOperation(
     bool isPrepared) {
     // Add the latest operation stats to the aggregate OpDebug::AdditiveMetrics and StorageMetrics
     // objects stored in the SingleTransactionStats instance on the TransactionMetricsObserver.
-    _singleTransactionStats.getOpDebug()->additiveMetrics.add(additiveMetrics);
+    _singleTransactionStats.getOpDebug()->getAdditiveMetrics().add(additiveMetrics);
     _singleTransactionStats.incrementPrepareReadConflicts(prepareReadConflicts);
     _singleTransactionStats.getTransactionStorageMetrics() += storageMetrics;
 

@@ -427,6 +427,10 @@ const isTxnApiEnabled = FeatureFlagUtil.isEnabled(
 configurations.forEach((config) => {
     let conn = WriteWithoutShardKeyTestUtil.getClusterConnection(st, config);
     testCases.forEach((testCase) => {
+        if (testCase.skip) {
+            return;
+        }
+
         if (
             !isTxnApiEnabled &&
             testCase.mustBeInRetryableWriteOrTransaction &&

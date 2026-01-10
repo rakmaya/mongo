@@ -42,15 +42,6 @@
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/test_commands_enabled.h"
 #include "mongo/db/database_name.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_catalog.h"
-#include "mongo/db/local_catalog/db_raii.h"
-#include "mongo/db/local_catalog/index_catalog.h"
-#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
-#include "mongo/db/local_catalog/shard_role_catalog/operation_sharding_state.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/internal_plans.h"
@@ -61,6 +52,15 @@
 #include "mongo/db/repl/read_concern_level.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/lock_manager/d_concurrency.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/db_raii.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/operation_sharding_state.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/storage_engine.h"
 #include "mongo/logv2/log.h"
@@ -102,16 +102,16 @@ void hashRecordsAndRecordIds(const CollectionPtr& collection, PlanExecutor* exec
     BSONObj c;
     RecordId rid;
     while (exec->getNext(&c, &rid) == PlanExecutor::ADVANCED) {
-        md5_append(st, (const md5_byte_t*)c.objdata(), c.objsize());
+        md5_append_deprecated(st, (const md5_byte_t*)c.objdata(), c.objsize());
         const auto ridInt = rid.getLong();
-        md5_append(st, (const md5_byte_t*)&ridInt, sizeof(ridInt));
+        md5_append_deprecated(st, (const md5_byte_t*)&ridInt, sizeof(ridInt));
     }
 }
 
 void hashRecordsOnly(PlanExecutor* exec, md5_state_t* st) {
     BSONObj c;
     while (exec->getNext(&c, nullptr) == PlanExecutor::ADVANCED) {
-        md5_append(st, (const md5_byte_t*)c.objdata(), c.objsize());
+        md5_append_deprecated(st, (const md5_byte_t*)c.objdata(), c.objsize());
     }
 }
 
@@ -239,7 +239,7 @@ public:
         result.append("host", prettyHostName(opCtx->getClient()->getLocalPort()));
 
         md5_state_t globalState;
-        md5_init_state(&globalState);
+        md5_init_state_deprecated(&globalState);
 
         std::map<std::string, std::string> collectionToHashMap;
         std::map<std::string, UUID> collectionToUUIDMap;
@@ -352,7 +352,7 @@ public:
             auto collName = entry.first;
             auto hash = entry.second;
             bb.append(collName, hash);
-            md5_append(&globalState, (const md5_byte_t*)hash.c_str(), hash.size());
+            md5_append_deprecated(&globalState, (const md5_byte_t*)hash.c_str(), hash.size());
         }
 
         bb.done();
@@ -361,7 +361,7 @@ public:
         result.append("uuids", collectionsByUUID.done());
 
         md5digest d;
-        md5_finish(&globalState, d);
+        md5_finish_deprecated(&globalState, d);
         std::string hash = digestToString(d);
 
         result.append("md5", hash);
@@ -408,7 +408,7 @@ private:
         }
 
         md5_state_t st;
-        md5_init_state(&st);
+        md5_init_state_deprecated(&st);
 
         try {
             MONGO_verify(nullptr != exec.get());
@@ -431,7 +431,7 @@ private:
         }
 
         md5digest d;
-        md5_finish(&st, d);
+        md5_finish_deprecated(&st, d);
         std::string hash = digestToString(d);
 
         return hash;

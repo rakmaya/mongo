@@ -30,7 +30,8 @@
 #include "mongo/s/write_ops/unified_write_executor/write_batch_scheduler.h"
 
 #include "mongo/db/global_catalog/ddl/cluster_ddl.h"
-#include "mongo/db/global_catalog/router_role_api/cluster_commands_helpers.h"
+#include "mongo/db/query/shard_key_diagnostic_printer.h"
+#include "mongo/db/router_role/router_role.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
@@ -49,16 +50,14 @@ void WriteBatchScheduler::run(OperationContext* opCtx) {
     // Keep executing rounds until the batcher says it can't make any more batches or until an
     // unrecoverable error or exception occurs.
     while (!_batcher.isDone()) {
-        // If there have been too many consecutive rounds without progress, fail the remaining ops
-        // and break out of the loop.
+        // If there have been too many consecutive rounds without progress, record an error for
+        // the remaining ops and break out of the loop.
         if (numRoundsWithoutProgress > kMaxRoundsWithoutProgress) {
             Status status{ErrorCodes::NoProgressMade,
                           str::stream() << "No progress was made executing write ops in after "
                                         << kMaxRoundsWithoutProgress << " rounds (" << rounds
                                         << " rounds total)"};
-
-            _processor.recordErrorForRemainingOps(opCtx, status);
-            _batcher.stopMakingBatches();
+            recordErrorForRemainingOps(opCtx, status);
             break;
         }
 
@@ -84,7 +83,7 @@ bool WriteBatchScheduler::executeRound(OperationContext* opCtx) {
     const auto nssList = std::vector<NamespaceString>{_nssSet.begin(), _nssSet.end()};
 
     // If we've exceeded our memory limit, stop execution.
-    if (_processor.checkBulkWriteReplyMaxSize()) {
+    if (_processor.checkBulkWriteReplyMaxSize(opCtx)) {
         _batcher.stopMakingBatches();
         return false;
     }
@@ -99,11 +98,25 @@ bool WriteBatchScheduler::executeRound(OperationContext* opCtx) {
 
     // Capture how many OK responses there have been at the start of the round so we can compare
     // against it when the round has finished.
-    const size_t previousNumOkResponses = _processor.getNumOkResponsesProcessed();
+    const size_t previousNumOkItems = _processor.getNumOkItemsProcessed();
 
     auto result = routing_context_utils::runAndValidate(
-        *swRoutingCtx.getValue(),
-        [&](RoutingContext& routingCtx) -> WriteBatchResponseProcessor::Result {
+        *swRoutingCtx.getValue(), [&](RoutingContext& routingCtx) -> ProcessorResult {
+            // Create an RAII object that prints each collection's shard key in the case of a
+            // tassert or crash.
+            stdx::unordered_map<NamespaceString, boost::optional<BSONObj>> shardKeys;
+            for (auto& nss : nssList) {
+                const auto& cri = routingCtx.getCollectionRoutingInfo(nss);
+                shardKeys.emplace(nss,
+                                  cri.isSharded()
+                                      ? boost::optional<BSONObj>(
+                                            cri.getChunkManager().getShardKeyPattern().toBSON())
+                                      : boost::none);
+            }
+            ScopedDebugInfo shardKeyDiagnostics(
+                "ShardKeyDiagnostics",
+                diagnostic_printers::MultipleShardKeysDiagnosticPrinter{shardKeys});
+
             // Call getNextBatch() and handle any target errors that occurred.
             auto batch = getNextBatchAndHandleTargetErrors(opCtx, routingCtx);
 
@@ -118,7 +131,7 @@ bool WriteBatchScheduler::executeRound(OperationContext* opCtx) {
         });
 
     // Check if any progress was made during this round.
-    bool madeProgress = _processor.getNumOkResponsesProcessed() > previousNumOkResponses;
+    bool madeProgress = _processor.getNumOkItemsProcessed() > previousNumOkItems;
 
     // If a write error occurred -AND- if the write command is ordered or running in a transaction,
     // call stopMakingBatches() to stop any further execution of this command and then return.
@@ -143,67 +156,66 @@ bool WriteBatchScheduler::executeRound(OperationContext* opCtx) {
 
 StatusWith<std::unique_ptr<RoutingContext>> WriteBatchScheduler::initRoutingContext(
     OperationContext* opCtx, const std::vector<NamespaceString>& nssList) {
-    constexpr size_t kMaxAttempts = 3u;
+    LOGV2_DEBUG_OPTIONS(11536700,
+                        2,
+                        {logv2::LogComponent::kShardMigrationPerf},
+                        "Creating RoutingContext in WriteBatchScheduler");
 
-    // Check to make sure isCollectionlessAggregateNS() is false for all names in 'nssList'.
-    for (const auto& nss : nssList) {
-        uassert(ErrorCodes::InvalidNamespace,
-                str::stream() << "Must use real namespaces with WriteBatchScheduler, got "
-                              << nss.toStringForErrorMsg(),
-                !nss.isCollectionlessAggregateNS());
-    }
+    try {
+        // Attempt to create the relevant databases and create a RoutingContext.
+        const bool checkTsBucketsNss = true;
+        const bool refresh = false;
+        auto routingCtx = sharding::router::createDatabasesAndGetRoutingCtx(
+            opCtx, nssList, checkTsBucketsNss, refresh);
 
-    size_t attempts = 0;
+        // If '_targetEpoch' is set, verify that the collection's epoch matches '_targetEpoch'.
+        if (_targetEpoch) {
+            // When '_targetEpoch' is set, we should only be targeting a single namespace. In
+            // general, a target epoch is only passed for $merge commands to detect concurrent
+            // collection drops between rounds of inserting documents.
+            tassert(11413800,
+                    "Expected only one namespace when target epoch is specified",
+                    nssList.size() == 1);
+            const auto firstNss = nssList.front();
+            const auto& cri = routingCtx->getCollectionRoutingInfo(firstNss);
+            const auto& cm = cri.getChunkManager();
 
-    for (;;) {
-        ++attempts;
-
-        try {
-            // Ensure all the relevant databases exist.
-            std::set<DatabaseName> dbSet;
-            for (const auto& nss : nssList) {
-                if (auto [it, inserted] = dbSet.insert(nss.dbName()); inserted) {
-                    const auto& dbName = *it;
-                    cluster::createDatabase(opCtx, dbName);
-                }
-            }
-
-            // Create a RoutingContext and return it. If the RoutingContext constructor fails, an
-            // exception will be thrown.
-            const auto allowLocks = opCtx->inMultiDocumentTransaction() &&
-                shard_role_details::getLocker(opCtx)->isLocked();
-
-            return std::make_unique<RoutingContext>(opCtx, std::move(nssList), allowLocks);
-        } catch (const DBException& ex) {
-            // For NamespaceNotFound errors, we will retry a couple of times before returning
-            // the error to the caller. For all other types of errors, we return the error to
-            // the caller immediately.
-            if (dynamic_cast<const ExceptionFor<ErrorCodes::NamespaceNotFound>*>(&ex)) {
-                LOGV2_INFO(10896505,
-                           "RoutingContext initialization failed due to a NamespaceNotFound error",
-                           "reason"_attr = ex.reason(),
-                           "attemptNumber"_attr = attempts,
-                           "maxAttempts"_attr = kMaxAttempts);
-
-                // If the maximum number of attempts has not been reached, continue and try
-                // again.
-                if (attempts < kMaxAttempts) {
-                    continue;
-                }
-            } else if (dynamic_cast<const ExceptionFor<ErrorCodes::StaleEpoch>*>(&ex)) {
-                LOGV2_DEBUG(10896506,
-                            2,
-                            "Failed to refresh RoutingContext in WriteBatchScheduler because "
-                            "collection was dropped",
-                            "error"_attr = redact(ex));
-            } else {
-                LOGV2_WARNING(10896507,
-                              "Failed to refresh RoutingContext in WriteBatchScheduler",
-                              "error"_attr = redact(ex));
-            }
-            // Return the error.
-            return ex.toStatus("Failed to refresh RoutingContext in WriteBatchScheduler");
+            // Throw a StaleEpoch exception if the collection's epoch does not match.
+            uassert(StaleEpochInfo(firstNss, ShardVersion{}, ShardVersion{}),
+                    "Collection has been dropped",
+                    cm.hasRoutingTable());
+            uassert(StaleEpochInfo(firstNss, ShardVersion{}, ShardVersion{}),
+                    "Collection epoch has changed",
+                    cm.getVersion().epoch() == _targetEpoch);
         }
+
+        LOGV2_DEBUG_OPTIONS(11536701,
+                            2,
+                            {logv2::LogComponent::kShardMigrationPerf},
+                            "Successfully created RoutingContext in WriteBatchScheduler");
+
+        return StatusWith(std::move(routingCtx));
+    } catch (const DBException& ex) {
+        // If an error occurs, log the error and return it.
+        if (dynamic_cast<const ExceptionFor<ErrorCodes::StaleEpoch>*>(&ex)) {
+            LOGV2_DEBUG(10896506,
+                        2,
+                        "Failed to create RoutingContext in WriteBatchScheduler because "
+                        "collection was dropped",
+                        "error"_attr = redact(ex));
+        } else {
+            LOGV2_WARNING(10896507,
+                          "Failed to create RoutingContext in WriteBatchScheduler",
+                          "error"_attr = redact(ex));
+        }
+
+        LOGV2_DEBUG_OPTIONS(11536702,
+                            2,
+                            {logv2::LogComponent::kShardMigrationPerf},
+                            "Failed to create RoutingContext in WriteBatchScheduler",
+                            "error"_attr = redact(ex));
+
+        return ex.toStatus("Failed to create RoutingContext in WriteBatchScheduler");
     }
 }
 
@@ -213,28 +225,36 @@ void WriteBatchScheduler::handleInitRoutingContextError(OperationContext* opCtx,
 
     // If creating the RoutingContext failed and nothing has been processed yet, throw the error
     // as an exception.
-    if (!_processor.getNumOkResponsesProcessed() && !_processor.getNumErrorsRecorded()) {
+    if (!_processor.getNumOkItemsProcessed() && !_processor.getNumErrorsRecorded()) {
         uassertStatusOK(status);
     }
 
-    // Get the non-OK Status from 'routingCtx' and record an error for all remaining ops, and
-    // then call stopMakingBatches() to stop any further execution of this command.
-    _processor.recordErrorForRemainingOps(opCtx, status);
+    // Record an error for the remaining ops.
+    recordErrorForRemainingOps(opCtx, status);
+}
+
+void WriteBatchScheduler::recordErrorForRemainingOps(OperationContext* opCtx,
+                                                     const Status& status) {
+    for (auto& op : _batcher.getAllRemainingOps()) {
+        _processor.recordError(opCtx, op, status);
+    }
     _batcher.stopMakingBatches();
 }
 
 WriteBatch WriteBatchScheduler::getNextBatchAndHandleTargetErrors(OperationContext* opCtx,
                                                                   RoutingContext& routingCtx) {
+    const bool ordered = _cmdRef.getOrdered();
+    const bool inTransaction = static_cast<bool>(TransactionRouter::get(opCtx));
+
     auto result = _batcher.getNextBatch(opCtx, routingCtx);
 
     if (!result.opsWithErrors.empty()) {
-        // Record any target errors that occurred with the response processor.
-        for (const auto& [op, status] : result.opsWithErrors) {
-            _processor.recordTargetError(opCtx, op, status);
-        }
+        // Record the errors that occurred during the batch creation process.
+        _processor.recordTargetErrors(opCtx, result);
+
         // If an unrecoverable error occurred, discard the batch, call stopMakingBatches() to
         // stop any further execution of this command, and then return an empty batch.
-        if (_cmdRef.getOrdered() || TransactionRouter::get(opCtx)) {
+        if (ordered || inTransaction) {
             _batcher.markBatchReprocess(std::move(result.batch));
             _batcher.stopMakingBatches();
             return WriteBatch{};

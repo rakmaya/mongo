@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
@@ -49,14 +48,14 @@
 #include "mongo/db/exec/mutable_bson/algorithm.h"
 #include "mongo/db/exec/mutable_bson/document.h"
 #include "mongo/db/exec/mutable_bson/element.h"
-#include "mongo/db/global_catalog/catalog_cache/catalog_cache.h"
-#include "mongo/db/global_catalog/router_role_api/cluster_commands_helpers.h"
 #include "mongo/db/global_catalog/type_database_gen.h"
-#include "mongo/db/local_catalog/ddl/list_collections_gen.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/explain_verbosity_gen.h"
+#include "mongo/db/router_role/cluster_commands_helpers.h"
+#include "mongo/db/router_role/routing_cache/catalog_cache.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/ddl/list_collections_gen.h"
 #include "mongo/db/sharding_environment/client/shard.h"
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/executor/remote_command_response.h"
@@ -73,7 +72,6 @@
 
 #include <set>
 #include <string>
-#include <type_traits>
 #include <utility>
 
 #include <absl/container/node_hash_map.h>
@@ -81,7 +79,6 @@
 #include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
-
 
 namespace mongo {
 namespace {
@@ -260,9 +257,8 @@ public:
         const auto cmdToSend = applyReadWriteConcern(opCtx, this, newCmd);
 
         try {
-            sharding::router::DBPrimaryRouter router(opCtx->getServiceContext(), nss.dbName());
+            sharding::router::DBPrimaryRouter router(opCtx, nss.dbName());
             router.route(
-                opCtx,
                 Request::kCommandName,
                 [&](OperationContext* opCtx, const CachedDatabaseInfo& dbInfo) {
                     auto response = executeCommandAgainstDatabasePrimaryOnlyAttachingDbVersion(

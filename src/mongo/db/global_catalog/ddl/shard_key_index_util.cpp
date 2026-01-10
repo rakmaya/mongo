@@ -30,11 +30,14 @@
 #include "mongo/db/global_catalog/ddl/shard_key_index_util.h"
 
 #include "mongo/bson/simple_bsonelement_comparator.h"
-#include "mongo/db/local_catalog/clustered_collection_util.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/index_catalog.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
 #include "mongo/db/server_feature_flags_gen.h"
+#include "mongo/db/shard_role/shard_catalog/clustered_collection_util.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
+#include "mongo/db/sharding_environment/sharding_api_d_params_gen.h"
+#include "mongo/db/sharding_environment/sharding_statistics.h"
+#include "mongo/logv2/log_severity_suppressor.h"
 #include "mongo/util/assert_util.h"
 
 #include <memory>
@@ -63,7 +66,7 @@ boost::optional<ShardKeyIndex> findShardKeyPrefixedIndex(
         return ShardKeyIndex(clusteredIndexSpec);
     }
 
-    const IndexDescriptor* best = nullptr;
+    const IndexCatalogEntry* best = nullptr;
 
     auto indexIterator = indexCatalog->getIndexIterator(IndexCatalog::InclusionPolicy::kReady);
     while (indexIterator->more()) {
@@ -81,10 +84,10 @@ boost::optional<ShardKeyIndex> findShardKeyPrefixedIndex(
         if (isCompatibleWithShardKey(
                 opCtx, collection, indexEntry, shardKey, requireSingleKey, errMsg)) {
             if (!indexEntry->isMultikey(opCtx, collection)) {
-                return ShardKeyIndex(indexDescriptor);
+                return ShardKeyIndex(indexEntry);
             }
 
-            best = indexDescriptor;
+            best = indexEntry;
         }
     }
 
@@ -97,21 +100,19 @@ boost::optional<ShardKeyIndex> findShardKeyPrefixedIndex(
 
 }  // namespace
 
-ShardKeyIndex::ShardKeyIndex(const IndexDescriptor* indexDescriptor)
-    : _indexDescriptor(indexDescriptor) {
+ShardKeyIndex::ShardKeyIndex(const IndexCatalogEntry* indexEntry) : _indexEntry(indexEntry) {
     tassert(6012300,
-            "The indexDescriptor for ShardKeyIndex(const IndexDescriptor* indexDescripto) must not "
+            "The indexEntry for ShardKeyIndex(const IndexCatalogEntry* indexEntry) must not "
             "be a nullptr",
-            indexDescriptor != nullptr);
+            indexEntry != nullptr);
 }
 
 ShardKeyIndex::ShardKeyIndex(const ClusteredIndexSpec& clusteredIndexSpec)
-    : _indexDescriptor(nullptr),
-      _clusteredIndexKeyPattern(clusteredIndexSpec.getKey().getOwned()) {}
+    : _indexEntry(nullptr), _clusteredIndexKeyPattern(clusteredIndexSpec.getKey().getOwned()) {}
 
 const BSONObj& ShardKeyIndex::keyPattern() const {
-    if (_indexDescriptor != nullptr) {
-        return _indexDescriptor->keyPattern();
+    if (_indexEntry != nullptr) {
+        return _indexEntry->descriptor()->keyPattern();
     }
     return _clusteredIndexKeyPattern;
 }
@@ -139,16 +140,15 @@ bool isCompatibleWithShardKey(OperationContext* opCtx,
         reasons |= kErrorPartial;
     }
 
-    if (desc->isSparse()) {
+    if (desc->behavesAsSparse()) {
         reasons |= kErrorSparse;
+        if (desc->getIndexType() == IndexType::INDEX_WILDCARD) {
+            reasons |= kErrorWildcard;
+        }
     }
 
     if (!shardKey.isPrefixOf(desc->keyPattern(), SimpleBSONElementComparator::kInstance)) {
         reasons |= kErrorNotPrefix;
-    }
-
-    if (desc->getIndexType() == IndexType::INDEX_WILDCARD) {
-        reasons |= kErrorWildcard;
     }
 
     if (reasons == 0) {  // that is, not partial index, not sparse, and not prefix, then:
@@ -168,9 +168,8 @@ bool isCompatibleWithShardKey(OperationContext* opCtx,
         reasons |= kErrorCollation;
     }
 
-    if (errMsg && reasons != 0) {
-        std::string errors = "Index " + indexEntry->descriptor()->indexName() +
-            " cannot be used for sharding because:";
+    if (reasons != 0) {
+        std::string errors = "Index " + desc->indexName() + " cannot be used for sharding because:";
         if (reasons & kErrorPartial) {
             errors += " Index key is partial.";
         }
@@ -189,10 +188,31 @@ bool isCompatibleWithShardKey(OperationContext* opCtx,
         if (reasons & kErrorWildcard) {
             errors += " Index key is a wildcard index.";
         }
-        if (!errMsg->empty()) {
-            *errMsg += "\n";
+
+        if (errMsg) {
+            if (!errMsg->empty()) {
+                *errMsg += "\n";
+            }
+            *errMsg += errors;
         }
-        *errMsg += errors;
+
+        // TODO (SERVER-112793) Remove metrics reporting for compound wildcard indexes prefixed by
+        // the shard key once v9.0 branches out.
+        if (reasons & kErrorWildcard && !(reasons & kErrorNotPrefix)) {
+            ShardingStatistics::get(opCtx)
+                .countHitsOfCompoundWildcardIndexesWithShardKeyPrefix.addAndFetch(1);
+            if (enableCompoundWildcardIndexLog.load()) {
+                static logv2::SeveritySuppressor logSeverity{
+                    Hours{1}, logv2::LogSeverity::Info(), logv2::LogSeverity::Debug(5)};
+                LOGV2_DEBUG(11279201,
+                            logSeverity().toInt(),
+                            "Found a compound wildcard index prefixed by the shard key",
+                            "index"_attr = desc->keyPattern(),
+                            "indexName"_attr = desc->indexName(),
+                            "shardKey"_attr = shardKey,
+                            "nss"_attr = collection.get()->ns());
+            }
+        }
     }
     return false;
 }
@@ -204,7 +224,8 @@ bool isLastNonHiddenRangedShardKeyIndex(OperationContext* opCtx,
     const auto index = collection->getIndexCatalog()->findIndexByName(opCtx, indexName);
     if (!index ||
         !isCompatibleWithShardKey(
-            opCtx, collection, index->getEntry(), shardKey, false /* requireSingleKey */)) {
+
+            opCtx, collection, index, shardKey, false /* requireSingleKey */)) {
         return false;
     }
 

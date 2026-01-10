@@ -33,7 +33,7 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/simple_bsonobj_comparator.h"
-#include "mongo/db/admission/execution_admission_context.h"
+#include "mongo/db/admission/execution_control/execution_admission_context.h"
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_checks.h"
 #include "mongo/db/auth/authorization_session.h"
@@ -51,18 +51,6 @@
 #include "mongo/db/global_catalog/sharding_catalog_client.h"
 #include "mongo/db/global_catalog/type_collection.h"
 #include "mongo/db/keypattern.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/coll_mod.h"
-#include "mongo/db/local_catalog/database.h"
-#include "mongo/db/local_catalog/ddl/coll_mod_gen.h"
-#include "mongo/db/local_catalog/ddl/coll_mod_reply_validation.h"
-#include "mongo/db/local_catalog/ddl/drop_database_gen.h"
-#include "mongo/db/local_catalog/ddl/drop_gen.h"
-#include "mongo/db/local_catalog/ddl/replica_set_ddl_tracker.h"
-#include "mongo/db/local_catalog/drop_collection.h"
-#include "mongo/db/local_catalog/drop_database.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/profile_settings.h"
@@ -76,6 +64,17 @@
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/ddl/coll_mod_gen.h"
+#include "mongo/db/shard_role/ddl/drop_database_gen.h"
+#include "mongo/db/shard_role/ddl/drop_gen.h"
+#include "mongo/db/shard_role/ddl/replica_set_ddl_tracker.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/coll_mod.h"
+#include "mongo/db/shard_role/shard_catalog/database.h"
+#include "mongo/db/shard_role/shard_catalog/drop_collection.h"
+#include "mongo/db/shard_role/shard_catalog/drop_database.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/stats/storage_stats.h"
 #include "mongo/db/storage/record_data.h"
@@ -120,145 +119,6 @@ namespace {
 
 // Will cause 'CmdDatasize' to hang as it starts executing.
 MONGO_FAIL_POINT_DEFINE(hangBeforeDatasizeCount);
-
-class CmdDropDatabase : public DropDatabaseCmdVersion1Gen<CmdDropDatabase> {
-public:
-    std::string help() const final {
-        return "drop (delete) this database";
-    }
-    AllowedOnSecondary secondaryAllowed(ServiceContext*) const final {
-        return AllowedOnSecondary::kNever;
-    }
-    bool collectsResourceConsumptionMetrics() const final {
-        return true;
-    }
-    bool allowedWithSecurityToken() const final {
-        return true;
-    }
-    class Invocation final : public InvocationBaseGen {
-    public:
-        using InvocationBaseGen::InvocationBaseGen;
-        bool supportsWriteConcern() const final {
-            return true;
-        }
-        NamespaceString ns() const final {
-            return NamespaceString(request().getDbName());
-        }
-        void doCheckAuthorization(OperationContext* opCtx) const final {
-            uassert(ErrorCodes::Unauthorized,
-                    str::stream() << "Not authorized to drop database '"
-                                  << request().getDbName().toStringForErrorMsg() << "'",
-                    AuthorizationSession::get(opCtx->getClient())
-                        ->isAuthorizedForActionsOnNamespace(ns(), ActionType::dropDatabase));
-        }
-        Reply typedRun(OperationContext* opCtx) final {
-            ReplicaSetDDLTracker::ScopedReplicaSetDDL scopedReplicaSetDDL(
-                opCtx, std::vector<NamespaceString>{ns()});
-
-            auto dbName = request().getDbName();
-            // disallow dropping the config database
-            if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer) &&
-                (dbName == DatabaseName::kConfig)) {
-                uasserted(ErrorCodes::IllegalOperation,
-                          "Cannot drop 'config' database if mongod started "
-                          "with --configsvr");
-            }
-
-            if ((repl::ReplicationCoordinator::get(opCtx)->getSettings().isReplSet()) &&
-                (dbName == DatabaseName::kLocal)) {
-                uasserted(ErrorCodes::IllegalOperation,
-                          str::stream() << "Cannot drop '" << dbName.toStringForErrorMsg()
-                                        << "' database while replication is active");
-            }
-
-            if (request().getCommandParameter() != 1) {
-                uasserted(5255100, "Have to pass 1 as 'drop' parameter");
-            }
-
-            Status status = dropDatabase(opCtx, dbName);
-            if (status != ErrorCodes::NamespaceNotFound) {
-                uassertStatusOK(status);
-            }
-            return {};
-        }
-    };
-};
-MONGO_REGISTER_COMMAND(CmdDropDatabase).forShard();
-
-/* drop collection */
-class CmdDrop : public DropCmdVersion1Gen<CmdDrop> {
-public:
-    AllowedOnSecondary secondaryAllowed(ServiceContext*) const final {
-        return AllowedOnSecondary::kNever;
-    }
-    bool adminOnly() const final {
-        return false;
-    }
-    std::string help() const final {
-        return "drop a collection\n{drop : <collectionName>}";
-    }
-    bool collectsResourceConsumptionMetrics() const final {
-        return true;
-    }
-    bool allowedWithSecurityToken() const final {
-        return true;
-    }
-
-    class Invocation final : public InvocationBaseGen {
-    public:
-        using InvocationBaseGen::InvocationBaseGen;
-        bool supportsWriteConcern() const final {
-            return true;
-        }
-        NamespaceString ns() const final {
-            return request().getNamespace();
-        }
-
-        bool isSubjectToIngressAdmissionControl() const override {
-            return true;
-        }
-
-        void doCheckAuthorization(OperationContext* opCtx) const final {
-            auto ns = request().getNamespace();
-            uassert(ErrorCodes::Unauthorized,
-                    str::stream() << "Not authorized to drop collection '"
-                                  << ns.toStringForErrorMsg() << "'",
-                    AuthorizationSession::get(opCtx->getClient())
-                        ->isAuthorizedForActionsOnNamespace(ns, ActionType::dropCollection));
-        }
-        Reply typedRun(OperationContext* opCtx) final {
-            ReplicaSetDDLTracker::ScopedReplicaSetDDL scopedReplicaSetDDL(
-                opCtx, std::vector<NamespaceString>{ns()});
-
-            if (request().getNamespace().isOplog()) {
-                uassert(5255000,
-                        "can't drop live oplog while replicating",
-                        !repl::ReplicationCoordinator::get(opCtx)->getSettings().isReplSet());
-                auto storageEngine = opCtx->getServiceContext()->getStorageEngine();
-                invariant(storageEngine);
-                // We use the method supportsRecoveryTimestamp() to detect whether we are using
-                // the WiredTiger storage engine, which is currently only storage engine that
-                // supports the replSetResizeOplog command.
-                uassert(
-                    5255001,
-                    "can't drop oplog on storage engines that support replSetResizeOplog command",
-                    !storageEngine->supportsRecoveryTimestamp());
-            }
-
-            // We need to copy the serialization context from the request to the reply object
-            Reply reply(
-                SerializationContext::stateCommandReply(request().getSerializationContext()));
-            uassertStatusOK(
-                dropCollection(opCtx,
-                               request().getNamespace(),
-                               request().getCollectionUUID(),
-                               &reply,
-                               DropCollectionSystemCollectionMode::kDisallowSystemCollectionDrops));
-            return reply;
-        }
-    };
-};
-MONGO_REGISTER_COMMAND(CmdDrop).forShard();
 
 class CmdDataSize final : public TypedCommand<CmdDataSize> {
 public:

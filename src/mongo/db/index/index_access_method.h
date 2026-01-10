@@ -34,20 +34,21 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/database_name.h"
-#include "mongo/db/field_ref.h"
 #include "mongo/db/index/multikey_paths.h"
-#include "mongo/db/local_catalog/index_catalog.h"
-#include "mongo/db/local_catalog/index_catalog_entry.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/record_id.h"
+#include "mongo/db/shard_role/shard_catalog/collection_options.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog_entry.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
 #include "mongo/db/sorter/sorter_stats.h"
 #include "mongo/db/storage/duplicate_key_error_info.h"
 #include "mongo/db/storage/ident.h"
 #include "mongo/db/storage/key_string/key_string.h"
 #include "mongo/db/storage/sorted_data_interface.h"
 #include "mongo/util/functional.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/shared_buffer_fragment.h"
 
 #include <cstddef>
@@ -59,18 +60,6 @@
 #include <boost/optional/optional.hpp>
 
 namespace mongo {
-
-class BSONObjBuilder;
-class MatchExpression;
-struct UpdateTicket;
-struct InsertDeleteOptions;
-class SortedDataIndexAccessMethod;
-struct CollectionOptions;
-
-namespace CollectionValidation {
-class ValidationOptions;
-}
-
 /**
  * An IndexAccessMethod is the interface through which all the mutation, lookup, and
  * traversal of index entries is done. The class is designed so that the underlying index
@@ -81,7 +70,7 @@ class ValidationOptions;
  * We assume the caller has whatever locks required.  This interface is not thread safe.
  *
  */
-class IndexAccessMethod {
+class MONGO_MOD_OPEN IndexAccessMethod {
     IndexAccessMethod(const IndexAccessMethod&) = delete;
     IndexAccessMethod& operator=(const IndexAccessMethod&) = delete;
 
@@ -241,7 +230,7 @@ public:
     // Bulk operations support
     //
 
-    class BulkBuilder {
+    class MONGO_MOD_OPEN BulkBuilder {
     public:
         virtual ~BulkBuilder() = default;
 
@@ -344,7 +333,7 @@ struct UpdateTicket {
 /**
  * Flags we can set for inserts and deletes (and updates, which are kind of both).
  */
-struct InsertDeleteOptions {
+struct MONGO_MOD_PUBLIC InsertDeleteOptions {
     // Are duplicate keys allowed in the index?
     bool dupsAllowed = false;
 
@@ -375,7 +364,7 @@ struct InsertDeleteOptions {
  * for the initialization and core functionality of this abstract class. To avoid any circular
  * dependencies, it is important that IndexAccessMethod remain an interface.
  */
-class SortedDataIndexAccessMethod : public IndexAccessMethod {
+class MONGO_MOD_OPEN SortedDataIndexAccessMethod : public IndexAccessMethod {
     SortedDataIndexAccessMethod(const SortedDataIndexAccessMethod&) = delete;
     SortedDataIndexAccessMethod& operator=(const SortedDataIndexAccessMethod&) = delete;
 
@@ -441,6 +430,11 @@ public:
                  const ShouldRelaxConstraintsFn& shouldRelaxConstraints = nullptr) const;
 
     /**
+     * Specifies whether container write oplog entries need to be generated.
+     */
+    enum class ContainerWriteBehavior { kReplicate, kUnreplicated };
+
+    /**
      * Inserts the specified keys into the index. Does not attempt to determine whether the
      * insertion of these keys should cause the index to become multikey. The 'numInserted' output
      * parameter, if non-nullptr, will be reset to the number of keys inserted by this function
@@ -455,7 +449,8 @@ public:
         const InsertDeleteOptions& options,
         KeyHandlerFn&& onDuplicateKey,
         int64_t* numInserted,
-        IncludeDuplicateRecordId includeDuplicateRecordId = IncludeDuplicateRecordId::kOff);
+        IncludeDuplicateRecordId includeDuplicateRecordId = IncludeDuplicateRecordId::kOff,
+        ContainerWriteBehavior containerWriteBehavior = ContainerWriteBehavior::kUnreplicated);
 
     /**
      * Inserts the specified keys into the index. and determines whether these keys should cause the
@@ -473,7 +468,8 @@ public:
         const InsertDeleteOptions& options,
         KeyHandlerFn&& onDuplicateKey,
         int64_t* numInserted,
-        IncludeDuplicateRecordId includeDuplicateRecordId = IncludeDuplicateRecordId::kOff);
+        IncludeDuplicateRecordId includeDuplicateRecordId = IncludeDuplicateRecordId::kOff,
+        ContainerWriteBehavior containerWriteBehavior = ContainerWriteBehavior::kUnreplicated);
 
     /**
      * Analogous to insertKeys above, but remove the keys instead of inserting them.
@@ -481,10 +477,13 @@ public:
      */
     Status removeKeys(OperationContext* opCtx,
                       RecoveryUnit& ru,
+                      const CollectionPtr& coll,
                       const IndexCatalogEntry* entry,
                       const KeyStringSet& keys,
                       const InsertDeleteOptions& options,
-                      int64_t* numDeleted) const;
+                      int64_t* numDeleted,
+                      ContainerWriteBehavior containerWriteBehavior =
+                          ContainerWriteBehavior::kUnreplicated) const;
 
     /**
      * Gets the keys of the documents 'from' and 'to' and prepares them for the update.
@@ -637,7 +636,9 @@ public:
                                               const DatabaseName& dbName,
                                               const IndexBuildMethodEnum& method) final;
 
-protected:
+    static long long getDuplicateKeyErrors_forTest();
+
+private:
     /**
      * Perform some initial validation on the document to ensure it can be indexed before calling
      * the implementation-specific 'doGetKeys' method.
@@ -671,7 +672,6 @@ protected:
                            MultikeyPaths* multikeyPaths,
                            const boost::optional<RecordId>& id) const = 0;
 
-private:
     /**
      * Removes a single key from the index.
      *
@@ -679,9 +679,11 @@ private:
      */
     void removeOneKey(OperationContext* opCtx,
                       RecoveryUnit& ru,
+                      const CollectionPtr& coll,
                       const IndexCatalogEntry* entry,
                       const key_string::Value& keyString,
-                      bool dupsAllowed) const;
+                      bool dupsAllowed,
+                      ContainerWriteBehavior containerWriteBehavior) const;
 
     Status _indexKeysOrWriteToSideTable(OperationContext* opCtx,
                                         const CollectionPtr& coll,
@@ -694,7 +696,7 @@ private:
                                         int64_t* keysInsertedOut);
 
     void _unindexKeysOrWriteToSideTable(OperationContext* opCtx,
-                                        const NamespaceString& ns,
+                                        const CollectionPtr& coll,
                                         const IndexCatalogEntry* entry,
                                         const KeyStringSet& keys,
                                         const BSONObj& obj,

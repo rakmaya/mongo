@@ -36,7 +36,6 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/commands/server_status/server_status.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/index_builds/active_index_builds.h"
 #include "mongo/db/index_builds/commit_quorum_options.h"
@@ -46,52 +45,33 @@
 #include "mongo/db/index_builds/rebuild_indexes.h"
 #include "mongo/db/index_builds/repl_index_build_state.h"
 #include "mongo/db/index_builds/resumable_index_builds_gen.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_options.h"
-#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/record_id.h"
-#include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/replication_state_transition_lock_guard.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
 #include "mongo/db/storage/disk_space_monitor.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/executor/task_executor.h"
-#include "mongo/executor/thread_pool_task_executor.h"
-#include "mongo/platform/atomic_word.h"
-#include "mongo/stdx/condition_variable.h"
-#include "mongo/stdx/mutex.h"
 #include "mongo/stdx/thread.h"
-#include "mongo/util/concurrency/with_lock.h"
-#include "mongo/util/fail_point.h"
 #include "mongo/util/future.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/net/hostandport.h"
-#include "mongo/util/string_map.h"
 #include "mongo/util/uuid.h"
 
-#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
-#include <map>
 #include <memory>
 #include <string>
-#include <tuple>
 #include <utility>
 #include <vector>
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
 
 namespace mongo {
-
-class OperationContext;
-class ServiceContext;
-enum class RepairData;
-struct IndexBuildInfo;
 
 /**
  * This is a coordinator for all things index builds. Index builds can be externally affected,
@@ -103,7 +83,7 @@ struct IndexBuildInfo;
  * accessible via the ServiceContext. It owns an IndexBuildsManager that manages all MultiIndexBlock
  * index builder instances.
  */
-class IndexBuildsCoordinator {
+class MONGO_MOD_PUBLIC IndexBuildsCoordinator {
 public:
     /**
      * Represents the set of different application modes used around building indexes that differ
@@ -225,8 +205,7 @@ public:
     /**
      * Runs the full index rebuild for recovery. This will only rebuild single-phase index builds.
      * Rebuilding an index in recovery mode verifies the BSON format of each document. Upon
-     * discovery of corruption, if 'repair' is kYes, this function will remove any documents with
-     * invalid BSON; otherwise, it will abort the server process.
+     * discovery of corruption, this function will remove any documents with invalid BSON.
      *
      * Returns the number of records and the size of the data iterated over, if successful.
      */
@@ -234,8 +213,7 @@ public:
         OperationContext* opCtx,
         CollectionWriter& collWriter,
         const std::vector<BSONObj>& specs,
-        const UUID& buildUUID,
-        RepairData repair);
+        const UUID& buildUUID);
 
     /**
      * Apply a 'startIndexBuild' oplog entry. Returns when the index build thread has started and
@@ -571,7 +549,8 @@ private:
      * Sets up the in-memory and durable state of the index build.
      *
      * This function should only be called when in recovery mode, because the index tables are
-     * recreated.
+     * recreated. The caller should hold the necessary resources to prevent replication state
+     * transitions.
      */
     Status _startIndexBuildForRecovery(OperationContext* opCtx,
                                        CollectionWriter& collWriter,
@@ -701,7 +680,7 @@ protected:
     /**
      * Runs the index build on the caller thread. Handles unregistering the index build and setting
      * the index build's Promise with the outcome of the index build.
-     * 'IndexBuildOptios::replSetAndNotPrimary' is determined at the start of the index build.
+     * 'IndexBuildOptions::replSetAndNotPrimary' is determined at the start of the index build.
      */
     void _runIndexBuild(OperationContext* opCtx,
                         const UUID& buildUUID,
@@ -830,7 +809,7 @@ protected:
     /**
      * Attempt to signal the index build to commit and advance the index build to the
      * kApplyCommitOplogEntry state. Returns true if successful and false if the attempt was
-     * unnecessful and the caller should retry.
+     * unsuccessful and the caller should retry.
      */
     bool _tryCommit(OperationContext* opCtx, std::shared_ptr<ReplIndexBuildState> replState);
     /**
@@ -926,10 +905,7 @@ protected:
      * Returns the number of records and the size of the data iterated over, if successful.
      */
     StatusWith<std::pair<long long, long long>> _runIndexRebuildForRecovery(
-        OperationContext* opCtx,
-        CollectionWriter& collection,
-        const UUID& buildUUID,
-        RepairData repair);
+        OperationContext* opCtx, CollectionWriter& collection, const UUID& buildUUID);
 
     /**
      * Looks up active index build by UUID. Returns NoSuchKey if the build does not exist.
@@ -955,10 +931,4 @@ protected:
     // The thread spawned during step-up to verify the builds.
     stdx::thread _stepUpThread;
 };
-
-// These fail points are used to control index build progress. Declared here to be shared
-// temporarily between createIndexes command and IndexBuildsCoordinator.
-extern FailPoint hangAfterIndexBuildFirstDrain;
-extern FailPoint hangAfterIndexBuildDumpsInsertsFromBulk;
-
 }  // namespace mongo

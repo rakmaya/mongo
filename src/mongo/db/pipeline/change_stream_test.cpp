@@ -34,7 +34,6 @@
 #include "mongo/unittest/death_test.h"
 #include "mongo/unittest/unittest.h"
 
-#include <boost/optional.hpp>
 
 namespace mongo {
 
@@ -63,7 +62,7 @@ TEST(ChangeStreamTest, CollectionLevelChangeStream) {
               changeStream.toString());
 }
 
-DEATH_TEST_REGEX(ChangeStreamTest,
+DEATH_TEST_REGEX(ChangeStreamTestDeathTest,
                  CollectionLevelChangeStreamWithoutNamespace,
                  "Tripwire assertion.*10656201") {
     // Not allowed to create a collection-level change stream without an NSS.
@@ -73,7 +72,7 @@ DEATH_TEST_REGEX(ChangeStreamTest,
         10656201);
 }
 
-DEATH_TEST_REGEX(ChangeStreamTest,
+DEATH_TEST_REGEX(ChangeStreamTestDeathTest,
                  CollectionLevelChangeWithDatabaseOnlyNamespace,
                  "Tripwire assertion.*10656202") {
     // Not allowed to create a collection-level change stream without a DB-only NSS.
@@ -118,7 +117,7 @@ TEST(ChangeStreamTest, DatabaseLevelChangeStreamOnCollectionLessAggregateNS) {
               changeStream.toString());
 }
 
-DEATH_TEST_REGEX(ChangeStreamTest,
+DEATH_TEST_REGEX(ChangeStreamTestDeathTest,
                  DatabaseLevelChangeStreamWithoutNamespace,
                  "Tripwire assertion.*10656201") {
     // Not allowed to create a database-level change stream without an NSS.
@@ -127,7 +126,7 @@ DEATH_TEST_REGEX(ChangeStreamTest,
                        10656201);
 }
 
-DEATH_TEST_REGEX(ChangeStreamTest,
+DEATH_TEST_REGEX(ChangeStreamTestDeathTest,
                  DatabaseLevelChangeStreamWithCollectionNamespace,
                  "Tripwire assertion.*10656202") {
     // Not allowed to create a database-level change stream without a collection NSS.
@@ -163,7 +162,7 @@ TEST(ChangeStreamTest, AllDatabasesChangeStreamOnAdminDB) {
     ASSERT_EQ("ChangeStream (type: all-databases, mode: strict)", changeStream.toString());
 }
 
-DEATH_TEST_REGEX(ChangeStreamTest,
+DEATH_TEST_REGEX(ChangeStreamTestDeathTest,
                  AllDatabasesChangeStreamWithNamespace,
                  "Tripwire assertion.*10656200") {
     // Not allowed to create an all databases change stream with an NSS.

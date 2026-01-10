@@ -32,20 +32,10 @@
  * fetch so we cannot test it outside of a dbtest.
  */
 
-#include <cstddef>
-#include <memory>
-#include <set>
-#include <string>
-#include <utility>
-#include <vector>
-
-#include <boost/container/small_vector.hpp>
-// IWYU pragma: no_include "boost/intrusive/detail/iterator.hpp"
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/json.h"
@@ -59,26 +49,31 @@
 #include "mongo/db/exec/classic/plan_stage.h"
 #include "mongo/db/exec/classic/working_set.h"
 #include "mongo/db/exec/document_value/document.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/database.h"
-#include "mongo/db/local_catalog/index_catalog.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
+#include "mongo/db/index_builds/index_build_test_helpers.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/snapshot.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/dbtests/dbtests.h"  // IWYU pragma: keep
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/intrusive_counter.h"
 #include "mongo/util/str.h"
 
-#include <boost/move/utility_core.hpp>
+#include <cstddef>
+#include <memory>
+#include <set>
+#include <string>
+#include <utility>
+#include <vector>
+
 #include <boost/optional/optional.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
@@ -94,11 +89,11 @@ public:
     }
 
     void addIndex(const BSONObj& obj) {
-        ASSERT_OK(dbtests::createIndex(&_opCtx, ns(), obj));
+        ASSERT_OK(createIndex(&_opCtx, ns(), obj));
     }
 
-    const IndexDescriptor* getIndex(const BSONObj& obj, const CollectionAcquisition& coll) {
-        std::vector<const IndexDescriptor*> indexes;
+    const IndexCatalogEntry* getIndex(const BSONObj& obj, const CollectionAcquisition& coll) {
+        std::vector<const IndexCatalogEntry*> indexes;
         coll.getCollectionPtr()->getIndexCatalog()->findIndexesByKeyPattern(
             &_opCtx, obj, IndexCatalog::InclusionPolicy::kReady, &indexes);
         if (indexes.empty()) {
@@ -109,8 +104,8 @@ public:
 
     IndexScanParams makeIndexScanParams(OperationContext* opCtx,
                                         const CollectionAcquisition& collection,
-                                        const IndexDescriptor* descriptor) {
-        IndexScanParams params(opCtx, collection.getCollectionPtr(), descriptor);
+                                        const IndexCatalogEntry* entry) {
+        IndexScanParams params(opCtx, collection.getCollectionPtr(), entry);
         params.bounds.isSimpleRange = true;
         params.bounds.endKey = BSONObj();
         params.bounds.boundInclusion = BoundInclusion::kIncludeBothStartAndEndKeys;

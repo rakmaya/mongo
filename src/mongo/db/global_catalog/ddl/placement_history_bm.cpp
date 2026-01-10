@@ -56,7 +56,7 @@
 #include "mongo/db/sharding_environment/config_server_test_fixture.h"
 #include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/db/topology/cluster_role.h"
-#include "mongo/db/vector_clock/vector_clock.h"
+#include "mongo/db/topology/vector_clock/vector_clock.h"
 #include "mongo/db/versioning_protocol/chunk_version.h"
 #include "mongo/db/versioning_protocol/database_version.h"
 #include "mongo/idl/server_parameter_test_controller.h"
@@ -75,8 +75,6 @@ namespace mongo {
 namespace {
 
 // Reusing the ConfigServerTestFixture for benchmarking.
-// _doTest has empty implementation to honor the abstract class, but it is not used in the benchmark
-// framework.
 class BenchmarkConfigServerTestFixture : public ConfigServerTestFixture {
 public:
     BenchmarkConfigServerTestFixture() : ConfigServerTestFixture() {
@@ -100,7 +98,7 @@ public:
     }
 
     ~BenchmarkConfigServerTestFixture() override {
-        TransactionCoordinatorService::get(operationContext())->interrupt();
+        TransactionCoordinatorService::get(operationContext())->interruptForStepDown();
         WaitForMajorityService::get(getServiceContext()).shutDown();
         ShardingCatalogManager::get(operationContext())->shutDown();
         ConfigServerTestFixture::tearDown();
@@ -176,7 +174,7 @@ public:
     }
 
 private:
-    void _doTest() override {};
+    void TestBody() override {}
 
     std::vector<BSONObj> _generateConfigShardSampleData(int nShards) const {
         std::vector<BSONObj> configShardData;

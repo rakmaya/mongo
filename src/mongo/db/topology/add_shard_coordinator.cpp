@@ -33,8 +33,8 @@
 #include "mongo/db/global_catalog/ddl/configsvr_coordinator_service.h"
 #include "mongo/db/global_catalog/ddl/sharded_ddl_commands_gen.h"
 #include "mongo/db/global_catalog/ddl/sharding_catalog_manager.h"
-#include "mongo/db/local_catalog/ddl/list_collections_gen.h"
-#include "mongo/db/local_catalog/shard_role_catalog/participant_block_gen.h"
+#include "mongo/db/shard_role/ddl/list_collections_gen.h"
+#include "mongo/db/shard_role/shard_catalog/participant_block_gen.h"
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/sharding_environment/sharding_api_d_params_gen.h"
 #include "mongo/db/sharding_environment/sharding_feature_flags_gen.h"
@@ -43,8 +43,8 @@
 #include "mongo/db/topology/add_shard_gen.h"
 #include "mongo/db/topology/sharding_state.h"
 #include "mongo/db/topology/topology_change_helpers.h"
-#include "mongo/db/user_write_block/user_writes_critical_section_document_gen.h"
-#include "mongo/db/vector_clock/vector_clock_mutable.h"
+#include "mongo/db/topology/user_write_block/user_writes_critical_section_document_gen.h"
+#include "mongo/db/topology/vector_clock/vector_clock_mutable.h"
 #include "mongo/executor/network_interface_factory.h"
 #include "mongo/executor/network_interface_thread_pool.h"
 #include "mongo/executor/scoped_task_executor.h"
@@ -197,6 +197,10 @@ ExecutorFuture<void> AddShardCoordinator::_runImpl(
             [this, _ = shared_from_this()](auto* opCtx) {
                 auto& targeter = _getTargeter(opCtx);
 
+                // Make sure we are the primary before dropping sessions collection.
+                // Check SERVER-113077 for a detailed reasoning
+                sharding_ddl_util::performNoopMajorityWriteLocally(opCtx);
+
                 _dropSessionsCollection(opCtx);
 
                 _installShardIdentity(opCtx, _executorWithoutGossip);
@@ -313,6 +317,24 @@ ExecutorFuture<void> AddShardCoordinator::_runImpl(
                     }
                 }
 
+                // V2 Change stream readers consuming events from a promoted replica set that
+                // predate this commit need to receive a notification about the presence of new
+                // metadata in config.placementHistory to execute proper retargeting.
+                if (generatePlacementHistoryInitMetadata) {
+                    auto& targeter = _getTargeter(opCtx);
+                    ShardsvrNotifyShardingEventRequest request(
+                        notify_sharding_event::kPlacementHistoryMetadataChanged,
+                        PlacementHistoryMetadataChanged(newTopologyTime.asTimestamp()).toBSON());
+                    request.setDbName(DatabaseName::kAdmin);
+                    const auto session = getNewSession(opCtx);
+                    generic_argument_util::setMajorityWriteConcern(request);
+                    generic_argument_util::setOperationSessionInfo(request, session);
+                    uassertStatusOK(
+                        topology_change_helpers::runCommandForAddShard(
+                            opCtx, targeter, DatabaseName::kAdmin, request.toBSON(), **executor)
+                            .commandStatus);
+                }
+
                 if (feature_flags::gShardAuthoritativeDbMetadataDDL.isEnabled(
                         VersionContext::getDecoration(opCtx),
                         serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
@@ -387,6 +409,8 @@ ExecutorFuture<void> AddShardCoordinator::_runImpl(
         .then(_buildPhaseHandler(
             Phase::kCleanup,
             [this, _ = shared_from_this(), executor](auto* opCtx) {
+                ConfigsvrCoordinatorService::getService(opCtx)->waitForAllOngoingCoordinatorsOfType(
+                    opCtx, ConfigsvrCoordinatorTypeEnum::kSetUserWriteBlockMode);
                 topology_change_helpers::propagateClusterUserWriteBlockToReplicaSet(
                     opCtx, _getTargeter(opCtx), _executorWithoutGossip);
                 _unblockFCVChangesOnNewShard(opCtx, **executor);

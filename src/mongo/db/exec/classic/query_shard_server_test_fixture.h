@@ -33,10 +33,11 @@
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/exec/classic/plan_stage.h"
 #include "mongo/db/global_catalog/type_chunk.h"
-#include "mongo/db/local_catalog/shard_role_catalog/metadata_manager.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
+#include "mongo/db/shard_role/shard_catalog/metadata_manager.h"
 #include "mongo/db/sharding_environment/shard_server_test_fixture.h"
+#include "mongo/util/modules.h"
 
 #include <memory>
 
@@ -83,7 +84,7 @@ public:
     /**
      * Get the index descriptor for the provided 'index'. Asserts if index isn't found.
      */
-    const IndexDescriptor& getIndexDescriptor(const CollectionPtr& coll, StringData indexName);
+    const IndexCatalogEntry& getIndexEntry(const CollectionPtr& coll, StringData indexName);
 
     /**
      * A helper struct used to initialize the chunk map for the current test.

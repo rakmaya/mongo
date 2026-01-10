@@ -31,7 +31,7 @@
 #include "mongo/db/storage/wiredtiger/wiredtiger_cursor.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_connection.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_util.h"
@@ -122,5 +122,13 @@ WiredTigerBulkLoadCursor::WiredTigerBulkLoadCursor(OperationContext* opCtx,
                   "index"_attr = indexUri);
 
     invariantWTOK(_session->open_cursor(indexUri.c_str(), nullptr, nullptr, &_cursor), *_session);
+}
+
+WiredTigerPrepareCursor::WiredTigerPrepareCursor(WiredTigerSession& session) : _session(session) {
+    _cursor = session.getNewCursor("prepared_discover:", nullptr);
+}
+
+WiredTigerPrepareCursor::~WiredTigerPrepareCursor() {
+    _session.closeCursor(_cursor);
 }
 }  // namespace mongo

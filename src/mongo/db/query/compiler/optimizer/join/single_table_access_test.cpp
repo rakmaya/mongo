@@ -33,62 +33,14 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/query/compiler/ce/sampling/sampling_test_utils.h"
 #include "mongo/db/query/compiler/optimizer/join/unit_test_helpers.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/stage_types.h"
 #include "mongo/unittest/unittest.h"
 
-namespace mongo::optimizer {
+namespace mongo::join_ordering {
 
 using namespace mongo::cost_based_ranker;
 
-class SingleTableAccessTestFixture : public CatalogTestFixture {
-public:
-    std::unique_ptr<ce::SamplingEstimator> samplingEstimator(const MultipleCollectionAccessor& mca,
-                                                             NamespaceString nss) {
-        auto collPtr = mca.lookupCollection(nss);
-        auto size = collPtr->getRecordStore()->numRecords();
-        // Sample 10% of the collection
-        auto sampleSize = static_cast<long>(size * 0.1);
-        auto samplingEstimator = std::make_unique<ce::SamplingEstimatorImpl>(
-            operationContext(),
-            mca,
-            PlanYieldPolicy::YieldPolicy::YIELD_MANUAL,
-            sampleSize,
-            ce::SamplingEstimatorImpl::SamplingStyle::kRandom,
-            boost::none,
-            CardinalityEstimate{CardinalityType{static_cast<double>(size)},
-                                EstimationSource::Code});
-        samplingEstimator->generateSample(ce::NoProjection{});
-        return samplingEstimator;
-    }
-
-    std::unique_ptr<CanonicalQuery> makeCanonicalQuery(NamespaceString nss, BSONObj filter) {
-        auto expCtx = ExpressionContextBuilder{}.opCtx(operationContext()).build();
-
-        auto swFindCmd = ParsedFindCommand::withExistingFilter(
-            expCtx,
-            nullptr,
-            std::move(MatchExpressionParser::parse(filter, expCtx).getValue()),
-            std::make_unique<FindCommandRequest>(nss),
-            ProjectionPolicies::aggregateProjectionPolicies());
-
-        auto swCq = CanonicalQuery::make(CanonicalQueryParams{
-            .expCtx = expCtx,
-            .parsedFind = std::move(swFindCmd.getValue()),
-        });
-        ASSERT_OK(swCq);
-        return std::move(swCq.getValue());
-    }
-
-    void createIndex(UUID collUUID, BSONObj spec, std::string name) {
-        auto indexBuildsCoord = IndexBuildsCoordinator::get(operationContext());
-        auto indexConstraints = IndexBuildsManager::IndexConstraints::kRelax;
-        ASSERT_DOES_NOT_THROW(indexBuildsCoord->createIndex(
-            operationContext(),
-            collUUID,
-            BSON("v" << int(IndexConfig::kLatestIndexVersion) << "key" << spec << "name" << name),
-            indexConstraints,
-            false));
-    }
-};
+using SingleTableAccessTestFixture = JoinOrderingTestFixture;
 
 void assertQuerySolutionHasEstimate(const QuerySolutionNode* qsn, const EstimateMap& estimates) {
     auto it = estimates.find(qsn);
@@ -106,47 +58,56 @@ TEST_F(SingleTableAccessTestFixture, EstimatesPopulated) {
     auto nss2 = NamespaceString::createNamespaceString_forTest("test", "coll2");
 
     std::vector<BSONObj> docs;
-    for (int i = 0; i < 100; ++i) {
+    for (int i = 0; i < 10; ++i) {
         docs.push_back(BSON("_id" << i << "a" << 1 << "b" << i));
     }
-
     ce::createCollAndInsertDocuments(opCtx, nss1, docs);
+
+    // coll2 is 10x larger than coll1.
+    for (int i = 10; i < 100; ++i) {
+        docs.push_back(BSON("_id" << i << "a" << 1 << "b" << i));
+    }
     ce::createCollAndInsertDocuments(opCtx, nss2, docs);
 
     {
-        auto mca = join_ordering::multipleCollectionAccessor(opCtx, {nss1, nss2});
+        auto mca = multipleCollectionAccessor(opCtx, {nss1, nss2});
         auto nss1UUID = mca.lookupCollection(nss1)->uuid();
-        auto nss2UUID = mca.lookupCollection(nss2)->uuid();
 
         createIndex(nss1UUID, fromjson("{a: 1}"), "a_1");
         createIndex(nss1UUID, fromjson("{b: 1}"), "b_1");
-        createIndex(nss2UUID, fromjson("{a: 1}"), "a_1");
-        createIndex(nss2UUID, fromjson("{b: 1}"), "b_1");
     }
 
     // Get new MultiCollectionAccessor after all DDLs are done.
-    auto mca = join_ordering::multipleCollectionAccessor(opCtx, {nss1, nss2});
+    auto mca = multipleCollectionAccessor(opCtx, {nss1, nss2});
 
     SamplingEstimatorMap estimators;
     estimators[nss1] = samplingEstimator(mca, nss1);
     estimators[nss2] = samplingEstimator(mca, nss2);
 
     auto filter1 = fromjson("{a: 1, b: 1}");
-    auto filter2 = fromjson("{a: 1, b: 1}");
+    auto filter2 = fromjson("{a: 1}");
 
     // Mock a JoinGraph for testing purposes.
-    join_ordering::JoinGraph graph;
-    graph.addNode(nss1, makeCanonicalQuery(nss1, filter1), boost::none);
-    graph.addNode(nss2, makeCanonicalQuery(nss2, filter2), boost::none);
+    MutableJoinGraph mgraph;
+    mgraph.addNode(nss1, makeCanonicalQuery(nss1, filter1), boost::none);
+    auto node2 = mgraph.addNode(nss2, makeCanonicalQuery(nss2, filter2), boost::none);
+    ASSERT(node2);
+
+    JoinGraph graph(std::move(mgraph));
     auto swRes = singleTableAccessPlans(opCtx, mca, graph, estimators);
     ASSERT_OK(swRes);
 
     auto& res = swRes.getValue();
     ASSERT_EQ(2, res.solns.size());
 
+    // There are no indexes on nss2, so the chosen access path must use a collection scan.
+    auto soln2 = res.solns.at(graph.accessPathAt(*node2)).get();
+    ASSERT(soln2);
+    ASSERT_EQ(soln2->getFirstNodeByType(STAGE_COLLSCAN).second, 1);
+
     for (auto&& [_, soln] : res.solns) {
         assertQuerySolutionHasEstimate(soln->root(), res.estimate);
     }
 }
 
-}  // namespace mongo::optimizer
+}  // namespace mongo::join_ordering

@@ -38,7 +38,7 @@ from __future__ import print_function
 import unittest
 
 from contextlib import contextmanager
-import errno, glob, os, re, shutil, sys, threading, time, traceback, types
+import errno, glob, os, re, shutil, sys, threading, time, traceback, types, shutil
 import abstract_test_case, test_result, wiredtiger, wthooks, wtscenario
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -88,8 +88,13 @@ class TestSuiteConnection(object):
         self._connlist = connlist
 
     def close(self, config=''):
+        conn = self._conn
         self._connlist.remove(self._conn)
-        return self._conn.close(config)
+        self._conn = None
+        return conn.close(config)
+
+    def is_open(self):
+        return self._conn is not None
 
     # Proxy everything except what we explicitly define to the
     # wrapped connection
@@ -97,6 +102,8 @@ class TestSuiteConnection(object):
         if attr in self.__dict__:
             return getattr(self, attr)
         else:
+            if self._conn is None:
+                raise Exception('The connection is closed')
             return getattr(self._conn, attr)
 
 # Just like a list of strings, but with a convenience function
@@ -142,6 +149,24 @@ class WiredTigerTestCase(abstract_test_case.AbstractWiredTigerTestCase):
     #    conn_extensions = ('collators/reverse',
     #                       'test/fail_fs={allow_writes=100}')
     conn_extensions = ()
+
+    # FIXME-WT-16369: Consider printing error dumps for self.conn_follow in DisAgg tests
+    @staticmethod
+    def dumpErrorLogOnWtError(func):
+        """
+        Decorator that catches WiredTigerError exceptions, dumps the error log, and re-raises.
+        """
+        def wrapper(self, *args, **kwargs):
+            try:
+                return func(self, *args, **kwargs)
+            except wiredtiger.WiredTigerError as e:
+                if self.conn is not None and self.conn.is_open():
+                    self.conn.dump_error_log()
+                else:
+                    sys.stderr.write('Error log after WiredTigerError exception, connection is closed:\n')
+                    wiredtiger.wiredtiger_dump_error_log(lambda e: sys.stderr.write(e))
+                raise
+        return wrapper
 
     @staticmethod
     def globalSetup(command_line_vars, preserveFiles = False, removeAtStart = True, useTimestamp = False,
@@ -273,6 +298,7 @@ class WiredTigerTestCase(abstract_test_case.AbstractWiredTigerTestCase):
     # Note that this method first appears in Python 3.7.  When running with an older Python,
     # this method does not override anything.  The test method is called a different way,
     # and we will not get any retry behavior.
+    @dumpErrorLogOnWtError
     def _callTestMethod(self, method):
         rollbacksAllowed = self.rollbacks_allowed
         finished = False
@@ -297,7 +323,8 @@ class WiredTigerTestCase(abstract_test_case.AbstractWiredTigerTestCase):
                     rollbacksAllowed -= 1
             except wiredtiger.WiredTigerError as err:
                 self.prexception(sys.exc_info())
-                self.conn.dump_error_log()
+                # Prevent an unnecessary "unexpected output" error.
+                self.ignoreTearDownLogs = True
                 raise
 
     # Construct the expected filename for an extension library and return
@@ -562,17 +589,18 @@ class WiredTigerTestCase(abstract_test_case.AbstractWiredTigerTestCase):
             for f in files:
                 os.chmod(os.path.join(root, f), 0o666)
 
-    # Return value of each action should be a tuple with the first value an integer (non-zero to indicate
-    # failure), and the second value a string suitable for printing when the test fails.
+    # Return value of each action should be a tuple with the first value an integer (non-zero to
+    # indicate failure), and the second value a string suitable for printing when the test fails.
     def addTearDownAction(self, action):
         self.teardown_actions.append(action)
 
     def verifyLayered(self):
-        # Need to check ".this" because SWIG proxies don't evaluate to None even after being freed.
-        if self.conn is None or self.conn.this is None:
+        if self.conn is None or not self.conn.is_open():
+            # If the connection is closed, reopen it.
             self.conn = self.setUpConnectionOpen(".")
         elif self.session is not None or self.session.this is not None:
-            # Ensure all cursors are closed by closing the session
+            # Need to check ".this" because SWIG proxies don't evaluate to None even after being
+            # freed. Ensure all cursors are closed by closing the session.
             self.session.close()
 
         sess = self.conn.open_session()
@@ -581,10 +609,17 @@ class WiredTigerTestCase(abstract_test_case.AbstractWiredTigerTestCase):
         while cur.next() == 0:
             uri = cur.get_key()
             if uri.startswith('layered:'):
-                self.verifyUntilSuccess(sess, uri)
-        cur.close()
+                try:
+                    self.verifyUntilSuccess(sess, uri)
+                except wiredtiger.WiredTigerError as e:
+                    print(f'Layered verification failed for {uri}: {str(e)}')
+                    raise e
 
+        sess.close()
+
+    @dumpErrorLogOnWtError
     def tearDown(self, dueToRetry=False):
+        dumped_error_log = False
         teardown_failed = False
         teardown_msg = None
         if not dueToRetry:
@@ -606,10 +641,11 @@ class WiredTigerTestCase(abstract_test_case.AbstractWiredTigerTestCase):
         passed = not (self.failed() or teardown_failed)
 
         if passed and self.__module__.startswith("test_layered"):
-            # FIXME-WT-15786: Handle the transient state where a follower that has not yet picked up
-            # its first checkpoint may fail with ENOENT due to missing its stable table.
-            if not re.match("test_layered(57|41|21|22|17)", str(self)):
+            # FIXME-WT-16366: Always call verifyLayered once the unsupported tests are fixed.
+            if not re.match("test_layered(39)", str(self)):
                 self.verifyLayered()
+            else:
+                self.pr('skipping verify for unsupported tests')
 
         try:
             self.platform_api.tearDown(self)
@@ -636,15 +672,26 @@ class WiredTigerTestCase(abstract_test_case.AbstractWiredTigerTestCase):
         # self.conn is on the list of active connections.
         if not self.conn in self._connections:
             self._connections.append(self.conn)
+        close_failed = False
         for conn in self._connections:
             try:
                 conn.close()
+            except wiredtiger.WiredTigerError as err:
+                # If the test already failed, we let the connection close fail silently to avoid
+                # unnecessary noise.
+                if passed:
+                    self.prexception(sys.exc_info())
+                    sys.stderr.write('Error log from closing a connection:\n')
+                    wiredtiger.wiredtiger_dump_error_log(lambda e: sys.stderr.write(e))
+                    close_failed = True
+                    dumped_error_log = True
+                    passed = False
             except:
                 pass
         self._connections = []
         try:
             self.fdTearDown()
-            if not (dueToRetry or self.ignoreTearDownLogs):
+            if not (dueToRetry or self.ignoreTearDownLogs or dumped_error_log):
                 self.captureout.check(self)
                 self.captureerr.check(self)
         finally:
@@ -673,6 +720,8 @@ class WiredTigerTestCase(abstract_test_case.AbstractWiredTigerTestCase):
             print("[pid:{}]: {}: {:.2f} seconds".format(os.getpid(), str(self), elapsed))
         if teardown_failed:
             self.fail(f'Teardown of {self} failed with message: {teardown_msg}')
+        if close_failed:
+            self.fail(f'Closing the connection failed')
         if (not passed or teardown_failed) and (not self.skipped):
             print("[pid:{}]: ERROR in {}".format(os.getpid(), str(self)))
             self.pr('FAIL')
@@ -943,6 +992,45 @@ class WiredTigerTestCase(abstract_test_case.AbstractWiredTigerTestCase):
         return a recno key
         """
         return i
+
+    @contextmanager
+    def temporaryDirectory(self, path, exist_ok=False):
+        os.makedirs(path, exist_ok=exist_ok)
+        try:
+            yield path
+        finally:
+            shutil.rmtree(path, ignore_errors=True)
+
+    def get_stats(self, stats, uri, session):
+        """Get the current values of multiple statistics."""
+        stat_cursor = session.open_cursor('statistics:' + uri)
+        results = {}
+        for stat in stats:
+            results[stat] = stat_cursor[stat][2]
+        stat_cursor.close()
+        return results
+
+    def checkpoint_and_verify_stats(self, expected_changes, uri, session = None):
+        if session is None:
+            session = self.session
+
+        stats_to_check = list(expected_changes.keys())
+        old_stats = self.get_stats(stats_to_check, uri, session)
+
+        session.checkpoint()
+
+        new_stats = self.get_stats(stats_to_check, uri, session)
+
+        for stat, expect_increase in expected_changes.items():
+            diff = new_stats[stat] - old_stats[stat]
+            if expect_increase:
+                self.assertGreater(diff, 0,
+                    f"Stat {stat}: expected increase, got diff {diff}")
+            else:
+                self.assertEqual(diff, 0,
+                    f"Stat {stat}: expected no change, got diff {diff}")
+
+        return new_stats
 
 @contextmanager
 def open_cursor(session, uri: str, **kwargs):

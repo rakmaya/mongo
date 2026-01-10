@@ -39,16 +39,6 @@
 #include "mongo/db/curop_metrics.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/feature_flag.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_catalog.h"
-#include "mongo/db/local_catalog/database.h"
-#include "mongo/db/local_catalog/db_raii.h"
-#include "mongo/db/local_catalog/document_validation.h"
-#include "mongo/db/local_catalog/lock_manager/exception_util.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/multitenancy_gen.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/profile_settings.h"
@@ -61,6 +51,16 @@
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/session/logical_session_id.h"
+#include "mongo/db/shard_role/lock_manager/exception_util.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/database.h"
+#include "mongo/db/shard_role/shard_catalog/db_raii.h"
+#include "mongo/db/shard_role/shard_catalog/document_validation.h"
+#include "mongo/db/shard_role/shard_role.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/storage/exceptions.h"
 #include "mongo/db/tenant_id.h"
@@ -394,7 +394,10 @@ void OplogApplierUtils::addDerivedCommitsOrAborts(
     // When this commit refers to a split prepare, we split the commit and add them
     // to the writers that have been assigned split prepare ops.
     for (const auto& sessInfo : *sessionInfos) {
-        addToWriterVectorImpl(sessInfo.requesterId,
+        // The number of workers could have changed since the prepare phase: mod by list size to
+        // make sure we are still in bounds.
+        const auto idx = sessInfo.requesterId % writerVectors->size();
+        addToWriterVectorImpl(idx,
                               writerVectors,
                               commitOrAbortOp,
                               ApplicationInstruction::applySplitPreparedTxnOp,
@@ -516,7 +519,7 @@ Status OplogApplierUtils::applyOplogEntryOrGroupedInsertsCommon(
                 // In initial sync and recovery modes we always ignore errors about missing
                 // documents on update, so there is no reason to convert the updates to upsert.
 
-                bool shouldAlwaysUpsert = !oplogApplicationEnforcesSteadyStateConstraints &&
+                bool shouldAlwaysUpsert = !oplogApplicationEnforcesSteadyStateConstraints.load() &&
                     oplogApplicationMode == OplogApplication::Mode::kSecondary;
                 Status status = applyOperation_inlock(opCtx,
                                                       *coll,
@@ -539,7 +542,7 @@ Status OplogApplierUtils::applyOplogEntryOrGroupedInsertsCommon(
                 // only for deletes, on the grounds that deleting from a non-existent collection
                 // is a no-op.
                 if (opType == OpTypeEnum::kDelete &&
-                    !oplogApplicationEnforcesSteadyStateConstraints &&
+                    !oplogApplicationEnforcesSteadyStateConstraints.load() &&
                     oplogApplicationMode == OplogApplication::Mode::kSecondary) {
                     LOGV2_DEBUG(8994800,
                                 1,
@@ -670,6 +673,7 @@ Status OplogApplierUtils::applyOplogBatchCommon(
 
                 LOGV2_FATAL_CONTINUE(21237,
                                      "Error applying operation",
+                                     "opTime"_attr = op->getOpTime(),
                                      "oplogEntry"_attr = redact(op->toBSONForLogging()),
                                      "error"_attr = causedBy(redact(status)));
                 return status;
@@ -681,6 +685,7 @@ Status OplogApplierUtils::applyOplogBatchCommon(
                                  "keyPattern"_attr = info->getKeyPattern(),
                                  "keyValue"_attr = redact(info->getDuplicatedKeyValue()),
                                  "error"_attr = redact(e.reason()),
+                                 "opTime"_attr = op->getOpTime(),
                                  "oplogEntry"_attr = redact(op->toBSONForLogging()));
             return e.toStatus();
         } catch (const DBException& e) {
@@ -707,6 +712,7 @@ Status OplogApplierUtils::applyOplogBatchCommon(
             LOGV2_FATAL_CONTINUE(21238,
                                  "Writer worker caught exception",
                                  "error"_attr = redact(e),
+                                 "opTime"_attr = op->getOpTime(),
                                  "oplogEntry"_attr = redact(op->toBSONForLogging()));
             return e.toStatus();
         }

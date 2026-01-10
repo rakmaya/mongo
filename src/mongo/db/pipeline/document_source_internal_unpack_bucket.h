@@ -61,6 +61,9 @@
 
 namespace MONGO_MOD_PUB mongo {
 
+DEFINE_LITE_PARSED_STAGE_DEFAULT_DERIVED(InternalUnpackBucket);
+DEFINE_LITE_PARSED_STAGE_DEFAULT_DERIVED(ExternalUnpackBucket);
+
 struct MONGO_MOD_PRIVATE InternalUnpackBucketSharedState {
     // It's beneficial to do as much filtering at the bucket level as possible to avoid unpacking
     // buckets that wouldn't contribute to the results anyway. There is a generic mechanism that
@@ -200,8 +203,8 @@ public:
      * function. The README.md should be maintained in sync with this function. Please update the
      * README accordingly.
      */
-    DocumentSourceContainer::iterator doOptimizeAt(DocumentSourceContainer::iterator itr,
-                                                   DocumentSourceContainer* container) final;
+    DocumentSourceContainer::iterator optimizeAt(DocumentSourceContainer::iterator itr,
+                                                 DocumentSourceContainer* container);
 
     /*
      * Given a $project produced by 'extractOrBuildProjectToInternalize()', attempt to internalize
@@ -439,6 +442,10 @@ private:
     bool _triedInternalizeProjectLocally = false;
     bool _triedLastpointRewriteLocally = false;
     bool _triedLimitPushDownLocally = false;
+
+    // When optimizing the rest of the pipeline, it's possible that we end up back at the unpack
+    // stage. If that happens, we don't need to attempt any optimizations on 'this'.
+    bool _optimizingRestOfPipeline = false;
 
     // The $project or $addFields stages which we have tried to apply the computed meta project push
     // down optimization to.

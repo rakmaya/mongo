@@ -43,7 +43,6 @@
 #include "mongo/util/modules.h"
 #include "mongo/util/uuid.h"
 
-#include <list>
 #include <utility>
 
 #include <boost/optional/optional.hpp>
@@ -66,10 +65,13 @@ public:
         : WriterStage<BSONObj>(stageName.data(), pExpCtx, std::move(outputNs)),
           _writeConcern(pExpCtx->getOperationContext()->getWriteConcern()),
           _timeseries(timeseries),
-          _mergeShardId(std::move(mergeShardId)),
-          _viewlessTimeseriesEnabled(gFeatureFlagCreateViewlessTimeseriesCollections.isEnabled(
-              VersionContext::getDecoration(pExpCtx->getOperationContext()),
-              serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {};
+          _mergeShardId(std::move(mergeShardId)) {
+        // TODO(SERVER-112816): The viewless timeseries feature flag should not be checked here,
+        // since $out has no FCV stability guarantee (and we can't acquire an Operation FCV,
+        // because it does not support long-running operations yet.)
+        _viewlessTimeseriesEnabled = gFeatureFlagCreateViewlessTimeseriesCollections.isEnabled(
+            VersionContext(serverGlobalParams.featureCompatibility.acquireFCVSnapshot()));
+    }
 
 private:
     void doDispose() override;

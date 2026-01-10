@@ -34,20 +34,24 @@
 #include "mongo/db/auth/validated_tenancy_scope.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/fle_crud.h"
-#include "mongo/db/global_catalog/router_role_api/cluster_commands_helpers.h"
-#include "mongo/db/global_catalog/router_role_api/collection_routing_info_targeter.h"
-#include "mongo/db/global_catalog/router_role_api/router_role.h"
+#include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/pipeline/expression_context_diagnostic_printer.h"
 #include "mongo/db/pipeline/query_request_conversion.h"
 #include "mongo/db/query/count_command_gen.h"
+#include "mongo/db/query/query_shape/count_cmd_shape.h"
+#include "mongo/db/query/query_shape/query_shape_hash.h"
+#include "mongo/db/query/query_shape/shape_helpers.h"
 #include "mongo/db/query/query_stats/count_key.h"
 #include "mongo/db/query/query_stats/query_stats.h"
 #include "mongo/db/query/shard_key_diagnostic_printer.h"
 #include "mongo/db/query/timeseries/timeseries_translation.h"
 #include "mongo/db/query/view_response_formatter.h"
-#include "mongo/db/raw_data_operation.h"
+#include "mongo/db/router_role/cluster_commands_helpers.h"
+#include "mongo/db/router_role/collection_routing_info_targeter.h"
+#include "mongo/db/router_role/router_role.h"
 #include "mongo/db/server_feature_flags_gen.h"
+#include "mongo/db/shard_role/shard_catalog/raw_data_operation.h"
 #include "mongo/db/version_context.h"
 #include "mongo/db/views/resolved_view.h"
 #include "mongo/platform/overflow_arithmetic.h"
@@ -57,20 +61,38 @@
 #include "mongo/s/query/exec/cluster_cursor_manager.h"
 #include "mongo/s/query/exec/collect_query_stats_mongos.h"
 #include "mongo/s/query/planner/cluster_aggregate.h"
+#include "mongo/s/query/shard_targeting_helpers.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/timer.h"
 
 #include <vector>
 
 namespace mongo {
 
-inline BSONObj prepareCountForPassthrough(const BSONObj& cmdObj, bool requestQueryStats) {
-    if (!requestQueryStats) {
-        return CommandHelpers::filterCommandRequestForPassthrough(cmdObj);
+inline BSONObj prepareCountForPassthrough(const OperationContext* opCtx,
+                                          const BSONObj& cmdObj,
+                                          bool requestQueryStats) {
+    BSONObjBuilder bob(cmdObj);
+
+    // Pass the queryShapeHash to the shards. We must validate that all participating shards can
+    // understand 'originalQueryShapeHash' and therefore check the feature flag. We use the last
+    // LTS when the FCV is uninitialized, since count commands can run during initial sync. This is
+    // because the feature is exclusively for observability enhancements and should only be applied
+    // when we are confident that the shard can correctly read this field, ensuring the query will
+    // not error.
+    if (feature_flags::gFeatureFlagOriginalQueryShapeHash.isEnabledUseLastLTSFCVWhenUninitialized(
+            VersionContext::getDecoration(opCtx),
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+        if (auto&& queryShapeHash = CurOp::get(opCtx)->debug().getQueryShapeHash()) {
+            bob.append(CountCommandRequest::kOriginalQueryShapeHashFieldName,
+                       queryShapeHash->toHexString());
+        }
+    }
+    if (requestQueryStats) {
+        bob.append(CountCommandRequest::kIncludeQueryStatsMetricsFieldName, true);
     }
 
-    BSONObjBuilder bob(cmdObj);
-    bob.append("includeQueryStatsMetrics", true);
     return CommandHelpers::filterCommandRequestForPassthrough(bob.done());
 }
 
@@ -103,6 +125,34 @@ inline bool convertAndRunAggregateIfViewlessTimeseries(
             verbosity,
             &bodyBuilder));
         return true;
+    }
+}
+
+inline void createShapeAndRegisterQueryStats(const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                                             const CountCommandRequest& countRequest,
+                                             const NamespaceString& nss) {
+    const std::unique_ptr<ParsedFindCommand> parsedFind = uassertStatusOK(
+        parsed_find_command::parseFromCount(expCtx, countRequest, ExtensionsCallbackNoop(), nss));
+
+    // Compute QueryShapeHash and record it in CurOp.
+    OperationContext* opCtx = expCtx->getOperationContext();
+    const query_shape::DeferredQueryShape deferredShape{[&]() {
+        return shape_helpers::tryMakeShape<query_shape::CountCmdShape>(
+            *parsedFind, countRequest.getLimit().has_value(), countRequest.getSkip().has_value());
+    }};
+    boost::optional<query_shape::QueryShapeHash> queryShapeHash =
+        CurOp::get(opCtx)->debug().ensureQueryShapeHash(opCtx, [&]() {
+            return shape_helpers::computeQueryShapeHash(expCtx, deferredShape, nss);
+        });
+
+    if (feature_flags::gFeatureFlagQueryStatsCountDistinct.isEnabled(
+            VersionContext::getDecoration(opCtx),
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+        query_stats::registerRequest(opCtx, nss, [&]() {
+            uassertStatusOKWithContext(deferredShape->getStatus(), "Failed to compute query shape");
+            return std::make_unique<query_stats::CountKey>(
+                expCtx, countRequest, std::move(deferredShape->getValue()));
+        });
     }
 }
 
@@ -178,9 +228,9 @@ public:
                 originalNss.isValid());
 
         try {
-            sharding::router::CollectionRouter router{opCtx->getServiceContext(), originalNss};
+            sharding::router::CollectionRouter router(opCtx, originalNss);
             return router.routeWithRoutingContext(
-                opCtx, getName(), [&](OperationContext* opCtx, RoutingContext& originalRoutingCtx) {
+                getName(), [&](OperationContext* opCtx, RoutingContext& originalRoutingCtx) {
                     // Clear the bodyBuilder since this lambda function may be retried if the router
                     // cache is stale.
                     result.resetToEmpty();
@@ -190,7 +240,7 @@ public:
                     BSONObj cmdObj = originalCmdObj;
                     auto nss = originalNss;
                     const auto targeter = CollectionRoutingInfoTargeter(opCtx, nss);
-                    auto& routingCtx = translateNssForRawDataAccordingToRoutingInfo(
+                    auto& routingCtx = performTimeseriesTranslationAccordingToRoutingInfo(
                         opCtx,
                         originalNss,
                         targeter,
@@ -203,6 +253,11 @@ public:
 
                     auto countRequest =
                         CountCommandRequest::parse(cmdObj, IDLParserContext("count"));
+
+                    // Forbid users from passing 'originalQueryShapeHash' explicitly.
+                    uassert(10742704,
+                            "BSON field 'originalQueryShapeHash' is an unknown field",
+                            !countRequest.getOriginalQueryShapeHash().has_value());
 
                     // Create an RAII object that prints the collection's shard key in the case of a
                     // tassert or crash.
@@ -233,22 +288,7 @@ public:
                     ScopedDebugInfo expCtxDiagnostics(
                         "ExpCtxDiagnostics", diagnostic_printers::ExpressionContextPrinter{expCtx});
 
-                    const auto parsedFind = uassertStatusOK(parsed_find_command::parseFromCount(
-                        expCtx, countRequest, ExtensionsCallbackNoop(), nss));
-
-                    if (feature_flags::gFeatureFlagQueryStatsCountDistinct.isEnabled(
-                            VersionContext::getDecoration(opCtx),
-                            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
-                        query_stats::registerRequest(opCtx, nss, [&]() {
-                            return std::make_unique<query_stats::CountKey>(
-                                expCtx,
-                                *parsedFind,
-                                countRequest.getLimit().has_value(),
-                                countRequest.getSkip().has_value(),
-                                countRequest.getReadConcern(),
-                                countRequest.getMaxTimeMS().has_value());
-                        });
-                    }
+                    createShapeAndRegisterQueryStats(expCtx, countRequest, nss);
 
                     // Note: This must happen after query stats because query stats retain the
                     // originating command type for timeseries.
@@ -298,7 +338,8 @@ public:
                             nss,
                             applyReadWriteConcern(opCtx,
                                                   this,
-                                                  prepareCountForPassthrough(countRequest.toBSON(),
+                                                  prepareCountForPassthrough(opCtx,
+                                                                             countRequest.toBSON(),
                                                                              requestQueryStats)),
                             ReadPreferenceSetting::get(opCtx),
                             Shard::RetryPolicy::kIdempotent,
@@ -359,7 +400,8 @@ public:
                                         shardMetrics.Obj(), IDLParserContext("CursorMetrics"));
                                     CurOp::get(opCtx)
                                         ->debug()
-                                        .additiveMetrics.aggregateCursorMetrics(metrics);
+                                        .getAdditiveMetrics()
+                                        .aggregateCursorMetrics(metrics);
                                 }
                                 continue;
                             }
@@ -384,7 +426,7 @@ public:
 
                     if (allShardMetricsReturned) {
                         collectQueryStatsMongos(opCtx,
-                                                std::move(curOp->debug().queryStatsInfo.key));
+                                                std::move(curOp->debug().getQueryStatsInfo().key));
                     }
 
                     return true;
@@ -400,7 +442,7 @@ public:
             auto* curOp = CurOp::get(opCtx);
             curOp->setEndOfOpMetrics(1);
 
-            collectQueryStatsMongos(opCtx, std::move(curOp->debug().queryStatsInfo.key));
+            collectQueryStatsMongos(opCtx, std::move(curOp->debug().getQueryStatsInfo().key));
             return true;
         }
     }
@@ -414,7 +456,7 @@ public:
         const BSONObj& originalCmdObj = request.body;
 
         auto curOp = CurOp::get(opCtx);
-        curOp->debug().queryStatsInfo.disableForSubqueryExecution = true;
+        curOp->debug().getQueryStatsInfo().disableForSubqueryExecution = true;
 
         const auto originalNss = parseNs(request.parseDbName(), originalCmdObj);
         uassert(ErrorCodes::InvalidNamespace,
@@ -422,11 +464,9 @@ public:
                               << originalNss.toStringForErrorMsg() << "'",
                 originalNss.isValid());
 
-        sharding::router::CollectionRouter router{opCtx->getServiceContext(), originalNss};
+        sharding::router::CollectionRouter router(opCtx, originalNss);
         return router.routeWithRoutingContext(
-            opCtx,
-            "explain count"_sd,
-            [&](OperationContext* opCtx, RoutingContext& originalRoutingCtx) {
+            "explain count"_sd, [&](OperationContext* opCtx, RoutingContext& originalRoutingCtx) {
                 // Clear the bodyBuilder since this lambda function may be retried if the router
                 // cache is stale.
                 result->getBodyBuilder().resetToEmpty();
@@ -436,7 +476,7 @@ public:
                 BSONObj cmdObj = originalCmdObj;
                 auto nss = originalNss;
                 const auto targeter = CollectionRoutingInfoTargeter(opCtx, originalNss);
-                auto& routingCtx = translateNssForRawDataAccordingToRoutingInfo(
+                auto& routingCtx = performTimeseriesTranslationAccordingToRoutingInfo(
                     opCtx,
                     originalNss,
                     targeter,

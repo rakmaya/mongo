@@ -16,10 +16,9 @@ genrule(
     srcs = [],
     outs = ["on_feature_flags.txt"],
     cmd = """
-    awk '/^on_feature_flags/ { for (i=2; i<=NF; i++) print $$i }' bazel-out/volatile-status.txt > $@
+    awk '/^STABLE_on_feature_flags/ { for (i=2; i<=NF; i++) print $$i }' bazel-out/stable-status.txt > $@
     """,
     stamp = True,
-    tags = ["external"],  # Consuming the feature flag information from volatile-status, so this should always execute.
     visibility = ["//visibility:public"],
 )
 
@@ -28,10 +27,9 @@ genrule(
     srcs = [],
     outs = ["off_feature_flags.txt"],
     cmd = """
-    awk '/^off_feature_flags/ { for (i=2; i<=NF; i++) print $$i }' bazel-out/volatile-status.txt > $@
+    awk '/^STABLE_off_feature_flags/ { for (i=2; i<=NF; i++) print $$i }' bazel-out/stable-status.txt > $@
     """,
     stamp = True,
-    tags = ["external"],  # Consuming the feature flag information from volatile-status, so this should always execute.
     visibility = ["//visibility:public"],
 )
 
@@ -40,10 +38,9 @@ genrule(
     srcs = [],
     outs = ["unreleased_ifr_flags.txt"],
     cmd = """
-    awk '/^unreleased_ifr_flags/ { for (i=2; i<=NF; i++) print $$i }' bazel-out/volatile-status.txt > $@
+    awk '/^STABLE_unreleased_ifr_flags/ { for (i=2; i<=NF; i++) print $$i }' bazel-out/stable-status.txt > $@
     """,
     stamp = True,
-    tags = ["external"],  # Consuming the feature flag information from volatile-status, so this should always execute.
     visibility = ["//visibility:public"],
 )
 
@@ -57,7 +54,10 @@ genrule(
     cat bazel-out/volatile-status.txt  > $@
     """,
     stamp = True,
-    tags = ["external"],  # Consuming information from volatile-status, so this should always execute.
+    tags = [
+        "external",
+        "no-cache",
+    ],
     visibility = ["//visibility:public"],
 )
 
@@ -66,12 +66,12 @@ genrule(
     srcs = [],
     outs = ["test_runtimes.json"],
     cmd = """
-    awk '/^STABLE_TEST_RUNTIMES/ { for (i=2; i<=NF; i++) print $$i }' bazel-out/stable-status.txt > $@
+    awk '/^TEST_RUNTIMES/ { for (i=2; i<=NF; i++) print $$i }' bazel-out/volatile-status.txt > $@
     """,
     stamp = True,
     tags = [
         "external",
-        "local",
+        "no-cache",
     ],
     visibility = ["//visibility:public"],
 )
@@ -88,6 +88,18 @@ config_setting(
     },
 )
 
+bool_flag(
+    name = "installed_dist_test",
+    build_setting_default = False,
+)
+
+config_setting(
+    name = "installed_dist_test_enabled",
+    flag_values = {
+        "//bazel/resmoke:installed_dist_test": "True",
+    },
+)
+
 py_binary(
     name = "resmoke_config_generator",
     srcs = ["resmoke_config_generator.py"],
@@ -101,27 +113,6 @@ py_binary(
         dependency(
             "pyyaml",
             group = "core",
-        ),
-    ],
-)
-
-py_binary(
-    name = "get_historic_runtimes",
-    srcs = ["get_historic_runtimes.py"],
-    main = "get_historic_runtimes.py",
-    visibility = ["//visibility:public"],
-    deps = [
-        dependency(
-            "typer",
-            group = "core",
-        ),
-        dependency(
-            "boto3",
-            group = "aws",
-        ),
-        dependency(
-            "botocore",
-            group = "aws",
         ),
     ],
 )

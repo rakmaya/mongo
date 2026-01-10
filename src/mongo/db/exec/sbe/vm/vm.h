@@ -50,7 +50,6 @@
 #include "mongo/util/debug_util.h"
 #include "mongo/util/modules.h"
 
-#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -342,6 +341,11 @@ enum class AggFirstLastNElems { kQueue, kN, kSizeOfArray };
  */
 enum class AggAccumulatorNElems { kValues = 0, kN, kMemUsage, kMemLimit, kSizeOfArray };
 
+/**
+ * Enum to specify whether to extract top or bottom N elements.
+ */
+enum class TopBottomSense { kTop, kBottom };
+
 class ByteCode {
     // The number of bytes per stack entry.
     static constexpr size_t sizeOfElement =
@@ -375,26 +379,17 @@ public:
                                                                      value::TypeTags rhsTag,
                                                                      value::Value rhsValue);
 
-    static FastTuple<bool, value::TypeTags, value::Value> builtinAddToArrayCappedImpl(
-        value::TypeTags tagAccumulatorState,
-        value::Value valAccumulatorState,  // Owned
-        bool ownedNewElem,
-        value::TypeTags tagNewElem,
-        value::Value valNewElem,
-        int32_t sizeCap);
+    static value::TagValueMaybeOwned builtinAddToArrayCappedImpl(
+        value::TagValueOwned accumulatorState, value::TagValueMaybeOwned newElem, int32_t sizeCap);
 
-    static FastTuple<bool, value::TypeTags, value::Value> addToSetCappedImpl(
-        value::TypeTags tagAccumulatorState,
-        value::Value valAccumulatorState,  // Owned
-        bool ownedNewElem,
-        value::TypeTags tagNewElem,
-        value::Value valNewElem,
-        int32_t sizeCap,
-        CollatorInterface* collator);
+    static value::TagValueMaybeOwned addToSetCappedImpl(value::TagValueOwned accumulatorState,
+                                                        value::TagValueMaybeOwned newElem,
+                                                        int32_t sizeCap,
+                                                        CollatorInterface* collator);
 
     /**
-     * Moves the elements from the (tagNewArrayElements, valNewArrayElements) array onto the end of
-     * the (tagAccumulatorState, valAccumulatorState) capped array accumulator, enforcing the cap by
+     * Moves the elements from the newArrayElements array onto the end of
+     * the accumulatorState capped array accumulator, enforcing the cap by
      * throwing an exception if the operation would result in an accumulator state that exceeds it.
      *
      * Either the accumulator state or new members array may be Nothing, which gets treated as an
@@ -403,21 +398,15 @@ public:
      * The capped accumulator state is a two-element array, where the first element is the array
      * value and the second element is the array value's pre-computed size. The return value is also
      * an array with the same structure.
-     *
-     * Takes ownership of both the accumulator state and the new elements array. The caller takes
-     * ownership of the returned value iff the 'bool' component is true.
      */
-    static FastTuple<bool, value::TypeTags, value::Value> concatArraysAccumImpl(
-        value::TypeTags tagAccumulatorState,
-        value::Value valAccumulatorState,  // Owned
-        value::TypeTags tagNewArrayElements,
-        value::Value valNewArrayElements,  // Owned
-        int64_t newArrayElementsSize,
-        int32_t sizeCap);
+    static value::TagValueMaybeOwned concatArraysAccumImpl(value::TagValueOwned accumulatorState,
+                                                           value::TagValueOwned newArrayElements,
+                                                           int64_t newArrayElementsSize,
+                                                           int32_t sizeCap);
 
     /**
-     * Moves the elements from the (tagNewSetMembers, valNewSetMembers) array into the
-     * (tagAccumulatorState, valAccumulatorState) capped set accumulator, preserving set semantics
+     * Moves the elements from the newSetMembers array into the
+     * accumulatorState capped set accumulator, preserving set semantics
      * by ignoring duplicates and enforcing the cap by throwing an exception if the operation would
      * result in an accumulator state that exceeds it.
      *
@@ -427,17 +416,11 @@ public:
      * The capped accumulator state is a two-element array, where the first element is an 'ArraySet'
      * and the second element is the set's pre-computed size. The return value is also an array
      * with the same structure.
-     *
-     * Takes ownership of both the accumulator state and the new elements array. The caller takes
-     * ownership of the returned value iff the 'bool' component is true.
      */
-    static FastTuple<bool, value::TypeTags, value::Value> setUnionAccumImpl(
-        value::TypeTags tagAccumulatorState,
-        value::Value valAccumulatorState,  // Owned
-        value::TypeTags tagNewSetMembers,
-        value::Value valNewSetMembers,  // Owned
-        int32_t sizeCap,
-        CollatorInterface* collator);
+    static value::TagValueMaybeOwned setUnionAccumImpl(value::TagValueOwned accumulatorState,
+                                                       value::TagValueOwned newSetMembers,
+                                                       int32_t sizeCap,
+                                                       CollatorInterface* collator);
 
     ByteCode() {
         _argStack = static_cast<uint8_t*>(::operator new(sizeOfElement * 4));
@@ -460,7 +443,7 @@ public:
     /**
      * Runs a CodeFragment representing an arbitrary VM program that returns one slot value.
      */
-    FastTuple<bool, value::TypeTags, value::Value> run(const CodeFragment* code);
+    value::TagValueMaybeOwned run(const CodeFragment* code);
 
     /**
      * Runs a CodeFragment reprensenting a predicate that returns a boolean result.
@@ -469,6 +452,12 @@ public:
 
     typedef std::tuple<value::Array*, value::Array*, size_t, size_t, int32_t, int32_t, bool>
         MultiAccState;
+
+    FastTuple<bool, value::TypeTags, value::Value> getField_test(value::TypeTags objTag,
+                                                                 value::Value objValue,
+                                                                 StringData fieldStr) {
+        return getField(objTag, objValue, fieldStr);
+    }
 
 private:
     /**
@@ -965,6 +954,14 @@ private:
     FastTuple<bool, value::TypeTags, value::Value> builtinIsArrayEmpty(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinReverseArray(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinSortArray(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinTopN(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinTop(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinBottomN(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinBottom(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> topOrBottomImpl(ArityType arity,
+                                                                   TopBottomSense sense);
+    FastTuple<bool, value::TypeTags, value::Value> topOrBottomNImpl(ArityType arity,
+                                                                    TopBottomSense sense);
     FastTuple<bool, value::TypeTags, value::Value> builtinDateAdd(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinHasNullBytes(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinGetRegexPattern(ArityType arity);
@@ -1106,10 +1103,10 @@ private:
     FastTuple<bool, value::TypeTags, value::Value> builtinAggIntegralRemove(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinAggIntegralFinalize(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> integralOfTwoPointsByTrapezoidalRule(
-        std::pair<value::TypeTags, value::Value> prevInput,
-        std::pair<value::TypeTags, value::Value> prevSortByVal,
-        std::pair<value::TypeTags, value::Value> newInput,
-        std::pair<value::TypeTags, value::Value> newSortByVal);
+        value::TagValueView prevInput,
+        value::TagValueView prevSortByVal,
+        value::TagValueView newInput,
+        value::TagValueView newSortByVal);
     FastTuple<bool, value::TypeTags, value::Value> builtinAggDerivativeFinalize(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> aggRemovableAvgFinalizeImpl(
         value::Array* sumState, int64_t count);
@@ -1177,12 +1174,11 @@ private:
     FastTuple<bool, value::TypeTags, value::Value> builtinAggRemovableMinMaxNFinalize(
         ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtin(ArityType arity);
-    FastTuple<bool, value::TypeTags, value::Value> linearFillInterpolate(
-        std::pair<value::TypeTags, value::Value> x1,
-        std::pair<value::TypeTags, value::Value> y1,
-        std::pair<value::TypeTags, value::Value> x2,
-        std::pair<value::TypeTags, value::Value> y2,
-        std::pair<value::TypeTags, value::Value> x);
+    FastTuple<bool, value::TypeTags, value::Value> linearFillInterpolate(value::TagValueView x1,
+                                                                         value::TagValueView y1,
+                                                                         value::TagValueView x2,
+                                                                         value::TagValueView y2,
+                                                                         value::TagValueView x);
     FastTuple<bool, value::TypeTags, value::Value> builtinAggRemovableTopBottomNInit(
         ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinAggRemovableTopBottomNAdd(
@@ -1253,27 +1249,25 @@ private:
     FastTuple<bool, value::TypeTags, value::Value> builtinScalarBlockArithmeticOperation(
         const value::TypeTags* bitsetTags,
         const value::Value* bitsetVals,
-        std::pair<value::TypeTags, value::Value> scalar,
+        value::TagValueView scalar,
         value::ValueBlock* block,
         size_t valsNum);
     template <int operation>
     FastTuple<bool, value::TypeTags, value::Value> builtinScalarBlockArithmeticOperation(
-        std::pair<value::TypeTags, value::Value> scalar, value::ValueBlock* block, size_t valsNum);
+        value::TagValueView scalar, value::ValueBlock* block, size_t valsNum);
     template <int operation>
     FastTuple<bool, value::TypeTags, value::Value> builtinBlockScalarArithmeticOperation(
         const value::TypeTags* bitsetTags,
         const value::Value* bitsetVals,
         value::ValueBlock* block,
-        std::pair<value::TypeTags, value::Value> scalar,
+        value::TagValueView scalar,
         size_t valsNum);
     template <int operation>
     FastTuple<bool, value::TypeTags, value::Value> builtinBlockScalarArithmeticOperation(
-        value::ValueBlock* block, std::pair<value::TypeTags, value::Value> scalar, size_t valsNum);
+        value::ValueBlock* block, value::TagValueView scalar, size_t valsNum);
     template <int operation>
     FastTuple<bool, value::TypeTags, value::Value> builtinScalarScalarArithmeticOperation(
-        std::pair<value::TypeTags, value::Value> leftInputScalar,
-        std::pair<value::TypeTags, value::Value> rightInputScalar,
-        size_t valsNum);
+        value::TagValueView leftInputScalar, value::TagValueView rightInputScalar, size_t valsNum);
     template <int operation>
     FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockArithmeticOperation(
         ArityType arity);
@@ -1560,12 +1554,12 @@ public:
     // Add definition to vm.cpp for this method.
     virtual ~TopBottomArgs();
 
-    bool keySortsBefore(std::pair<value::TypeTags, value::Value> item) {
+    bool keySortsBefore(value::TagValueView item) {
         if (!_keyArg) {
             return keySortsBeforeImpl(item);
         } else {
-            auto [_, tag, val] = *_keyArg;
-            auto [cmpTag, cmpVal] = _sortSpec->compare(tag, val, item.first, item.second);
+            auto [cmpTag, cmpVal] =
+                _sortSpec->compare(_keyArg->tag(), _keyArg->value(), item.tag, item.value);
             if (cmpTag == value::TypeTags::NumberInt32) {
                 int32_t cmp = value::bitcastTo<int32_t>(cmpVal);
                 return _sense == TopBottomSense::kTop ? cmp < 0 : cmp > 0;
@@ -1574,29 +1568,19 @@ public:
         }
     }
 
-    std::pair<value::TypeTags, value::Value> getOwnedKey() {
+    value::TagValueOwned getOwnedKey() {
         if (!_keyArg) {
             return getOwnedKeyImpl();
         } else {
-            auto [owned, tag, val] = *_keyArg;
-            if (!owned) {
-                std::tie(tag, val) = value::copyValue(tag, val);
-            }
-            _keyGuard->reset();
-            return std::pair(tag, val);
+            return _keyArg->moveToOwned();
         }
     }
 
-    std::pair<value::TypeTags, value::Value> getOwnedValue() {
+    value::TagValueOwned getOwnedValue() {
         if (!_valueArg) {
             return getOwnedValueImpl();
         } else {
-            auto [owned, tag, val] = *_valueArg;
-            if (!owned) {
-                std::tie(tag, val) = value::copyValue(tag, val);
-            }
-            _valueGuard->reset();
-            return std::pair(tag, val);
+            return _valueArg->moveToOwned();
         }
     }
 
@@ -1624,31 +1608,25 @@ protected:
         return 0;
     }
 
-    virtual bool keySortsBeforeImpl(std::pair<value::TypeTags, value::Value> item) = 0;
-    virtual std::pair<value::TypeTags, value::Value> getOwnedKeyImpl() = 0;
-    virtual std::pair<value::TypeTags, value::Value> getOwnedValueImpl() = 0;
+    virtual bool keySortsBeforeImpl(value::TagValueView item) = 0;
+    virtual value::TagValueOwned getOwnedKeyImpl() = 0;
+    virtual value::TagValueOwned getOwnedValueImpl() = 0;
 
-    void setDirectKeyArg(FastTuple<bool, value::TypeTags, value::Value> arg) {
-        _keyArg.emplace(arg);
-        _keyGuard.emplace(arg);
+    void setDirectKeyArg(value::TagValueMaybeOwned arg) {
+        _keyArg.emplace(std::move(arg));
     }
 
-    void setDirectValueArg(FastTuple<bool, value::TypeTags, value::Value> arg) {
-        _valueArg.emplace(arg);
-        _valueGuard.emplace(arg);
+    void setDirectValueArg(value::TagValueMaybeOwned arg) {
+        _valueArg.emplace(std::move(arg));
     }
 
     SortSpec* _sortSpec = nullptr;
     TopBottomSense _sense;
     bool _decomposedKey = false;
     bool _decomposedValue = false;
-    boost::optional<FastTuple<bool, value::TypeTags, value::Value>> _keyArg;
-    boost::optional<FastTuple<bool, value::TypeTags, value::Value>> _valueArg;
-    boost::optional<value::ValueGuard> _keyGuard;
-    boost::optional<value::ValueGuard> _valueGuard;
+    boost::optional<value::TagValueMaybeOwned> _keyArg;
+    boost::optional<value::TagValueMaybeOwned> _valueArg;
 };
-
-std::pair<value::TypeTags, value::Value> initializeDoubleDoubleSumState();
 }  // namespace vm
 }  // namespace sbe
 }  // namespace mongo

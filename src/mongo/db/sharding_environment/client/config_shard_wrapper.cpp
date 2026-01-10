@@ -30,7 +30,7 @@
 
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/logical_time.h"
-#include "mongo/db/vector_clock/vector_clock.h"
+#include "mongo/db/topology/vector_clock/vector_clock.h"
 #include "mongo/util/assert_util.h"
 
 #include <utility>
@@ -62,10 +62,10 @@ std::string ConfigShardWrapper::toString() const {
     return _configShard->toString();
 }
 
-bool ConfigShardWrapper::isRetriableError(ErrorCodes::Error code,
+bool ConfigShardWrapper::isRetriableError(const Status& status,
                                           std::span<const std::string> errorLabels,
                                           RetryPolicy options) const {
-    return _configShard->isRetriableError(code, errorLabels, options);
+    return _configShard->isRetriableError(status, errorLabels, options);
 }
 
 void ConfigShardWrapper::runFireAndForgetCommand(OperationContext* opCtx,

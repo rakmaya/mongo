@@ -74,7 +74,7 @@ const QuerySolution* pickBestPlan(CanonicalQuery* cq,
     const auto collection = acquireCollection(
         &opCtx,
         CollectionAcquisitionRequest(nss,
-                                     PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                     PlacementConcern(boost::none, ShardVersion::UNTRACKED()),
                                      repl::ReadConcernArgs::get(&opCtx),
                                      AcquisitionPrerequisites::kRead),
         MODE_IS);
@@ -105,7 +105,8 @@ const QuerySolution* pickBestPlan(CanonicalQuery* cq,
     }
     // This is what sets a backup plan, should we test for it.
     NoopYieldPolicy yieldPolicy(&opCtx, opCtx.getServiceContext()->getFastClockSource());
-    mps->pickBestPlan(&yieldPolicy).transitional_ignore();
+    ASSERT_OK(mps->runTrials(&yieldPolicy));
+    ASSERT_OK(mps->pickBestPlan());
     ASSERT(mps->bestPlanChosen());
     auto bestPlanIdx = mps->bestPlanIdx();
     ASSERT(bestPlanIdx.has_value());
@@ -127,7 +128,7 @@ const QuerySolution* bestCBRPlan(CanonicalQuery* cq,
     const auto collection = acquireCollection(
         &opCtx,
         CollectionAcquisitionRequest(nss,
-                                     PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                     PlacementConcern(boost::none, ShardVersion::UNTRACKED()),
                                      repl::ReadConcernArgs::get(&opCtx),
                                      AcquisitionPrerequisites::kRead),
         MODE_IS);
@@ -138,6 +139,7 @@ const QuerySolution* bestCBRPlan(CanonicalQuery* cq,
     std::unique_ptr<ce::SamplingEstimator> samplingEstimator =
         std::make_unique<ce::SamplingEstimatorImpl>(&opCtx,
                                                     collectionsAccessor,
+                                                    nss,
                                                     PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
                                                     static_cast<size_t>(sampleSize),
                                                     samplingStyle,

@@ -8,6 +8,7 @@ import pymongo
 import pymongo.errors
 import yaml
 
+from buildscripts.resmokelib import config as _config
 from buildscripts.resmokelib.extensions import (
     delete_extension_configs,
     find_and_generate_extension_configs,
@@ -207,10 +208,8 @@ class ShardedClusterFixture(interface.Fixture, interface._DockerComposeInterface
             for task in as_completed(tasks):
                 task.result()
 
-        # Need to get the new config shard connection string generated from the auto-bootstrap procedure
-        if self.use_auto_bootstrap_procedure:
-            for mongos in self.mongos:
-                mongos.mongos_options["configdb"] = self.configsvr.get_internal_connection_string()
+        for mongos in self.mongos:
+            mongos.mongos_options["configdb"] = self.configsvr.get_internal_connection_string()
 
         if self.launch_mongot:
             # These mongot parameters are popped from shard.mongod_options when mongod is launched in above
@@ -242,6 +241,10 @@ class ShardedClusterFixture(interface.Fixture, interface._DockerComposeInterface
             # Wait for the setup of all nodes to complete
             for task in as_completed(tasks):
                 task.result()
+
+    def get_rs_fixture_name(self):
+        """Declares the fixture name needed to build the shards of this cluster."""
+        return "ReplicaSetFixture"
 
     def _all_mongo_d_s_t(self):
         """Return a list of all `mongo{d,s,t}` `Process` instances in this fixture."""
@@ -639,7 +642,14 @@ class ShardedClusterFixture(interface.Fixture, interface._DockerComposeInterface
     def get_mongos_kwargs(self):
         """Return options that may be passed to a mongos."""
         mongos_options = self.mongos_options.copy()
-        mongos_options["configdb"] = self.configsvr.get_internal_connection_string()
+        if _config.DOCKER_COMPOSE_BUILD_IMAGES:
+            # Suites generating Docker Compose resources need to retrieve the connection string to the config server
+            # while constructing this fixture.
+            mongos_options["configdb"] = self.configsvr.get_internal_connection_string()
+        else:
+            # Regular test suite execution: the connection string will be assigned at ShardedClusterFixture.setup() time,
+            # after ensuring that the stack of nodes and services backing the config server replica set has been correctly started.
+            mongos_options["configdb"] = None
         if self.config_shard is not None:
             if "set_parameters" not in mongos_options:
                 mongos_options["set_parameters"] = {}
@@ -666,6 +676,10 @@ class ShardedClusterFixture(interface.Fixture, interface._DockerComposeInterface
         else:
             self.logger.info("Adding %s as a shard...", connection_string)
             client.admin.command({"addShard": connection_string})
+
+    def internode_validation(self):
+        for replicaset in self.shards:
+            replicaset.internode_validation()
 
 
 class ExternalShardedClusterFixture(external.ExternalFixture, ShardedClusterFixture):
@@ -754,7 +768,6 @@ class _MongoSFixture(interface.Fixture, interface._DockerComposeInterface):
 
         interface.Fixture.__init__(self, logger, job_num, fixturelib)
 
-        self.fixturelib = fixturelib
         self.config = self.fixturelib.get_config()
 
         # Default to command line options if the YAML configuration is not passed in.
@@ -771,6 +784,8 @@ class _MongoSFixture(interface.Fixture, interface._DockerComposeInterface):
                 self.mongos_options["set_parameters"][ff] = "true"
 
         self.mongos = None
+        self.port = None
+        self.grpcPort = None
         self.port = fixturelib.get_next_port(job_num)
         self.mongos_options["port"] = self.port
         if "featureFlagGRPC" in self.config.ENABLED_FEATURE_FLAGS:
@@ -781,6 +796,7 @@ class _MongoSFixture(interface.Fixture, interface._DockerComposeInterface):
 
     def setup(self):
         """Set up the sharded cluster."""
+
         if self.config.ALWAYS_USE_LOG_FILES:
             self.mongos_options["logpath"] = self._dbpath_prefix + "/{name}.log".format(
                 name=self.logger.name
@@ -1034,4 +1050,3 @@ def _add_testing_set_parameters(suite_set_parameters):
     """
     suite_set_parameters.setdefault("testingDiagnosticsEnabled", True)
     suite_set_parameters.setdefault("enableTestCommands", True)
-    suite_set_parameters.setdefault("disableTransitionFromLatestToLastContinuous", False)

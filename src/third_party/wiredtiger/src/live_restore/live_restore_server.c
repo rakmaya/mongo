@@ -149,8 +149,8 @@ __live_restore_free_work_item(WT_SESSION_IMPL *session, WTI_LIVE_RESTORE_WORK_IT
 
     __wt_free(session, (*work_itemp)->uri);
     __wt_free(session, *work_itemp);
-    WT_STAT_CONN_SET(
-      session, live_restore_work_remaining, __wt_atomic_sub64(&server->work_items_remaining, 1));
+    WT_STAT_CONN_SET(session, live_restore_work_remaining,
+      __wt_atomic_sub_uint64(&server->work_items_remaining, 1));
 
     *work_itemp = NULL;
 }
@@ -256,7 +256,7 @@ __live_restore_worker_run(WT_SESSION_IMPL *session, WT_THREAD *ctx)
          * again later.
          */
         __wt_spin_lock(session, &server->queue_lock);
-        remain = server->work_items_remaining;
+        remain = __wt_tsan_suppress_load_uint64(&server->work_items_remaining);
         threads = server->threads_working;
         TAILQ_INSERT_TAIL(&server->work_queue, work_item, q);
         __wt_spin_unlock(session, &server->queue_lock);
@@ -349,8 +349,8 @@ __live_restore_init_work_queue(WT_SESSION_IMPL *session)
         WT_ERR(__insert_queue_item(session, (char *)("file:" WT_METAFILE), &work_count));
 
     WT_STAT_CONN_SET(session, live_restore_work_remaining, work_count);
-    __wt_atomic_store64(&conn->live_restore_server->work_count, work_count);
-    __wt_atomic_store64(&conn->live_restore_server->work_items_remaining, work_count);
+    __wt_atomic_store_uint64_relaxed(&conn->live_restore_server->work_count, work_count);
+    __wt_atomic_store_uint64_relaxed(&conn->live_restore_server->work_items_remaining, work_count);
 
     if (0) {
 err:

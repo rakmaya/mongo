@@ -36,7 +36,6 @@
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/client.h"
-#include "mongo/db/local_catalog/collection_options.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/oplog_applier_impl_test_fixture.h"
@@ -47,6 +46,7 @@
 #include "mongo/db/repl/storage_interface_impl.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/service_context_d_test_fixture.h"
+#include "mongo/db/shard_role/shard_catalog/collection_options.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/stdx/type_traits.h"
 #include "mongo/unittest/barrier.h"
@@ -144,7 +144,7 @@ CollectionAcquisition getCollectionForRead(OperationContext* opCtx, const Namesp
     return acquireCollection(
         opCtx,
         CollectionAcquisitionRequest(nss,
-                                     PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                     PlacementConcern(boost::none, ShardVersion::UNTRACKED()),
                                      repl::ReadConcernArgs::get(opCtx),
                                      mongo::AcquisitionPrerequisites::kRead),
         MODE_IS);
@@ -221,7 +221,8 @@ TEST_F(OplogBufferCollectionTest, addIdToDocumentChangesTimestampToId) {
                                       OplogBufferCollection::addIdToDocument(originalOp));
 }
 
-DEATH_TEST_REGEX_F(OplogBufferCollectionTest,
+using OplogBufferCollectionTestDeathTest = OplogBufferCollectionTest;
+DEATH_TEST_REGEX_F(OplogBufferCollectionTestDeathTest,
                    addIdToDocumentWithMissingTimestampFieldTriggersInvariantFailure,
                    R"#(Invariant failure.*!ts.isNull\(\))#") {
     OplogBufferCollection::addIdToDocument(BSON("x" << 1));
@@ -361,7 +362,7 @@ TEST_F(OplogBufferCollectionTest, StartupWithExistingCollectionFailsWhenEntryHas
                                 "StartupWithExistingCollectionFailsWhenEntryHasNoId, index: _id_");
 }
 
-DEATH_TEST_REGEX_F(OplogBufferCollectionTest,
+DEATH_TEST_REGEX_F(OplogBufferCollectionTestDeathTest,
                    StartupWithExistingCollectionFailsWhenEntryHasNoTimestamp,
                    R"#(Fatal assertion.*40405.*NoSuchKey: Missing expected field \\"ts\\")#") {
     auto nss = makeNamespace();
@@ -841,7 +842,7 @@ TEST_F(OplogBufferCollectionTest, WaitForDataBlocksAndTimesOutWhenItDoesNotFindD
     ASSERT_EQUALS(count, 0UL);
 }
 
-DEATH_TEST_REGEX_F(OplogBufferCollectionTest,
+DEATH_TEST_REGEX_F(OplogBufferCollectionTestDeathTest,
                    PushAllNonBlockingWithOutOfOrderDocumentsTriggersInvariantFailure,
                    R"#(Invariant failure.*ts > previousTimestamp)#") {
     auto nss = makeNamespace();

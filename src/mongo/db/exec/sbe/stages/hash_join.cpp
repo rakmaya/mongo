@@ -153,15 +153,13 @@ void HashJoinStage::open(bool reOpen) {
         size_t idx = 0;
         // Copy keys in order to do the lookup.
         for (auto& p : _inOuterKeyAccessors) {
-            auto [tag, val] = p->getCopyOfValue();
-            key.reset(idx++, true, tag, val);
+            key.reset(idx++, p->getCopyOfValue());
         }
 
         idx = 0;
         // Copy projects.
         for (auto& p : _inOuterProjectAccessors) {
-            auto [tag, val] = p->getCopyOfValue();
-            project.reset(idx++, true, tag, val);
+            project.reset(idx++, p->getCopyOfValue());
         }
 
         _ht->emplace(std::move(key), std::move(project));
@@ -228,9 +226,8 @@ const SpecificStats* HashJoinStage::getSpecificStats() const {
     return nullptr;
 }
 
-std::vector<DebugPrinter::Block> HashJoinStage::debugPrint() const {
-    auto ret = PlanStage::debugPrint();
-
+void HashJoinStage::doDebugPrint(std::vector<DebugPrinter::Block>& ret,
+                                 DebugPrintInfo& debugPrintInfo) const {
     if (_collatorSlot) {
         DebugPrinter::addIdentifier(ret, *_collatorSlot);
     }
@@ -260,7 +257,7 @@ std::vector<DebugPrinter::Block> HashJoinStage::debugPrint() const {
     ret.emplace_back(DebugPrinter::Block("`]"));
 
     ret.emplace_back(DebugPrinter::Block::cmdIncIndent);
-    DebugPrinter::addBlocks(ret, _children[0]->debugPrint());
+    DebugPrinter::addBlocks(ret, _children[0]->debugPrint(debugPrintInfo));
     ret.emplace_back(DebugPrinter::Block::cmdDecIndent);
 
     DebugPrinter::addKeyword(ret, "right");
@@ -285,12 +282,10 @@ std::vector<DebugPrinter::Block> HashJoinStage::debugPrint() const {
     ret.emplace_back(DebugPrinter::Block("`]"));
 
     ret.emplace_back(DebugPrinter::Block::cmdIncIndent);
-    DebugPrinter::addBlocks(ret, _children[1]->debugPrint());
+    DebugPrinter::addBlocks(ret, _children[1]->debugPrint(debugPrintInfo));
     ret.emplace_back(DebugPrinter::Block::cmdDecIndent);
 
     ret.emplace_back(DebugPrinter::Block::cmdDecIndent);
-
-    return ret;
 }
 
 size_t HashJoinStage::estimateCompileTimeSize() const {

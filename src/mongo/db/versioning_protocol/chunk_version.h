@@ -38,6 +38,7 @@
 #include "mongo/bson/timestamp.h"
 #include "mongo/bson/util/builder_fwd.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/time_support.h"
 
 #include <compare>
@@ -51,7 +52,7 @@ namespace mongo {
 /**
  * The most-significant component of the shard versioning protocol (collection epoch/timestamp).
  */
-class CollectionGeneration {
+class MONGO_MOD_NEEDS_REPLACEMENT CollectionGeneration {
 public:
     CollectionGeneration(OID epoch, Timestamp timestamp) : _epoch(epoch), _timestamp(timestamp) {}
 
@@ -84,7 +85,7 @@ protected:
         return gen;
     }
 
-    static CollectionGeneration UNSHARDED() {
+    static CollectionGeneration UNTRACKED() {
         return CollectionGeneration{OID(), Timestamp()};
     }
 
@@ -97,7 +98,7 @@ protected:
  * its own without the Generation component above, that's why most of its methods are protected and
  * are exposed as semantic checks in ChunkVersion below.
  */
-class CollectionPlacement {
+class MONGO_MOD_NEEDS_REPLACEMENT CollectionPlacement {
 public:
     CollectionPlacement(uint32_t major, uint32_t minor)
         : _combined(static_cast<uint64_t>(minor) | (static_cast<uint64_t>(major) << 32)) {}
@@ -135,7 +136,8 @@ protected:
  * 3. (n, 0), n > 0 - invalid configuration.
  * 4. (n, m), n > 0, m > 0 - normal sharded collection placement version.
  */
-class ChunkVersion : public CollectionGeneration, public CollectionPlacement {
+class MONGO_MOD_NEEDS_REPLACEMENT ChunkVersion : public CollectionGeneration,
+                                                 public CollectionPlacement {
 public:
     /**
      * The name for the chunk version information field, which ddl operations use to send only
@@ -149,10 +151,10 @@ public:
     ChunkVersion() : ChunkVersion({OID(), Timestamp()}, {0, 0}) {}
 
     /**
-     * Indicates that the collection is not sharded.
+     * Indicates that the collection is not tracked.
      */
-    static ChunkVersion UNSHARDED() {
-        return ChunkVersion(CollectionGeneration::UNSHARDED(), {0, 0});
+    static ChunkVersion UNTRACKED() {
+        return ChunkVersion(CollectionGeneration::UNTRACKED(), {0, 0});
     }
 
     /**
@@ -209,15 +211,15 @@ public:
      * - partial_ordering::equivalent if versions are equal
      *
      * Non-comparable versions (partial_ordering::unordered) include:
-     * - UNSHARDED versions
+     * - UNTRACKED versions
      * - IGNORED versions
      * - Versions from the same collection generation where at least one has unset placement version
      * ({0,0})
      * Note: Versions with unset placement from different collection generations can be compared. *
      */
     std::partial_ordering operator<=>(const ChunkVersion& otherVersion) const {
-        // Check for non-comparable versions (UNSHARDED, IGNORED)
-        if (*this == UNSHARDED() || otherVersion == UNSHARDED() || *this == IGNORED() ||
+        // Check for non-comparable versions (UNTRACKED, IGNORED)
+        if (*this == UNTRACKED() || otherVersion == UNTRACKED() || *this == IGNORED() ||
             otherVersion == IGNORED()) {
             return std::partial_ordering::unordered;
         }

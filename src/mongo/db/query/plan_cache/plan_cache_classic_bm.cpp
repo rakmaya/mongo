@@ -30,9 +30,6 @@
 #include "mongo/bson/json.h"
 #include "mongo/db/exec/classic/working_set.h"
 #include "mongo/db/exec/runtime_planners/classic_runtime_planner/planner_interface.h"
-#include "mongo/db/local_catalog/collection_mock.h"
-#include "mongo/db/local_catalog/index_catalog_mock.h"
-#include "mongo/db/local_catalog/shard_role_api/shard_role_mock.h"
 #include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/query/compiler/metadata/index_entry.h"
 #include "mongo/db/query/multiple_collection_accessor.h"
@@ -43,6 +40,9 @@
 #include "mongo/db/query/query_planner_params.h"
 #include "mongo/db/query/query_planner_test_fixture.h"
 #include "mongo/db/query/query_test_service_context.h"
+#include "mongo/db/shard_role/shard_catalog/collection_mock.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog_mock.h"
+#include "mongo/db/shard_role/shard_role_mock.h"
 #include "mongo/idl/server_parameter_test_util.h"
 #include "mongo/unittest/unittest.h"
 
@@ -269,9 +269,7 @@ IndexEntry createIndexEntry(BSONObj keyPattern, const std::string& indexName) {
                       false,
                       false,
                       IndexEntry::Identifier{indexName},
-                      nullptr,
                       BSONObj(),
-                      nullptr,
                       nullptr);
 }
 
@@ -367,8 +365,6 @@ void BM_PlanCacheClassic(benchmark::State& state) {
 
     auto collection =
         std::make_shared<CollectionMock>(UUID::gen(), kNss, std::make_unique<IndexCatalogMock>());
-    auto catalog = CollectionCatalog::get(opCtx.get());
-    catalog->onCreateCollection(opCtx.get(), collection);
     // The initialization of the CollectionPtr is SAFE. The lifetime of the Mocked Collection
     // instance is managed by the test and guaranteed to be valid for the entire duration of the
     // test.

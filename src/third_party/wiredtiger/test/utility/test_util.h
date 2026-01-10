@@ -76,14 +76,18 @@ extern "C" {
 #define DIR_STORE "dir_store"
 #define S3_STORE "s3_store"
 
-#define TESTUTIL_ENV_CONFIG_DISAGG         \
-    ",disaggregated=(role=%s,page_log=%s)" \
-    ",precise_checkpoint=true"             \
+/* FIXME-WT-16269: Make drain_threads configurable in test format. */
+#define TESTUTIL_ENV_CONFIG_DISAGG                         \
+    ",disaggregated=(role=%s,page_log=%s,drain_threads=4)" \
+    ",precise_checkpoint=true"                             \
     ",page_delta=(internal_page_delta=%s,leaf_page_delta=%s)"
 #define TESTUTIL_ENV_CONFIG_DISAGG_EXT                                                   \
     "\"%s/ext/page_log/%s/libwiredtiger_%s.so\"=("                                       \
     "config=(home=\"%s\",delay_ms=%" PRIu64 ",error_ms=%" PRIu64 ",force_delay=%" PRIu64 \
     ",force_error=%" PRIu64 ",cache_size_mb=%" PRIu64 ",verbose=%" PRIu32 "))"
+#define TESTUTIL_ENV_CONFIG_KEY_PROVIDER_EXT                        \
+    ",\"%s/ext/test/key_provider/libwiredtiger_key_provider.so\"=(" \
+    "early_load=true,config=(key_expires=60,verbose=-1))"
 #define TESTUTIL_ENV_CONFIG_TIERED               \
     ",tiered_storage=(bucket=%s"                 \
     ",bucket_prefix=%s,local_retention=%" PRIu32 \
@@ -114,9 +118,8 @@ typedef struct {
 
     enum {
         TABLE_NOT_SET = 0, /* Not explicitly set */
-        TABLE_COL = 1,     /* Fixed-length column store */
-        TABLE_FIX = 2,     /* Variable-length column store */
-        TABLE_ROW = 3      /* Row-store */
+        TABLE_COL = 1,     /* Variable-length column store */
+        TABLE_ROW = 2      /* Row-store */
     } table_type;
 
     FILE *progress_fp; /* Progress tracking file */
@@ -141,6 +144,7 @@ typedef struct {
     bool absolute_bucket_dir;  /* Use an absolute bucket path when it is a directory */
     bool compat;               /* Compatibility */
     bool disagg_storage;       /* Uses disaggregated storage */
+    bool disagg_key_provider;  /* Uses key provider testing module for disaggregated storage */
     bool disagg_switch_mode;   /* Switching disaggregated storage mode during the test */
     bool do_data_ops;          /* Have schema ops use data */
     bool inmem;                /* In-memory */
@@ -564,6 +568,7 @@ void testutil_copy(const char *, const char *);
 void testutil_copy_data(void);
 void testutil_copy_data_opt(const char *);
 void testutil_copy_ext(const char *, const char *, const WT_FILE_COPY_OPTS *opts);
+void testutil_copy_fast(const char *, const char *);
 void testutil_copy_file(WT_SESSION *, const char *);
 void testutil_copy_if_exists(WT_SESSION *, const char *);
 void testutil_create_backup_directory(const char *, uint64_t, bool);

@@ -40,16 +40,20 @@
 
 namespace mongo::extension {
 
+class AggStageDescriptorAPI;
+
+template <>
+struct c_api_to_cpp_api<::MongoExtensionAggStageDescriptor> {
+    using CppApi_t = AggStageDescriptorAPI;
+};
+
 /**
- * AggStageDescriptorHandle is a wrapper around a
- * MongoExtensionAggStageDescriptor.
+ * AggStageDescriptorHandle is a wrapper around a MongoExtensionAggStageDescriptor vtable API.
  */
-class AggStageDescriptorHandle : public UnownedHandle<const ::MongoExtensionAggStageDescriptor> {
+class AggStageDescriptorAPI : public VTableAPI<::MongoExtensionAggStageDescriptor> {
 public:
-    AggStageDescriptorHandle(absl::Nonnull<const ::MongoExtensionAggStageDescriptor*> descriptor)
-        : UnownedHandle<const ::MongoExtensionAggStageDescriptor>(descriptor) {
-        _assertValidVTable();
-    }
+    AggStageDescriptorAPI(::MongoExtensionAggStageDescriptor* descriptor)
+        : VTableAPI<::MongoExtensionAggStageDescriptor>(descriptor) {}
 
     /**
      * Returns a StringData containing the name of this aggregation stage.
@@ -57,13 +61,6 @@ public:
     StringData getName() const {
         auto stringView = byteViewAsStringView(vtable().get_name(get()));
         return StringData{stringView.data(), stringView.size()};
-    }
-
-    /**
-     * Return the type for this stage.
-     */
-    MongoExtensionAggStageType getType() const {
-        return vtable().get_type(get());
     }
 
     /**
@@ -78,14 +75,13 @@ public:
      */
     AggStageParseNodeHandle parse(BSONObj stageBson) const;
 
-protected:
-    void _assertVTableConstraints(const VTable_t& vtable) const override {
+    static void assertVTableConstraints(const VTable_t& vtable) {
         tassert(
             10930102, "ExtensionAggStageDescriptor 'get_name' is null", vtable.get_name != nullptr);
-        tassert(
-            10930103, "ExtensionAggStageDescriptor 'get_type' is null", vtable.get_type != nullptr);
         tassert(10930104, "ExtensionAggStageDescriptor 'parse' is null", vtable.parse != nullptr);
     }
 };
+
+using AggStageDescriptorHandle = UnownedHandle<const ::MongoExtensionAggStageDescriptor>;
 
 }  // namespace mongo::extension

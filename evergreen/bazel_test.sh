@@ -41,15 +41,16 @@ echo "${ALL_FLAGS}" >.bazel_build_flags
 # to capture exit codes
 set +o errexit
 
-# Build then test with retries.
+# Fetch then test with retries.
+export RETRY_ON_FAIL=1
 bazel_evergreen_shutils::retry_bazel_cmd 3 "$BAZEL_BINARY" \
-    build ${ALL_FLAGS} ${targets}
+    fetch ${ALL_FLAGS} ${targets}
 RET=$?
 
 if [[ "$RET" == "0" ]]; then
-
+    export RETRY_ON_FAIL=0
     bazel_evergreen_shutils::retry_bazel_cmd 3 "$BAZEL_BINARY" \
-        test ${ALL_FLAGS} ${targets}
+        test ${ALL_FLAGS} --build_event_json_file=build_events.json ${targets}
     RET=$?
 
     if [[ "$RET" -eq 124 ]]; then
@@ -59,13 +60,15 @@ if [[ "$RET" == "0" ]]; then
     fi
 fi
 
+bazel_evergreen_shutils::write_last_engflow_link
+
 set -o errexit
 
 # The --config flag needs to stay consistent between invocations to avoid evicting the previous results.
 # Strip out anything that isn't a --config flag that could interfere with the run command.
 if [[ "$RET" != "0" ]]; then
     CONFIG_FLAGS="$(bazel_evergreen_shutils::extract_config_flags "${ALL_FLAGS}")"
-    eval ${BAZEL_BINARY} run ${CONFIG_FLAGS} //buildscripts:gather_failed_unittests || true
+    eval ${BAZEL_BINARY} run ${CONFIG_FLAGS} //buildscripts:gather_failed_tests || true
 fi
 
 : "${RET:=1}"

@@ -51,8 +51,6 @@
 #include "mongo/db/global_catalog/type_database_gen.h"
 #include "mongo/db/global_catalog/type_namespace_placement_gen.h"
 #include "mongo/db/global_catalog/type_shard.h"
-#include "mongo/db/local_catalog/ddl/coll_mod_gen.h"
-#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/optime_with.h"
@@ -61,6 +59,8 @@
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/logical_session_cache.h"
 #include "mongo/db/session/logical_session_id.h"
+#include "mongo/db/shard_role/ddl/coll_mod_gen.h"
+#include "mongo/db/shard_role/lock_manager/d_concurrency.h"
 #include "mongo/db/sharding_environment/client/shard.h"
 #include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/db/tenant_id.h"
@@ -75,6 +75,7 @@
 #include "mongo/s/write_ops/batched_command_request.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/util/functional.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/uuid.h"
 
 #include <climits>
@@ -96,7 +97,9 @@ namespace mongo {
  * this class and ShardingCatalogClient. Eventually all methods that write catalog data should be
  * moved out of ShardingCatalogClient and into this class.
  */
-class ShardingCatalogManager {
+// TODO (SERVER-105531): Untag inner symbol declarations exceptionally tagged as
+// MONGO_MOD_UNFORTUNATELY_OPEN.
+class MONGO_MOD_NEEDS_REPLACEMENT ShardingCatalogManager {
     ShardingCatalogManager(const ShardingCatalogManager&) = delete;
     ShardingCatalogManager& operator=(const ShardingCatalogManager&) = delete;
 
@@ -178,9 +181,14 @@ public:
                                const std::string& zoneName);
 
     /**
-     * Assigns a range of a sharded collection to a particular shard zone. If range is a prefix of
-     * the shard key, the range will be converted into a new range with full shard key filled with
-     * MinKey values.
+     * Checks that the given zone exists.
+     */
+    void checkZoneExists(OperationContext* opCtx, std::string zoneName);
+
+    /**
+     * Assigns a range of a sharded collection to a particular shard zone. If range is a prefix
+     * of the shard key, the range will be converted into a new range with full shard key filled
+     * with MinKey values.
      */
     void assignKeyRangeToZone(OperationContext* opCtx,
                               const NamespaceString& nss,
@@ -623,11 +631,6 @@ public:
      */
     Status setFeatureCompatibilityVersionOnShards(OperationContext* opCtx, const BSONObj& cmdObj);
 
-    /**
-     * Runs _shardsvrCloneAuthoritativeMetadata on all shards.
-     */
-    Status runCloneAuthoritativeMetadataOnShards(OperationContext* opCtx);
-
     //
     // For Diagnostics
     //
@@ -722,7 +725,8 @@ public:
     HistoricalPlacement getHistoricalPlacement(OperationContext* opCtx,
                                                const boost::optional<NamespaceString>& nss,
                                                const Timestamp& atClusterTime,
-                                               bool checkIfPointInTimeIsInFuture = true);
+                                               bool checkIfPointInTimeIsInFuture,
+                                               bool ignoreRemovedShards);
 
     /**
      * Helper function to compose a command request to insert new initialization metadata documents
@@ -762,15 +766,15 @@ private:
     /**
      * Drops the sessions collection on the specified host.
      */
-    Status _dropSessionsCollection(OperationContext* opCtx,
-                                   std::shared_ptr<RemoteCommandTargeter> targeter);
+    MONGO_MOD_UNFORTUNATELY_OPEN Status _dropSessionsCollection(
+        OperationContext* opCtx, std::shared_ptr<RemoteCommandTargeter> targeter);
 
     /**
      * Runs the listDatabases command on the specified host and returns the names of all databases
      * it returns excluding those named local, config and admin, since they serve administrative
      * purposes.
      */
-    StatusWith<std::vector<DatabaseName>> _getDBNamesListFromShard(
+    MONGO_MOD_UNFORTUNATELY_OPEN StatusWith<std::vector<DatabaseName>> _getDBNamesListFromShard(
         OperationContext* opCtx, std::shared_ptr<RemoteCommandTargeter> targeter);
 
 
@@ -778,10 +782,11 @@ private:
      * Runs a command against a "shard" that is not yet in the cluster and thus not present in the
      * ShardRegistry.
      */
-    StatusWith<Shard::CommandResponse> _runCommandForAddShard(OperationContext* opCtx,
-                                                              RemoteCommandTargeter* targeter,
-                                                              const DatabaseName& dbName,
-                                                              const BSONObj& cmdObj);
+    MONGO_MOD_UNFORTUNATELY_OPEN StatusWith<Shard::CommandResponse> _runCommandForAddShard(
+        OperationContext* opCtx,
+        RemoteCommandTargeter* targeter,
+        const DatabaseName& dbName,
+        const BSONObj& cmdObj);
 
     /**
      * Appends a read committed read concern to the request object.
@@ -801,17 +806,19 @@ private:
      * Returns true if the zone with the given name has chunk ranges associated with it and the
      * shard with the given name is the only shard that it belongs to.
      */
-    StatusWith<bool> _isShardRequiredByZoneStillInUse(OperationContext* opCtx,
-                                                      const ReadPreferenceSetting& readPref,
-                                                      const std::string& shardName,
-                                                      const std::string& zoneName);
+    MONGO_MOD_UNFORTUNATELY_OPEN StatusWith<bool> _isShardRequiredByZoneStillInUse(
+        OperationContext* opCtx,
+        const ReadPreferenceSetting& readPref,
+        const std::string& shardName,
+        const std::string& zoneName);
 
     /**
      * Determines whether to absorb the cluster parameters on the newly added shard (if we're
      * converting from a replica set to a sharded cluster) or set the cluster parameters stored on
      * the config server in the newly added shard.
      */
-    void _standardizeClusterParameters(OperationContext* opCtx, RemoteCommandTargeter& targeter);
+    MONGO_MOD_UNFORTUNATELY_OPEN void _standardizeClusterParameters(
+        OperationContext* opCtx, RemoteCommandTargeter& targeter);
 
     /**
      * Execute the migration chunk updates using the internal transaction API.
@@ -857,10 +864,8 @@ private:
      * _kClusterCardinalityParameterLock lock in exclusive mode to avoid interleaving with other
      * add/remove shard operation and its set cluster cardinality parameter operation.
      */
-    Status _updateClusterCardinalityParameterAfterAddShardIfNeeded(const Lock::ExclusiveLock&,
-                                                                   OperationContext* opCtx);
-    Status _updateClusterCardinalityParameterAfterRemoveShardIfNeeded(const Lock::ExclusiveLock&,
-                                                                      OperationContext* opCtx);
+    MONGO_MOD_UNFORTUNATELY_OPEN Status _updateClusterCardinalityParameterAfterAddShardIfNeeded(
+        const Lock::ExclusiveLock&, OperationContext* opCtx);
 
     // The owning service context
     ServiceContext* const _serviceContext;
@@ -868,11 +873,11 @@ private:
     // Executor specifically used for sending commands to servers that are in the process of being
     // added as shards. Does not have any connection hook set on it, thus it can be used to talk to
     // servers that are not yet in the ShardRegistry.
-    const std::shared_ptr<executor::TaskExecutor> _executorForAddShard;
+    MONGO_MOD_UNFORTUNATELY_OPEN const std::shared_ptr<executor::TaskExecutor> _executorForAddShard;
 
     // A ShardLocal and ShardingCatalogClient with a ShardLocal used for local connections.
-    const std::shared_ptr<Shard> _localConfigShard;
-    const std::unique_ptr<ShardingCatalogClient> _localCatalogClient;
+    MONGO_MOD_UNFORTUNATELY_OPEN const std::shared_ptr<Shard> _localConfigShard;
+    MONGO_MOD_UNFORTUNATELY_OPEN const std::unique_ptr<ShardingCatalogClient> _localCatalogClient;
 
     //
     // All member variables are labeled with one of the following codes indicating the
@@ -898,12 +903,12 @@ private:
     /**
      * Lock that is held in exclusive mode during the commit phase of an add/remove shard operation.
      */
-    Lock::ResourceMutex _kShardMembershipLock;
+    MONGO_MOD_UNFORTUNATELY_OPEN ResourceMutex _kShardMembershipLock;
 
     /**
      * Lock that guards changes to the cluster cardinality parameter.
      */
-    Lock::ResourceMutex _kClusterCardinalityParameterLock;
+    MONGO_MOD_UNFORTUNATELY_OPEN ResourceMutex _kClusterCardinalityParameterLock;
 
     /**
      * Lock for chunk split/merge/move operations. This should be acquired when doing split/merge/
@@ -912,7 +917,7 @@ private:
      * locks (for example to write to a local collection) those locks should be taken after
      * taking this.
      */
-    Lock::ResourceMutex _kChunkOpLock;
+    ResourceMutex _kChunkOpLock;
 
     /**
      * Lock for shard zoning operations. This should be acquired when doing any operations that
@@ -921,7 +926,7 @@ private:
      * locks (for example to write to a local collection) those locks should be taken after
      * taking this.
      */
-    Lock::ResourceMutex _kZoneOpLock;
+    ResourceMutex _kZoneOpLock;
 };
 
 }  // namespace mongo

@@ -33,9 +33,10 @@
 
 #include "mongo/db/exec/classic/filter.h"
 #include "mongo/db/index/index_access_method.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/query/compiler/optimizer/index_bounds_builder/index_bounds_builder.h"
 #include "mongo/db/query/plan_executor_impl.h"
+#include "mongo/db/query/stage_memory_limit_knobs/knobs.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/exceptions.h"
 #include "mongo/db/storage/key_string/key_string.h"
 #include "mongo/util/assert_util.h"
@@ -67,7 +68,7 @@ IndexScan::IndexScan(ExpressionContext* expCtx,
                      IndexScanParams params,
                      WorkingSet* workingSet,
                      const MatchExpression* filter)
-    : RequiresIndexStage(kStageType, expCtx, collection, params.indexDescriptor, workingSet),
+    : RequiresIndexStage(kStageType, expCtx, collection, params.indexEntry, workingSet),
       _workingSet(workingSet),
       _keyPattern(params.keyPattern.getOwned()),
       _bounds(std::move(params.bounds)),
@@ -79,17 +80,18 @@ IndexScan::IndexScan(ExpressionContext* expCtx,
       _recordIdDeduplicator(expCtx),
       _startKeyInclusive(IndexBounds::isStartIncludedInBound(_bounds.boundInclusion)),
       _endKeyInclusive(IndexBounds::isEndIncludedInBound(_bounds.boundInclusion)),
-      // TODO SERVER-97747 Add internalIndexScanMaxMemoryBytes when it exists.
-      _memoryTracker(OperationMemoryUsageTracker::createSimpleMemoryUsageTrackerForStage(*expCtx)) {
+      _memoryTracker(OperationMemoryUsageTracker::createSimpleMemoryUsageTrackerForStage(
+          *expCtx, loadMemoryLimit(StageMemoryLimit::IndexScanStageMaxMemoryBytes))) {
     _specificStats.indexName = params.name;
     _specificStats.keyPattern = _keyPattern;
     _specificStats.isMultiKey = params.isMultiKey;
     _specificStats.multiKeyPaths = params.multikeyPaths;
-    _specificStats.isUnique = params.indexDescriptor->unique();
-    _specificStats.isSparse = params.indexDescriptor->isSparse();
-    _specificStats.isPartial = params.indexDescriptor->isPartial();
-    _specificStats.indexVersion = static_cast<int>(params.indexDescriptor->version());
-    _specificStats.collation = params.indexDescriptor->infoObj()
+    _specificStats.isUnique = indexDescriptor()->unique();
+    _specificStats.isSetSparseByUser = indexDescriptor()->isSetSparseByUser();
+    _specificStats.isPartial = indexDescriptor()->isPartial();
+    _specificStats.indexVersion = static_cast<int>(indexDescriptor()->version());
+    _specificStats.collation = indexDescriptor()
+                                   ->infoObj()
                                    .getObjectField(IndexDescriptor::kCollationFieldName)
                                    .getOwned();
 }
@@ -250,6 +252,9 @@ PlanStage::StageState IndexScan::doWork(WorkingSetID* out) {
         uint64_t dedupBytes = _recordIdDeduplicator.getApproximateSize();
         _memoryTracker.add(dedupBytes - dedupBytesPrev);
         _specificStats.peakTrackedMemBytes = _memoryTracker.peakTrackedMemoryBytes();
+        uassert(11130305,
+                "Exceeded memory limit in record id deduplicator for IXSCAN stage",
+                _memoryTracker.withinMemoryLimit());
 
         // If we've seen the RecordId before
         if (duplicate) {
@@ -271,6 +276,9 @@ PlanStage::StageState IndexScan::doWork(WorkingSetID* out) {
         uint64_t dedupBytes = _recordIdDeduplicator.getApproximateSize();
         _memoryTracker.add(dedupBytes - dedupBytesPrev);
         _specificStats.peakTrackedMemBytes = _memoryTracker.peakTrackedMemoryBytes();
+        uassert(11130304,
+                "Exceeded memory limit in record id deduplicator for IXSCAN stage",
+                _memoryTracker.withinMemoryLimit());
     }
 
     if (!kv->key.isOwned())

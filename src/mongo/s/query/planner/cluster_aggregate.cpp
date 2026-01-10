@@ -43,16 +43,14 @@
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/feature_flag.h"
 #include "mongo/db/fle_crud.h"
-#include "mongo/db/global_catalog/catalog_cache/catalog_cache.h"
 #include "mongo/db/global_catalog/chunk_manager.h"
 #include "mongo/db/global_catalog/ddl/cluster_ddl.h"
-#include "mongo/db/global_catalog/router_role_api/cluster_commands_helpers.h"
 #include "mongo/db/global_catalog/type_collection_common_types_gen.h"
-#include "mongo/db/local_catalog/collection_uuid_mismatch_info.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/pipeline/aggregation_hint_translation.h"
 #include "mongo/db/pipeline/aggregation_request_helper.h"
+#include "mongo/db/pipeline/desugarer.h"
 #include "mongo/db/pipeline/document_source_geo_near.h"
 #include "mongo/db/pipeline/document_source_internal_unpack_bucket.h"
 #include "mongo/db/pipeline/expression_context.h"
@@ -71,6 +69,7 @@
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/explain_common.h"
 #include "mongo/db/query/explain_options.h"
+#include "mongo/db/query/query_feature_flags_gen.h"
 #include "mongo/db/query/query_settings/query_settings_service.h"
 #include "mongo/db/query/query_shape/agg_cmd_shape.h"
 #include "mongo/db/query/query_stats/agg_key.h"
@@ -78,9 +77,13 @@
 #include "mongo/db/query/query_stats/query_stats.h"
 #include "mongo/db/query/shard_key_diagnostic_printer.h"
 #include "mongo/db/query/tailable_mode_gen.h"
-#include "mongo/db/raw_data_operation.h"
+#include "mongo/db/query/util/retry.h"
+#include "mongo/db/router_role/cluster_commands_helpers.h"
+#include "mongo/db/router_role/routing_cache/catalog_cache.h"
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
+#include "mongo/db/shard_role/shard_catalog/collection_uuid_mismatch_info.h"
+#include "mongo/db/shard_role/shard_catalog/raw_data_operation.h"
 #include "mongo/db/sharding_environment/client/num_hosts_targeted_metrics.h"
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/sharding_environment/shard_id.h"
@@ -163,6 +166,36 @@ Document serializeForPassthrough(const boost::intrusive_ptr<ExpressionContext>& 
     req.setRawData(rawData);
     aggregation_request_helper::addQuerySettingsToRequest(req, expCtx);
 
+    // Pass the queryShapeHash to the shards. We must validate that all participating shards can
+    // understand 'originalQueryShapeHash' and therefore check the feature flag. We use the last
+    // LTS when the FCV is uninitialized, even though aggregates cannot execute during initial sync.
+    // This is because the feature is exclusively for observability enhancements and should only be
+    // applied when we are confident that the shard can correctly read this field, ensuring the
+    // query will not error.
+    if (!req.getExplain().has_value() &&
+        feature_flags::gFeatureFlagOriginalQueryShapeHash.isEnabledUseLastLTSFCVWhenUninitialized(
+            VersionContext::getDecoration(expCtx->getOperationContext()),
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+        if (auto&& queryShapeHash =
+                CurOp::get(expCtx->getOperationContext())->debug().getQueryShapeHash()) {
+            req.setOriginalQueryShapeHash(queryShapeHash);
+        }
+    }
+
+    // If the featureFlagVectorSearchExtension IFR flag is enabled, all nodes are upgraded and can
+    // parse IFR flags.
+    // TODO SERVER-116118: Remove FCV gate once multiversion testing can handle IFR flags.
+    if (serverGlobalParams.featureCompatibility.acquireFCVSnapshot().isGreaterThanOrEqualTo(
+            multiversion::FeatureCompatibilityVersion::kVersion_8_3)) {  // NOLINT
+        // TODO SERVER-116219: Expand IFR flag serialization beyond $vectorSearch.
+        auto ifrCtx = expCtx->getIfrContext();
+        tassert(11565104, "IFRContext cannot be null", ifrCtx);
+        if (ifrCtx->getSavedFlagValue(feature_flags::gFeatureFlagVectorSearchExtension)) {
+            req.setIfrFlags(
+                ifrCtx->serializeFlagValues({&feature_flags::gFeatureFlagVectorSearchExtension}));
+        }
+    }
+
     auto cmdObj =
         isRawDataOperation(expCtx->getOperationContext()) && req.getNamespace() != executionNs
         ? rewriteCommandForRawDataOperation<AggregateCommandRequest>(req.toBSON(),
@@ -186,7 +219,8 @@ boost::intrusive_ptr<ExpressionContext> makeExpressionContext(
     ResolvedNamespaceMap resolvedNamespaces,
     bool hasChangeStream,
     boost::optional<ExplainOptions::Verbosity> verbosity,
-    ExpressionContextCollationMatchesDefault collationMatchesDefault) {
+    ExpressionContextCollationMatchesDefault collationMatchesDefault,
+    std::shared_ptr<IncrementalFeatureRolloutContext> ifrContext = nullptr) {
 
     std::unique_ptr<CollatorInterface> collation;
     if (!collationObj.isEmpty()) {
@@ -201,6 +235,7 @@ boost::intrusive_ptr<ExpressionContext> makeExpressionContext(
     auto mergeCtx = ExpressionContextBuilder{}
                         .fromRequest(opCtx, request)
                         .explain(verbosity)
+                        .ifrContext(std::move(ifrContext))
                         .collator(std::move(collation))
                         .mongoProcessInterface(std::make_shared<MongosProcessInterface>(
                             Grid::get(opCtx)->getExecutorPool()->getArbitraryExecutor()))
@@ -236,7 +271,7 @@ void appendEmptyResultSetWithStatus(OperationContext* opCtx,
     if (status == ErrorCodes::ShardNotFound) {
         status = {ErrorCodes::NamespaceNotFound, status.reason()};
     }
-    collectQueryStatsMongos(opCtx, std::move(CurOp::get(opCtx)->debug().queryStatsInfo.key));
+    collectQueryStatsMongos(opCtx, std::move(CurOp::get(opCtx)->debug().getQueryStatsInfo().key));
     appendEmptyResultSet(opCtx, *result, status, nss);
 }
 
@@ -319,7 +354,7 @@ void performValidationChecks(const OperationContext* opCtx,
                              const AggregateCommandRequest& request,
                              const LiteParsedPipeline& liteParsedPipeline) {
     liteParsedPipeline.validate(opCtx);
-    aggregation_request_helper::validateRequestForAPIVersion(opCtx, request);
+    aggregation_request_helper::validateRequestWithClient(opCtx, request);
     aggregation_request_helper::validateRequestFromClusterQueryWithoutShardKey(request);
 
     uassert(51028, "Cannot specify exchange option to a router", !request.getExchange());
@@ -404,16 +439,17 @@ std::vector<BSONObj> patchPipelineForTimeSeriesQuery(
  */
 std::unique_ptr<Pipeline> parsePipelineAndRegisterQueryStats(
     OperationContext* opCtx,
-    const stdx::unordered_set<NamespaceString>& involvedNamespaces,
     const ClusterAggregate::Namespaces& nsStruct,
     AggregateCommandRequest& request,
+    const LiteParsedPipeline& liteParsedPipeline,
     boost::optional<CollectionRoutingInfo> cri,
     bool hasChangeStream,
     bool shouldDoFLERewrite,
     bool requiresCollationForParsingUnshardedAggregate,
     boost::optional<ResolvedView> resolvedView,
     boost::optional<AggregateCommandRequest> originalRequest,
-    boost::optional<ExplainOptions::Verbosity> verbosity) {
+    boost::optional<ExplainOptions::Verbosity> verbosity,
+    std::shared_ptr<IncrementalFeatureRolloutContext> ifrContext = nullptr) {
     // Populate the collation. If this is a change stream, take the user-defined collation if one
     // exists, or an empty BSONObj otherwise. Change streams never inherit the collection's default
     // collation, and since collectionless aggregations generally run on the 'admin'
@@ -439,10 +475,11 @@ std::unique_ptr<Pipeline> parsePipelineAndRegisterQueryStats(
                               nsStruct.requestedNss,
                               collationObj,
                               boost::none /* uuid */,
-                              resolveInvolvedNamespaces(involvedNamespaces),
+                              resolveInvolvedNamespaces(liteParsedPipeline.getInvolvedNamespaces()),
                               hasChangeStream,
                               verbosity,
-                              collationMatchesDefault);
+                              collationMatchesDefault,
+                              std::move(ifrContext));
 
     // If the routing table exists, then the collection is tracked in the router role and we can
     // validate if it is timeseries. If the collection is untracked, this validation will happen in
@@ -456,11 +493,11 @@ std::unique_ptr<Pipeline> parsePipelineAndRegisterQueryStats(
     if (resolvedView && originalRequest) {
         const auto& viewName = nsStruct.requestedNss;
         // If applicable, ensure that the resolved namespace is added to the resolvedNamespaces map
-        // on the expCtx before calling Pipeline::parse(). This is necessary for search on views as
-        // Pipeline::parse() will first check if a view exists directly on the stage specification
-        // and if none is found, will then check for the view using the expCtx. As such, it's
-        // necessary to add the resolved namespace to the expCtx prior to any call to
-        // Pipeline::parse().
+        // on the expCtx before calling parseFromLiteParsed(). This is necessary for search on views
+        // as parseFromLiteParsed() will first check if a view exists directly on the stage
+        // specification and if none is found, will then check for the view using the expCtx. As
+        // such, it's necessary to add the resolved namespace to the expCtx prior to any call to
+        // parseFromLiteParsed().
         search_helpers::checkAndSetViewOnExpCtx(
             expCtx, originalRequest->getPipeline(), *resolvedView, viewName);
 
@@ -519,7 +556,7 @@ std::unique_ptr<Pipeline> parsePipelineAndRegisterQueryStats(
         }
     }
 
-    auto pipeline = Pipeline::parse(request.getPipeline(), expCtx);
+    auto pipeline = Pipeline::parseFromLiteParsed(liteParsedPipeline, expCtx);
     if (cri && cri->hasRoutingTable()) {
         pipeline->validateWithCollectionMetadata(cri.get());
     }
@@ -531,7 +568,11 @@ std::unique_ptr<Pipeline> parsePipelineAndRegisterQueryStats(
     // Compute QueryShapeHash and record it in CurOp.
     query_shape::DeferredQueryShape deferredShape{[&]() {
         return shape_helpers::tryMakeShape<query_shape::AggCmdShape>(
-            request, nsStruct.executionNss, involvedNamespaces, *pipeline, expCtx);
+            request,
+            nsStruct.executionNss,
+            liteParsedPipeline.getInvolvedNamespaces(),
+            *pipeline,
+            expCtx);
     }};
     auto queryShapeHash = CurOp::get(opCtx)->debug().ensureQueryShapeHash(opCtx, [&]() {
         return shape_helpers::computeQueryShapeHash(expCtx, deferredShape, nsStruct.executionNss);
@@ -554,13 +595,19 @@ std::unique_ptr<Pipeline> parsePipelineAndRegisterQueryStats(
             [&]() {
                 uassertStatusOKWithContext(deferredShape->getStatus(),
                                            "Failed to compute query shape");
-                return std::make_unique<query_stats::AggKey>(expCtx,
-                                                             request,
-                                                             std::move(deferredShape->getValue()),
-                                                             std::move(involvedNamespaces));
+                return std::make_unique<query_stats::AggKey>(
+                    expCtx,
+                    request,
+                    std::move(deferredShape->getValue()),
+                    std::move(liteParsedPipeline.getInvolvedNamespaces()));
             },
             hasChangeStream);
     }
+
+    // Find stages with stage expanders and desugar. We desugar after registering query stats to
+    // ensure that the query shape is representative of the user's original query.
+    Desugarer(pipeline.get())();
+
     return pipeline;
 }
 
@@ -601,9 +648,9 @@ Status _parseQueryStatsAndReturnEmptyResult(
     try {
         auto pipeline =
             parsePipelineAndRegisterQueryStats(opCtx,
-                                               liteParsedPipeline.getInvolvedNamespaces(),
                                                namespaces,
                                                request,
+                                               liteParsedPipeline,
                                                boost::none /* CollectionRoutingInfo */,
                                                hasChangeStream,
                                                shouldDoFLERewrite,
@@ -635,7 +682,8 @@ Status runAggregateImpl(OperationContext* opCtx,
                         boost::optional<ResolvedView> resolvedView,
                         boost::optional<AggregateCommandRequest> originalRequest,
                         boost::optional<ExplainOptions::Verbosity> verbosity,
-                        BSONObjBuilder* res) {
+                        BSONObjBuilder* res,
+                        std::shared_ptr<IncrementalFeatureRolloutContext> ifrContext = nullptr) {
     const auto pipelineDataSource = sharded_agg_helpers::getPipelineDataSource(liteParsedPipeline);
     if (!originalRoutingCtx.hasNss(namespaces.executionNss) &&
         sharded_agg_helpers::checkIfMustRunOnAllShards(namespaces.executionNss,
@@ -664,7 +712,7 @@ Status runAggregateImpl(OperationContext* opCtx,
     auto& routingCtx = std::invoke([&]() -> RoutingContext& {
         if (originalRoutingCtx.hasNss(namespaces.executionNss)) {
             collectionTargeter = CollectionRoutingInfoTargeter(opCtx, namespaces.executionNss);
-            return translateNssForRawDataAccordingToRoutingInfo(
+            return performTimeseriesTranslationAccordingToRoutingInfo(
                 opCtx,
                 namespaces.executionNss,
                 *collectionTargeter,
@@ -740,16 +788,17 @@ Status runAggregateImpl(OperationContext* opCtx,
         [&]() -> std::tuple<std::unique_ptr<Pipeline>, boost::intrusive_ptr<ExpressionContext>> {
         auto pipeline =
             parsePipelineAndRegisterQueryStats(opCtx,
-                                               involvedNamespaces,
                                                namespaces,
                                                request,
+                                               liteParsedPipeline,
                                                cri,
                                                hasChangeStream,
                                                shouldDoFLERewrite,
                                                requiresCollationForParsingUnshardedAggregate,
                                                resolvedView,
                                                originalRequest,
-                                               verbosity);
+                                               verbosity,
+                                               std::move(ifrContext));
         const boost::intrusive_ptr<ExpressionContext>& pipelineCtx = pipeline->getContext();
 
         // If cri is valueful, then the database definitely exists and the cluster has shards. If
@@ -859,6 +908,8 @@ Status runAggregateImpl(OperationContext* opCtx,
     auto status = [&](auto& expCtx) {
         bool requestQueryStatsFromRemotes = query_stats::shouldRequestRemoteMetrics(
             CurOp::get(expCtx->getOperationContext())->debug());
+        boost::optional<query_shape::QueryShapeHash> queryShapeHash =
+            CurOp::get(opCtx)->debug().getQueryShapeHash();
         try {
             switch (targeter.policy) {
                 case cluster_aggregation_planner::AggregationTargeter::TargetingPolicy::
@@ -927,8 +978,6 @@ Status runAggregateImpl(OperationContext* opCtx,
                         &result,
                         requestQueryStatsFromRemotes);
                 }
-
-                    MONGO_UNREACHABLE;
             }
             MONGO_UNREACHABLE;
         } catch (const DBException& dbe) {
@@ -972,7 +1021,7 @@ Status runAggregateImpl(OperationContext* opCtx,
                     &result);
             }
             collectQueryStatsMongos(opCtx,
-                                    std::move(CurOp::get(opCtx)->debug().queryStatsInfo.key));
+                                    std::move(CurOp::get(opCtx)->debug().getQueryStatsInfo().key));
         }
 
         // Populate `result` and `req` once we know this function is not going to be implicitly
@@ -1006,6 +1055,10 @@ Status ClusterAggregate::runAggregate(OperationContext* opCtx,
                                       boost::optional<ExplainOptions::Verbosity> verbosity,
                                       BSONObjBuilder* result,
                                       StringData comment) {
+    // Creates a new IFRContext for the aggregation, which will be shared among the root
+    // ExpressionContext and any child ExpressionContexts that are created, for example, as part of
+    // sub-pipeline execution.
+    auto ifrContext = std::make_shared<IncrementalFeatureRolloutContext>();
 
     const bool requiresCollectionRouter = std::invoke([&]() {
         const auto pipelineDataSource =
@@ -1026,11 +1079,27 @@ Status ClusterAggregate::runAggregate(OperationContext* opCtx,
                                 boost::none /* resolvedView */,
                                 boost::none /* originalRequest */,
                                 verbosity,
-                                result);
+                                result,
+                                std::move(ifrContext));
     }
 
-    sharding::router::CollectionRouter router(opCtx->getServiceContext(), namespaces.executionNss);
+    sharding::router::CollectionRouter router(opCtx, namespaces.executionNss);
 
+    bool isExplain = verbosity.has_value();
+    if (isExplain) {
+        // Implicitly create the database for explain commands since, right now, there is no way
+        // to respond properly when the database doesn't exist.
+        // Before, the database was implicitly created by the CollectionRoutingInfoTargeter class,
+        // (for context, it's a legacy class to store the routing information), now that we are
+        // using the RoutingContext instead, we still need to create a database until SERVER-108882
+        // gets addressed.
+        // TODO (SERVER-108882) Stop creating the db once explain can be executed when th db
+        // doesn't exist.
+        router.createDbImplicitlyOnRoute();
+    }
+
+    // We'll use routerBodyStarted to distinguish whether an error was thrown before or after the
+    // body function was executed.
     bool routerBodyStarted = false;
     auto bodyFn = [&](OperationContext* opCtx, RoutingContext& routingCtx) {
         routerBodyStarted = true;
@@ -1043,37 +1112,21 @@ Status ClusterAggregate::runAggregate(OperationContext* opCtx,
                                          boost::none /* resolvedView */,
                                          boost::none /* originalRequest */,
                                          verbosity,
-                                         result));
+                                         result,
+                                         ifrContext));
         return Status::OK();
     };
 
-    const size_t kMaxDatabaseCreationAttempts = 3;
-    size_t attempts = 1;
-    Status status{Status::OK()};
-    bool isExplain = verbosity.has_value();
-    while (true) {
-        if (isExplain) {
-            // Implicitly create the database for explain commands since, right now, there is no way
-            // to respond properly when the database doesn't exist. Before the database was
-            // implicitly created by CollectionRoutingInfoTargeter, now that we are not using this
-            // class anymore still need to create a database.
-            // TODO (SERVER-108882) Stop creating the db once explain can be executed when th db
-            // doesn't exist.
-            cluster::createDatabase(opCtx, namespaces.executionNss.dbName());
-        }
+    // Route the command and capture the returned status.
+    Status status = std::invoke([&]() -> Status {
         try {
-            status = router.routeWithRoutingContext(opCtx, comment, bodyFn);
-        } catch (const ExceptionFor<ErrorCodes::NamespaceNotFound>& ex) {
-            if (isExplain && ++attempts < kMaxDatabaseCreationAttempts) {
-                continue;
-            }
-            status = ex.toStatus();
+            return router.routeWithRoutingContext(comment, bodyFn);
         } catch (const DBException& ex) {
-            status = ex.toStatus();
+            return ex.toStatus();
         }
-        break;
-    }
+    });
 
+    // Error handling for exceptions raised prior to executing the runAggregation operation.
     if (!status.isOK() && !routerBodyStarted) {
         uassert(CollectionUUIDMismatchInfo(request.getDbName(),
                                            *request.getCollectionUUID(),
@@ -1132,38 +1185,31 @@ Status ClusterAggregate::retryOnViewError(OperationContext* opCtx,
                                           const NamespaceString& requestedNss,
                                           const PrivilegeVector& privileges,
                                           boost::optional<ExplainOptions::Verbosity> verbosity,
-                                          BSONObjBuilder* result,
-                                          unsigned numberRetries) {
-    if (numberRetries >= kMaxViewRetries) {
-        return Status(ErrorCodes::InternalError,
-                      "Failed to resolve view after max number of retries.");
-    }
+                                          BSONObjBuilder* result) {
+    auto body = [&](ResolvedView& currentResolvedView) {
+        auto resolvedAggRequest =
+            PipelineResolver::buildRequestWithResolvedPipeline(currentResolvedView, request);
 
-    auto resolvedAggRequest =
-        PipelineResolver::buildRequestWithResolvedPipeline(resolvedView, request);
+        result->resetToEmpty();
 
-    result->resetToEmpty();
+        if (auto txnRouter = TransactionRouter::get(opCtx)) {
+            txnRouter.onViewResolutionError(opCtx, requestedNss);
+        }
 
-    if (auto txnRouter = TransactionRouter::get(opCtx)) {
-        txnRouter.onViewResolutionError(opCtx, requestedNss);
-    }
+        // We pass both the underlying collection namespace and the view namespace here. The
+        // underlying collection namespace is used to execute the aggregation on mongoD. Any cursor
+        // returned will be registered under the view namespace so that subsequent getMore and
+        // killCursors calls against the view have access.
+        Namespaces nsStruct;
+        nsStruct.requestedNss = requestedNss;
+        nsStruct.executionNss = currentResolvedView.getNamespace();
 
-    // We pass both the underlying collection namespace and the view namespace here. The
-    // underlying collection namespace is used to execute the aggregation on mongoD. Any cursor
-    // returned will be registered under the view namespace so that subsequent getMore and
-    // killCursors calls against the view have access.
-    Namespaces nsStruct;
-    nsStruct.requestedNss = requestedNss;
-    nsStruct.executionNss = resolvedView.getNamespace();
+        uassert(ErrorCodes::OptionNotSupportedOnView,
+                "$rankFusion and $scoreFusion are unsupported on timeseries collections",
+                !(currentResolvedView.timeseries() && request.getIsHybridSearch()));
 
-    uassert(ErrorCodes::OptionNotSupportedOnView,
-            "$rankFusion and $scoreFusion are unsupported on timeseries collections",
-            !(resolvedView.timeseries() && request.getIsHybridSearch()));
-
-    sharding::router::CollectionRouter router(opCtx->getServiceContext(), nsStruct.executionNss);
-    try {
+        sharding::router::CollectionRouter router(opCtx, nsStruct.executionNss);
         router.routeWithRoutingContext(
-            opCtx,
             "ClusterAggregate::retryOnViewError",
             [&](OperationContext* opCtx, RoutingContext& routingCtx) {
                 // For a sharded time-series collection, the routing is based on both routing table
@@ -1210,27 +1256,24 @@ Status ClusterAggregate::retryOnViewError(OperationContext* opCtx,
                                                resolvedAggRequest,
                                                LiteParsedPipeline(resolvedAggRequest, true),
                                                privileges,
-                                               boost::make_optional(resolvedView),
+                                               boost::make_optional(currentResolvedView),
                                                boost::make_optional(request),
                                                verbosity,
                                                result));
             });
-    } catch (const ExceptionFor<ErrorCodes::CommandOnShardedViewNotSupportedOnMongod>& ex) {
-        // If the underlying namespace was changed to a view during retry, then re-run the
-        // aggregation on the new resolved namespace.
-        return ClusterAggregate::retryOnViewError(opCtx,
-                                                  resolvedAggRequest,
-                                                  *ex.extraInfo<ResolvedView>(),
-                                                  requestedNss,
-                                                  privileges,
-                                                  verbosity,
-                                                  result,
-                                                  numberRetries + 1);
-    } catch (const DBException& ex) {
-        return ex.toStatus();
-    }
 
-    return Status::OK();
+        return Status::OK();
+    };
+
+    // If the underlying namespace was changed to a view during retry, then re-run the aggregation
+    // on the new resolved namespace.
+    auto onError = [&](ExceptionFor<ErrorCodes::CommandOnShardedViewNotSupportedOnMongod>& ex,
+                       ResolvedView& currentResolvedView) {
+        currentResolvedView = *ex.extraInfo<ResolvedView>();
+    };
+
+    return retryOnWithState<ErrorCodes::CommandOnShardedViewNotSupportedOnMongod>(
+        "ClusterAggregate::retryOnViewError", resolvedView, kMaxViewRetries, body, onError);
 }
 
 }  // namespace mongo

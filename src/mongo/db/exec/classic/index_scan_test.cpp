@@ -35,7 +35,6 @@
 #include "mongo/db/exec/classic/collection_scan.h"
 #include "mongo/db/exec/classic/working_set.h"
 #include "mongo/db/pipeline/expression_context_builder.h"
-#include "mongo/db/query/plan_executor.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
 #include "mongo/db/service_context_d_test_fixture.h"
 #include "mongo/unittest/unittest.h"
@@ -77,7 +76,7 @@ public:
     }
 
 
-    const IndexDescriptor* getIndexDescriptor(StringData name) {
+    const IndexCatalogEntry* getIndexEntry(StringData name) {
         return getCollection().getCollectionPtr()->getIndexCatalog()->findIndexByName(_opCtx.get(),
                                                                                       name);
     }
@@ -139,8 +138,8 @@ TEST_F(IndexScanTest, IndexScanStageReturnsEOF) {
     createIndex(indexName, indexKeys);
 
     const auto coll = getCollection();
-    const auto* idxDesc = getIndexDescriptor(indexName);
-    IndexScanParams params{_opCtx.get(), coll.getCollectionPtr(), idxDesc};
+    const auto* idxEntry = getIndexEntry(indexName);
+    IndexScanParams params{_opCtx.get(), coll.getCollectionPtr(), idxEntry};
 
     IndexScan indexScan(_expCtx.get(), coll, std::move(params), &_ws, matchExpr);
     WorkingSetID wsid = WorkingSet::INVALID_ID;
@@ -158,8 +157,8 @@ TEST_F(IndexScanTest, BasicIndex) {
                 BSON("_id" << 3 << "a" << 20)});
 
     const auto coll = getCollection();
-    const auto* idxDesc = getIndexDescriptor(indexName);
-    IndexScanParams params{_opCtx.get(), coll.getCollectionPtr(), idxDesc};
+    const auto* idxEntry = getIndexEntry(indexName);
+    IndexScanParams params{_opCtx.get(), coll.getCollectionPtr(), idxEntry};
 
     IndexScan indexScan(_expCtx.get(), coll, std::move(params), &_ws, matchExpr);
 
@@ -185,12 +184,12 @@ TEST_F(IndexScanTest, BasicMultiKeyIndex) {
 
 
     const auto coll = getCollection();
-    const auto* idxDesc = getIndexDescriptor(indexName);
+    const auto* idxEntry = getIndexEntry(indexName);
 
     // Make sure index is a multikey index as 'a' is an array.
-    ASSERT_EQ(idxDesc->getEntry()->isMultikey(_opCtx.get(), coll.getCollectionPtr()), true);
+    ASSERT_EQ(idxEntry->isMultikey(_opCtx.get(), coll.getCollectionPtr()), true);
 
-    IndexScanParams params{_opCtx.get(), coll.getCollectionPtr(), idxDesc};
+    IndexScanParams params{_opCtx.get(), coll.getCollectionPtr(), idxEntry};
     //'shouldDedup' should be true for multiKey indexes as there may be multiple keys per recordId.
     params.shouldDedup = true;
     IndexScan indexScan(_expCtx.get(), coll, std::move(params), &_ws, matchExpr);

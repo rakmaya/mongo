@@ -38,13 +38,13 @@
 #include "mongo/db/exec/mutable_bson/element.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/itoa.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/overloaded_visitor.h"  // IWYU pragma: keep
 #include "mongo/util/str.h"
 #include "mongo/util/string_map.h"
 
 #include <cstddef>
 #include <cstdint>
-#include <iterator>
 #include <map>
 #include <memory>
 #include <string>
@@ -69,12 +69,13 @@ using Diff = BSONObj;
 enum DiffType : uint8_t { kDocument, kArray };
 
 // Below are string constants used in the diff format.
-constexpr StringData kArrayHeader = "a"_sd;
-constexpr StringData kDeleteSectionFieldName = "d"_sd;
-constexpr StringData kInsertSectionFieldName = "i"_sd;
-constexpr StringData kUpdateSectionFieldName = "u"_sd;
-constexpr StringData kBinarySectionFieldName = "b"_sd;
-constexpr char kSubDiffSectionFieldPrefix = 's';
+// TODO SERVER-115821 remove external dependencies on these constants.
+MONGO_MOD_NEEDS_REPLACEMENT constexpr StringData kArrayHeader = "a"_sd;
+MONGO_MOD_NEEDS_REPLACEMENT constexpr StringData kDeleteSectionFieldName = "d"_sd;
+MONGO_MOD_NEEDS_REPLACEMENT constexpr StringData kInsertSectionFieldName = "i"_sd;
+MONGO_MOD_NEEDS_REPLACEMENT constexpr StringData kUpdateSectionFieldName = "u"_sd;
+MONGO_MOD_NEEDS_REPLACEMENT constexpr StringData kBinarySectionFieldName = "b"_sd;
+MONGO_MOD_NEEDS_REPLACEMENT constexpr char kSubDiffSectionFieldPrefix = 's';
 // 'l' for length.
 constexpr StringData kResizeSectionFieldName = "l"_sd;
 
@@ -136,6 +137,14 @@ public:
     boost::optional<BSONElement> nextBinary();
     boost::optional<std::pair<StringData, std::variant<DocumentDiffReader, ArrayDiffReader>>>
     nextSubDiff();
+    /**
+     * Calls all of the above 'next*' methods.
+     */
+    using Modification =
+        std::variant<StringData,
+                     BSONElement,
+                     std::pair<StringData, std::variant<DocumentDiffReader, ArrayDiffReader>>>;
+    boost::optional<Modification> next();
 
 private:
     Diff _diff;

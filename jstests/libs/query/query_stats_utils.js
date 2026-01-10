@@ -7,6 +7,27 @@ import {ShardingTest} from "jstests/libs/shardingtest.js";
 export const kShellApplicationName = "MongoDB Shell";
 export const kDefaultQueryStatsHmacKey = BinData(8, "MjM0NTY3ODkxMDExMTIxMzE0MTUxNjE3MTgxOTIwMjE=");
 
+export const queryShapeUpdateFieldsRequired = ["cmdNs", "command", "u", "q", "multi", "upsert"];
+// The outer fields not nested inside queryShape.
+export const updateKeyFieldsRequired = [
+    "queryShape",
+    "collectionType",
+    "client",
+    "ordered",
+    "bypassDocumentValidation",
+];
+export const updateKeyFieldsComplex = [
+    ...updateKeyFieldsRequired,
+    "comment",
+    "readConcern",
+    "apiDeprecationErrors",
+    "apiVersion",
+    "apiStrict",
+    "maxTimeMS",
+    "$readPreference",
+    "hint",
+];
+
 /**
  * Utility for checking that the aggregated queryStats metrics are logical (follows sum >= max >=
  * min, and sum = max = min if only one execution).
@@ -151,6 +172,30 @@ export function getQueryStatsDistinctCmd(
 ) {
     let matchExpr = {
         "key.queryShape.command": "distinct",
+        "key.client.application.name": kShellApplicationName,
+    };
+
+    return getQueryStatsWithTransform(conn, matchExpr, options);
+}
+
+/**
+ * @param {object} conn - connection to database
+ * @param {object} options {
+ *  {BinData} hmacKey
+ *  {String} collName - name of collection
+ *  {boolean} transformIdentifiers - whether to include transform identifiers
+ * }
+ */
+export function getQueryStatsUpdateCmd(
+    conn,
+    options = {
+        collName: "",
+        transformIdentifiers: false,
+        hmacKey: kDefaultQueryStatsHmacKey,
+    },
+) {
+    let matchExpr = {
+        "key.queryShape.command": "update",
         "key.client.application.name": kShellApplicationName,
     };
 
@@ -439,12 +484,17 @@ export function getQueryPlannerMetrics(metrics) {
         return metrics[queryPlannerSectionName];
     }
 
-    return {
+    // Include planningTimeMicros if present (when CBR feature flag is on).
+    const result = {
         hasSortStage: metrics.hasSortStage,
         usedDisk: metrics.usedDisk,
         fromMultiPlanner: metrics.fromMultiPlanner,
         fromPlanCache: metrics.fromPlanCache,
     };
+    if (metrics.hasOwnProperty("planningTimeMicros")) {
+        result.planningTimeMicros = metrics.planningTimeMicros;
+    }
+    return result;
 }
 
 export function getWriteMetrics(metrics) {
@@ -597,6 +647,7 @@ export function withQueryStatsEnabled(collName, callbackFn) {
  * 2. The fields nested inside of queryShape field of the key exactly matches those given by
  * shapeFields.
  * 3. The list of fields of the key exactly matches those given by keyFields.
+ * 4. The query shape hash is present in the explain output and matches the query stats entry.
  * /**
  * @param {object} coll - The given collection to run on
  * @param {string} commandName - string name of type of command, ex. "find", "aggregate", or
@@ -607,9 +658,16 @@ export function withQueryStatsEnabled(collName, callbackFn) {
  * @param {object} keyFields - List of outer fields not nested inside queryShape but should be part
  *     of the key
  */
-export function runCommandAndValidateQueryStats({coll, commandName, commandObj, shapeFields, keyFields}) {
+export function runCommandAndValidateQueryStats({
+    coll,
+    commandName,
+    commandObj,
+    shapeFields,
+    keyFields,
+    checkExplain = true,
+}) {
     const testDB = coll.getDB();
-    assert.commandWorked(testDB.runCommand(commandObj));
+    const result = assert.commandWorked(testDB.runCommand(commandObj));
     const entry = getLatestQueryStatsEntry(testDB.getMongo(), {collName: coll.getName()});
 
     assert.eq(entry.key.queryShape.command, commandName);
@@ -670,6 +728,24 @@ export function runCommandAndValidateQueryStats({coll, commandName, commandObj, 
             .hint({"v": 60, $hint: -128})
             .itcount();
     }, ErrorCodes.BadValue);
+
+    // Verify that the same shape hash is present in the explain output
+    function compareQueryShapeHash(explainResult) {
+        assert(entry.hasOwnProperty("queryShapeHash"), entry);
+        assert(explainResult.hasOwnProperty("queryShapeHash"), explainResult);
+        assert.eq(explainResult.queryShapeHash, entry.queryShapeHash);
+    }
+    if (checkExplain) {
+        if (commandObj.explain) {
+            compareQueryShapeHash(result);
+        } else if (commandName == "aggregate") {
+            const explainResult = assert.commandWorked(testDB.runCommand({...commandObj, explain: true}));
+            compareQueryShapeHash(explainResult);
+        } else {
+            const explainResult = assert.commandWorked(testDB.runCommand({explain: {...commandObj}}));
+            compareQueryShapeHash(explainResult);
+        }
+    }
 }
 
 /**

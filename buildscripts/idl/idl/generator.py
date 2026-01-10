@@ -167,8 +167,8 @@ def _get_bson_type_check(bson_element, ctxt_name, ast_type):
         )
     else:
         return (
-            f'MONGO_likely({ctxt_name}.checkAndAssertTypes({bson_element}, '
-            f'{_std_array_expr("BSONType", [bson.cpp_bson_type_name(b) for b in bson_types])}))'
+            f"MONGO_likely({ctxt_name}.checkAndAssertTypes({bson_element}, "
+            f"{_std_array_expr('BSONType', [bson.cpp_bson_type_name(b) for b in bson_types])}))"
         )
 
 
@@ -229,9 +229,10 @@ def _gen_field_element_name(field):
     return "BSONElement_%s" % (common.title_case(field.cpp_name))
 
 
-def _gen_mark_present(field_name):
-    # type: (str) -> str
-    return f"_hasMembers.markPresent(static_cast<size_t>(RequiredFields::{field_name}));"
+def _gen_mark_present(field):
+    # type: (ast.Field) -> str
+    kname = _get_field_kname(field)
+    return f"_hasMembers.markPresent(fieldToRequiredFieldPositions[size_t(Field::{kname})]);"
 
 
 def _is_parse(field):
@@ -759,7 +760,7 @@ class _CppHeaderFileWriter(_CppFileWriterBase):
                 body = f"{_get_field_member_getter_name(field.nested_chained_parent)}().{memfn}(std::move(value));"
             else:
                 body = cpp_type_info.get_setter_body(_get_field_member_name(field), validator)
-        set_has = _gen_mark_present(field.cpp_name) if is_serial else ""
+        set_has = _gen_mark_present(field) if is_serial else ""
 
         with self._block(f"void {memfn}({setter_type} value) {{", "}"):
             self._writer.write_line(body)
@@ -875,16 +876,25 @@ class _CppHeaderFileWriter(_CppFileWriterBase):
         with self._block("enum class Field {", "};"):
             for f in struct.fields:
                 self._writer.write_line(f"{_get_field_kname(f)},")
-        with self._block("static constexpr std::array fieldNames{", "};"):
+        with self._block(
+            f"static constexpr std::array<::mongo::idl::FieldMetadata, {len(struct.fields)}> fieldMetadata{{{{",
+            "}};",
+        ):
+            required_field_names = [f.cpp_name for f in _get_required_fields(struct)]
             for f in struct.fields:
-                self._writer.write_line(f'"{f.name}"_sd,')
-        self._writer.write_empty_line()
-
-    def gen_required_field_enum(self, struct):
+                name = f.name
+                req = "false"
+                for rf in required_field_names:
+                    if rf == f.cpp_name:
+                        req = "true"
+                self._writer.write_line(f'{{"{name}"_sd, {req}}},')
         self._writer.write_line(
-            "enum class RequiredFields : size_t { %s };"
-            % ", ".join([f.cpp_name for f in _get_required_fields(struct)])
+            "static constexpr std::array fieldNames = mongo::idl::extractNames<fieldMetadata>();"
         )
+        self._writer.write_line(
+            "static constexpr std::array fieldToRequiredFieldPositions = mongo::idl::extractRequiredFieldPositions<fieldMetadata>();"
+        )
+        self._writer.write_empty_line()
 
     def gen_authorization_contract_declaration(self, struct):
         # type: (ast.Struct) -> None
@@ -903,12 +913,13 @@ class _CppHeaderFileWriter(_CppFileWriterBase):
         # type: (ast.Enum) -> None
         """Generate the declaration for an enum's supporting functions."""
         enum_type_info = enum_types.get_type_info(idl_enum)
+        mod_tag = make_mod_tag(idl_enum.mod_visibility)
 
-        self._writer.write_line("%s;" % (enum_type_info.get_deserializer_declaration()))
+        self._writer.write_line("%s;" % (enum_type_info.get_deserializer_declaration(mod_tag)))
 
-        self._writer.write_line("%s;" % (enum_type_info.get_serializer_declaration()))
+        self._writer.write_line("%s;" % (enum_type_info.get_serializer_declaration(mod_tag)))
 
-        extra_data_decl = enum_type_info.get_extra_data_declaration()
+        extra_data_decl = enum_type_info.get_extra_data_declaration(mod_tag)
         if extra_data_decl is not None:
             self._writer.write_line("%s;" % (extra_data_decl))
 
@@ -1001,7 +1012,7 @@ class _CppHeaderFileWriter(_CppFileWriterBase):
 
         self.write_empty_line()
 
-    def _gen_exported_constexpr(self, name, suffix, expr, condition):
+    def _gen_exported_constexpr(self, name, suffix, expr, condition, mod_visibility):
         # type: (str, str, ast.Expression, ast.Condition) -> None
         """Generate exports for default initializer."""
         if not (name and expr and expr.export):
@@ -1009,12 +1020,12 @@ class _CppHeaderFileWriter(_CppFileWriterBase):
 
         with self._condition(condition, preprocessor_only=True):
             self._writer.write_line(
-                "constexpr auto %s%s = %s;" % (_get_constant(name), suffix, expr.expr)
+                f"{make_mod_tag(mod_visibility)}constexpr auto {_get_constant(name)}{suffix} = {expr.expr};"
             )
 
         self.write_empty_line()
 
-    def _gen_extern_declaration(self, vartype, varname, condition):
+    def _gen_extern_declaration(self, vartype, varname, condition, mod_visibility):
         # type: (str, str, ast.Condition) -> None
         """Generate externs for storage declaration."""
         if (vartype is None) or (varname is None):
@@ -1026,7 +1037,7 @@ class _CppHeaderFileWriter(_CppFileWriterBase):
             for ns in idents:
                 self._writer.write_line("namespace %s {" % (ns))
 
-            self._writer.write_line("extern %s %s;" % (vartype, decl))
+            self._writer.write_line(f"{make_mod_tag(mod_visibility)}extern {vartype} {decl};")
 
             for ns in reversed(idents):
                 self._writer.write_line("}  // namespace " + ns)
@@ -1062,7 +1073,9 @@ class _CppHeaderFileWriter(_CppFileWriterBase):
 
         cls = scp.cpp_class
 
-        with self._block(f"class {cls.name} : public ServerParameter {{", "};"):
+        with self._block(
+            f"class {make_mod_tag(scp.mod_visibility)}{cls.name} : public ServerParameter {{", "};"
+        ):
             self._writer.write_unindented_line("public:")
             if scp.default is not None:
                 self._writer.write_line(
@@ -1119,11 +1132,13 @@ class _CppHeaderFileWriter(_CppFileWriterBase):
         """Generate a template declaration for a command's base class."""
         self._writer.write_line("template <typename Derived>")
 
-    def gen_derived_class_declaration_block(self, class_name):
+    def gen_derived_class_declaration_block(self, class_name, mod_visibility):
         # type: (str) -> writer.IndentedScopedBlock
         """Generate a command's base class declaration block."""
         return writer.IndentedScopedBlock(
-            self._writer, "class %s : public TypedCommand<Derived> {" % class_name, "};"
+            self._writer,
+            f"class {make_mod_tag(mod_visibility)}{class_name} : public TypedCommand<Derived> {{",
+            "};",
         )
 
     def gen_type_alias_declaration(self, new_type_name, old_type_name):
@@ -1150,10 +1165,11 @@ class _CppHeaderFileWriter(_CppFileWriterBase):
         with self._block(f"const std::set<std::string>& {fn_name}() const final {{", "}"):
             self._writer.write_line("return %s;" % value)
 
-    def gen_invocation_base_class_declaration(self, command):
-        # type: (ast.Command) -> None
+    def gen_invocation_base_class_declaration(
+        self, command: ast.Command, mod_visibility: str
+    ) -> None:
         """Generate the InvocationBaseGen class for a command's base class."""
-        class_declaration = "class InvocationBaseGen : public _TypedCommandInvocationBase {"
+        class_declaration = f"class {make_mod_tag(mod_visibility)}InvocationBaseGen : public _TypedCommandInvocationBase {{"
         with writer.IndentedScopedBlock(self._writer, class_declaration, "};"):
             # public requires special indentation that aligns with the class definition.
             self._writer.unindent()
@@ -1183,7 +1199,7 @@ class _CppHeaderFileWriter(_CppFileWriterBase):
         self.write_empty_line()
 
         self.gen_template_declaration()
-        with self.gen_derived_class_declaration_block(class_name):
+        with self.gen_derived_class_declaration_block(class_name, command.mod_visibility):
             # Write type alias for InvocationBase.
             self.gen_type_alias_declaration(
                 "_TypedCommandInvocationBase", "typename TypedCommand<Derived>::InvocationBase"
@@ -1222,7 +1238,7 @@ class _CppHeaderFileWriter(_CppFileWriterBase):
                 self.write_empty_line()
 
             # Write InvocationBaseGen class.
-            self.gen_invocation_base_class_declaration(command)
+            self.gen_invocation_base_class_declaration(command, command.mod_visibility)
 
     def _need_feature_flag_headers(self, spec):
         # type: (ast.IDLAST) -> bool
@@ -1249,6 +1265,13 @@ class _CppHeaderFileWriter(_CppFileWriterBase):
         for idl_enum in spec.enums:
             if idl_enum.mod_visibility:
                 return True
+        for scp in spec.server_parameters:
+            if scp.mod_visibility:
+                return True
+        if spec.configs:
+            for opt in spec.configs:
+                if opt.mod_visibility:
+                    return True
         return False
 
     def generate(self, spec):
@@ -1411,7 +1434,6 @@ class _CppHeaderFileWriter(_CppFileWriterBase):
                     self.write_unindented_line("private:")
                     self._writer.write_line("struct FieldInfo;")
 
-                    self.gen_required_field_enum(struct)
                     self.write_empty_line()
 
                     if struct.generate_comparison_operators:
@@ -1443,7 +1465,7 @@ class _CppHeaderFileWriter(_CppFileWriterBase):
                     # non-debug builds, and is marked MONGO_COMPILER_NO_UNIQUE_ADDRESS so that the
                     # compiler knows that it should be optimized to take up no space when possible.
                     self._writer.write_line(
-                        "MONGO_COMPILER_NO_UNIQUE_ADDRESS mongo::idl::HasMembers<%s> _hasMembers;"
+                        "MONGO_COMPILER_NO_UNIQUE_ADDRESS mongo::idl::HasMembers<%s> _hasMembers{};"
                         % len(_get_required_fields(struct))
                     )
                     # Write constexpr struct data
@@ -1453,17 +1475,25 @@ class _CppHeaderFileWriter(_CppFileWriterBase):
 
             for scp in spec.server_parameters:
                 if scp.cpp_class is None:
-                    self._gen_exported_constexpr(scp.name, "Default", scp.default, scp.condition)
+                    self._gen_exported_constexpr(
+                        scp.name, "Default", scp.default, scp.condition, scp.mod_visibility
+                    )
                 self._writer.write_line(
-                    f"constexpr inline auto {_get_constant(scp.name + 'Name')} = \"{scp.name}\"_sd;"
+                    f'{make_mod_tag(scp.mod_visibility)}constexpr inline auto {_get_constant(scp.name + "Name")} = "{scp.name}"_sd;'
                 )
-                self._gen_extern_declaration(scp.cpp_vartype, scp.cpp_varname, scp.condition)
+                self._gen_extern_declaration(
+                    scp.cpp_vartype, scp.cpp_varname, scp.condition, scp.mod_visibility
+                )
                 self.gen_server_parameter_class(scp)
 
             if spec.configs:
                 for opt in spec.configs:
-                    self._gen_exported_constexpr(opt.name, "Default", opt.default, opt.condition)
-                    self._gen_extern_declaration(opt.cpp_vartype, opt.cpp_varname, opt.condition)
+                    self._gen_exported_constexpr(
+                        opt.name, "Default", opt.default, opt.condition, opt.mod_visibility
+                    )
+                    self._gen_extern_declaration(
+                        opt.cpp_vartype, opt.cpp_varname, opt.condition, opt.mod_visibility
+                    )
                 self._gen_config_function_declaration(spec)
 
             # Write a base class for each command in API Version 1.
@@ -1736,7 +1766,7 @@ class _CppSourceFileWriter(_CppFileWriterBase):
                     bson.cpp_bson_type_name(t.bson_serialization_type[0]) for t in array_types
                 ]
                 self._writer.write_line(
-                    f'ctxt.throwBadType({bson_element},  {_std_array_expr("BSONType", expected_types)});'
+                    f"ctxt.throwBadType({bson_element},  {_std_array_expr('BSONType', expected_types)});"
                 )
                 self._writer.write_line("break;")
                 self._writer.unindent()
@@ -1779,7 +1809,7 @@ class _CppSourceFileWriter(_CppFileWriterBase):
             bson.cpp_bson_type_name(t.bson_serialization_type[0]) for t in scalar_types
         ]
         self._writer.write_line(
-            f'ctxt.throwBadType({bson_element}, ' f'{_std_array_expr("BSONType", expected_types)});'
+            f"ctxt.throwBadType({bson_element}, {_std_array_expr('BSONType', expected_types)});"
         )
         self._writer.write_line("break;")
         self._writer.unindent()
@@ -1850,7 +1880,7 @@ class _CppSourceFileWriter(_CppFileWriterBase):
             field_usage_check.add(field, bson_element)
 
             if _is_required_serializer_field(field):
-                self._writer.write_line(_gen_mark_present(field.cpp_name))
+                self._writer.write_line(_gen_mark_present(field))
 
     def gen_field_deserializer(
         self,
@@ -2139,11 +2169,15 @@ class _CppSourceFileWriter(_CppFileWriterBase):
             initializers_str = ": " + ", ".join(initializers)
 
         with self._block("%s %s {" % (constructor.get_definition(), initializers_str), "}"):
+            db_field = None
             for field in _get_required_fields(struct):
+                if field.name == "$db":
+                    db_field = field
                 if not (field.name == "$db" and initializes_db_name) and not default_init:
-                    self._writer.write_line(_gen_mark_present(field.cpp_name))
+                    self._writer.write_line(_gen_mark_present(field))
             if initializes_db_name:
-                self._writer.write_line(_gen_mark_present("dbName"))
+                assert db_field is not None
+                self._writer.write_line(_gen_mark_present(db_field))
         self._writer.write_empty_line()
 
     def gen_constructors(self, struct):
@@ -2552,7 +2586,7 @@ class _CppSourceFileWriter(_CppFileWriterBase):
                             field_usage_check.add(field, "sequence.name")
 
                             if _is_required_serializer_field(field):
-                                self._writer.write_line(_gen_mark_present(field.cpp_name))
+                                self._writer.write_line(_gen_mark_present(field))
 
                             self.gen_doc_sequence_deserializer(
                                 field, "request.getValidatedTenantId()"
@@ -2894,7 +2928,9 @@ class _CppSourceFileWriter(_CppFileWriterBase):
         ]
 
         if required_fields:
-            self._writer.write_line("_hasMembers.required();")
+            self._writer.write_line(
+                "handleMissingRequiredFields(_hasMembers, fieldMetadata, fieldToRequiredFieldPositions);"
+            )
             self._writer.write_empty_line()
 
         # Serialize the namespace as the first field
@@ -3240,7 +3276,7 @@ class _CppSourceFileWriter(_CppFileWriterBase):
         """Generate IDLServerParameterDeprecatedAlias instance."""
 
         for alias_no, alias in enumerate(param.deprecated_name):
-            varname = f"scp_{param_no}_deprecated_alias"
+            varname = f"scp_{param_no}_deprecated_alias_{alias_no}"
             with self.get_initializer_lambda(
                 f"auto {varname}",
                 return_type="std::unique_ptr<ServerParameter>",
@@ -3324,12 +3360,17 @@ return std::move({varname});"""
 
         with self._condition(opt.condition):
             with self._block(section, ";"):
-                self._writer.write_line(f"""\
-.addOptionChaining({_encaps(opt.name)}, {_encaps(opt.short_name)}, moe::{opt.arg_vartype},
-    {_get_expression(opt.description)}, {_encaps_list(opt.deprecated_name)},
-    {_encaps_list(opt.deprecated_short_name)}, {usage})
-.setSources(moe::{opt.source})
-""")
+                self._writer.write_line(
+                    ""
+                    + f".addOptionChaining({_encaps(opt.name)},"
+                    + f"                   {_encaps(opt.short_name)},"
+                    + f"                   moe::{opt.arg_vartype},"
+                    + f"                   {_get_expression(opt.description)},"
+                    + f"                   {_encaps_list(opt.deprecated_name)},"
+                    + f"                   {_encaps_list(opt.deprecated_short_name)},"
+                    + f"                   {usage})"
+                )
+                self._writer.write_line(f".setSources(moe::{opt.source})")
                 if opt.hidden:
                     self._writer.write_line(".hidden()")
                 if opt.redact:

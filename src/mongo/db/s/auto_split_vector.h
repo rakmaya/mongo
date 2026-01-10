@@ -33,10 +33,11 @@
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsontypes.h"
-#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/shard_role/shard_role.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
 
 #include <utility>
 #include <vector>

@@ -37,17 +37,17 @@
 #include "mongo/db/commands.h"
 #include "mongo/db/curop_failpoint_helpers.h"
 #include "mongo/db/generic_argument_util.h"
-#include "mongo/db/global_catalog/catalog_cache/catalog_cache.h"
 #include "mongo/db/global_catalog/ddl/cluster_ddl.h"
 #include "mongo/db/global_catalog/ddl/sharded_ddl_commands_gen.h"
-#include "mongo/db/global_catalog/router_role_api/cluster_commands_helpers.h"
 #include "mongo/db/global_catalog/type_database_gen.h"
-#include "mongo/db/local_catalog/collection_uuid_mismatch_info.h"
-#include "mongo/db/local_catalog/ddl/rename_collection_common.h"
-#include "mongo/db/local_catalog/ddl/rename_collection_gen.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/router_role/cluster_commands_helpers.h"
+#include "mongo/db/router_role/routing_cache/catalog_cache.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/ddl/rename_collection_common.h"
+#include "mongo/db/shard_role/ddl/rename_collection_gen.h"
+#include "mongo/db/shard_role/shard_catalog/collection_uuid_mismatch_info.h"
 #include "mongo/db/sharding_environment/client/shard.h"
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/topology/shard_registry.h"
@@ -69,7 +69,6 @@
 #include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
-
 
 namespace mongo {
 MONGO_FAIL_POINT_DEFINE(renameWaitAfterDatabaseCreation);
@@ -143,11 +142,10 @@ public:
                         ActionType::setUserWriteBlockMode));
             generic_argument_util::setMajorityWriteConcern(renameCollRequest);
 
-            sharding::router::DBPrimaryRouter router(opCtx->getServiceContext(), fromNss.dbName());
+            sharding::router::DBPrimaryRouter router(opCtx, fromNss.dbName());
 
             try {
                 router.route(
-                    opCtx,
                     Request::kCommandName,
                     [&](OperationContext* opCtx, const CachedDatabaseInfo& dbInfo) {
                         // Creates the destination database if it doesn't exist already.
@@ -170,7 +168,7 @@ public:
                                 dbInfo,
                                 renameCollRequest.toBSON(),
                                 ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-                                Shard::RetryPolicy::kNoRetry);
+                                Shard::RetryPolicy::kStrictlyNotIdempotent);
 
                         const auto remoteResponse = uassertStatusOK(cmdResponse.swResponse);
                         const auto resultObj =

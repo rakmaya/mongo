@@ -48,10 +48,13 @@ namespace {
 const StringDataSet kFieldsToRemoveForQueryShapeSerialization = {"version", "supportedEvents"};
 }  // namespace
 
-REGISTER_INTERNAL_DOCUMENT_SOURCE(_internalChangeStreamTransform,
-                                  LiteParsedDocumentSourceChangeStreamInternal::parse,
-                                  DocumentSourceChangeStreamTransform::createFromBson,
-                                  true);
+REGISTER_INTERNAL_LITE_PARSED_DOCUMENT_SOURCE(_internalChangeStreamTransform,
+                                              ChangeStreamTransformLiteParsed::parse);
+
+REGISTER_DOCUMENT_SOURCE_WITH_STAGE_PARAMS_DEFAULT(_internalChangeStreamTransform,
+                                                   DocumentSourceChangeStreamTransform,
+                                                   ChangeStreamTransformStageParams);
+
 ALLOCATE_DOCUMENT_SOURCE_ID(_internalChangeStreamTransform, DocumentSourceChangeStreamTransform::id)
 
 boost::intrusive_ptr<DocumentSourceChangeStreamTransform>

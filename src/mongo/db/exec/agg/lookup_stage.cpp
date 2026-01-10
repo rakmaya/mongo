@@ -36,7 +36,8 @@
 #include "mongo/db/pipeline/optimization/optimize.h"
 #include "mongo/db/pipeline/pipeline_factory.h"
 #include "mongo/db/query/stage_memory_limit_knobs/knobs.h"
-#include "mongo/db/views/resolved_view.h"
+#include "mongo/db/shard_role/shard_catalog/raw_data_operation.h"
+#include "mongo/db/views/resolved_view.h"  // IWYU pragma: keep
 #include "mongo/logv2/log.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
@@ -82,13 +83,13 @@ void addCacheStageAndOptimize(boost::intrusive_ptr<DocumentSource> source,
     // optimizeContainer on the pipeline to ensure the rest of the pipeline is in its correct
     // order before optimizing the cache.
     // TODO SERVER-84113: We will no longer have separate logic based on if a cache is present
-    // in doOptimizeAt(), so we can instead only add and optimize the cache after
+    // in optimizeAt(), so we can instead only add and optimize the cache after
     // optimizeContainer is called.
     pipeline.addFinalSource(std::move(source));
 
     auto& container = pipeline.getSources();
 
-    pipeline_optimization::optimizeContainer(&container);
+    pipeline_optimization::optimizeContainer(*pipeline.getContext(), &container);
 
     // We want to ensure the cache has been optimized prior to any calls to optimize().
     auto itr = (&container)->begin();
@@ -103,7 +104,7 @@ void addCacheStageAndOptimize(boost::intrusive_ptr<DocumentSource> source,
     }
 
     // Optimize the pipeline, with the cache in its correct position if it exists.
-    pipeline_optimization::optimizeEachStage(&container);
+    pipeline_optimization::optimizeEachStage(*pipeline.getContext(), &container);
 }
 }  // namespace
 
@@ -262,7 +263,7 @@ GetNextResult LookUpStage::doGetNext() {
         // throw a custom exception.
         if (auto staleInfo = ex.extraInfo<StaleConfigInfo>(); staleInfo &&
             staleInfo->getVersionWanted() &&
-            staleInfo->getVersionWanted() != ShardVersion::UNSHARDED()) {
+            staleInfo->getVersionWanted() != ShardVersion::UNTRACKED()) {
             uassert(3904800,
                     "Cannot run $lookup with a sharded foreign collection in a transaction",
                     foreignShardedLookupAllowed());
@@ -314,9 +315,7 @@ std::unique_ptr<mongo::Pipeline> LookUpStage::buildPipelineFromViewDefinition(
     const std::vector<BSONObj>& viewPipeline,
     bool attachCursorAfterOptimizing,
     ShardTargetingPolicy shardTargetingPolicy,
-    std::function<void(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                       mongo::Pipeline* pipeline,
-                       MongoProcessInterface::CollectionMetadata collData)> finalizePipeline) {
+    std::function<void(mongo::Pipeline* pipeline)> optimizePipeline) {
 
     // We don't want to optimize or attach a cursor source here because we need to update
     // _sharedState->resolvedPipeline so we can reuse it on subsequent calls to getNext(), and we
@@ -357,22 +356,26 @@ std::unique_ptr<mongo::Pipeline> LookUpStage::buildPipelineFromViewDefinition(
     // Update the expression context with any new namespaces the resolved pipeline has
     // introduced.
     LiteParsedPipeline liteParsedPipeline(resolvedNs, viewPipeline);
-    _fromExpCtx = makeCopyFromExpressionContext(
-        _fromExpCtx, resolvedNs, boost::none, boost::none, std::make_pair(_fromNs, viewPipeline));
+    _fromExpCtx = makeCopyFromExpressionContext(_fromExpCtx,
+                                                resolvedNs,
+                                                boost::none,
+                                                boost::none,
+                                                ViewInfo(_fromNs, resolvedNs, viewPipeline));
     _fromExpCtx->addResolvedNamespaces(liteParsedPipeline.getInvolvedNamespaces());
 
     // Parse the new pipeline and prepare it again. We must resolve the view before entering
     // 'finalizeAndMaybePreparePipelineForExecution', since that function requires accessing
     // collection catalog data.
-    std::unique_ptr<mongo::Pipeline> parsedPipeline = mongo::Pipeline::parse(
-        _sharedState->resolvedPipeline, _fromExpCtx, mongo::lookupPipeValidator);
-    _fromExpCtx->initializeReferencedSystemVariables();
+    pipeline_factory::MakePipelineOptions pipelineOpts = pipeline_factory::kOptionsMinimal;
+    pipelineOpts.validator = mongo::lookupPipeValidator;
+    std::unique_ptr<mongo::Pipeline> parsedPipeline = mongo::pipeline_factory::makePipeline(
+        _sharedState->resolvedPipeline, _fromExpCtx, pipelineOpts);
 
     return pExpCtx->getMongoProcessInterface()->finalizeAndMaybePreparePipelineForExecution(
         _fromExpCtx,
         std::move(parsedPipeline),
         attachCursorAfterOptimizing,
-        finalizePipeline,
+        optimizePipeline,
         shardTargetingPolicy);
 }
 
@@ -400,7 +403,7 @@ void LookUpStage::prepareStateToBuildPipeline(
 
     if (!foreignShardedLookupAllowed() && !fromExpCtx->getInRouter()) {
         // Enforce that the foreign collection must be unsharded for lookup.
-        fromExpCtx->getMongoProcessInterface()->expectUnshardedCollectionInScope(
+        fromExpCtx->getMongoProcessInterface()->expectUntrackedCollectionInScope(
             fromExpCtx->getOperationContext(), fromExpCtx->getNamespaceString(), boost::none);
     }
 }
@@ -437,54 +440,33 @@ std::unique_ptr<mongo::Pipeline> LookUpStage::buildPipeline(
         : ShardTargetingPolicy::kNotAllowed;
 
     // Parse the pipeline.
-    std::unique_ptr<mongo::Pipeline> parsedPipeline = mongo::Pipeline::parse(
-        _sharedState->resolvedPipeline, fromExpCtx, mongo::lookupPipeValidator);
-    fromExpCtx->initializeReferencedSystemVariables();
+    pipeline_factory::MakePipelineOptions pipelineOpts = pipeline_factory::kOptionsMinimal;
+    pipelineOpts.validator = mongo::lookupPipeValidator;
+    std::unique_ptr<mongo::Pipeline> parsedPipeline = mongo::pipeline_factory::makePipeline(
+        _sharedState->resolvedPipeline, fromExpCtx, pipelineOpts);
 
     // If we don't have a cache, optimize and translate, and attach a cursor to the pipeline
     // immediately.
     if (!_cache || _cache->isAbandoned()) {
-        const auto& finalizePipeline = [](const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                                          mongo::Pipeline* pipeline,
-                                          MongoProcessInterface::CollectionMetadata collData) {
-            tassert(11028104, "Expected pipeline to finalize", pipeline);
-            visit(OverloadedVisitor{[&](std::monostate) {},
-                                    [&](const CollectionOrViewAcquisition& collOrView) {
-                                        pipeline->validateWithCollectionMetadata(collOrView);
-                                        pipeline->performPreOptimizationRewrites(expCtx,
-                                                                                 collOrView);
-                                    },
-                                    [&](const CollectionRoutingInfo& cri) {
-                                        // If there is no routing table, an aggregate command will
-                                        // be sent to the shard that owns this collection, where the
-                                        // translation will happen, or the collection is completely
-                                        // local and will use 'CollectionOrViewAcquisition'.
-                                        if (cri.hasRoutingTable()) {
-                                            pipeline->validateWithCollectionMetadata(cri);
-                                            pipeline->performPreOptimizationRewrites(expCtx, cri);
-                                        }
-                                    }},
-                  collData);
-            pipeline_optimization::optimizePipeline(*pipeline);
-            pipeline->validateCommon(true /* alreadyOptimized */);
-        };
-
         try {
             return pExpCtx->getMongoProcessInterface()->finalizeAndMaybePreparePipelineForExecution(
                 fromExpCtx,
                 std::move(parsedPipeline),
                 true /* attachCursorAfterOptimizing */,
-                finalizePipeline,
+                pipeline_optimization::optimizeAndValidatePipeline,
                 shardTargetingPolicy);
         } catch (const ExceptionFor<ErrorCodes::CommandOnShardedViewNotSupportedOnMongod>& e) {
             // This exception returns the information we need to resolve a sharded view. Update the
             // pipeline with the resolved view definition.
-            return buildPipelineFromViewDefinition(fromExpCtx,
-                                                   e->getNamespace(),
-                                                   e->getPipeline(),
-                                                   true /* attachCursorAfterOptimizing */,
-                                                   shardTargetingPolicy,
-                                                   finalizePipeline);
+            return buildPipelineFromViewDefinition(
+                fromExpCtx,
+                e->getNamespace(),
+                isRawDataOperation(pExpCtx->getOperationContext()) && e->timeseries()
+                    ? std::vector<BSONObj>{}
+                    : e->getPipeline(),
+                true /* attachCursorAfterOptimizing */,
+                shardTargetingPolicy,
+                pipeline_optimization::optimizeAndValidatePipeline);
         }
     }
 
@@ -492,32 +474,18 @@ std::unique_ptr<mongo::Pipeline> LookUpStage::buildPipeline(
     // If the subpipeline is reading documents from the cache, we should not attach a cursor.
     bool cacheIsServing = _cache->isServing();
 
-    const auto& finalizePipeline = [this](const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                                          mongo::Pipeline* pipeline,
-                                          MongoProcessInterface::CollectionMetadata collData) {
-        tassert(11028105, "Expected pipeline to finalize", pipeline);
-        visit(OverloadedVisitor{[&](std::monostate) {},
-                                [&](const CollectionOrViewAcquisition& collOrView) {
-                                    pipeline->validateWithCollectionMetadata(collOrView);
-                                    pipeline->performPreOptimizationRewrites(expCtx, collOrView);
-                                },
-                                [&](const CollectionRoutingInfo& cri) {
-                                    // If there is no routing table, an aggregate command will be
-                                    // sent to the shard that owns this collection where the
-                                    // translation will happen, or the collection is completely
-                                    // local and will use 'CollectionOrViewAcquisition'.
-                                    if (cri.hasRoutingTable()) {
-                                        pipeline->validateWithCollectionMetadata(cri);
-                                        pipeline->performPreOptimizationRewrites(expCtx, cri);
-                                    }
-                                }},
-              collData);
-
+    const auto& optimizePipeline = [this](mongo::Pipeline* pipeline) {
+        tassert(11028105, "Expected pipeline to optimize", pipeline);
         // We've already validated above the cache exists and is not abandoned, so we should
-        // always apply the optimization here. We do not validate the pipeline after adding the
-        // cache stage optimization.
+        // always apply the optimization here.
         addCacheStageAndOptimize(DocumentSourceSequentialDocumentCache::create(_fromExpCtx, _cache),
                                  *pipeline);
+
+        // We perform pipeline validation again after adding the cache stage, given that stages with
+        // a stage constraint of PositionRequirement::kCustom will only perform validation checks
+        // when 'alreadyOptimized' is true. If we avoid this check we could potentially try to
+        // execute invalid pipelines.
+        pipeline->validateCommon(true /* alreadyOptimized */);
     };
 
     try {
@@ -525,17 +493,20 @@ std::unique_ptr<mongo::Pipeline> LookUpStage::buildPipeline(
             fromExpCtx,
             std::move(parsedPipeline),
             !cacheIsServing,
-            finalizePipeline,
+            optimizePipeline,
             shardTargetingPolicy);
     } catch (const ExceptionFor<ErrorCodes::CommandOnShardedViewNotSupportedOnMongod>& e) {
         // This exception returns the information we need to resolve a sharded view. Update the
         // pipeline with the resolved view definition and retry to attach the cursor.
-        pipeline = buildPipelineFromViewDefinition(fromExpCtx,
-                                                   e->getNamespace(),
-                                                   e->getPipeline(),
-                                                   !cacheIsServing,
-                                                   shardTargetingPolicy,
-                                                   finalizePipeline);
+        pipeline = buildPipelineFromViewDefinition(
+            fromExpCtx,
+            e->getNamespace(),
+            isRawDataOperation(pExpCtx->getOperationContext()) && e->timeseries()
+                ? std::vector<BSONObj>{}
+                : e->getPipeline(),
+            !cacheIsServing,
+            shardTargetingPolicy,
+            optimizePipeline);
     }
 
     // If the cache has been abandoned, release it.
@@ -570,12 +541,11 @@ GetNextResult LookUpStage::unwindResult() {
         _input = nextInput.releaseDocument();
 
         _sharedState->pipeline = buildPipeline(_fromExpCtx, *_input);
-        _sharedState->execPipeline = exec::agg::buildPipeline(_sharedState->pipeline->freeze());
 
         // The $lookup stage takes responsibility for disposing of its Pipeline, since it will
         // potentially be used by multiple OperationContexts, and the $lookup stage is part of an
         // outer Pipeline that will propagate dispose() calls before being destroyed.
-        _sharedState->execPipeline->dismissDisposal();
+        _sharedState->execPipeline = exec::agg::buildPipeline(_sharedState->pipeline->freeze());
 
         _cursorIndex = 0;
         _nextValue = _sharedState->execPipeline->getNext();

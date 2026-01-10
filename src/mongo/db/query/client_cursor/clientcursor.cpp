@@ -29,28 +29,21 @@
 
 #include "mongo/db/query/client_cursor/clientcursor.h"
 
-#include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands/server_status/server_status_metric.h"
 #include "mongo/db/curop.h"
-#include "mongo/db/local_catalog/external_data_source_scope_guard.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/memory_tracking/operation_memory_usage_tracker.h"
 #include "mongo/db/query/client_cursor/cursor_manager.h"
 #include "mongo/db/query/client_cursor/cursor_server_params.h"
 #include "mongo/db/query/plan_explainer.h"
-#include "mongo/db/query/query_knob_configuration.h"
-#include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/query_stats/query_stats.h"
+#include "mongo/db/shard_role/shard_catalog/external_data_source_scope_guard.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/util/background.h"
 #include "mongo/util/clock_source.h"
 #include "mongo/util/concurrency/idle_thread_block.h"
 #include "mongo/util/exit.h"
 
-#include <iosfwd>
-#include <mutex>
-#include <ratio>
 #include <string>
 
 #include <boost/cstdint.hpp>
@@ -127,10 +120,10 @@ ClientCursor::ClientCursor(ClientCursorParams params,
       _planCacheKey(CurOp::get(operationUsingCursor)->debug().planCacheKey),
       _planCacheShapeHash(CurOp::get(operationUsingCursor)->debug().planCacheShapeHash),
       _queryShapeHash(CurOp::get(operationUsingCursor)->debug().getQueryShapeHash()),
-      _queryStatsKeyHash(CurOp::get(operationUsingCursor)->debug().queryStatsInfo.keyHash),
-      _queryStatsKey(std::move(CurOp::get(operationUsingCursor)->debug().queryStatsInfo.key)),
+      _queryStatsKeyHash(CurOp::get(operationUsingCursor)->debug().getQueryStatsInfo().keyHash),
+      _queryStatsKey(std::move(CurOp::get(operationUsingCursor)->debug().getQueryStatsInfo().key)),
       _queryStatsWillNeverExhaust(
-          CurOp::get(operationUsingCursor)->debug().queryStatsInfo.willNeverExhaust),
+          CurOp::get(operationUsingCursor)->debug().getQueryStatsInfo().willNeverExhaust),
       _isChangeStreamQuery(CurOp::get(operationUsingCursor)->debug().isChangeStreamQuery),
       _shouldOmitDiagnosticInformation(
           CurOp::get(operationUsingCursor)->getShouldOmitDiagnosticInformation()),

@@ -37,9 +37,6 @@
 #include "mongo/db/query/util/validate_id.h"
 #include "mongo/util/str.h"
 
-#include <cstdint>
-#include <memory>
-
 #include <boost/functional/hash.hpp>
 #include <boost/optional/optional.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
@@ -484,13 +481,15 @@ void DocumentStorage::loadLazyMetadata() const {
             } else if (fieldName == Document::metaFieldRandVal) {
                 _metadataFields.setRandVal(elem.Double());
             } else if (fieldName == Document::metaFieldSortKey) {
+                uassert(11503701,
+                        str::stream() << "$sortKey must be an object or array type.Provided type: "
+                                      << elem.type(),
+                        elem.isABSONObj());
                 auto bsonSortKey = elem.Obj();
-
                 // If the sort key has exactly one field, we say it is a "single element key."
                 BSONObjIterator sortKeyIt(bsonSortKey);
                 uassert(31282, "Empty sort key in metadata", sortKeyIt.more());
                 bool isSingleElementKey = !(++sortKeyIt).more();
-
                 _metadataFields.setSortKey(
                     DocumentMetadataFields::deserializeSortKey(isSingleElementKey, bsonSortKey),
                     isSingleElementKey);
@@ -600,6 +599,10 @@ constexpr StringData Document::metaFieldChangeStreamControlEvent;
 
 void Document::toBsonWithMetaData(BSONObjBuilder* builder) const {
     toBson(builder);
+    toBsonWithMetaDataOnly(builder);
+}
+
+void Document::toBsonWithMetaDataOnly(BSONObjBuilder* builder) const {
     if (!metadata()) {
         return;
     }
@@ -644,6 +647,15 @@ void Document::toBsonWithMetaData(BSONObjBuilder* builder) const {
     if (metadata().isChangeStreamControlEvent()) {
         builder->append(metaFieldChangeStreamControlEvent, true);
     }
+}
+
+Document Document::createDocumentWithMetadata(const BSONObj& documentBSON,
+                                              const BSONObj& metadataBSON) {
+    MutableDocument document(Document{documentBSON});
+    MutableDocument metadataDocument;
+    metadataDocument.reset(metadataBSON, true);
+    document.setMetadata(metadataDocument.releaseMetadata());
+    return document.freeze();
 }
 
 Document Document::fromBsonWithMetaData(const BSONObj& bson) {
@@ -820,7 +832,6 @@ void Document::hash_combine(size_t& seed, const StringDataComparator* stringComp
 int Document::compare(const Document& rL,
                       const Document& rR,
                       const StringDataComparator* stringComparator) {
-
     if (&rL.storage() == &rR.storage()) {
         // If the storage is the same (shared between the documents) then the documents must be
         // equal.

@@ -242,10 +242,7 @@ const skippedAuthTestingAggStages = [
     "$tumblingWindow",
     "$sessionWindow",
     "$validate",
-
-    // The following stages are stubs defined in aggregation_stage_stub_parsers.json.
-    "$stubStage",
-    "$testFoo",
+    "$setStreamMeta",
 ];
 
 // The following commands are skipped in 'authCommandsLib' because they are unable to be
@@ -301,6 +298,7 @@ const skippedAuthTestingCommands = [
     "planCacheSetFilter",
     "prepareTransaction",
     "reapLogicalSessionCacheNow",
+    "recreateRangeDeletionTasks",
     "releaseMemory",
     "repairShardedCollectionChunksHistory",
     "replicateSearchIndexCommand",
@@ -472,6 +470,19 @@ export const authCommandsLib = {
                     runOnDb: adminDbName,
                     roles: Object.extend({enableSharding: 1}, roles_clusterManager),
                     privileges: [{resource: {db: "test", collection: "x"}, actions: ["reshardCollection"]}],
+                    expectFail: true,
+                },
+            ],
+        },
+        {
+            testname: "abortRewriteCollection",
+            command: {abortRewriteCollection: "test.x"},
+            skipUnlessSharded: true,
+            testcases: [
+                {
+                    runOnDb: adminDbName,
+                    roles: Object.extend({enableSharding: 1}, roles_clusterManager),
+                    privileges: [{resource: {db: "test", collection: "x"}, actions: ["rewriteCollection"]}],
                     expectFail: true,
                 },
             ],
@@ -3500,6 +3511,23 @@ export const authCommandsLib = {
             ],
         },
         {
+            testname: "_shardsvrReshardRecipientCriticalSectionStarted",
+            command: {
+                _shardsvrReshardRecipientCriticalSectionStarted: UUID(),
+            },
+            skipSharded: true,
+            testcases: [
+                {
+                    runOnDb: adminDbName,
+                    roles: {__system: 1},
+                    privileges: [{resource: {cluster: true}, actions: ["internal"]}],
+                    expectFail: true,
+                },
+                {runOnDb: firstDbName, roles: {}},
+                {runOnDb: secondDbName, roles: {}},
+            ],
+        },
+        {
             testname: "clusterCommitTransaction",
             command: {clusterCommitTransaction: 1},
             skipSharded: true,
@@ -5725,6 +5753,58 @@ export const authCommandsLib = {
                 {runOnDb: secondDbName, roles: {}},
             ],
         },
+        {
+            testname: "killOpWrongErrorCode",
+            command: {killOp: 1, op: 123, errorCode: ErrorCodes.DuplicateKey},
+            skipSharded: true,
+            skipTest: (conn) => !isFeatureEnabled(conn, "featureFlagKillOpErrorCodeOverride"),
+            testcases: [
+                {
+                    runOnDb: adminDbName,
+                    roles: {},
+                },
+            ],
+        },
+        {
+            testname: "killOpWrongErrorCode",
+            command: {killOp: 1, op: "shard1:123", errorCode: ErrorCodes.DuplicateKey},
+            skipUnlessSharded: true,
+            skipTest: (conn) => !isFeatureEnabled(conn, "featureFlagKillOpErrorCodeOverride"),
+            testcases: [
+                {
+                    runOnDb: adminDbName,
+                    roles: {},
+                    expectFail: true, // we won't be able to find the shardId
+                },
+            ],
+        },
+        {
+            testname: "killOpErrorCode",
+            command: {killOp: 1, op: 123, errorCode: ErrorCodes.InterruptedDueToOverload},
+            skipSharded: true,
+            skipTest: (conn) => !isFeatureEnabled(conn, "featureFlagKillOpErrorCodeOverride"),
+            testcases: [
+                {
+                    runOnDb: adminDbName,
+                    roles: roles_hostManager,
+                    privileges: [{resource: {cluster: true}, actions: ["killop"]}],
+                },
+            ],
+        },
+        {
+            testname: "killOpErrorCode",
+            command: {killOp: 1, op: "shard1:123", errorCode: ErrorCodes.InterruptedDueToOverload},
+            skipUnlessSharded: true,
+            skipTest: (conn) => !isFeatureEnabled(conn, "featureFlagKillOpErrorCodeOverride"),
+            testcases: [
+                {
+                    runOnDb: adminDbName,
+                    roles: roles_hostManager,
+                    privileges: [{resource: {cluster: true}, actions: ["killop"]}],
+                    expectFail: true, // we won't be able to find the shardId
+                },
+            ],
+        },
         // The rest of kill sessions auth testing is in the kill_sessions fixture (because calling
         // the commands logged in as a different user needs to have different results).  These tests
         // merely verify that the hostManager is the only role with killAnySession.
@@ -6214,6 +6294,36 @@ export const authCommandsLib = {
             ],
         },
         {
+            testname: "eseRotateActiveKEK",
+            command: {eseRotateActiveKEK: 1},
+            skipTest: () => {
+                return !getBuildInfo().modules.includes("atlas");
+            },
+            testcases: [
+                {
+                    runOnDb: adminDbName,
+                    roles: roles_hostManager,
+                    privileges: [{resource: {cluster: true}, actions: ["eseRotateActiveKEK"]}],
+                    expectFail: true,
+                },
+            ],
+        },
+        {
+            testname: "getESERotateActiveKEKStatus",
+            command: {getESERotateActiveKEKStatus: 1},
+            skipTest: () => {
+                return !getBuildInfo().modules.includes("atlas");
+            },
+            testcases: [
+                {
+                    runOnDb: adminDbName,
+                    roles: roles_hostManager,
+                    privileges: [{resource: {cluster: true}, actions: ["getESERotateActiveKEKStatus"]}],
+                    expectFail: true,
+                },
+            ],
+        },
+        {
             testname: "oidcListKeys",
             command: {oidcListKeys: 1},
             // Only enterprise knows of this command.
@@ -6376,6 +6486,22 @@ export const authCommandsLib = {
             testname: "profileSetSampleRate",
             command: {profile: -1, sampleRate: 0.5},
             skipSharded: true,
+            testcases: [
+                {
+                    runOnDb: firstDbName,
+                    roles: roles_dbAdmin,
+                    privileges: [{resource: {db: firstDbName, collection: ""}, actions: ["enableProfiler"]}],
+                },
+                {
+                    runOnDb: secondDbName,
+                    roles: roles_dbAdminAny,
+                    privileges: [{resource: {db: secondDbName, collection: ""}, actions: ["enableProfiler"]}],
+                },
+            ],
+        },
+        {
+            testname: "profileFilter",
+            command: {profile: -1, filter: {$alwaysTrue: 1}},
             testcases: [
                 {
                     runOnDb: firstDbName,
@@ -6820,7 +6946,21 @@ export const authCommandsLib = {
                 {runOnDb: secondDbName, roles: {}},
             ],
         },
-
+        {
+            testname: "rewriteCollection",
+            command: {rewriteCollection: "test.x"},
+            skipUnlessSharded: true,
+            testcases: [
+                {
+                    runOnDb: adminDbName,
+                    roles: Object.extend({enableSharding: 1}, roles_clusterManager),
+                    privileges: [{resource: {db: "test", collection: "x"}, actions: ["rewriteCollection"]}],
+                    expectFail: true,
+                },
+                {runOnDb: firstDbName, roles: {}},
+                {runOnDb: secondDbName, roles: {}},
+            ],
+        },
         {
             testname: "_configsvrReshardCollection",
             command: {_configsvrReshardCollection: "test.x", key: {_id: 1}},
@@ -7421,13 +7561,7 @@ export const authCommandsLib = {
         },
         {
             testname: "aggregate_$backupCursor",
-            setup: (db) => {
-                return {isReplicaSetEndpointEnabled: FeatureFlagUtil.isEnabled(db, "ReplicaSetEndpoint")};
-            },
-            runOnDb: (state) => {
-                const {isReplicaSetEndpointEnabled} = state;
-                return isReplicaSetEndpointEnabled ? "local" : adminDbName;
-            },
+            runOnDb: () => adminDbName,
             command: {aggregate: 1, cursor: {}, pipeline: [{$backupCursor: {}}]},
             skipSharded: true,
             // Only enterprise knows of this aggregation stage.
@@ -7448,13 +7582,7 @@ export const authCommandsLib = {
         },
         {
             testname: "aggregate_$backupCursorExtend",
-            setup: (db) => {
-                return {isReplicaSetEndpointEnabled: FeatureFlagUtil.isEnabled(db, "ReplicaSetEndpoint")};
-            },
-            runOnDb: (state) => {
-                const {isReplicaSetEndpointEnabled} = state;
-                return isReplicaSetEndpointEnabled ? "local" : adminDbName;
-            },
+            runOnDb: () => adminDbName,
             command: {
                 aggregate: 1,
                 pipeline: [
@@ -7939,6 +8067,8 @@ export const authCommandsLib = {
                 },
             ],
         },
+        // TODO SERVER-112325: Remove this stage once all mongos versions are guaranteed to not
+        // generate this stage in a change stream pipeline anymore.
         {
             testname: "aggregate_$_internalChangeStreamCheckTopologyChange",
             command: {

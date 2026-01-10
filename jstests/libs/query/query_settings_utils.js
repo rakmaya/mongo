@@ -11,7 +11,7 @@ import {
     getQueryPlanners,
     getWinningPlanFromExplain,
 } from "jstests/libs/query/analyze_plan.js";
-import {getParameter, setParameterOnAllHosts} from "jstests/noPassthrough/libs/server_parameter_helpers.js";
+import {getParameter, setParameterOnAllNonConfigNodes} from "jstests/noPassthrough/libs/server_parameter_helpers.js";
 
 export class QuerySettingsUtils {
     /**
@@ -161,6 +161,14 @@ export class QuerySettingsUtils {
     }
 
     /**
+     * Forces a refresh of the query settings cache on all mongos nodes.
+     */
+    forceRefresh() {
+        const mongo = this._db.getMongo();
+        mongo.refreshClusterParameters();
+    }
+
+    /**
      * Helper function to assert equality of QueryShapeConfigurations. In order to ease the
      * assertion logic, 'queryShapeHash' field is removed from the QueryShapeConfiguration prior
      * to assertion.
@@ -175,6 +183,7 @@ export class QuerySettingsUtils {
         shouldRunExplain = true,
         ignoreRepresentativeQueryFields = [],
     ) {
+        this.forceRefresh();
         const isRunningFCVUpgradeDowngradeSuite = TestData.isRunningFCVUpgradeDowngradeSuite || false;
 
         // In case 'expectedQueryShapeConfigurations' has no 'representativeQuery' attribute, we do
@@ -310,20 +319,27 @@ export class QuerySettingsUtils {
             if (representativeQuery) {
                 expectedQueryShapeConfiguration.representativeQuery = representativeQuery;
             }
+            this.forceRefresh();
             assert.soonNoExcept(() => {
                 const settings = this.getQuerySettings({filter: {queryShapeHash}, showQueryShapeHash: true});
                 assert.sameMembers(settings, [expectedQueryShapeConfiguration]);
                 return true;
             });
 
+            // Run the test callback first, then execute hooks.
+            // This ensures that any explains in runTest() see the same database state
+            // as explains captured before withQuerySettings was called, because hooks
+            // may execute commands that modify state (e.g., $merge creating collections).
+            const result = runTest();
             this._onSetQuerySettingsHooks.forEach((hook) => hook());
-            return runTest();
+            return result;
         } finally {
             if (queryShapeHash) {
                 const removeQuerySettingsCmd = {
                     removeQuerySettings: representativeQuery ?? queryShapeHash,
                 };
                 assert.commandWorked(this._db.adminCommand(removeQuerySettingsCmd));
+                this.forceRefresh();
                 assert.soon(() => this.getQuerySettings({filter: {queryShapeHash}}).length === 0);
             }
         }
@@ -358,16 +374,19 @@ export class QuerySettingsUtils {
     withBackfillDelaySeconds(delaySeconds, fn) {
         let originalDelaySeconds = null;
         let hostList = [];
+        let conn = null;
         try {
-            const conn = this._db.getMongo();
-            hostList = DiscoverTopology.findNonConfigNodes(conn);
-            assert.gt(hostList.length, 0, "No hosts found");
+            conn = this._db.getMongo();
             originalDelaySeconds = getParameter(conn, "internalQuerySettingsBackfillDelaySeconds");
-            setParameterOnAllHosts(hostList, "internalQuerySettingsBackfillDelaySeconds", delaySeconds);
+            setParameterOnAllNonConfigNodes(conn, "internalQuerySettingsBackfillDelaySeconds", delaySeconds);
             return fn();
         } finally {
-            if (hostList.length > 0 && originalDelaySeconds !== null) {
-                setParameterOnAllHosts(hostList, "internalQuerySettingsBackfillDelaySeconds", originalDelaySeconds);
+            if (originalDelaySeconds !== null && conn !== null) {
+                setParameterOnAllNonConfigNodes(
+                    conn,
+                    "internalQuerySettingsBackfillDelaySeconds",
+                    originalDelaySeconds,
+                );
             }
         }
     }
@@ -457,6 +476,8 @@ export class QuerySettingsUtils {
      * shape, `queryPrime`, and does _not_ fail a query of differing shape, `unrelatedQuery`.
      */
     assertRejection({query, queryPrime, unrelatedQuery}) {
+        // Asserting the the total amount of rejections requires executing the rejected operations and the server status on the same node each time.
+        assert(TestData.pinToSingleMongos === true);
         // Confirm there's no pre-existing settings.
         this.assertQueryShapeConfiguration([]);
 
@@ -467,6 +488,7 @@ export class QuerySettingsUtils {
 
         const assertRejectedDelta = (delta) => {
             let actual;
+            this.forceRefresh();
             assert.soon(
                 () => (actual = getRejectCount()) == delta + rejectBaseline,
                 () =>

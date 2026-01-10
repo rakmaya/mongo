@@ -31,15 +31,17 @@ global:
     cpp_includes:
         - "mongo/db/query/write_ops/write_ops_parsers.h"
         - "mongo/db/repl/optime.h"
+    mod_visibility: public
 
 imports:
     - "mongo/crypto/fle_field_schema.idl"
     - "mongo/db/auth/access_checks.idl"
     - "mongo/db/auth/action_type.idl"
-    - "mongo/db/session/logical_session_id.idl"
-    - "mongo/db/pipeline/legacy_runtime_constants.idl"
-    - "mongo/db/query/hint.idl"
     - "mongo/db/basic_types.idl"
+    - "mongo/db/pipeline/legacy_runtime_constants.idl"
+    - "mongo/db/query/write_ops/query_stats_metrics.idl"
+    - "mongo/db/query/hint.idl"
+    - "mongo/db/session/logical_session_id.idl"
 
 types:
     multi_delete_bool:
@@ -158,6 +160,11 @@ structs:
                 type: array<Upserted>
                 optional: true
                 stability: stable
+            queryStatsMetrics:
+                description: "Metrics for those statements within the command that request them."
+                type: array<QueryStatsMetrics>
+                optional: true
+                stability: internal
             nModified:
                 description: "Number of updated documents."
                 type: int
@@ -339,6 +346,11 @@ structs:
                     on its own (based on whether the command is retryable or in a transaction)."
                 type: optionalBool
                 cpp_name: allowShardKeyUpdatesWithoutFullShardKeyInQuery
+                stability: internal
+            includeQueryStatsMetricsForOpIndex:
+                description: "When present, tells shards to add metrics to response for the op at the given index."
+                type: int
+                optional: true
                 stability: internal
 
     DeleteOpEntry:

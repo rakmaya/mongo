@@ -65,8 +65,7 @@ struct kv_workload_generator_spec {
     uint64_t max_recno;
     uint64_t max_value_uint64;
 
-    /* Probabilities for table types. */
-    float column_fix;
+    /* Probability for table type. */
     float column_var;
 
     /* The probability of allowing the use of "set commit timestamp" in a transaction. */
@@ -109,7 +108,7 @@ struct kv_workload_generator_spec {
     float prepared_transaction_rollback_after_prepare;
     float prepared_transaction_rollback_before_prepare;
 
-    /* Probabilities of WiredTiger timing stress configurations. */
+    /* Weights of WiredTiger timing stress configurations. */
     /* FIXME-WT-13878 : Refactor this code and move into a separate structure. */
     float timing_stress_ckpt_slow;
     float timing_stress_ckpt_evict_page;
@@ -128,6 +127,12 @@ struct kv_workload_generator_spec {
      *     Create the generator specification using default probability values.
      */
     kv_workload_generator_spec();
+
+    /*
+     * kv_workload_generator_spec::compute_timing_stress_total --
+     *     The function to compute the sum of weights.
+     */
+    std::function<float()> timing_stress_total;
 };
 
 /*

@@ -63,6 +63,8 @@
 
 namespace mongo {
 
+DECLARE_STAGE_PARAMS_DERIVED_DEFAULT(CurrentOp);
+
 class DocumentSourceCurrentOp final : public DocumentSource {
 public:
     using TruncationMode = MongoProcessInterface::CurrentOpTruncateMode;
@@ -81,21 +83,25 @@ public:
     static constexpr TruncationMode kDefaultTruncationMode = TruncationMode::kNoTruncation;
     static constexpr CursorMode kDefaultCursorMode = CursorMode::kExcludeCursors;
 
-    class LiteParsed final : public LiteParsedDocumentSource {
+    class LiteParsed final : public LiteParsedDocumentSourceDefault<LiteParsed> {
     public:
         static std::unique_ptr<LiteParsed> parse(const NamespaceString& nss,
                                                  const BSONElement& spec,
                                                  const LiteParserOptions& options);
 
-        LiteParsed(std::string parseTimeName,
+        LiteParsed(const BSONElement& spec,
                    const boost::optional<TenantId>& tenantId,
                    UserMode allUsers,
                    LocalOpsMode localOps)
-            : LiteParsedDocumentSource(std::move(parseTimeName)),
+            : LiteParsedDocumentSourceDefault(spec),
               _allUsers(allUsers),
               _localOps(localOps),
               _privileges(
                   {Privilege(ResourcePattern::forClusterResource(tenantId), ActionType::inprog)}) {}
+
+        std::unique_ptr<StageParams> getStageParams() const override {
+            return std::make_unique<CurrentOpStageParams>(_originalBson);
+        }
 
         stdx::unordered_set<NamespaceString> getInvolvedNamespaces() const final {
             return stdx::unordered_set<NamespaceString>();

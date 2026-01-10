@@ -31,14 +31,24 @@ extensions_with_config(
         # are added to the "skips" list in that test.
         ":bar_mongo_extension",
         ":foo_mongo_extension",
+        ":limit_mongo_extension",
         ":logging_mongo_extension",
         ":debug_logging_mongo_extension",
         ":parse_options_mongo_extension",
         ":test_options_mongo_extension",
+        ":toaster_mongo_extension",
         ":extension_errors_mongo_extension",
         ":shapify_mongo_extension",
         ":sharded_execution_serialization_mongo_extension",
+        ":read_n_documents_mongo_extension",
         ":explain_mongo_extension",
+        ":metadata_mongo_extension",
+        ":idle_threads_mongo_extension",
+        ":interrupt_mongo_extension",
+        ":match_topN_mongo_extension",
+        ":native_vector_search_mongo_extension",
+        ":metrics_mongo_extension",
+        ":other_metrics_mongo_extension",
 
         #################### EXTENSIONS FOR NO-PASSTHROUGH TESTS ####################
         # Any extension that is just loaded in a no-passthrough test MUST NOT have the
@@ -49,6 +59,8 @@ extensions_with_config(
         ":vector_search_extension",
     ],
 )
+
+pkg_name = "//" + package_name() + "/"
 
 ############################## EXTENSIONS FOR PASSTHROUGH TESTS ##############################
 ### Any extension name suffix'ed with "_mongo_extension" with be automatically picked up by
@@ -63,8 +75,23 @@ extensions_with_config(
     )
     for extension_name in [
         "foo",
+        "metadata",
         "foo_v2",
         "bar",
+        "read_n_documents",
+    ]
+]
+
+# Extensions under test_examples/desugar/
+[
+    mongo_cc_extension_shared_library(
+        name = extension_name + "_mongo_extension",
+        srcs = [pkg_name + "desugar:" + extension_name + ".cpp"],
+    )
+    for extension_name in [
+        "limit",
+        "match_topN",
+        "native_vector_search",
     ]
 ]
 
@@ -72,11 +99,12 @@ extensions_with_config(
 [
     mongo_cc_extension_shared_library(
         name = extension_name + "_mongo_extension",
-        srcs = ["extension_options/" + extension_name + ".cpp"],
+        srcs = [pkg_name + "extension_options:" + extension_name + ".cpp"],
     )
     for extension_name in [
         "test_options",
         "parse_options",
+        "toaster",
     ]
 ]
 
@@ -84,7 +112,7 @@ extensions_with_config(
 [
     mongo_cc_extension_shared_library(
         name = extension_name + "_mongo_extension",
-        srcs = ["loading/" + extension_name + ".cpp"],
+        srcs = [pkg_name + "loading:" + extension_name + ".cpp"],
     )
     for extension_name in [
         "host_version_succeeds",
@@ -97,12 +125,13 @@ extensions_with_config(
 [
     mongo_cc_extension_shared_library(
         name = extension_name + "_mongo_extension",
-        srcs = ["host_services/" + extension_name + ".cpp"],
+        srcs = [pkg_name + "host_services:" + extension_name + ".cpp"],
     )
     for extension_name in [
         "logging",
         "extension_errors",
         "debug_logging",
+        "idle_threads",
     ]
 ]
 
@@ -110,12 +139,15 @@ extensions_with_config(
 [
     mongo_cc_extension_shared_library(
         name = extension_name + "_mongo_extension",
-        srcs = ["observability/" + extension_name + ".cpp"],
+        srcs = [pkg_name + "observability:" + extension_name + ".cpp"],
     )
     for extension_name in [
         "sharded_execution_serialization",
         "explain",
         "shapify",
+        "metrics",
+        "other_metrics",
+        "interrupt",
     ]
 ]
 
@@ -130,7 +162,7 @@ extensions_with_config(
 [
     mongo_cc_extension_shared_library(
         name = extension_name + "_bad_extension",
-        srcs = ["fail_to_load/" + extension_name + ".cpp"],
+        srcs = [pkg_name + "fail_to_load:" + extension_name + ".cpp"],
     )
     for extension_name in [
         "no_symbol",

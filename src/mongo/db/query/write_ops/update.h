@@ -30,11 +30,12 @@
 #pragma once
 
 #include "mongo/db/curop.h"
-#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/write_ops/update_request.h"
 #include "mongo/db/query/write_ops/update_result.h"
+#include "mongo/db/shard_role/shard_role.h"
+#include "mongo/util/modules.h"
 
 namespace mongo {
 
@@ -48,8 +49,8 @@ class UpdateDriver;
  *
  * Caller must hold the appropriate database locks.
  */
-UpdateResult update(OperationContext* opCtx,
-                    CollectionAcquisition& coll,
-                    const UpdateRequest& request);
+MONGO_MOD_PUBLIC UpdateResult update(OperationContext* opCtx,
+                                     CollectionAcquisition& coll,
+                                     const UpdateRequest& request);
 
 }  // namespace mongo

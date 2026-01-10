@@ -37,14 +37,14 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/index/multikey_paths.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_options.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/collection_bulk_loader.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_options.h"
 #include "mongo/db/storage/key_string/key_string.h"
 #include "mongo/util/modules.h"
 #include "mongo/util/uuid.h"
@@ -407,6 +407,12 @@ public:
      * Fetches the latest oplog entry's timestamp. Bypasses the oplog visibility rules.
      */
     virtual Timestamp getLatestOplogTimestamp(OperationContext* opCtx) = 0;
+
+    /**
+     * Gets the oldest timestamp for which the storage engine must maintain snapshot history
+     * through.
+     */
+    virtual Timestamp getOldestTimestamp(ServiceContext* serviceCtx) = 0;
 
     using CollectionSize = uint64_t;
     using CollectionCount = uint64_t;

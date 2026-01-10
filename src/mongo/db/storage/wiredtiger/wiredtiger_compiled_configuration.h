@@ -30,6 +30,7 @@
 #pragma once
 
 #include "mongo/base/status.h"
+#include "mongo/util/modules.h"
 
 #include <wiredtiger.h>
 
@@ -46,6 +47,8 @@ public:
     CompiledConfiguration(const char* apiName, const char* config);
 
     const char* getConfig(WiredTigerSession* session) const;
+
+    const std::string& getRawConfig() const;
 
 private:
     std::string _apiName;

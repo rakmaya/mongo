@@ -35,6 +35,7 @@
 #include "mongo/bson/util/builder_fwd.h"
 #include "mongo/db/logical_time.h"
 #include "mongo/db/versioning_protocol/chunk_version.h"
+#include "mongo/util/modules.h"
 
 #include <iosfwd>
 #include <string>
@@ -54,7 +55,7 @@ namespace mongo {
  * network requests and the shard versioning protocol.
  *
  */
-class ShardVersion {
+class MONGO_MOD_NEEDS_REPLACEMENT ShardVersion {
 public:
     /**
      * The name for the shard version information field, which shard-aware commands should include
@@ -64,8 +65,8 @@ public:
 
     ShardVersion() : _chunkVersion(ChunkVersion()) {}
 
-    static ShardVersion UNSHARDED() {
-        return ShardVersion(ChunkVersion::UNSHARDED(), boost::none);
+    static ShardVersion UNTRACKED() {
+        return ShardVersion(ChunkVersion::UNTRACKED(), boost::none);
     }
 
     static bool isPlacementVersionIgnored(const ShardVersion& version) {
@@ -76,16 +77,18 @@ public:
         return _chunkVersion;
     }
 
-    boost::optional<LogicalTime> placementConflictTime() const {
+    // TODO (SERVER-115178): Remove once v9.0 branches out
+    boost::optional<LogicalTime> placementConflictTime_DEPRECATED() const {
         return _placementConflictTime;
+    }
+
+    // TODO (SERVER-115178): Remove once v9.0 branches out
+    void setPlacementConflictTime_DEPRECATED(LogicalTime conflictTime) {
+        _placementConflictTime.emplace(std::move(conflictTime));
     }
 
     void setPlacementVersionIgnored() {
         _chunkVersion = ChunkVersion::IGNORED();
-    }
-
-    void setPlacementConflictTime(LogicalTime conflictTime) {
-        _placementConflictTime.emplace(std::move(conflictTime));
     }
 
     bool getIgnoreShardingCatalogUuidMismatch() const {
@@ -108,6 +111,7 @@ public:
     void serialize(StringData field, BSONObjBuilder* builder) const;
 
     std::string toString() const;
+    BSONObj toBSON() const;
 
 private:
     ShardVersion(ChunkVersion chunkVersion,

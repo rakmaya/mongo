@@ -44,18 +44,6 @@
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/value.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/clustered_collection_options_gen.h"
-#include "mongo/db/local_catalog/clustered_collection_util.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_catalog.h"
-#include "mongo/db/local_catalog/collection_options.h"
-#include "mongo/db/local_catalog/database.h"
-#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
-#include "mongo/db/local_catalog/lock_manager/exception_util.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/logical_time.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
@@ -73,6 +61,18 @@
 #include "mongo/db/s/resharding/resharding_oplog_fetcher_progress_gen.h"
 #include "mongo/db/s/resharding/resharding_server_parameters_gen.h"
 #include "mongo/db/s/resharding/resharding_util.h"
+#include "mongo/db/shard_role/lock_manager/d_concurrency.h"
+#include "mongo/db/shard_role/lock_manager/exception_util.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/clustered_collection_options_gen.h"
+#include "mongo/db/shard_role/shard_catalog/clustered_collection_util.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/collection_options.h"
+#include "mongo/db/shard_role/shard_catalog/database.h"
+#include "mongo/db/shard_role/shard_role.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/topology/shard_registry.h"
@@ -316,6 +316,13 @@ Future<void> ReshardingOplogFetcher::awaitInsert(const ReshardingDonorOplogId& l
     // ReshardingDonorOplogIterator only uses _id's from documents that it actually read from the
     // oplog buffer collection for `lastSeen`, but would also mean the caller wants to wait.
     return std::move(_onInsertFuture);
+}
+
+void ReshardingOplogFetcher::awaitBatchProcessed(int numBatchesProcessed) {
+    stdx::unique_lock lk(_mutex);
+    _batchProcessedCV.wait(lk, [this, numBatchesProcessed] {
+        return _totalNumBatchesProcessed == numBatchesProcessed;
+    });
 }
 
 ExecutorFuture<void> ReshardingOplogFetcher::schedule(
@@ -613,7 +620,7 @@ bool ReshardingOplogFetcher::consume(Client* client,
     auto aggRequest = _makeAggregateCommandRequest(client, factory);
 
     auto opCtxRaii = factory.makeOperationContext(client);
-    int batchesProcessed = 0;
+    int currentNumBatchesProcessed = 0;
     bool moreToCome = true;
 
     auto tickSource = opCtxRaii->getServiceContext()->getTickSource();
@@ -621,10 +628,12 @@ bool ReshardingOplogFetcher::consume(Client* client,
 
     // Note that the oplog entries are *not* being copied with a tailable cursor.
     // Shard::runAggregation() will instead return upon hitting the end of the donor's oplog.
+    // TODO(SERVER-113504): Consider using kIdempotent and properly implement onRetry.
     uassertStatusOK(shard->runAggregation(
         opCtxRaii.get(),
         aggRequest,
-        [this, &batchesProcessed, &moreToCome, &opCtxRaii, &batchTimer, factory](
+        Shard::RetryPolicy::kNoRetry,
+        [this, &currentNumBatchesProcessed, &moreToCome, &opCtxRaii, &batchTimer, factory](
             const std::vector<BSONObj>& aggregateBatch,
             const boost::optional<BSONObj>& postBatchResumeToken) {
             _env->metrics()->onBatchRetrievedDuringOplogFetching(Milliseconds(batchTimer.millis()));
@@ -649,7 +658,7 @@ bool ReshardingOplogFetcher::consume(Client* client,
                 acquireCollection(opCtx,
                                   CollectionAcquisitionRequest(
                                       _oplogBufferNss,
-                                      PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                      PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
                                       repl::ReadConcernArgs::get(opCtx),
                                       AcquisitionPrerequisites::kWrite),
                                   MODE_IX);
@@ -657,7 +666,7 @@ bool ReshardingOplogFetcher::consume(Client* client,
                 acquireCollection(opCtx,
                                   CollectionAcquisitionRequest(
                                       NamespaceString::kReshardingFetcherProgressNamespace,
-                                      PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                      PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
                                       repl::ReadConcernArgs::get(opCtx),
                                       AcquisitionPrerequisites::kWrite),
                                   MODE_IX);
@@ -698,15 +707,21 @@ bool ReshardingOplogFetcher::consume(Client* client,
                 }
             }
 
+            boost::optional<Timestamp> currBatchLastOplogTs;
+
+            if (!insertBatches.empty()) {
+                currBatchLastOplogTs = insertBatches.back().lastOplogId.getTs();
+            }
+
             if (postBatchResumeToken) {
-                auto currBatchLastOplogTs = postBatchResumeToken->getField("ts").timestamp();
+                currBatchLastOplogTs = postBatchResumeToken->getField("ts").timestamp();
 
                 // Insert a noop entry with the latest oplog timestamp from the donor's cursor
                 // response. This will allow the fetcher to resume reading from the last oplog entry
                 // it fetched even if that entry is for a different collection, making resuming less
                 // wasteful.
                 if (auto oplogId =
-                        _makeProgressMarkOplogIdIfNeedToInsert(opCtx, currBatchLastOplogTs)) {
+                        _makeProgressMarkOplogIdIfNeedToInsert(opCtx, *currBatchLastOplogTs)) {
                     auto oplog = _makeProgressMarkOplog(opCtx, *oplogId);
 
                     try {
@@ -737,19 +752,27 @@ bool ReshardingOplogFetcher::consume(Client* client,
                         // donor returns will be the same, so it's safe to ignore this error.
                     }
                 }
+            }
 
+            if (currBatchLastOplogTs) {
                 auto timeToFetch = calculateTimeToFetch(
-                    opCtx, batchTimer, currBatchLastOplogTs, prevBatchLastOplogId.getTs());
+                    opCtx, batchTimer, *currBatchLastOplogTs, prevBatchLastOplogId.getTs());
                 _env->metrics()->updateAverageTimeToFetchOplogEntries(_donorShard, timeToFetch);
             }
 
             batchTimer.reset();
 
-            if (_maxBatches > -1 && ++batchesProcessed >= _maxBatches) {
+            stdx::lock_guard lk(_mutex);
+            ++_totalNumBatchesProcessed;
+            _batchProcessedCV.notify_all();
+            if (_maxBatches > -1 && ++currentNumBatchesProcessed >= _maxBatches) {
                 return false;
             }
 
             return true;
+        },
+        [](const Status&) {
+            // Do nothing on retry since we don't allow retries.
         }));
 
     return moreToCome;

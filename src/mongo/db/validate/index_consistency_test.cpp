@@ -29,14 +29,16 @@
 
 #include "mongo/db/validate/index_consistency.h"
 
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
-#include "mongo/db/collection_crud/collection_write_path.h"
-#include "mongo/db/local_catalog/catalog_test_fixture.h"
+#include "mongo/db/dbhelpers.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_test_fixture.h"
 #include "mongo/db/validate/collection_validation.h"
 #include "mongo/db/validate/validate_gen.h"
 #include "mongo/db/validate/validate_options.h"
+#include "mongo/logv2/log.h"
 #include "mongo/unittest/unittest.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
 namespace mongo {
 namespace {
@@ -44,19 +46,18 @@ namespace {
 // Namespace String for the collection used in these tests.
 const auto kNss =
     NamespaceString::createNamespaceString_forTest("indexConsistencyDB.indexConsistencyColl");
+const auto kDefaultValidateOptions =
+    CollectionValidation::ValidationOptions{CollectionValidation::ValidateMode::kForegroundFull,
+                                            CollectionValidation::RepairMode::kNone,
+                                            /*logDiagnostics=*/true};
 
 using IndexConsistencyTest = CatalogTestFixture;
 
 
 ValidateResults validate(OperationContext* opCtx) {
     ValidateResults validateResults;
-    ASSERT_OK(CollectionValidation::validate(
-        opCtx,
-        kNss,
-        CollectionValidation::ValidationOptions{CollectionValidation::ValidateMode::kForegroundFull,
-                                                CollectionValidation::RepairMode::kNone,
-                                                /*logDiagnostics=*/true},
-        &validateResults));
+    ASSERT_OK(
+        CollectionValidation::validate(opCtx, kNss, kDefaultValidateOptions, &validateResults));
     return validateResults;
 }
 
@@ -70,9 +71,8 @@ void clearCollection(OperationContext* opCtx, const CollectionPtr& coll) {
 // entries.
 void clearIndexOfEntriesFoundInCollection(OperationContext* opCtx,
                                           CollectionWriter& coll,
-                                          const IndexDescriptor* descriptor) {
-    IndexCatalog* indexCatalog = coll.getWritableCollection(opCtx)->getIndexCatalog();
-    auto iam = indexCatalog->getEntry(descriptor)->accessMethod()->asSortedData();
+                                          const IndexCatalogEntry* entry) {
+    auto iam = entry->accessMethod()->asSortedData();
     auto cursor = coll->getCursor(opCtx);
     for (auto record = cursor->next(); record; record = cursor->next()) {
         SharedBufferFragmentBuilder pooledBuilder(
@@ -81,7 +81,7 @@ void clearIndexOfEntriesFoundInCollection(OperationContext* opCtx,
         KeyStringSet keys;
         iam->getKeys(opCtx,
                      coll.get(),
-                     descriptor->getEntry(),
+                     entry,
                      pooledBuilder,
                      record->data.toBson(),
                      InsertDeleteOptions::ConstraintEnforcementMode::kRelaxConstraintsUnfiltered,
@@ -92,7 +92,8 @@ void clearIndexOfEntriesFoundInCollection(OperationContext* opCtx,
                      record->id);
         ASSERT_OK(iam->removeKeys(opCtx,
                                   *shard_role_details::getRecoveryUnit(opCtx),
-                                  descriptor->getEntry(),
+                                  coll.get(),
+                                  entry,
                                   std::move(keys),
                                   InsertDeleteOptions{.dupsAllowed = true},
                                   &numDeleted));
@@ -113,8 +114,7 @@ TEST_F(IndexConsistencyTest, ExtraIndexEntriesLimitedByMemoryBounds) {
 
         for (int i = 0; i < 10; ++i) {
             BSONObj doc = BSON("_id" << i);
-            ASSERT_OK(collection_internal::insertDocument(
-                operationContext(), *coll, InsertStatement(doc), nullptr));
+            ASSERT_OK(Helpers::insert(operationContext(), *coll, doc));
         }
 
         clearCollection(operationContext(), *coll);
@@ -150,8 +150,7 @@ TEST_F(IndexConsistencyTest, MissingIndexEntriesLimitedByMemoryBounds) {
 
         for (int i = 0; i < 10; ++i) {
             BSONObj doc = BSON("_id" << i);
-            ASSERT_OK(collection_internal::insertDocument(
-                operationContext(), writer.get(), InsertStatement(doc), nullptr));
+            ASSERT_OK(Helpers::insert(operationContext(), writer.get(), doc));
         }
 
         IndexCatalog* indexCatalog =
@@ -199,8 +198,7 @@ TEST_F(IndexConsistencyTest, ExtraEntryPartialFindingsWithNonzeroMemoryLimit) {
                         << BSON("a" << 1))));
         for (int i = 0; i < 10; ++i) {
             BSONObj doc = BSON("_id" << i << "a" << std::string(600 * 1024, 'a' + i));
-            ASSERT_OK(collection_internal::insertDocument(
-                operationContext(), writer.get(), InsertStatement(doc), nullptr));
+            ASSERT_OK(Helpers::insert(operationContext(), writer.get(), doc));
         }
 
         clearCollection(operationContext(), writer.get());
@@ -254,8 +252,7 @@ TEST_F(IndexConsistencyTest, MissingEntryPartialFindingsWithNonzeroMemoryLimit) 
                         << BSON("a" << 1))));
         for (int i = 0; i < 10; ++i) {
             BSONObj doc = BSON("_id" << i << "a" << std::string(600 * 1024, 'a' + i));
-            ASSERT_OK(collection_internal::insertDocument(
-                operationContext(), writer.get(), InsertStatement(doc), nullptr));
+            ASSERT_OK(Helpers::insert(operationContext(), writer.get(), doc));
         }
 
         IndexCatalog* indexCatalog =
@@ -306,16 +303,14 @@ TEST_F(IndexConsistencyTest, MemoryLimitSharedBetweenMissingAndExtra) {
         // The first 10 entries appear in the index and not the collection.
         for (int i = 0; i < 10; ++i) {
             BSONObj doc = BSON("_id" << i);
-            ASSERT_OK(collection_internal::insertDocument(
-                operationContext(), writer.get(), InsertStatement(doc), nullptr));
+            ASSERT_OK(Helpers::insert(operationContext(), writer.get(), doc));
         }
         clearCollection(operationContext(), writer.get());
 
         // The second 10 entries are collection-only.
         for (int i = 10; i < 20; ++i) {
             BSONObj doc = BSON("_id" << i);
-            ASSERT_OK(collection_internal::insertDocument(
-                operationContext(), writer.get(), InsertStatement(doc), nullptr));
+            ASSERT_OK(Helpers::insert(operationContext(), writer.get(), doc));
         }
         IndexCatalog* indexCatalog =
             writer.getWritableCollection(operationContext())->getIndexCatalog();
@@ -348,6 +343,54 @@ TEST_F(IndexConsistencyTest, MemoryLimitSharedBetweenMissingAndExtra) {
         // 1 bucket is always kept, so even with 0 memory we will at least find one inconsistency.
         ASSERT_GTE(sum_of_inconsistencies, 1);
     }
+}
+
+// Index key consistency is validated by rebuilding the key for a given document in a collection.
+// This test exercises the failure path by creating a hashed index which is incompatible with
+// array-type BSON data. This document will then be subject to key consistency checks that it will
+// fail.
+TEST_F(IndexConsistencyTest, FailedKeygen) {
+    auto opCtx = operationContext();
+    ASSERT_OK(storageInterface()->createCollection(opCtx, kNss, CollectionOptions()));
+
+    static constexpr auto secondaryIndexKey{"xHashed"_sd};
+
+    AutoGetCollection coll(opCtx, kNss, MODE_X);
+    CollectionWriter writer(opCtx, coll);
+    const auto indexSpec = BSON("v" << IndexDescriptor::IndexVersion::kV2 << "name"
+                                    << secondaryIndexKey << "key" << BSON("x" << "hashed"));
+    {
+        WriteUnitOfWork wuow(opCtx);
+        auto collWriter = writer.getWritableCollection(opCtx);
+        ASSERT_OK(collWriter->getIndexCatalog()->createIndexOnEmptyCollection(
+            opCtx, collWriter, indexSpec));
+
+        ASSERT_OK(Helpers::insert(opCtx, writer.get(), BSON("_id" << 1 << "x" << "y")));
+        wuow.commit();
+    }
+
+    CollectionValidation::ValidateState state(opCtx, kNss, kDefaultValidateOptions);
+
+    const auto unhashableDoc = std::invoke([] {
+        BSONArrayBuilder bab;
+        bab.append(1);
+        return BSON("x" << bab.arr());
+    });
+
+    const auto xHashedIndex = coll->getIndexCatalog()->findIndexByName(opCtx, secondaryIndexKey);
+
+    ValidateResults results;
+    KeyStringIndexConsistency ksic(opCtx, &state);
+    ksic.traverseRecord(opCtx, *coll, xHashedIndex, RecordId(1), unhashableDoc, &results);
+    const auto& errors = results.getErrors();
+    ASSERT_EQ(errors.size(), 1);
+    auto it = std::find_if(errors.begin(), errors.end(), [](StringData error) {
+        // Expect error relating to hashed indexes unsupported on array types
+        return error.contains("16766");
+    });
+    ASSERT_EQ(errors.begin(), it)
+        << "Expected to find error 16766 relating to hashed indexes unsupported on array types";
+    LOGV2(11475700, "Error associated with validation run", "validationError"_attr = *it);
 }
 
 }  // namespace mongo

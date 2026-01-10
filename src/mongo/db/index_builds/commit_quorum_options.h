@@ -34,13 +34,11 @@
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/util/modules.h"
 
 #include <string>
 
-namespace mongo {
-
-class Status;
-
+namespace MONGO_MOD_PUBLIC mongo {
 /**
  * 'CommitQuorumOptions' is used to determine when a primary should commit an index build. When the
  * specified 'quorum' of replica set members is reached, then the primary proceeds to commit the
@@ -58,10 +56,10 @@ public:
     static const char kMajority[];               // = "majority"
     static const char kVotingMembers[];          // = "votingMembers"
 
-    static const int kUninitializedNumNodes = -1;
-    static const int kDisabled = 0;
-    static const BSONObj Majority;       // = {"commitQuorum": "majority"}
-    static const BSONObj VotingMembers;  // = {"commitQuorum": "votingMembers"}
+    static constexpr int kUninitializedNumNodes = -1;
+    static constexpr int kPrimarySelfVote = 1;  // Primary just needs 1 vote (from itself).
+    static const BSONObj Majority;              // = {"commitQuorum": "majority"}
+    static const BSONObj VotingMembers;         // = {"commitQuorum": "votingMembers"}
 
     CommitQuorumOptions() {
         reset();
@@ -111,4 +109,4 @@ public:
     std::string mode = "";
 };
 
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUBLIC mongo

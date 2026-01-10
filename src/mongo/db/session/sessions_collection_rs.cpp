@@ -40,13 +40,13 @@
 #include "mongo/client/remote_command_targeter_factory_impl.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/dbdirectclient.h"
-#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/repl_set_config.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/session/logical_session_id_gen.h"
+#include "mongo/db/shard_role/lock_manager/d_concurrency.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/net/hostandport.h"
@@ -186,24 +186,25 @@ void SessionsCollectionRS::checkSessionsCollectionExists(OperationContext* opCtx
                     (localLogicalSessionTimeoutMinutes * 60));
 }
 
-void SessionsCollectionRS::refreshSessions(OperationContext* opCtx,
-                                           const LogicalSessionRecordSet& sessions) {
+SessionsCollection::RefreshSessionsResult SessionsCollectionRS::refreshSessions(
+    OperationContext* opCtx, const LogicalSessionRecordSet& sessions) {
     const std::vector<LogicalSessionRecord> sessionsVector(sessions.begin(), sessions.end());
 
-    _dispatch(
+    return _dispatch(
         NamespaceString::kLogicalSessionsNamespace,
         opCtx,
         [&] {
             DBDirectClient client(opCtx);
-            _doRefresh(
+            return _doRefresh(
                 NamespaceString::kLogicalSessionsNamespace,
                 sessionsVector,
                 makeSendFnForBatchWrite(NamespaceString::kLogicalSessionsNamespace, &client));
         },
         [&](DBClientBase* client) {
-            _doRefresh(NamespaceString::kLogicalSessionsNamespace,
-                       sessionsVector,
-                       makeSendFnForBatchWrite(NamespaceString::kLogicalSessionsNamespace, client));
+            return _doRefresh(
+                NamespaceString::kLogicalSessionsNamespace,
+                sessionsVector,
+                makeSendFnForBatchWrite(NamespaceString::kLogicalSessionsNamespace, client));
         });
 }
 

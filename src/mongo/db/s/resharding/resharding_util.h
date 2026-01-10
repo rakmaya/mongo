@@ -60,6 +60,7 @@
 #include "mongo/s/resharding/resharding_feature_flag_gen.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/uuid.h"
 
 #include <cstdint>
@@ -79,12 +80,26 @@
 namespace mongo {
 namespace resharding {
 
-constexpr auto kReshardFinalOpLogType = "reshardFinalOp"_sd;
+inline const Status kUserAbortReason{ErrorCodes::ReshardCollectionAborted,
+                                     "resharding aborted by user"};
+MONGO_MOD_PUBLIC inline const Status kFCVChangeAbortReason{
+    ErrorCodes::ReshardCollectionInterruptedDueToFCVChange, "resharding aborted due to FCV change"};
+inline const Status kCriticalTimeoutAbortReason{ErrorCodes::ReshardingCriticalSectionTimeout,
+                                                "resharding critical section timed out"};
+inline const Status kQuiesceAbortReason{ErrorCodes::ReshardCollectionQuiescing,
+                                        "resharding operation completed and is in quiesce"};
+
+enum MONGO_MOD_PUBLIC AbortType { kAbortWithQuiesce, kAbortSkipQuiesce };
+
+MONGO_MOD_NEEDS_REPLACEMENT constexpr auto kReshardFinalOpLogType = "reshardFinalOp"_sd;
 constexpr auto kReshardProgressMarkOpLogType = "reshardProgressMark"_sd;
 static const auto kReshardErrorMaxBytes = 2000;
 
 const WriteConcernOptions kMajorityWriteConcern{
     WriteConcernOptions::kMajority, WriteConcernOptions::SyncMode::UNSET, Seconds(0)};
+
+inline const Status kCoordinatorAbortedError{ErrorCodes::ReshardCollectionAborted,
+                                             "Received abort from the resharding coordinator"};
 
 struct ParticipantShardsAndChunks {
     std::vector<DonorShardEntry> donorShards;
@@ -290,7 +305,8 @@ RecipientShardEntry makeRecipientShard(ShardId shardId,
  *      <db>.system.resharding.<existing collection's UUID>
  * or   <db>.system.buckets.resharding.<existing collection's UUID> for a timeseries source ns.
  */
-NamespaceString constructTemporaryReshardingNss(const NamespaceString& nss, const UUID& sourceUuid);
+MONGO_MOD_NEEDS_REPLACEMENT NamespaceString
+constructTemporaryReshardingNss(const NamespaceString& nss, const UUID& sourceUuid);
 
 /**
  * Asserts that there is not a hole or overlap in the chunks.
@@ -426,11 +442,14 @@ bool isMoveCollection(const boost::optional<ReshardingProvenanceEnum>& provenanc
 bool isUnshardCollection(const boost::optional<ReshardingProvenanceEnum>& provenance);
 
 /**
+ * Returns true if the provenance is rewriteCollection.
+ */
+bool isRewriteCollection(const boost::optional<ReshardingProvenanceEnum>& provenance);
+
+/**
  * Helper function to create a thread pool for _markKilledExecutor member of resharding POS.
  */
 std::shared_ptr<ThreadPool> makeThreadPoolForMarkKilledExecutor(const std::string& poolName);
-
-boost::optional<Status> coordinatorAbortedError();
 
 /**
  * If 'performVerification' is true, asserts that featureFlagReshardingVerification is enabled.

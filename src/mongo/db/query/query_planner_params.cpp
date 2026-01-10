@@ -27,10 +27,9 @@
  *    it in the license file.
  */
 
-#include "query_planner_params.h"
+#include "mongo/db/query/query_planner_params.h"
 
 #include "mongo/db/exec/projection_executor_utils.h"
-#include "mongo/db/global_catalog/shard_key_pattern_query_util.h"
 #include "mongo/db/index/multikey_metadata_access_stats.h"
 #include "mongo/db/index/wildcard_access_method.h"
 #include "mongo/db/query/compiler/stats/collection_statistics_impl.h"
@@ -43,7 +42,8 @@
 #include "mongo/db/query/wildcard_multikey_paths.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/db/timeseries/timeseries_index_schema_conversion_functions.h"
-#include "mongo/s/shard_targeting_helpers.h"
+#include "mongo/s/query/shard_key_pattern_query_util.h"
+#include "mongo/s/query/shard_targeting_collation_helpers.h"
 #include "mongo/util/assert_util.h"
 
 #include <boost/optional/optional.hpp>
@@ -66,10 +66,10 @@ namespace {
  */
 IndexEntry indexEntryFromIndexCatalogEntry(OperationContext* opCtx,
                                            const CollectionPtr& collection,
-                                           const IndexCatalogEntry& ice,
+                                           std::shared_ptr<const IndexCatalogEntry> ice,
                                            const CanonicalQuery& canonicalQuery) {
-    auto desc = ice.descriptor();
-    invariant(desc);
+    auto desc = ice->descriptor();
+    tassert(11321048, "Index catalog entry descriptor must not be null", desc);
 
     if (desc->isIdIndex()) {
         // _id indexes are guaranteed to be non-multikey. Determining whether the index is multikey
@@ -80,19 +80,18 @@ IndexEntry indexEntryFromIndexCatalogEntry(OperationContext* opCtx,
                 false, /* isMultikey */
                 {},    /* MultikeyPaths */
                 {},    /* multikey Pathset */
-                desc->isSparse(),
+                desc->isSetSparseByUser(),
                 desc->unique(),
                 IndexEntry::Identifier{desc->indexName()},
-                ice.getFilterExpression(),
                 desc->infoObj(),
-                ice.getCollator(),
-                nullptr /* wildcard projection */};
+                nullptr /* wildcard projection */,
+                std::move(ice)};
     }
 
-    auto accessMethod = ice.accessMethod();
-    invariant(accessMethod);
+    auto accessMethod = ice->accessMethod();
+    tassert(11321049, "Index catalog entry access method must not be null", accessMethod);
 
-    const bool isMultikey = ice.isMultikey(opCtx, collection);
+    const bool isMultikey = ice->isMultikey(opCtx, collection);
 
     const WildcardProjection* wildcardProjection = nullptr;
     std::set<FieldRef> multikeyPathSet;
@@ -114,7 +113,7 @@ IndexEntry indexEntryFromIndexCatalogEntry(OperationContext* opCtx,
             }
 
             multikeyPathSet =
-                getWildcardMultikeyPathSet(opCtx, &ice, projectedFields, &mkAccessStats);
+                getWildcardMultikeyPathSet(opCtx, ice.get(), projectedFields, &mkAccessStats);
 
             LOGV2_DEBUG(20920,
                         2,
@@ -125,25 +124,24 @@ IndexEntry indexEntryFromIndexCatalogEntry(OperationContext* opCtx,
         }
     }
 
+    auto multikeyPaths = ice->getMultikeyPaths(opCtx, collection);
     return {desc->keyPattern(),
             desc->getIndexType(),
             desc->version(),
             isMultikey,
             // The fixed-size vector of multikey paths stored in the index catalog.
-            ice.getMultikeyPaths(opCtx, collection),
+            std::move(multikeyPaths),
             // The set of multikey paths from special metadata keys stored in the index itself.
             // Indexes that have these metadata keys do not store a fixed-size vector of multikey
             // metadata in the index catalog. Depending on the index type, an index uses one of
             // these mechanisms (or neither), but not both.
             std::move(multikeyPathSet),
-            desc->isSparse(),
+            desc->isSetSparseByUser(),
             desc->unique(),
             IndexEntry::Identifier{desc->indexName()},
-            ice.getFilterExpression(),
             desc->infoObj(),
-            ice.getCollator(),
             wildcardProjection,
-            ice.shared_from_this()};
+            std::move(ice)};
 }
 
 void fillOutIndexEntries(OperationContext* opCtx,
@@ -152,18 +150,14 @@ void fillOutIndexEntries(OperationContext* opCtx,
                          std::vector<IndexEntry>& entries) {
     bool apiStrict = APIParameters::get(opCtx).getAPIStrict().value_or(false);
 
-    std::vector<const IndexCatalogEntry*> indexCatalogEntries;
-    auto ii =
-        collection->getIndexCatalog()->getIndexIterator(IndexCatalog::InclusionPolicy::kReady);
-    while (ii->more()) {
-        const IndexCatalogEntry* ice = ii->next();
-
+    for (auto&& ice :
+         collection->getIndexCatalog()->getEntriesShared(IndexCatalog::InclusionPolicy::kReady)) {
         // Indexes excluded from API version 1 should _not_ be used for planning if apiStrict is
         // set to true.
         auto indexType = ice->descriptor()->getIndexType();
         if (apiStrict &&
             (indexType == IndexType::INDEX_HAYSTACK || indexType == IndexType::INDEX_TEXT ||
-             ice->descriptor()->isSparse())) {
+             ice->descriptor()->isSetSparseByUser())) {
             continue;
         }
 
@@ -172,14 +166,10 @@ void fillOutIndexEntries(OperationContext* opCtx,
             continue;
         }
 
-        indexCatalogEntries.push_back(ice);
+        entries.emplace_back(
+            indexEntryFromIndexCatalogEntry(opCtx, collection, std::move(ice), canonicalQuery));
     }
 
-    entries.reserve(indexCatalogEntries.size());
-    for (auto ice : indexCatalogEntries) {
-        entries.emplace_back(
-            indexEntryFromIndexCatalogEntry(opCtx, collection, *ice, canonicalQuery));
-    }
     pauseAfterFillingOutIndexEntries.pauseWhileSet();
 }
 
@@ -444,13 +434,10 @@ void QueryPlannerParams::applyQuerySettingsOrIndexFiltersForMainCollection(
     }
 }
 
-void QueryPlannerParams::fillOutSecondaryCollectionsPlannerParams(
+void QueryPlannerParams::fillOutSecondaryCollectionsInfo(
     OperationContext* opCtx,
     const CanonicalQuery& canonicalQuery,
     const MultipleCollectionAccessor& collections) {
-    if (canonicalQuery.cqPipeline().empty()) {
-        return;
-    }
     auto fillOutSecondaryInfo = [&](const NamespaceString& nss,
                                     const CollectionPtr& secondaryColl) {
         CollectionInfo secondaryInfo;
@@ -498,6 +485,17 @@ void QueryPlannerParams::fillOutSecondaryCollectionsPlannerParams(
                                             coll->getTimeseriesOptions());
         }
     }
+}
+
+void QueryPlannerParams::fillOutSecondaryCollectionsPlannerParams(
+    OperationContext* opCtx,
+    const CanonicalQuery& canonicalQuery,
+    const MultipleCollectionAccessor& collections) {
+    if (canonicalQuery.cqPipeline().empty()) {
+        return;
+    }
+
+    fillOutSecondaryCollectionsInfo(opCtx, canonicalQuery, collections);
 }
 
 void QueryPlannerParams::fillOutMainCollectionPlannerParams(
@@ -574,6 +572,17 @@ void QueryPlannerParams::setTargetSbeStageBuilder(OperationContext* opCtx,
 }
 
 namespace {
+
+projection_executor::ProjectionExecutor* getWildcardProjectionExecutor(
+    const IndexDescriptor& desc, const IndexCatalogEntry& ice) {
+    if (desc.getIndexType() != IndexType::INDEX_WILDCARD) {
+        return nullptr;
+    }
+    return static_cast<const WildcardAccessMethod*>(ice.accessMethod())
+        ->getWildcardProjection()
+        ->exec();
+}
+
 std::vector<IndexEntry> getIndexEntriesForDistinct(
     const QueryPlannerParams::ArgsForDistinct& distinctArgs) {
     std::vector<IndexEntry> indices;
@@ -583,17 +592,11 @@ std::vector<IndexEntry> getIndexEntriesForDistinct(
     const auto& query = canonicalQuery.getFindCommandRequest().getFilter();
     const auto& key = canonicalQuery.getDistinct()->getKey();
     const auto& collectionPtr = distinctArgs.collections.getMainCollection();
+    const bool strictDistinctOnly =
+        distinctArgs.plannerOptions & QueryPlannerParams::STRICT_DISTINCT_ONLY;
 
-    // If the caller did not request a "strict" distinct scan then we may choose a plan which
-    // either unwinds arrays and treats each element in an array as its own key or ignores missing
-    // fields.
-    const bool mayUnwindArraysOrIgnoreMissing =
-        !(distinctArgs.plannerOptions & QueryPlannerParams::STRICT_DISTINCT_ONLY);
-
-    auto ii =
-        collectionPtr->getIndexCatalog()->getIndexIterator(IndexCatalog::InclusionPolicy::kReady);
-    while (ii->more()) {
-        const IndexCatalogEntry* ice = ii->next();
+    for (auto&& ice : collectionPtr->getIndexCatalog()->getEntriesShared(
+             IndexCatalog::InclusionPolicy::kReady)) {
         const IndexDescriptor* desc = ice->descriptor();
 
         // Skip the addition of hidden indexes to prevent use in query planning.
@@ -601,58 +604,17 @@ std::vector<IndexEntry> getIndexEntriesForDistinct(
             continue;
         }
 
-        if (desc->keyPattern().hasField(key)) {
-            // This handles regular fields of Compound Wildcard Indexes as well.
-            if (distinctArgs.flipDistinctScanDirection && ice->isMultikey(opCtx, collectionPtr)) {
-                // This CanonicalDistinct was generated as a result of transforming a $group with
-                // $last accumulators using the GroupFromFirstTransformation. We cannot use a
-                // DISTINCT_SCAN if $last is being applied to an indexed field which is multikey,
-                // even if the 'canonicalDistinct' key does not include multikey paths. This is
-                // because changing the sort direction also changes the comparison semantics for
-                // arrays, which means that flipping the scan may not exactly flip the order that we
-                // see documents in. In the case of using DISTINCT_SCAN for $group, that would mean
-                // that $first of the flipped scan may not be the same document as $last from the
-                // user's requested sort order.
-                continue;
-            }
-
-            // If we do not want to ignore missing fields then we cannot use a sparse index.
-            if (!mayUnwindArraysOrIgnoreMissing && desc->isSparse()) {
-                continue;
-            }
-
-            if (!mayUnwindArraysOrIgnoreMissing &&
-                isAnyComponentOfPathOrProjectionMultikey(
-                    desc->keyPattern(),
-                    ice->isMultikey(opCtx, collectionPtr),
-                    ice->getMultikeyPaths(opCtx, collectionPtr),
-                    key)) {
-                // If the caller requested "strict" distinct that does not "pre-unwind" arrays,
-                // then an index which is multikey on the distinct field may not be used. This is
-                // because when indexing an array each element gets inserted individually. Any plan
-                // which involves scanning the index will have effectively "unwound" all arrays.
-                continue;
-            }
-
-            indices.push_back(
-                indexEntryFromIndexCatalogEntry(opCtx, collectionPtr, *ice, canonicalQuery));
-        } else if (desc->getIndexType() == IndexType::INDEX_WILDCARD && !query.isEmpty()) {
-            // Check whether the $** projection captures the field over which we are distinct-ing.
-            auto* proj = static_cast<const WildcardAccessMethod*>(ice->accessMethod())
-                             ->getWildcardProjection()
-                             ->exec();
-            if (projection_executor_utils::applyProjectionToOneField(proj, key)) {
-                indices.push_back(
-                    indexEntryFromIndexCatalogEntry(opCtx, collectionPtr, *ice, canonicalQuery));
-            }
-
-            // It is not necessary to do any checks about 'mayUnwindArrays' in this case, because:
-            // 1) If there is no predicate on the distinct(), a wildcard indices may not be used.
-            // 2) distinct() _with_ a predicate may not be answered with a DISTINCT_SCAN on _any_
-            // multikey index.
-
-            // So, we will not distinct scan a wildcard index that's multikey on the distinct()
-            // field, regardless of the value of 'mayUnwindArrays'.
+        if (isIndexSuitableForDistinct(desc->keyPattern(),
+                                       ice->isMultikey(opCtx, collectionPtr),
+                                       ice->getMultikeyPaths(opCtx, collectionPtr),
+                                       desc->isSetSparseByUser(),
+                                       getWildcardProjectionExecutor(*desc, *ice),
+                                       key,
+                                       query,
+                                       distinctArgs.flipDistinctScanDirection,
+                                       strictDistinctOnly)) {
+            indices.push_back(indexEntryFromIndexCatalogEntry(
+                opCtx, collectionPtr, std::move(ice), canonicalQuery));
         }
     }
 
@@ -720,11 +682,6 @@ bool QueryPlannerParams::requiresShardFiltering(const CanonicalQuery& canonicalQ
                                                 const CollectionPtr& collection) {
     if (!(mainCollectionInfo.options & INCLUDE_SHARD_FILTER)) {
         // Shard filter was not requested; cmd may not be from a router.
-        return false;
-    }
-    // If the caller wants a shard filter, make sure we're actually sharded.
-    if (!collection.isSharded_DEPRECATED()) {
-        // Not actually sharded.
         return false;
     }
 

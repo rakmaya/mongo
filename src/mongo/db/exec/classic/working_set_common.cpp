@@ -34,20 +34,18 @@
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/bson/util/builder.h"
 #include "mongo/bson/util/builder_fwd.h"
 #include "mongo/db/exec/classic/working_set.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/index/multikey_paths.h"
 #include "mongo/db/index/preallocated_container_pool.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/index_catalog.h"
-#include "mongo/db/local_catalog/index_catalog_entry.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/record_id.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog_entry.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/index_entry_comparison.h"
 #include "mongo/db/storage/key_string/key_string.h"
 #include "mongo/db/storage/record_data.h"
@@ -60,9 +58,7 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/shared_buffer_fragment.h"
-#include "mongo/util/stacktrace.h"
 #include "mongo/util/str.h"
-#include "mongo/util/time_support.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -108,7 +104,7 @@ bool WorkingSetCommon::fetch(OperationContext* opCtx,
 
     // We should have a RecordId but need to retrieve the obj. Get the obj now and reset all WSM
     // state appropriately.
-    invariant(member->hasRecordId());
+    tassert(11051600, "Expecting working set member to have recordId", member->hasRecordId());
 
     auto record = cursor->seekExact(member->recordId);
     if (!record) {
@@ -192,14 +188,14 @@ bool WorkingSetCommon::fetch(OperationContext* opCtx,
             KeyStringSet* multikeyMetadataKeys = nullptr;
             MultikeyPaths* multikeyPaths = nullptr;
             const StringData indexIdent = workingSet->retrieveIndexIdent(memberKey.indexId);
-            auto desc = collection->getIndexCatalog()->findIndexByIdent(opCtx, indexIdent);
-            invariant(desc,
+            auto entry = collection->getIndexCatalog()->findIndexByIdent(opCtx, indexIdent);
+            invariant(entry,
                       str::stream() << "Index entry not found for index with ident " << indexIdent
                                     << " on collection " << collection->ns().toStringForErrorMsg());
-            auto* iam = desc->getEntry()->accessMethod()->asSortedData();
+            auto* iam = entry->accessMethod()->asSortedData();
             iam->getKeys(opCtx,
                          collection,
-                         desc->getEntry(),
+                         entry,
                          pool,
                          member->doc.value().toBson(),
                          InsertDeleteOptions::ConstraintEnforcementMode::kEnforceConstraints,

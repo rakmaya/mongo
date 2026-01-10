@@ -30,6 +30,7 @@
 #pragma once
 
 #include "mongo/db/exec/sbe/stages/stages.h"
+#include "mongo/util/modules.h"
 
 namespace mongo::sbe {
 
@@ -54,6 +55,9 @@ public:
     const SpecificStats* getSpecificStats() const final;
 
     size_t estimateCompileTimeSize() const final;
+
+    void doDebugPrint(std::vector<DebugPrinter::Block>& ret,
+                      DebugPrintInfo& debugPrintInfo) const final {}
 
 protected:
     void doAttachCollectionAcquisition(const MultipleCollectionAccessor& mca) override {

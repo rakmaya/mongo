@@ -60,6 +60,8 @@
 
 namespace mongo {
 
+DECLARE_STAGE_PARAMS_DERIVED_DEFAULT(ListSessions);
+
 /**
  * $listSessions: { allUsers: true/false, users: [ {user:"jsmith", db:"test"}, ... ] }
  * Return all sessions in the config.system.sessions collection
@@ -88,21 +90,21 @@ public:
         return id;
     }
 
-    class LiteParsed final : public LiteParsedDocumentSource {
+    class LiteParsed final : public LiteParsedDocumentSourceDefault<LiteParsed> {
     public:
         static std::unique_ptr<LiteParsed> parse(const NamespaceString& nss,
                                                  const BSONElement& spec,
                                                  const LiteParserOptions& options) {
             return std::make_unique<LiteParsed>(
-                spec.fieldName(),
+                spec,
                 nss.tenantId(),
                 listSessionsParseSpec(DocumentSourceListSessions::kStageName, spec));
         }
 
-        explicit LiteParsed(std::string parseTimeName,
-                            const boost::optional<TenantId>& tenantId,
-                            const ListSessionsSpec& spec)
-            : LiteParsedDocumentSource(std::move(parseTimeName)),
+        LiteParsed(const BSONElement& specElem,
+                   const boost::optional<TenantId>& tenantId,
+                   const ListSessionsSpec& spec)
+            : LiteParsedDocumentSourceDefault(specElem),
               _spec(spec),
               _privileges(listSessionsRequiredPrivileges(_spec, tenantId)) {}
 
@@ -121,6 +123,10 @@ public:
 
         bool isInitialSource() const final {
             return true;
+        }
+
+        std::unique_ptr<StageParams> getStageParams() const final {
+            return std::make_unique<ListSessionsStageParams>(_originalBson);
         }
 
     private:

@@ -51,9 +51,6 @@
 #include "mongo/db/global_catalog/type_namespace_placement_gen.h"
 #include "mongo/db/global_catalog/type_shard.h"
 #include "mongo/db/global_catalog/type_tags.h"
-#include "mongo/db/local_catalog/coll_mod.h"
-#include "mongo/db/local_catalog/collection_options_gen.h"
-#include "mongo/db/local_catalog/ddl/coll_mod_gen.h"
 #include "mongo/db/logical_time.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
@@ -73,10 +70,13 @@
 #include "mongo/db/server_options.h"
 #include "mongo/db/session/logical_session_cache.h"
 #include "mongo/db/session/logical_session_id_gen.h"
+#include "mongo/db/shard_role/ddl/coll_mod_gen.h"
+#include "mongo/db/shard_role/shard_catalog/coll_mod.h"
+#include "mongo/db/shard_role/shard_catalog/collection_options_gen.h"
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/topology/cluster_role.h"
 #include "mongo/db/topology/shard_registry.h"
-#include "mongo/db/vector_clock/vector_clock.h"
+#include "mongo/db/topology/vector_clock/vector_clock.h"
 #include "mongo/executor/connection_pool_stats.h"
 #include "mongo/executor/inline_executor.h"
 #include "mongo/executor/task_executor_pool.h"
@@ -176,6 +176,8 @@ void startTransactionWithNoopFind(OperationContext* opCtx,
     FindCommandRequest findCommand(nss);
     findCommand.setBatchSize(0);
     findCommand.setSingleBatch(true);
+    findCommand.setReadConcern(
+        ReadWriteConcernDefaults::get(opCtx).getImplicitDefaultReadConcern());
 
     auto res = runCommandInLocalTxn(
                    opCtx, nss.dbName(), true /*startTransaction*/, txnNumber, findCommand.toBSON())
@@ -610,48 +612,6 @@ Status ShardingCatalogManager::setFeatureCompatibilityVersionOnShards(OperationC
                                           DatabaseName::kAdmin,
                                           cmdObj,
                                           Shard::RetryPolicy::kIdempotent);
-        if (!response.isOK()) {
-            return response.getStatus();
-        }
-        if (!response.getValue().commandStatus.isOK()) {
-            return response.getValue().commandStatus;
-        }
-        if (!response.getValue().writeConcernStatus.isOK()) {
-            return response.getValue().writeConcernStatus;
-        }
-    }
-
-    return Status::OK();
-}
-
-Status ShardingCatalogManager::runCloneAuthoritativeMetadataOnShards(OperationContext* opCtx) {
-    // No shards should be added until we have forwarded the clone command to all shards.
-    Lock::SharedLock lk(opCtx, _kShardMembershipLock);
-
-    // We do a direct read of the shards collection with local readConcern so no shards are missed,
-    // but don't go through the ShardRegistry to prevent it from caching data that may be rolled
-    // back.
-    const auto opTimeWithShards =
-        _localCatalogClient->getAllShards(opCtx, repl::ReadConcernLevel::kLocalReadConcern);
-
-    for (const auto& shardType : opTimeWithShards.value) {
-        const auto shardStatus =
-            Grid::get(opCtx)->shardRegistry()->getShard(opCtx, shardType.getName());
-        if (!shardStatus.isOK()) {
-            continue;
-        }
-        const auto shard = shardStatus.getValue();
-
-        ShardsvrCloneAuthoritativeMetadata request;
-        request.setWriteConcern(defaultMajorityWriteConcernDoNotUse());
-        request.setDbName(DatabaseName::kAdmin);
-
-        auto response = shard->runCommand(opCtx,
-                                          ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-                                          DatabaseName::kAdmin,
-                                          request.toBSON(),
-                                          Shard::RetryPolicy::kIdempotent);
-
         if (!response.isOK()) {
             return response.getStatus();
         }

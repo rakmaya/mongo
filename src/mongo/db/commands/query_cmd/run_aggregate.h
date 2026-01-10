@@ -34,13 +34,14 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/commands/server_status/server_status_metric.h"
-#include "mongo/db/local_catalog/external_data_source_scope_guard.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/pipeline/lite_parsed_pipeline.h"
+#include "mongo/db/shard_role/shard_catalog/external_data_source_scope_guard.h"
 #include "mongo/rpc/op_msg_rpc_impls.h"
 #include "mongo/rpc/reply_builder_interface.h"
+#include "mongo/util/modules.h"
 
 namespace mongo {
 
@@ -64,7 +65,8 @@ Status runAggregate(
     boost::optional<ExplainOptions::Verbosity> verbosity,
     rpc::ReplyBuilderInterface* result,
     const std::vector<std::pair<NamespaceString, std::vector<ExternalDataSourceInfo>>>&
-        usedExternalDataSources = {});
+        usedExternalDataSources = {},
+    std::shared_ptr<IncrementalFeatureRolloutContext> ifrContext = nullptr);
 
 /**
  * Tracks explicit use of allowDiskUse:false with find and aggregate commands.

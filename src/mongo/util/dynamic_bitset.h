@@ -33,17 +33,22 @@
 #include "mongo/platform/compiler.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/inlined_storage.h"
+#include "mongo/util/modules.h"
 
 #include <bit>
+#include <iterator>
 #include <type_traits>
 
-namespace mongo {
-namespace bitset_utils {
+namespace MONGO_MOD_PUB mongo {
+namespace bitset_details {
 template <typename T>
 T maskbit(size_t bitIndex) {
     return static_cast<T>(1) << bitIndex;
 }
-}  // namespace bitset_utils
+}  // namespace bitset_details
+
+template <typename T, size_t nBlocks, typename Storage>
+class DynamicBitsetPopulationView;
 
 /**
  * Bitset class implementation, which can dynamically grow and shrink. t has the capability to
@@ -53,12 +58,10 @@ T maskbit(size_t bitIndex) {
  */
 template <typename T, size_t nBlocks, typename Storage = InlinedStorage<T, nBlocks>>
 class DynamicBitset {
-public:
+private:
     using BlockType = T;
     static_assert(std::is_integral_v<BlockType>);
     static_assert(nBlocks > 0);
-
-    static constexpr size_t npos = static_cast<size_t>(-1);
 
     // Useful for bit operations constants.
     static constexpr BlockType kZero = 0;       // All bits unset: 0b00000000
@@ -106,7 +109,7 @@ public:
 
     private:
         BlockType maskbit() const noexcept {
-            return bitset_utils::maskbit<BlockType>(_bitIndex);
+            return bitset_details::maskbit<BlockType>(_bitIndex);
         }
 
         void _set(bool b) noexcept {
@@ -120,6 +123,9 @@ public:
         BlockType& _block;
         size_t _bitIndex;
     };
+
+public:
+    static constexpr size_t npos = static_cast<size_t>(-1);
 
     /**
      * Allocates a bitset of default size. The bitset of default size occupies all available inlined
@@ -164,6 +170,37 @@ public:
      */
     MONGO_COMPILER_ALWAYS_INLINE bool none() const {
         return !any();
+    }
+
+    /**
+     * Return true if all bits of this bitset are set.
+     * Important: The size of the DynamicBitset is rounded up to a factor of 8 * sizeof(T) (the size
+     * of the underlying container type T). This means the bitset might be larger than the size
+     * passed to the constructor. If this is an issue, consider using 'allInPrefix' function.
+     */
+    MONGO_COMPILER_ALWAYS_INLINE bool all() const {
+        for (auto&& e : _storage)
+            if (e != kOnes)
+                return false;
+        return true;
+    }
+
+    /**
+     * Returns true if all of the first `n` bits are set.
+     */
+    bool allInPrefix(size_t n) const {
+        if (n > size())
+            return false;
+        auto iter = _storage.data();
+        for (auto end = iter + n / kBitsPerBlock; iter != end; ++iter)
+            if (*iter != kOnes)
+                return false;
+
+        if (auto part = n % kBitsPerBlock) {
+            const BlockType mask = maskbit(part) - 1;
+            return (*iter & mask) == mask;
+        }
+        return true;
     }
 
     /**
@@ -222,6 +259,12 @@ public:
         return result;
     }
 
+    /** Returns a bool equivalent to `(*this)[index]`. */
+    MONGO_COMPILER_ALWAYS_INLINE bool test(size_t index) const {
+        assertBitIndex(index);
+        return _storage[getBlockIndex(index)] & maskbit(getBitIndex(index));
+    }
+
     /**
      * Return a reference to 'index'-th bit. Using the reference you may change read or set the bit.
      */
@@ -236,6 +279,10 @@ public:
     MONGO_COMPILER_ALWAYS_INLINE bool operator[](size_t index) const {
         assertBitIndex(index);
         return _storage[getBlockIndex(index)] & maskbit(getBitIndex(index));
+    }
+
+    MONGO_COMPILER_ALWAYS_INLINE void clear() {
+        std::fill(_storage.begin(), _storage.end(), kZero);
     }
 
     /**
@@ -443,7 +490,7 @@ private:
     }
 
     MONGO_COMPILER_ALWAYS_INLINE static BlockType maskbit(size_t bitIndex) noexcept {
-        return bitset_utils::maskbit<BlockType>(bitIndex);
+        return bitset_details::maskbit<BlockType>(bitIndex);
     }
 
     /**
@@ -467,6 +514,100 @@ private:
 
     // 0 is the least significant word.
     Storage _storage;
+
+    friend class DynamicBitsetPopulationView<T, nBlocks, Storage>;
 };
 
-}  // namespace mongo
+/**
+ * A view on DynamicBitset provides a forward iterator over the indices of its set bits.
+ * The iterator is invalidated after updating or resizing the bitset.
+ */
+template <typename T, size_t nBlocks, typename Storage>
+class DynamicBitsetPopulationView {
+public:
+    using Bitset = DynamicBitset<T, nBlocks, Storage>;
+
+    class Iterator {
+    public:
+        using value_type = std::size_t;
+        using difference_type = std::ptrdiff_t;
+
+        Iterator() = default;
+
+        Iterator(const Storage* storage, size_t blockIndex)
+            : _storage(storage), _nextBlockIndex(blockIndex) {
+            _moveToNextSetBit();
+        }
+
+        value_type operator*() const {
+            return _bitIndex;
+        }
+
+        Iterator& operator++() {
+            _moveToNextSetBit();
+            return *this;
+        }
+
+        Iterator operator++(int) {
+            auto tmp = *this;
+            ++*this;
+            return tmp;
+        }
+
+        bool operator==(const Iterator& other) const {
+            return _bitIndex == other._bitIndex;
+        }
+
+    private:
+        /**
+         * Finds the lowest set bit index in the current block to calculate the bitset index and
+         * clears the bit. Advances to the next block when the current one is exhausted.
+         */
+        void _moveToNextSetBit() {
+            dassert(_storage, "increment of singular iterator");
+
+            while (_currentBlock == 0 && _nextBlockIndex < _storage->size()) {
+                _currentBlock = (*_storage)[_nextBlockIndex++];
+            }
+
+            if (_currentBlock != 0) {
+                _bitIndex =
+                    Bitset::kBitsPerBlock * (_nextBlockIndex - 1) + std::countr_zero(_currentBlock);
+                _currentBlock &= _currentBlock - 1;
+            } else {
+                _bitIndex = Bitset::npos;
+            }
+        }
+
+        const Storage* _storage{nullptr};
+        size_t _nextBlockIndex{0};
+        Bitset::BlockType _currentBlock{0};
+        value_type _bitIndex{Bitset::npos};
+    };
+
+    explicit DynamicBitsetPopulationView(const DynamicBitset<T, nBlocks, Storage>& bitset)
+        : _storage(&bitset._storage) {}
+
+    Iterator begin() const {
+        return Iterator{_storage, 0};
+    }
+
+    Iterator end() const {
+        return Iterator{_storage, _storage->size()};
+    }
+
+private:
+    static_assert(std::forward_iterator<Iterator>);
+
+    const Storage* _storage;
+};
+
+/**
+ * Creates a DynamicBitsetPopulationView to iterate over set bits.
+ */
+template <typename T, size_t nBlocks, typename Storage>
+DynamicBitsetPopulationView<T, nBlocks, Storage> makePopulationView(
+    const DynamicBitset<T, nBlocks, Storage>& bitset) {
+    return DynamicBitsetPopulationView<T, nBlocks, Storage>(bitset);
+}
+}  // namespace MONGO_MOD_PUB mongo

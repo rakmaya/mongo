@@ -51,20 +51,13 @@
 #include "mongo/db/exec/agg/exchange_stage.h"
 #include "mongo/db/exec/disk_use_options_gen.h"
 #include "mongo/db/fle_crud.h"
-#include "mongo/db/global_catalog/router_role_api/router_role.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_options.h"
-#include "mongo/db/local_catalog/db_raii.h"
-#include "mongo/db/local_catalog/external_data_source_scope_guard.h"
-#include "mongo/db/local_catalog/shard_role_api/resource_yielders.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
-#include "mongo/db/local_catalog/shard_role_catalog/operation_sharding_state.h"
 #include "mongo/db/logical_time.h"
 #include "mongo/db/memory_tracking/operation_memory_usage_tracker.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/aggregation_hint_translation.h"
 #include "mongo/db/pipeline/aggregation_request_helper.h"
 #include "mongo/db/pipeline/change_stream_invalidation_info.h"
+#include "mongo/db/pipeline/desugarer.h"
 #include "mongo/db/pipeline/document_source_exchange.h"
 #include "mongo/db/pipeline/document_source_geo_near.h"
 #include "mongo/db/pipeline/expression_context.h"
@@ -101,17 +94,25 @@
 #include "mongo/db/query/query_stats/agg_key.h"
 #include "mongo/db/query/query_stats/query_stats.h"
 #include "mongo/db/query/shard_key_diagnostic_printer.h"
-#include "mongo/db/raw_data_operation.h"
+#include "mongo/db/query/util/retry.h"
 #include "mongo/db/read_concern.h"
 #include "mongo/db/repl/read_concern_args.h"
+#include "mongo/db/router_role/router_role.h"
 #include "mongo/db/s/query_analysis_writer.h"
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/server_parameter.h"
+#include "mongo/db/shard_role/resource_yielders.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_options.h"
+#include "mongo/db/shard_role/shard_catalog/db_raii.h"
+#include "mongo/db/shard_role/shard_catalog/external_data_source_scope_guard.h"
+#include "mongo/db/shard_role/shard_catalog/operation_sharding_state.h"
+#include "mongo/db/shard_role/shard_role_loop.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/db/tenant_id.h"
-#include "mongo/db/timeseries/timeseries_options.h"
 #include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/db/views/resolved_view.h"
 #include "mongo/db/views/view.h"
@@ -278,7 +279,7 @@ void collectQueryStats(const AggExState& aggExState,
     if (maybePinnedCursor) {
         collectQueryStatsMongod(opCtx, *maybePinnedCursor);
     } else {
-        collectQueryStatsMongod(opCtx, expCtx, std::move(curOp->debug().queryStatsInfo.key));
+        collectQueryStatsMongod(opCtx, expCtx, std::move(curOp->debug().getQueryStatsInfo().key));
     }
 }
 
@@ -664,26 +665,35 @@ std::vector<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> prepareExecuto
                                                       pipeline.get(),
                                                       catalogResourceHandle);
 
-        std::vector<std::unique_ptr<Pipeline>> pipelines;
-        // Any pipeline that relies on calls to mongot requires additional setup.
-        if (search_helpers::isMongotPipeline(pipeline.get())) {
-            // Release locks early, before we generate the search pipeline, so that we don't hold
-            // them during network calls to mongot. This is fine for search pipelines since they are
-            // not reading any local (lock-protected) data in the main pipeline.
-            // Stash the ShardRole TransactionResources on the 'sharedStasher' we shared with the
-            // pipeline stages.
-            aggCatalogState.stashResources(sharedStasher.get());
-
-            pipelines.push_back(std::move(pipeline));
-
+        // We split up mongot setup as bindCatalogInfo() should be called on
+        // a desugared search pipeline and requires catalog locks.
+        bool isMongotPipeline = search_helpers::isMongotPipeline(pipeline.get());
+        DocsNeededBounds mongotBounds;
+        if (isMongotPipeline) {
             // TODO SERVER-89546 extractDocsNeededBounds should be called internally within
             // DocumentSourceSearch optimization; that also means we'd be skipping that step when
             // optimization is off.
-            auto bounds = extractDocsNeededBounds(*pipelines.back().get());
+            mongotBounds = extractDocsNeededBounds(*pipeline.get());
+            search_helpers::desugarSearchPipeline(pipeline.get());
+        }
+
+        pipeline->bindCatalogInfo(aggCatalogState.getCollections(), sharedStasher);
+
+        std::vector<std::unique_ptr<Pipeline>> pipelines;
+
+        // Any pipeline that relies on calls to mongot requires additional setup.
+        if (isMongotPipeline) {
+            pipelines.push_back(std::move(pipeline));
+            // Release locks early, before we make network calls to mongot. This is fine for search
+            // setup since they are not reading any local (lock-protected) data in the main
+            // pipeline. Stash the ShardRole TransactionResources on the 'sharedStasher' we shared
+            // with the pipeline stages.
+            aggCatalogState.stashResources(sharedStasher.get());
+
             auto metadataPipe = search_helpers::prepareSearchForTopLevelPipelineLegacyExecutor(
                 pipelines.back()->getContext(),
                 pipelines.back().get(),
-                bounds,
+                mongotBounds,
                 aggExState.getRequest().getCursor().getBatchSize());
             if (metadataPipe) {
                 pipelines.push_back(std::move(metadataPipe));
@@ -803,7 +813,7 @@ void executeExplain(const AggExState& aggExState,
     collectQueryStatsMongod(
         aggExState.getOpCtx(),
         expCtx,
-        std::move(CurOp::get(aggExState.getOpCtx())->debug().queryStatsInfo.key));
+        std::move(CurOp::get(aggExState.getOpCtx())->debug().getQueryStatsInfo().key));
 }
 
 /**
@@ -815,112 +825,18 @@ void executeExplain(const AggExState& aggExState,
  *
  * On success, fills out 'result' with the command response.
  */
-Status _runAggregate(AggExState& aggExState, rpc::ReplyBuilderInterface* result);
-
-/**
- * Resolve the view by finding the underlying collection and stitching the view pipelines and this
- * request's pipeline together. We then release our locks before recursively calling runAggregate(),
- * which will re-acquire locks on the underlying collection. (The lock must be released because
- * recursively acquiring locks on the database will prohibit yielding.)
- */
-Status runAggregateOnView(ResolvedViewAggExState& resolvedViewAggExState,
-                          std::unique_ptr<AggCatalogState> aggCatalogState,
-                          rpc::ReplyBuilderInterface* result) {
-    uassert(ErrorCodes::CommandNotSupportedOnView,
-            "mapReduce on a view is not supported",
-            !resolvedViewAggExState.getRequest().getIsMapReduceCommand());
-
-    // Resolved view will be available after view has been set on AggregationExecutionState
-    auto resolvedView = resolvedViewAggExState.getResolvedView();
-
-    // With the view & collation resolved, we can relinquish locks.
-    aggCatalogState->relinquishResources();
-
-    OperationContext* opCtx = resolvedViewAggExState.getOpCtx();
-    auto& originalNss = resolvedViewAggExState.getOriginalNss();
-
-    auto status{Status::OK()};
-    if (!OperationShardingState::get(opCtx).shouldBeTreatedAsFromRouter(opCtx)) {
-        // Non sharding-aware operation.
-        // Run the translated query on the view on this node.
-        status = _runAggregate(resolvedViewAggExState, result);
-    } else {
-        // Sharding-aware operation.
-        const auto& resolvedViewNss = resolvedView.getNamespace();
-
-        // Stash the shard role for the resolved view nss, in case it was set, as we are about to
-        // transition into the router role for it.
-        const ScopedStashShardRole scopedUnsetShardRole{opCtx, resolvedViewNss};
-
-        sharding::router::CollectionRouter router(opCtx->getServiceContext(),
-                                                  resolvedViewNss,
-                                                  false  // retryOnStaleShard=false
-        );
-        status = router.routeWithRoutingContext(
-            opCtx, "runAggregateOnView", [&](OperationContext* opCtx, RoutingContext& routingCtx) {
-                // TODO: SERVER-77402 Use a ShardRoleLoop here and remove this usage of
-                // CollectionRouter's retryOnStaleShard=false.
-                const auto& cri = routingCtx.getCollectionRoutingInfo(resolvedViewNss);
-
-                // Setup the opCtx's OperationShardingState with the expected placement versions for
-                // the underlying collection. Use the same 'placementConflictTime' from the original
-                // request, if present.
-                const auto scopedShardRole = resolvedViewAggExState.setShardRole(cri);
-
-                // Mark routing table as validated as we have entered the shard role for a local
-                // read.
-                routingCtx.onRequestSentForNss(resolvedViewNss);
-
-                // If the underlying collection is unsharded and is located on this shard, then we
-                // can execute the view aggregation locally. Otherwise, we need to kick-back to the
-                // router.
-                if (!resolvedViewAggExState.canReadUnderlyingCollectionLocally(cri)) {
-                    // Cannot execute the resolved aggregation locally. The router must do it.
-                    //
-                    // Before throwing the kick-back exception, validate the routing table
-                    // we are basing this decision on. We do so by briefly entering into
-                    // the shard-role by acquiring the underlying collection.
-                    const auto underlyingColl = acquireCollectionMaybeLockFree(
-                        opCtx,
-                        CollectionAcquisitionRequest::fromOpCtx(
-                            opCtx,
-                            resolvedView.getNamespace(),
-                            AcquisitionPrerequisites::OperationType::kRead));
-
-                    // Throw the kick-back exception.
-                    uasserted(std::move(resolvedView),
-                              "Resolved views on collections that do not exclusively live on the "
-                              "db-primary shard must be executed by mongos");
-                }
-
-                // Run the resolved aggregation locally.
-                return _runAggregate(resolvedViewAggExState, result);
-            });
-    }
-
-    // Set the namespace of the curop back to the view namespace so ctx records stats on this view
-    // namespace on destruction.
-    {
-        // It's possible this resolvedViewAggExState will be unusable by the time _runAggregate
-        // returns, so we must use opCtx and originalNss variables instead of trying to retrieve
-        // from resolvedViewAggExState.
-        // TODO SERVER-93536 Clarify ownership of aggExState.
-        stdx::lock_guard<Client> lk(*opCtx->getClient());
-        CurOp::get(opCtx)->setNS(lk, originalNss);
-    }
-
-    return status;
-}
+Status _runAggregate(std::shared_ptr<AggExState> aggExState, rpc::ReplyBuilderInterface* result);
 
 std::unique_ptr<Pipeline> parsePipelineAndRegisterQueryStats(
     const AggExState& aggExState,
     const AggCatalogState& aggCatalogState,
     boost::intrusive_ptr<ExpressionContext> expCtx) {
     // If applicable, ensure that the resolved namespace is added to the resolvedNamespaces map on
-    // the expCtx before calling Pipeline::parse(). This is necessary for search on views as
-    // Pipeline::parse() will first check if a view exists directly on the stage specification and
-    // if none is found, will then check for the view using the expCtx. As such, it's necessary to
-    // add the resolved namespace to the expCtx prior to any call to Pipeline::parse().
+    // the expCtx before calling pipeline_factory::makePipeline(). This is necessary for search on
+    // views as pipeline_factory::makePipeline() will first check if a view exists directly on the
+    // stage specification and if none is found, will then check for the view using the expCtx. As
+    // such, it's necessary to add the resolved namespace to the expCtx prior to any call to
+    // pipeline_factory::makePipeline().
     auto* opCtx = expCtx->getOperationContext();
 
     if (aggExState.isView()) {
@@ -967,7 +883,8 @@ std::unique_ptr<Pipeline> parsePipelineAndRegisterQueryStats(
     // the two pipelines together below.
     auto userRequest = aggExState.getOriginalRequest();
     expCtx->startExpressionCounters();
-    auto pipeline = Pipeline::parse(userRequest.getPipeline(), expCtx);
+    auto pipeline =
+        Pipeline::parseFromLiteParsed(aggExState.getOriginalLiteParsedPipeline(), expCtx);
     expCtx->stopExpressionCounters();
 
     const auto& request = aggExState.getRequest();
@@ -1019,7 +936,7 @@ std::unique_ptr<Pipeline> parsePipelineAndRegisterQueryStats(
             aggExState.hasChangeStream());
 
         if (aggExState.getRequest().getIncludeQueryStatsMetrics()) {
-            CurOp::get(aggExState.getOpCtx())->debug().queryStatsInfo.metricsRequested = true;
+            CurOp::get(aggExState.getOpCtx())->debug().getQueryStatsInfo().metricsRequested = true;
         }
     }
 
@@ -1040,6 +957,10 @@ std::unique_ptr<Pipeline> parsePipelineAndRegisterQueryStats(
 
     // Report usage statistics for each stage in the pipeline.
     aggExState.tickGlobalStageCounters();
+
+    // Find stages with stage expanders and desugar. We desugar after registering query stats to
+    // ensure that the query shape is representative of the user's original query.
+    Desugarer(pipeline.get())();
 
     return pipeline;
 }
@@ -1138,71 +1059,27 @@ StatusWith<std::unique_ptr<Pipeline>> preparePipeline(
     return std::move(pipeline);
 }
 
-Status _runAggregate(AggExState& aggExState, rpc::ReplyBuilderInterface* result) {
-    // Perform the validation checks on the request and its derivatives before proceeding.
-    aggExState.performValidationChecks();
-
-    // If we are running a retryable write without shard key, check if the write was applied on this
-    // shard, and if so, return early with an empty cursor with $_wasStatementExecuted
-    // set to true.
-    if (checkRetryableWriteAlreadyApplied(aggExState, result)) {
-        return Status::OK();
+Status executeResolvedAggregate(const AggExState& aggExState,
+                                AggCatalogState& aggCatalogState,
+                                rpc::ReplyBuilderInterface* result) {
+    // If due to concurrent view remapping we ended up with a view here, we must not attempt to
+    // treat the view as a collection. Throw a retryable error so we will resolve as a view instead.
+    if (aggCatalogState.lockAcquired() && aggCatalogState.getMainCollectionOrView().isView() &&
+        !aggExState.startsWithCollStats()) {
+        uasserted(ErrorCodes::CollectionBecameView,
+                  "Namespace changed from collection to view during aggregation planning");
     }
 
-    // Going forward this operation must never ignore interrupt signals while waiting for lock
-    // acquisition. This InterruptibleLockGuard will ensure that waiting for lock re-acquisition
-    // after yielding will not ignore interrupt signals. This is necessary to avoid deadlocking with
-    // replication rollback, which at the storage layer waits for all cursors to be closed under the
-    // global MODE_X lock, after having sent interrupt signals to read operations. This operation
-    // must never hold open storage cursors while ignoring interrupt.
-    InterruptibleLockGuard interruptibleLockAcquisition(aggExState.getOpCtx());
-
-    // Acquire any catalog locks needed by the pipeline, and create catalog-dependent state.
-    std::unique_ptr<AggCatalogState> aggCatalogState = aggExState.createAggCatalogState();
-
-    BSONObj shardKey = BSONObj();
-    if (aggCatalogState->lockAcquired() &&
-        aggCatalogState->getMainCollectionOrView().isCollection()) {
-        const auto& mainCollShardingDescription =
-            aggCatalogState->getMainCollectionOrView().getCollection().getShardingDescription();
-        if (mainCollShardingDescription.isSharded()) {
-            shardKey = mainCollShardingDescription.getShardKeyPattern().toBSON();
-        }
-    }
     // Create an RAII object that prints the collection's shard key in the case of a tassert
     // or crash.
-    ScopedDebugInfo shardKeyDiagnostics("ShardKeyDiagnostics",
-                                        diagnostic_printers::ShardKeyDiagnosticPrinter{shardKey});
+    ScopedDebugInfo shardKeyDiagnostics(
+        "ShardKeyDiagnostics",
+        diagnostic_printers::ShardKeyDiagnosticPrinter{aggCatalogState.getShardKey()});
 
     boost::optional<AutoStatsTracker> statsTracker;
-    aggCatalogState->getStatsTrackerIfNeeded(statsTracker);
+    aggCatalogState.getStatsTrackerIfNeeded(statsTracker);
 
-    // If this is a view, we must resolve the view, then recursively call runAggregate from
-    // runAggregateOnView.
-    if (aggCatalogState->lockAcquired() && aggCatalogState->getMainCollectionOrView().isView()) {
-        // We do not need to expand the view pipeline when there is a $collStats stage, as
-        // $collStats is supported on a view namespace. For a time-series collection, however,
-        // the view is abstracted out for the users, so we needed to resolve the namespace to
-        // get the underlying bucket collection.
-        const auto& view = aggCatalogState->getMainCollectionOrView().getView();
-
-        bool shouldViewBeExpanded =
-            !aggExState.startsWithCollStats() || view.getViewDefinition().timeseries();
-        if (shouldViewBeExpanded) {
-            // "Convert" aggExState into resolvedViewAggExState. Note that this will make the
-            // initial aggExState object unusable.
-            auto resolvedViewAggExState =
-                ResolvedViewAggExState::create(std::move(aggExState), aggCatalogState);
-            if (!resolvedViewAggExState.isOK()) {
-                return resolvedViewAggExState.getStatus();
-            }
-
-            return runAggregateOnView(
-                *resolvedViewAggExState.getValue(), std::move(aggCatalogState), result);
-        }
-    }
-
-    boost::intrusive_ptr<ExpressionContext> expCtx = aggCatalogState->createExpressionContext();
+    boost::intrusive_ptr<ExpressionContext> expCtx = aggCatalogState.createExpressionContext();
 
     // Create an RAII object that prints useful information about the ExpressionContext in the
     // case of a tassert or crash.
@@ -1213,18 +1090,27 @@ Status _runAggregate(AggExState& aggExState, rpc::ReplyBuilderInterface* result)
     // registering query stats, rewriting the pipeline to support queryable encryption, and
     // optimizing and rewriting the pipeline if necessary.
     StatusWith<std::unique_ptr<Pipeline>> swPipeline =
-        preparePipeline(aggExState, *aggCatalogState, expCtx);
+        preparePipeline(aggExState, aggCatalogState, expCtx);
     if (!swPipeline.isOK()) {
         return swPipeline.getStatus();
     }
 
-    std::vector<unique_ptr<PlanExecutor, PlanExecutor::Deleter>> execs;
     auto pipeline = std::move(swPipeline.getValue());
+    std::vector<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> execs;
 
     auto swResForJoin = join_ordering::getJoinReorderedExecutor(
-        aggCatalogState->getCollections(), *pipeline, aggExState.getOpCtx(), expCtx);
+        aggCatalogState.getCollections(), *pipeline, aggExState.getOpCtx(), expCtx);
     if (swResForJoin.isOK()) {
-        auto resForJoin = std::move(swResForJoin.getValue());
+        /**
+         * We are careful to keep the AggJoinModel alive for the entirety of this function scope.
+         * We've created several CanonicalQueries, which in turn may own memory to the backing BSON
+         * of some MatchExpression filters. Several places in code may try to access this BSON, so
+         * we need to make sure it doesn't get deleted.
+         *
+         * TODO SERVER-114272: We keep our QSN tree alive in the SBE executor; however, filters in
+         * that QSN tree may be unowned, so accessing them may lead to use-after-free.
+         */
+        auto& resForJoin = swResForJoin.getValue();
         auto attachExecutorCallback =
             [](const MultipleCollectionAccessor& collections,
                std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> exec,
@@ -1242,14 +1128,14 @@ Status _runAggregate(AggExState& aggExState, rpc::ReplyBuilderInterface* result)
 
         // Attach pipeline suffix to SBE executor for join-reordered prefix of the pipeline.
         execs = prepareExecutorsForPipeline(aggExState,
-                                            *aggCatalogState,
+                                            aggCatalogState,
                                             std::move(resForJoin.model.suffix),
                                             std::move(resForJoin.executor),
                                             attachExecutorCallback,
                                             {} /* additionalExecutors */,
                                             false /* hasGeoNear */);
     } else {
-        execs = prepareExecutors(aggExState, *aggCatalogState, std::move(pipeline));
+        execs = prepareExecutors(aggExState, aggCatalogState, std::move(pipeline));
     }
 
     // Dispose of the statsTracker to update stats for Top and CurOp.
@@ -1258,12 +1144,157 @@ Status _runAggregate(AggExState& aggExState, rpc::ReplyBuilderInterface* result)
     // Having released the collection lock, we can now begin to fetch results from the pipeline.
     // If both explain and cursor are specified, explain wins.
     if (expCtx->getExplain()) {
-        executeExplain(aggExState, *aggCatalogState, expCtx, execs[0].get(), result);
+        executeExplain(aggExState, aggCatalogState, expCtx, execs[0].get(), result);
     } else {
-        executeUntilFirstBatch(aggExState, *aggCatalogState, expCtx, execs, result);
+        executeUntilFirstBatch(aggExState, aggCatalogState, expCtx, execs, result);
     }
 
     return Status::OK();
+}
+
+Status runAggregateOnShardedView(std::unique_ptr<ResolvedViewAggExState> resolvedViewAggExState,
+                                 rpc::ReplyBuilderInterface* result) {
+    // Resolved view available after ResolvedViewAggExState construction.
+    auto resolvedView = resolvedViewAggExState->getResolvedView();
+
+    auto* opCtx = resolvedViewAggExState->getOpCtx();
+    const auto& originalNss = resolvedViewAggExState->getOriginalNss();
+    const auto& underlyingNss = resolvedView.getNamespace();
+
+    // Stash the shard role for the resolved view nss, in case it was set, as we are about to
+    // transition into the router role for it.
+    const ScopedStashShardRole scopedUnsetShardRole{opCtx, underlyingNss};
+
+    sharding::router::CollectionRouter router(opCtx, underlyingNss);
+    Status status = router.routeWithRoutingContext(
+        "runAggregateOnView", [&](OperationContext* opCtx, RoutingContext& routingCtx) {
+            const auto& cri = routingCtx.getCollectionRoutingInfo(underlyingNss);
+
+            // Setup the opCtx's OperationShardingState with the expected placement versions for the
+            // underlying collection. Use the same 'placementConflictTime' from the original
+            // request, if present.
+            const auto scopedShardRole = resolvedViewAggExState->setShardRole(cri);
+
+            // Mark routing table as validated as we have entered the shard role for a local read.
+            routingCtx.onRequestSentForNss(underlyingNss);
+
+            // If the underlying collection is unsharded and is located on this shard, then we can
+            // execute the view aggregation locally. Otherwise, we need to kick-back to the router.
+            if (!resolvedViewAggExState->canReadUnderlyingCollectionLocally(cri)) {
+                // Cannot execute the resolved aggregation locally. The router must do it.
+                //
+                // Before throwing the kick-back exception, validate the routing table we are basing
+                // this decision on. We do so by briefly entering into the shard-role by acquiring
+                // the underlying collection.
+                shard_role_loop::withStaleShardRetry(opCtx, [&]() {
+                    const auto underlyingColl = acquireCollectionMaybeLockFree(
+                        opCtx,
+                        CollectionAcquisitionRequest::fromOpCtx(
+                            opCtx, underlyingNss, AcquisitionPrerequisites::OperationType::kRead));
+
+                    // Throw the kick-back exception.
+                    uasserted(std::move(resolvedView),
+                              "Resolved views on collections that do not exclusively live on the "
+                              "db-primary shard must be executed by mongos");
+                });
+            }
+
+            // We are now in the shard role for the underlying collection. Re-run validation and the
+            // retryable-write check on the resolved request.
+            resolvedViewAggExState->performValidationChecks();
+
+            // Acquire catalog locks and state for the underlying collection and run the resolved
+            // aggregate once.
+            auto aggCatalogState = resolvedViewAggExState->createAggCatalogState();
+
+            return executeResolvedAggregate(*resolvedViewAggExState, *aggCatalogState, result);
+        });
+
+    // Set the namespace of the curop back to the view namespace so ctx records stats on this view
+    // namespace on destruction.
+    {
+        stdx::lock_guard<Client> lk(*opCtx->getClient());
+        CurOp::get(opCtx)->setNS(lk, originalNss);
+    }
+
+    return status;
+}
+
+Status _runAggregate(std::unique_ptr<AggExState> aggExState, rpc::ReplyBuilderInterface* result) {
+    // Perform the validation checks on the request and its derivatives before proceeding.
+    aggExState->performValidationChecks();
+
+    // If we are running a retryable write without shard key, check if the write was applied on this
+    // shard, and if so, return early with an empty cursor with $_wasStatementExecuted
+    // set to true.
+    if (checkRetryableWriteAlreadyApplied(*aggExState, result)) {
+        return Status::OK();
+    }
+
+    // Going forward this operation must never ignore interrupt signals while waiting for lock
+    // acquisition. This InterruptibleLockGuard will ensure that waiting for lock re-acquisition
+    // after yielding will not ignore interrupt signals. This is necessary to avoid deadlocking with
+    // replication rollback, which at the storage layer waits for all cursors to be closed under the
+    // global MODE_X lock, after having sent interrupt signals to read operations. This operation
+    // must never hold open storage cursors while ignoring interrupt.
+    InterruptibleLockGuard interruptibleLockAcquisition(aggExState->getOpCtx());
+
+    // Acquire any catalog locks needed by the pipeline, and create catalog-dependent state.
+    std::unique_ptr<AggCatalogState> aggCatalogState = aggExState->createAggCatalogState();
+
+    // If this is a view, we may need to resolve the view and recreate the AggExState and
+    // AggCatalogState for the resolved pipeline.
+    if (aggCatalogState->lockAcquired() && aggCatalogState->getMainCollectionOrView().isView()) {
+        // We do not need to expand the view pipeline when there is a $collStats stage, as
+        // $collStats is supported on a view namespace. For a time-series collection, however,
+        // the view is abstracted out for the users, so we needed to resolve the namespace to
+        // get the underlying bucket collection.
+        const auto& view = aggCatalogState->getMainCollectionOrView().getView();
+        const auto shouldViewBeExpanded =
+            !aggExState->startsWithCollStats() || view.getViewDefinition().timeseries();
+
+        if (shouldViewBeExpanded) {
+            // "Convert" aggExState into resolvedViewAggExState. Note that this will make the
+            // initial aggExState object unusable.
+            auto swResolvedViewAggExState =
+                ResolvedViewAggExState::create(std::move(aggExState), *aggCatalogState);
+            if (!swResolvedViewAggExState.isOK()) {
+                return swResolvedViewAggExState.getStatus();
+            }
+
+            auto resolvedViewAggExState = std::move(swResolvedViewAggExState.getValue());
+
+            uassert(ErrorCodes::CommandNotSupportedOnView,
+                    "mapReduce on a view is not supported",
+                    !resolvedViewAggExState->getRequest().getIsMapReduceCommand());
+
+            // With the view and collation resolved, we can relinquish locks on the view namespace.
+            // We will create a new catalog state with the underlying collection information.
+            aggCatalogState->relinquishResources();
+            aggCatalogState.reset();
+
+            OperationContext* opCtx = resolvedViewAggExState->getOpCtx();
+            if (OperationShardingState::get(opCtx).shouldBeTreatedAsFromRouter(opCtx)) {
+                // Sharding-aware operation on a view: execute the resolved aggregation under the
+                // shard-role for the underlying collection, without recursing into _runAggregate.
+                return runAggregateOnShardedView(std::move(resolvedViewAggExState), result);
+            }
+
+            // Non-sharded view: treat the resolved view as the new AggExState and proceed normally,
+            // running the aggregate exactly once.
+            aggExState = std::move(resolvedViewAggExState);
+
+            // Re-run validation on the resolved request, then rebuild catalog state for the
+            // underlying collection.
+            aggExState->performValidationChecks();
+            aggCatalogState = aggExState->createAggCatalogState();
+        }
+    }
+
+    // At this point, aggExState and aggCatalogState both describe the final namespace/pipeline
+    // (either the original collection, or the resolved underlying collection for a view).
+    // No further view resolution or routing decisions occur here.
+    return executeResolvedAggregate(*aggExState, *aggCatalogState, result);
 }
 
 }  // namespace
@@ -1278,22 +1309,41 @@ Status runAggregate(
     boost::optional<ExplainOptions::Verbosity> verbosity,
     rpc::ReplyBuilderInterface* result,
     const std::vector<std::pair<NamespaceString, std::vector<ExternalDataSourceInfo>>>&
-        usedExternalDataSources) {
-    AggExState aggExState(
-        opCtx, request, liteParsedPipeline, cmdObj, privileges, usedExternalDataSources, verbosity);
-
-    // NOTE: It's possible this aggExState will be unusable by the time _runAggregate returns.
-    // TODO SERVER-93536 Clarify ownership of aggExState.
-    Status status = _runAggregate(aggExState, result);
-
-    // The aggregation pipeline may change the namespace of the curop and we need to set it back to
-    // the original namespace to correctly report command stats. One example when the namespace can
-    // be changed is when the pipeline contains an $out stage, which executes an internal command to
-    // create a temp collection, changing the curop namespace to the name of this temp collection.
-    {
-        stdx::lock_guard<Client> lk(*opCtx->getClient());
-        CurOp::get(opCtx)->setNS(lk, request.getNamespace());
+        usedExternalDataSources,
+    std::shared_ptr<IncrementalFeatureRolloutContext> ifrContext) {
+    // Creates or passes IFRContext for the aggregation, which will be shared among the root
+    // ExpressionContext and any child ExpressionContexts that are created, for example, as part
+    // of sub-pipeline execution.
+    if (ifrContext == nullptr) {
+        ifrContext = std::make_shared<IncrementalFeatureRolloutContext>();
     }
-    return status;
+    auto body = [&]() {
+        auto aggExState = std::make_unique<AggExState>(opCtx,
+                                                       request,
+                                                       liteParsedPipeline,
+                                                       cmdObj,
+                                                       privileges,
+                                                       usedExternalDataSources,
+                                                       verbosity,
+                                                       std::move(ifrContext));
+
+        // NOTE: It's possible this aggExState will be unusable by the time _runAggregate returns.
+        auto status = _runAggregate(std::move(aggExState), result);
+
+        // The aggregation pipeline may change the namespace of the curop and we need to set it back
+        // to the original namespace to correctly report command stats. One example when the
+        // namespace can be changed is when the pipeline contains an $out stage, which executes an
+        // internal command to create a temp collection, changing the curop namespace to the name of
+        // this temp collection.
+        {
+            stdx::lock_guard<Client> lk(*opCtx->getClient());
+            CurOp::get(opCtx)->setNS(lk, request.getNamespace());
+        }
+        return status;
+    };
+
+    // Retry if the namespace concurrently transitioned from collection to view during aggregation
+    // planning.
+    return retryOn<ErrorCodes::CollectionBecameView>("runAggregate", body);
 }
 }  // namespace mongo

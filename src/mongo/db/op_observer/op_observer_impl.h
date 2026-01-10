@@ -33,8 +33,6 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/database_name.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_options.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/op_observer/operation_logger.h"
@@ -45,6 +43,8 @@
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/logical_session_id_gen.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_options.h"
 #include "mongo/db/transaction/transaction_operations.h"
 #include "mongo/util/modules.h"
 #include "mongo/util/time_support.h"
@@ -110,6 +110,11 @@ public:
                            const Status& cause,
                            bool fromMigrate,
                            bool isTimeseries = false) final;
+
+    void onSetMultikeyMetadata(OperationContext* opCtx,
+                               const NamespaceString& nss,
+                               const std::string& idxName,
+                               const BSONObj& multikeyPaths) final;
 
     void onInserts(OperationContext* opCtx,
                    const CollectionPtr& coll,
@@ -246,11 +251,9 @@ public:
                               WriteUnitOfWork::OplogEntryGroupType oplogGroupingFormat,
                               OpStateAccumulator* opAccumulator = nullptr) final;
     void onBatchedWriteAbort(OperationContext* opCtx) final;
-    void onPreparedTransactionCommit(
-        OperationContext* opCtx,
-        OplogSlot commitOplogEntryOpTime,
-        Timestamp commitTimestamp,
-        const std::vector<repl::ReplOperation>& statements) noexcept final;
+    void onPreparedTransactionCommit(OperationContext* opCtx,
+                                     OplogSlot commitOplogEntryOpTime,
+                                     Timestamp commitTimestamp) noexcept final;
 
     void preTransactionPrepare(
         OperationContext* opCtx,
@@ -294,6 +297,11 @@ public:
                          int64_t bytesDeleted,
                          int64_t docsDeleted,
                          repl::OpTime& opTime) final;
+
+    void onUpgradeDowngradeViewlessTimeseries(OperationContext* opCtx,
+                                              const NamespaceString& nss,
+                                              const UUID& uuid,
+                                              bool skipViewCreation = false) final;
 
 private:
     std::unique_ptr<OperationLogger> _operationLogger;

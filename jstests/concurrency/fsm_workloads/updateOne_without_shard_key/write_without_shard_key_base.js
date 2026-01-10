@@ -478,6 +478,7 @@ export const $config = extendWorkload($baseConfig, function ($config, $super) {
                     containsMatchedDocs,
             );
 
+            // TODO SERVER-114994 findAndModify support in UWE.
             const cmdObj = {
                 findAndModify: collName,
                 query: query,

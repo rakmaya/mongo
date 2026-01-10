@@ -98,6 +98,7 @@ const updateCmdObjBase = {
     ordered: false,
 };
 
+// TODO SERVER-114994 findAndModifySupport for UWE.
 const findAndModifyUpdateCmdObjBase = {
     findAndModify: collName,
     query: {x: shardKeyValueOnShard0},

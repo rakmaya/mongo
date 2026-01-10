@@ -39,6 +39,7 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/process_interface/mongo_process_interface.h"
 #include "mongo/db/repl/primary_only_service.h"
+#include "mongo/db/s/primary_only_service_helpers/cancel_state.h"
 #include "mongo/db/s/resharding/donor_document_gen.h"
 #include "mongo/db/s/resharding/resharding_change_streams_monitor.h"
 #include "mongo/db/s/resharding/resharding_future_util.h"
@@ -46,6 +47,8 @@
 #include "mongo/db/service_context.h"
 #include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/executor/scoped_task_executor.h"
+#include "mongo/otel/telemetry_context.h"
+#include "mongo/otel/traces/span/span.h"
 #include "mongo/s/resharding/common_types_gen.h"
 #include "mongo/s/resharding/type_collection_fields_gen.h"
 #include "mongo/stdx/mutex.h"
@@ -53,6 +56,7 @@
 #include "mongo/util/concurrency/thread_pool.h"
 #include "mongo/util/future.h"
 #include "mongo/util/future_impl.h"
+#include "mongo/util/modules.h"
 
 #include <cstdint>
 #include <memory>
@@ -64,7 +68,7 @@
 
 namespace mongo {
 
-class ReshardingDonorService : public repl::PrimaryOnlyService {
+class MONGO_MOD_PUBLIC ReshardingDonorService : public repl::PrimaryOnlyService {
 public:
     static constexpr StringData kServiceName = "ReshardingDonorService"_sd;
 
@@ -72,27 +76,28 @@ public:
         : PrimaryOnlyService(serviceContext), _serviceContext(serviceContext) {}
     ~ReshardingDonorService() override = default;
 
-    class DonorStateMachine;
+    class MONGO_MOD_PRIVATE DonorStateMachine;
 
-    class DonorStateMachineExternalState;
+    class MONGO_MOD_PRIVATE DonorStateMachineExternalState;
 
-    StringData getServiceName() const override {
+    MONGO_MOD_PRIVATE StringData getServiceName() const override {
         return kServiceName;
     }
 
-    NamespaceString getStateDocumentsNS() const override {
+    MONGO_MOD_PRIVATE NamespaceString getStateDocumentsNS() const override {
         return NamespaceString::kDonorReshardingOperationsNamespace;
     }
 
-    ThreadPool::Limits getThreadPoolLimits() const override;
+    MONGO_MOD_PRIVATE ThreadPool::Limits getThreadPoolLimits() const override;
 
     // The service implemented its own conflict check before this method was added.
-    void checkIfConflictsWithOtherInstances(
+    MONGO_MOD_PRIVATE void checkIfConflictsWithOtherInstances(
         OperationContext* opCtx,
         BSONObj initialState,
         const std::vector<const Instance*>& existingInstances) override {}
 
-    std::shared_ptr<PrimaryOnlyService::Instance> constructInstance(BSONObj initialState) override;
+    MONGO_MOD_PRIVATE std::shared_ptr<PrimaryOnlyService::Instance> constructInstance(
+        BSONObj initialState) override;
 
 private:
     ServiceContext* _serviceContext;
@@ -191,7 +196,7 @@ private:
      */
     ExecutorFuture<void> _runUntilBlockingWritesOrErrored(
         const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
-        const CancellationToken& abortToken);
+        std::shared_ptr<otel::TelemetryContext> telemetryCtx);
 
     /**
      * Notifies the coordinator if the donor is in kBlockingWrites or kError and waits for
@@ -199,24 +204,20 @@ private:
      * canceled (failure or stepdown).
      */
     ExecutorFuture<void> _notifyCoordinatorAndAwaitDecision(
-        const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
-        const CancellationToken& abortToken);
+        const std::shared_ptr<executor::ScopedTaskExecutor>& executor);
 
     /**
      * Finishes the work left remaining on the donor after the coordinator persists its decision to
      * abort or complete resharding.
      */
     ExecutorFuture<void> _finishReshardingOperation(
-        const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
-        const CancellationToken& stepdownToken,
-        bool aborted);
+        const std::shared_ptr<executor::ScopedTaskExecutor>& executor);
 
     /**
      * The work inside this function must be run regardless of any work on _scopedExecutor ever
      * running.
      */
-    ExecutorFuture<void> _runMandatoryCleanup(Status status,
-                                              const CancellationToken& stepdownToken);
+    ExecutorFuture<void> _runMandatoryCleanup(Status status);
 
     // The following functions correspond to the actions to take at a particular donor state.
     void _transitionToPreparingToDonate();
@@ -230,17 +231,14 @@ private:
      */
     ExecutorFuture<void> _createAndStartChangeStreamsMonitor(
         const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
-        const CancellationToken& abortToken,
         const CancelableOperationContextFactory& factory);
 
     ExecutorFuture<void> _awaitAllRecipientsDoneCloningThenTransitionToDonatingOplogEntries(
         const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
-        const CancellationToken& abortToken,
         const CancelableOperationContextFactory& factory);
 
     ExecutorFuture<void> _awaitAllRecipientsDoneApplyingThenTransitionToPreparingToBlockWrites(
         const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
-        const CancellationToken& abortToken,
         const CancelableOperationContextFactory& factory);
 
     void _writeTransactionOplogEntryThenTransitionToBlockingWrites(
@@ -250,8 +248,7 @@ private:
      * If verification is enabled, waits for the the change streams monitor to complete.
      */
     ExecutorFuture<void> _awaitChangeStreamsMonitorCompleted(
-        const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
-        const CancellationToken& abortToken);
+        const std::shared_ptr<executor::ScopedTaskExecutor>& executor);
 
     // Drops the original collection and throws if the returned status is not either Status::OK()
     // or NamespaceNotFound.
@@ -276,7 +273,7 @@ private:
     void _transitionToError(Status abortReason, const CancelableOperationContextFactory& factory);
 
     // Transitions the on-disk and in-memory state to DonorStateEnum::kDone.
-    void _transitionToDone(bool aborted, const CancelableOperationContextFactory& factory);
+    void _transitionToDone(const CancelableOperationContextFactory& factory);
 
     BSONObj _makeQueryForCoordinatorUpdate(const ShardId& shardId, DonorStateEnum newState);
 
@@ -294,16 +291,19 @@ private:
     void _updateDonorDocument(OperationContext* opCtx, const BSONObj& updateMod);
 
     // Removes the local donor document from disk.
-    void _removeDonorDocument(const CancellationToken& stepdownToken,
-                              bool aborted,
-                              const CancelableOperationContextFactory& factory);
+    void _removeDonorDocument(const CancelableOperationContextFactory& factory);
 
-    // Initializes the _abortSource and generates a token from it to return back the caller. If an
-    // abort was reported prior to the initialization, automatically cancels the _abortSource before
-    // returning the token.
-    //
-    // Should only be called once per lifetime.
-    CancellationToken _initAbortSource(const CancellationToken& stepdownToken);
+    // Initializes the _cancelState and generates an abort token. If an
+    // abort was reported prior to the initialization, automatically cancels the _cancelState before
+    // returning. Note: Should only be called once per lifetime.
+    void _initCancelState(const CancellationToken& stepdownToken);
+
+    /**
+     * Creates a new span with the resharding UUID set as an attribute.
+     */
+    otel::traces::Span _startSpan(std::shared_ptr<otel::TelemetryContext> telemetryCtx,
+                                  const std::string& spanName,
+                                  bool keepSpan = false);
 
     // The primary-only service instance corresponding to the donor instance. Not owned.
     const ReshardingDonorService* const _donorService;
@@ -335,14 +335,12 @@ private:
     boost::optional<resharding::RetryingCancelableOperationContextFactory>
         _retryingCancelableOpCtxFactory;
 
-
     // Protects the state below
     stdx::mutex _mutex;
 
-    // Canceled by 2 different sources: (1) This DonorStateMachine when it learns of an
-    // unrecoverable error (2) The primary-only service instance driving this DonorStateMachine that
-    // cancels the parent CancellationSource upon stepdown/failover.
-    boost::optional<CancellationSource> _abortSource;
+    // Manages abort state and provides cancellation tokens for async operations. Initialized in
+    // _initCancelState().
+    std::unique_ptr<primary_only_service_helpers::CancelState> _cancelState;
 
     // The identifier associated to the recoverable critical section.
     const BSONObj _critSecReason;

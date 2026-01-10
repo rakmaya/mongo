@@ -29,11 +29,13 @@
 
 #pragma once
 
+#include "mongo/db/exec/sbe/stages/fetch.h"
 #include "mongo/db/exec/sbe/stages/loop_join.h"
 #include "mongo/db/exec/sbe/stages/scan.h"
 #include "mongo/db/exec/sbe/stages/window.h"
-#include "mongo/db/exec/sbe/values/cell_interface.h"
+#include "mongo/db/exec/sbe/values/path_request.h"
 #include "mongo/db/query/stage_builder/sbe/builder_state.h"
+#include "mongo/db/query/stage_builder/sbe/gen_abt_helpers.h"
 #include "mongo/db/query/stage_builder/sbe/sbexpr.h"
 #include "mongo/util/modules.h"
 
@@ -336,11 +338,10 @@ public:
         UUID collectionUuid,
         DatabaseName dbName,
         bool forward = true,
-        boost::optional<SbSlot> seekSlot = boost::none,
         std::vector<std::string> scanFieldNames = {},
         const SbScanBounds& scanBounds = {},
         const SbIndexInfoSlots& indexInfoSlots = {},
-        sbe::ScanCallbacks scanCallbacks = {},
+        sbe::ScanOpenCallback scanOpenCallback = {},
         boost::optional<SbSlot> oplogTsSlot = boost::none);
 
     std::tuple<SbStage, SbSlot, SbSlotVector, SbIndexInfoSlots> makeSimpleIndexScan(
@@ -710,6 +711,22 @@ public:
                           const SbSlotVector& innerProjectSlots,
                           std::vector<sbe::value::SortDirection> dirs);
 
+
+    struct FetchBuildResult {
+        SbStage stage;
+        SbSlot recordSlot;
+        SbSlot recordIdSlot;
+        SbSlotVector scanFieldSlots;
+    };
+    FetchBuildResult makeFetch(SbStage child,
+                               UUID collectionUuid,
+                               DatabaseName dbName,
+                               SbSlot seekSlot,
+                               std::vector<std::string> scanFieldNames,
+                               const SbIndexInfoSlots& indexInfoSlots,
+                               sbe::FetchCallbacks scanCallbacks);
+
+
 protected:
     SbIndexInfoSlots allocateIndexInfoSlots(SbIndexInfoType indexInfoTypeMask,
                                             const BSONObj& keyPattern);
@@ -723,14 +740,14 @@ private:
                               SbeHashAggIncreasedSpillingModeEnum forceIncreasedSpillingMode) {
         switch (forceIncreasedSpillingMode) {
             case SbeHashAggIncreasedSpillingModeEnum::kAlways:
-                return true;
+                return allowDiskUse;
             case SbeHashAggIncreasedSpillingModeEnum::kNever:
                 return false;
             case SbeHashAggIncreasedSpillingModeEnum::kInDebug:
                 return kDebugBuild && allowDiskUse;
-            default:
-                tasserted(9915702, "Unknown forceIncreasedSpillingMode");
         }
+
+        tasserted(9915702, "Unknown forceIncreasedSpillingMode");
     }
 };
 }  // namespace mongo::stage_builder

@@ -21,7 +21,6 @@ COMPILERS = struct(
 )
 
 LINKERS = struct(
-    GOLD = "gold",
     LLD = "lld",
     MOLD = "mold",
 )
@@ -49,6 +48,18 @@ all_compile_actions = \
     [
         ACTION_NAMES.lto_backend,
     ]
+
+all_link_actions = [
+    ACTION_NAMES.cpp_link_executable,
+    ACTION_NAMES.cpp_link_dynamic_library,
+    ACTION_NAMES.cpp_link_nodeps_dynamic_library,
+]
+
+lto_index_actions = [
+    ACTION_NAMES.lto_index_for_executable,
+    ACTION_NAMES.lto_index_for_dynamic_library,
+    ACTION_NAMES.lto_index_for_nodeps_dynamic_library,
+]
 
 FEATURES_ATTR_NAMES = struct(
     OPT_LEVEL = "optimization_level",
@@ -357,6 +368,82 @@ def get_common_features(ctx):
                         # Don't issue warnings about potentially evaluated expressions
                         "-Wno-potentially-evaluated-expression",
                     ])],
+                ),
+            ],
+        ),
+        feature(
+            name = "internal_thin_lto",
+            enabled = ctx.attr.internal_thin_lto_enabled,
+            flag_sets = [
+                flag_set(
+                    actions = all_compile_actions,
+                    flag_groups = [flag_group(flags = [
+                        "-flto=thin",
+                    ])],
+                ),
+                flag_set(
+                    actions = all_link_actions,
+                    flag_groups = [flag_group(flags = [
+                        "-flto=thin",
+                    ])],
+                ),
+            ],
+        ),
+        feature(
+            # The mongo is added because coverage is a used feature already
+            name = "coverage_mongo",
+            enabled = ctx.attr.coverage_enabled,
+            flag_sets = [
+                flag_set(
+                    actions = all_compile_actions,
+                    flag_groups = [flag_group(flags = [
+                        "--coverage",
+                        "-fprofile-update=single",
+                    ])],
+                ),
+                flag_set(
+                    actions = all_link_actions + lto_index_actions,
+                    flag_groups = [flag_group(flags = [
+                        "--coverage",
+                        "-fprofile-update=single",
+                    ])],
+                ),
+            ],
+        ),
+        feature(
+            name = "compress_debug",
+            enabled = ctx.attr.compress_debug_enabled,
+            flag_sets = [
+                flag_set(
+                    actions = all_compile_actions,
+                    flag_groups = [flag_group(flags = [
+                        "-Wa,--compress-debug-sections",
+                    ])],
+                ),
+            ],
+        ),
+        feature(
+            name = "warnings_as_errors_compile",
+            enabled = ctx.attr.warnings_as_errors_enabled,
+            flag_sets = [
+                flag_set(
+                    actions = all_compile_actions,
+                    flag_groups = [flag_group(flags = [
+                        "-Werror",
+                    ])],
+                ),
+            ],
+        ),
+        feature(
+            name = "mongo_defines",
+            enabled = True,
+            flag_sets = [
+                flag_set(
+                    actions = all_compile_actions,
+                    flag_groups = [flag_group(
+                        flags =
+                            ["-D" + define for define in ctx.attr.global_defines],
+                    )],
                 ),
             ],
         ),

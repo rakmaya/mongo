@@ -30,13 +30,13 @@
 #include "mongo/db/timeseries/timeseries_op_observer.h"
 
 #include "mongo/bson/bsonelement.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_catalog.h"
-#include "mongo/db/local_catalog/collection_operation_source.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/repl/oplog.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/collection_operation_source.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/timeseries/bucket_catalog/bucket_catalog.h"
 #include "mongo/db/timeseries/bucket_catalog/bucket_catalog_helpers.h"
@@ -162,6 +162,9 @@ repl::OpTime TimeSeriesOpObserver::onDropCollection(OperationContext* opCtx,
                                                     std::uint64_t numRecords,
                                                     bool markFromMigrate,
                                                     bool isTimeseries) {
+    if (!isTimeseries) {
+        return {};
+    }
     auto& bucketCatalog =
         timeseries::bucket_catalog::GlobalBucketCatalog::get(opCtx->getServiceContext());
     timeseries::bucket_catalog::drop(bucketCatalog, uuid);

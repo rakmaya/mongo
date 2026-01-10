@@ -28,6 +28,7 @@
  */
 #include "mongo/db/extension/shared/handle/aggregation_stage/parse_node.h"
 
+#include "mongo/db/extension/shared/array/abi_array_to_raii_vector.h"
 #include "mongo/db/extension/shared/extension_status.h"
 #include "mongo/db/extension/shared/handle/byte_buf_handle.h"
 #include "mongo/util/fail_point.h"
@@ -36,91 +37,110 @@
 namespace mongo::extension {
 
 MONGO_FAIL_POINT_DEFINE(failExtensionExpand);
+MONGO_FAIL_POINT_DEFINE(failExtensionDPL);
 
-BSONObj AggStageParseNodeHandle::getQueryShape(
-    const ::MongoExtensionHostQueryShapeOpts& opts) const {
-    ::MongoExtensionByteBuf* buf;
-    const auto& vtbl = vtable();
-    auto* ptr = get();
+BSONObj AggStageParseNodeAPI::getQueryShape(const ::MongoExtensionHostQueryShapeOpts& opts) const {
+    ::MongoExtensionByteBuf* buf{nullptr};
 
-    invokeCAndConvertStatusToException([&]() { return vtbl.get_query_shape(ptr, &opts, &buf); });
+    invokeCAndConvertStatusToException(
+        [&]() { return vtable().get_query_shape(get(), &opts, &buf); });
 
     tassert(11188203, "buffer returned from get_query_shape must not be null", buf != nullptr);
 
     // Take ownership of the returned buffer so that it gets cleaned up, then retrieve an owned
     // BSONObj to return to the host.
     ExtensionByteBufHandle ownedBuf{buf};
-    return bsonObjFromByteView(ownedBuf.getByteView()).getOwned();
+    return bsonObjFromByteView(ownedBuf->getByteView()).getOwned();
 }
 
-std::vector<VariantNodeHandle> AggStageParseNodeHandle::expand() const {
-    // Host allocates buffer with the expected size.
-    const auto expandedSize = getExpandedSize();
-    tassert(11113803, "AggStageParseNode getExpandedSize() must be >= 1", expandedSize >= 1);
-    std::vector<::MongoExtensionExpandedArrayElement> buf{expandedSize};
-    ::MongoExtensionExpandedArray expandedArray{expandedSize, buf.data()};
+template <>
+struct RaiiVectorElemType<::MongoExtensionExpandedArrayElement> {
+    using type = VariantNodeHandle;
+};
 
-    invokeCAndConvertStatusToException([&] { return vtable().expand(get(), &expandedArray); });
-
-    // This guard provides a best-effort cleanup in the case of an exception.
-    //
-    // - `transferredCount` tracks how many elements from the front of `buf` have been
-    //   successfully wrapped into RAII handles and had their raw pointers nulled.
-    // - If an exception occurs while constructing handles (e.g., OOM in `emplace_back` or a bad
-    //   vtable), we destroy only the elements that have not yet been transferred
-    //   ([transferredCount, expandedSize)).
-    size_t transferredCount{0};
-    ScopeGuard guard([&]() {
-        for (size_t idx = transferredCount; idx < expandedSize; ++idx) {
-            auto& elt = expandedArray.elements[idx];
-            switch (elt.type) {
-                case kParseNode: {
-                    if (elt.parse && elt.parse->vtable && elt.parse->vtable->destroy) {
-                        elt.parse->vtable->destroy(elt.parse);
-                    }
-                    break;
-                }
-                case kAstNode: {
-                    if (elt.ast && elt.ast->vtable && elt.ast->vtable->destroy) {
-                        elt.ast->vtable->destroy(elt.ast);
-                    }
-                    break;
-                }
-                default:
-                    // Memory is leaked if the type tag is invalid, but this only happens if the
-                    // extension violates the API contract.
-                    break;
-            }
-        }
-    });
-
-    // Transfer ownership of each element into RAII handles and build the result vector.
-    std::vector<VariantNodeHandle> expandedVec;
-    expandedVec.reserve(expandedSize);
-    for (auto& elt : buf) {
+template <>
+struct ArrayElemAsRaii<::MongoExtensionExpandedArrayElement> {
+    using ArrayElem_t = ::MongoExtensionExpandedArrayElement;
+    using RaiiElem_t = RaiiVectorElemType<ArrayElem_t>::type;
+    static RaiiElem_t consume(ArrayElem_t& elt) {
+        VariantNodeHandle handle = AggStageParseNodeHandle{nullptr};
         if (MONGO_unlikely(failExtensionExpand.shouldFail())) {
             uasserted(11113805, "Injected failure in expand() during handle transfer");
         }
-
         switch (elt.type) {
             case kParseNode: {
-                expandedVec.emplace_back(elt.parse);
-                elt.parse = nullptr;
+                handle = VariantNodeHandle(AggStageParseNodeHandle{elt.parseOrAst.parse});
+                elt.parseOrAst.parse = nullptr;
                 break;
             }
             case kAstNode: {
-                expandedVec.emplace_back(elt.ast);
-                elt.ast = nullptr;
+                handle = VariantNodeHandle(AggStageAstNodeHandle{elt.parseOrAst.ast});
+                elt.parseOrAst.ast = nullptr;
                 break;
             }
             default:
                 tasserted(11113804, "ExpandedArray element has invalid type tag");
                 break;
         }
-        ++transferredCount;
+        return handle;
     }
+};
 
-    guard.dismiss();
-    return expandedVec;
+std::vector<VariantNodeHandle> AggStageParseNodeAPI::expand() const {
+    // Host allocates buffer with the expected size.
+    const auto expandedSize = getExpandedSize();
+    tassert(11113803, "AggStageParseNode getExpandedSize() must be >= 1", expandedSize >= 1);
+    std::vector<::MongoExtensionExpandedArrayElement> buf{expandedSize};
+    ::MongoExtensionExpandedArray expandedArray{expandedSize, buf.data()};
+    invokeCAndConvertStatusToException([&] { return vtable().expand(get(), &expandedArray); });
+    return abiArrayToRaiiVector(expandedArray);
 }
+
+AggStageParseNodeHandle AggStageParseNodeAPI::clone() const {
+    assertValid();
+    ::MongoExtensionAggStageParseNode* parseNodePtr{nullptr};
+
+    // The API's contract mandates that parseNodePtr will only be allocated if status is OK.
+    invokeCAndConvertStatusToException([&] { return vtable().clone(get(), &parseNodePtr); });
+
+    return AggStageParseNodeHandle(parseNodePtr);
+}
+
+template <>
+struct RaiiVectorElemType<::MongoExtensionDPLArrayElement> {
+    using type = VariantDPLHandle;
+};
+
+template <>
+struct ArrayElemAsRaii<::MongoExtensionDPLArrayElement> {
+    using ArrayElem_t = ::MongoExtensionDPLArrayElement;
+    using RaiiElem_t = RaiiVectorElemType<ArrayElem_t>::type;
+    static RaiiElem_t consume(ArrayElem_t& elt) {
+        VariantDPLHandle handle = AggStageParseNodeHandle{nullptr};
+        if (MONGO_unlikely(failExtensionDPL.shouldFail())) {
+            uasserted(11365502, "Injected failure in DPL during handle transfer");
+        }
+        switch (elt.type) {
+            case kParse: {
+                handle = VariantDPLHandle(AggStageParseNodeHandle{elt.element.parseNode});
+                elt.element.parseNode = nullptr;
+                break;
+            }
+            case kLogical: {
+                handle = VariantDPLHandle(LogicalAggStageHandle{elt.element.logicalStage});
+                elt.element.logicalStage = nullptr;
+                break;
+            }
+            default:
+                tasserted(11365500, "DPLArray element has invalid type tag");
+                break;
+        }
+        return handle;
+    }
+};
+
+std::vector<VariantDPLHandle> dplArrayToRaiiVector(::MongoExtensionDPLArray& arr) {
+    return abiArrayToRaiiVector(arr);
+}
+
 }  // namespace mongo::extension

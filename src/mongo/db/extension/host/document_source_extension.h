@@ -29,10 +29,15 @@
 #pragma once
 
 #include "mongo/base/string_data.h"
-#include "mongo/bson/bsonobj.h"
+#include "mongo/db/extension/host/aggregation_stage/ast_node.h"
+#include "mongo/db/extension/host/aggregation_stage/parse_node.h"
+#include "mongo/db/extension/host/static_properties_util.h"
 #include "mongo/db/extension/shared/handle/aggregation_stage/parse_node.h"
 #include "mongo/db/extension/shared/handle/aggregation_stage/stage_descriptor.h"
+#include "mongo/db/pipeline/desugarer.h"
 #include "mongo/db/pipeline/document_source.h"
+#include "mongo/db/pipeline/lite_parsed_desugarer.h"
+#include "mongo/stdx/unordered_set.h"
 #include "mongo/util/modules.h"
 
 namespace mongo::extension {
@@ -43,6 +48,46 @@ namespace host {
 using LiteParsedList = std::list<std::unique_ptr<LiteParsedDocumentSource>>;
 
 class LoadExtensionsTest;
+class LoadNativeVectorSearchTest;
+
+// Custom StageParams classes for LPDSExpandable and LPDSExpanded that own a parseNode and astNode
+// respectively.
+class ExpandableStageParams : public StageParams {
+public:
+    ExpandableStageParams(AggStageParseNodeHandle parseNode) : _parseNode(std::move(parseNode)) {}
+
+    static const Id& id;
+
+    Id getId() const override {
+        return id;
+    }
+
+    AggStageParseNodeHandle releaseParseNode() {
+        return std::move(_parseNode);
+    }
+
+private:
+    AggStageParseNodeHandle _parseNode;
+};
+
+
+class ExpandedStageParams : public StageParams {
+public:
+    ExpandedStageParams(AggStageAstNodeHandle astNode) : _astNode(std::move(astNode)) {}
+
+    static const Id& id;
+
+    Id getId() const override {
+        return id;
+    }
+
+    AggStageAstNodeHandle releaseAstNode() {
+        return std::move(_astNode);
+    }
+
+private:
+    AggStageAstNodeHandle _astNode;
+};
 
 /**
  * A DocumentSource implementation for an extension aggregation stage. DocumentSourceExtension is a
@@ -62,27 +107,42 @@ public:
                                                                const NamespaceString& nss,
                                                                const BSONElement& spec,
                                                                const LiteParserOptions& options) {
-            auto parseNode = descriptor.parse(spec.wrap());
-            return std::make_unique<LiteParsedExpandable>(
-                spec.fieldName(), std::move(parseNode), nss, options);
+            auto parseNode = descriptor->parse(spec.wrap());
+            return std::make_unique<LiteParsedExpandable>(spec, std::move(parseNode), nss, options);
         }
 
-        LiteParsedExpandable(std::string stageName,
+        LiteParsedExpandable(const BSONElement& spec,
                              AggStageParseNodeHandle parseNode,
                              const NamespaceString& nss,
                              const LiteParserOptions& options)
-            : LiteParsedDocumentSource(std::move(stageName)),
+            : LiteParsedDocumentSource(spec),
               _parseNode(std::move(parseNode)),
               _nss(nss),
-              _options(options) {
-            _expanded = expand();
+              _options(options),
+              _expanded([&] {
+                  auto expandedList = expand();
+                  tassert(10905600,
+                          "LiteParsedExpandable must not have an empty expanded pipeline",
+                          !expandedList.empty());
+
+                  return StageSpecs(std::make_move_iterator(expandedList.begin()),
+                                    std::make_move_iterator(expandedList.end()));
+              }()) {}
+
+        std::unique_ptr<StageParams> getStageParams() const override {
+            return std::make_unique<ExpandableStageParams>(_parseNode->clone());
         }
 
         /**
-         * Return the pre-computed expanded pipeline.
+         * Return a copy to the pre-computed expanded pipeline.
          */
-        const LiteParsedList& getExpandedPipeline() const {
-            return _expanded;
+        StageSpecs getExpandedPipeline() const {
+            StageSpecs cloned;
+            cloned.reserve(_expanded.size());
+            for (const auto& stage : _expanded) {
+                cloned.push_back(stage->clone());
+            }
+            return cloned;
         }
 
         stdx::unordered_set<NamespaceString> getInvolvedNamespaces() const override {
@@ -91,23 +151,34 @@ public:
 
         PrivilegeVector requiredPrivileges(bool isMongos,
                                            bool bypassDocumentValidation) const override {
-            // TODO SERVER-109056 Support getting required privileges from extensions.
-            return {};
+            PrivilegeVector privileges;
+            for (const auto& lp : _expanded) {
+                Privilege::addPrivilegesToPrivilegeVector(
+                    &privileges, lp->requiredPrivileges(isMongos, bypassDocumentValidation));
+            }
+            return privileges;
         }
 
         bool isInitialSource() const override {
-            // TODO SERVER-109056 isInitialSource() value should be inherited from the first
-            // stage in the LiteParsedExpandable's expanded pipeline.
+            return _expanded.front()->isInitialSource();
+        }
+
+        bool requiresAuthzChecks() const override {
+            for (const auto& lp : _expanded) {
+                if (lp->requiresAuthzChecks()) {
+                    return true;
+                }
+            }
             return false;
         }
 
-        /**
-         * requiresAuthzChecks() is overriden to false because requiredPrivileges() returns an empty
-         * vector and has no authz checks by default.
-         */
-        bool requiresAuthzChecks() const override {
-            return false;
+        std::unique_ptr<LiteParsedDocumentSource> clone() const override {
+            return std::make_unique<LiteParsedExpandable>(
+                getOriginalBson(), _parseNode->clone(), _nss, _options);
         }
+
+        // Define how to desugar a LiteParsedExpandable.
+        static LiteParsedDesugarer::StageExpander stageExpander;
 
     private:
         /**
@@ -139,20 +210,37 @@ public:
                                          const NamespaceString& nss,
                                          const LiteParserOptions& options);
 
-        AggStageParseNodeHandle _parseNode;
-        NamespaceString _nss;
-        LiteParserOptions _options;
-        LiteParsedList _expanded;
+        const AggStageParseNodeHandle _parseNode;
+        const NamespaceString _nss;
+        const LiteParserOptions _options;
+        const StageSpecs _expanded;
     };
 
     /**
      * A LiteParsedDocumentSource implementation for extension stages mapping to an
      * AggStageAstNode.
+     *
+     * NOTE: This class is only instantiated during expansion of an extension stage, existing in the
+     * LiteParsedExpandable's _expanded list. That means it will never exist at the top-level
+     * LiteParsedPipeline.
      */
     class LiteParsedExpanded : public LiteParsedDocumentSource {
     public:
-        LiteParsedExpanded(std::string stageName, AggStageAstNodeHandle astNode)
-            : LiteParsedDocumentSource(std::move(stageName)), _astNode(std::move(astNode)) {}
+        LiteParsedExpanded(std::string stageName,
+                           AggStageAstNodeHandle astNode,
+                           const NamespaceString& nss)
+            // NOTE: There is no original BSON since this stage is created from an AST node
+            // desugared without BSON. For now we create a dummy spec with the stage name, but it
+            // will go unused since LiteParsedExpanded will not exist at the top-level
+            // LiteParsedPipeline.
+            : LiteParsedDocumentSource(BSON(stageName << BSONObj()).firstElement()),
+              _astNode(std::move(astNode)),
+              _properties(_astNode->getProperties()),
+              _nss(nss) {}
+
+        std::unique_ptr<StageParams> getStageParams() const override {
+            return std::make_unique<ExpandedStageParams>(_astNode->clone());
+        }
 
         stdx::unordered_set<NamespaceString> getInvolvedNamespaces() const override {
             return stdx::unordered_set<NamespaceString>();
@@ -160,34 +248,55 @@ public:
 
         PrivilegeVector requiredPrivileges(bool isMongos,
                                            bool bypassDocumentValidation) const override {
-            // TODO SERVER-109056 Support getting required privileges from extensions.
-            return {};
+            PrivilegeVector privileges;
+
+            if (const auto& requiredPrivileges = _properties.getRequiredPrivileges()) {
+                for (const auto& rp : *requiredPrivileges) {
+                    tassert(
+                        11350602,
+                        "Only 'namespace' resourcePattern is supported for extension privileges",
+                        rp.getResourcePattern() ==
+                            MongoExtensionPrivilegeResourcePatternEnum::kNamespace);
+
+                    ActionSet actions;
+                    for (const auto& entry : rp.getActions()) {
+                        actions.addAction(static_properties_util::toActionType(entry.getAction()));
+                    }
+
+                    tassert(11350600,
+                            "requiredPrivileges.actions must not be empty.",
+                            !actions.empty());
+                    Privilege::addPrivilegeToPrivilegeVector(
+                        &privileges, Privilege{ResourcePattern::forExactNamespace(_nss), actions});
+                }
+            }
+
+            return privileges;
         }
 
         bool isInitialSource() const override {
-            // TODO SERVER-109569 Change this to return true if the stage is a source stage.
-            return false;
+            return !_properties.getRequiresInputDocSource();
         }
 
-        /**
-         * requiresAuthzChecks() is overriden to false because requiredPrivileges() returns an empty
-         * vector and has no authz checks by default.
-         */
         bool requiresAuthzChecks() const override {
-            return false;
+            // If the stage specifies a non-empty set of required privileges, mandatory auth checks
+            // are required. Otherwise, it is safe to opt out of auth checks.
+            const auto& properties = _properties.getRequiredPrivileges();
+            return properties.has_value() && !properties->empty();
+        }
+
+        std::unique_ptr<LiteParsedDocumentSource> clone() const override {
+            return std::make_unique<LiteParsedExpanded>(
+                getParseTimeName(), _astNode->clone(), _nss);
         }
 
     private:
-        AggStageAstNodeHandle _astNode;
+        const AggStageAstNodeHandle _astNode;
+        const MongoExtensionStaticProperties _properties;
+        const NamespaceString _nss;
     };
 
     const char* getSourceName() const override;
-
-    static const Id& id;
-
-    Id getId() const override;
-
-    boost::optional<DistributedPlanLogic> distributedPlanLogic() override;
 
     void addVariableRefs(std::set<Variables::Id>* refs) const override {}
 
@@ -201,27 +310,9 @@ public:
     // Declare DocumentSourceExtension to be pure virtual.
     ~DocumentSourceExtension() override = 0;
 
-private:
-    static void registerStage(const std::string& name,
-                              DocumentSource::Id id,
-                              AggStageDescriptorHandle descriptor);
-
-    /**
-     * Give access to DocumentSourceExtensionTest/LoadExtensionsTest to unregister parser.
-     * unregisterParser_forTest is only meant to be used in the context of unit
-     * tests. This is because the parserMap is not thread safe, so modifying it at runtime is
-     * unsafe.
-     */
-    friend class mongo::extension::DocumentSourceExtensionTest;
-    friend class mongo::extension::host::LoadExtensionsTest;
-    static void unregisterParser_forTest(const std::string& name);
-
 protected:
     DocumentSourceExtension(StringData name,
-                            const boost::intrusive_ptr<ExpressionContext>& exprCtx,
-                            Id id,
-                            BSONObj rawStage,
-                            mongo::extension::AggStageDescriptorHandle descriptor);
+                            const boost::intrusive_ptr<ExpressionContext>& exprCtx);
 
     /**
      * NB : Here we keep a copy of the stage name to service getSourceName().
@@ -231,8 +322,6 @@ protected:
      * terminator.
      **/
     const std::string _stageName;
-    const Id _id;
-    const mongo::extension::AggStageParseNodeHandle _parseNode;
 
 private:
     // Do not support copy or move.
@@ -241,6 +330,50 @@ private:
     DocumentSourceExtension& operator=(const DocumentSourceExtension&) = delete;
     DocumentSourceExtension& operator=(DocumentSourceExtension&&) = delete;
 };
+
+namespace helper {
+
+template <typename OnParseHost, typename OnParseExt, typename OnAstHost, typename OnAstExt>
+inline void visitExpandedNodes(std::vector<VariantNodeHandle>& expanded,
+                               OnParseHost&& onParseHost,
+                               OnParseExt&& onParseExt,
+                               OnAstHost&& onAstHost,
+                               OnAstExt&& onAstExt) {
+    for (auto& node : expanded) {
+        std::visit(
+            [&](auto&& handle) {
+                using H = std::decay_t<decltype(handle)>;
+                // Case 1: Parse node handle.
+                //   a) Host-allocated parse node: convert directly to a host
+                //      DocumentSource using the host-provided BSON spec. No recursion
+                //      in this branch.
+                //   b) Extension-allocated parse node: Recurse on the parse node
+                //      handle, splicing the results of its expansion.
+                if constexpr (std::is_same_v<H, AggStageParseNodeHandle>) {
+                    if (host::HostAggStageParseNode::isHostAllocated(*handle.get())) {
+                        onParseHost(*static_cast<host::HostAggStageParseNode*>(handle.get()));
+                    } else {
+                        onParseExt(handle);
+                    }
+                }
+                // Case 2: AST node handle.
+                //   a) Host-allocated AST node: convert directly to a host DocumentSource using
+                //      the host-provided BSON spec.
+                //   b) Extension-allocated AST node: Construct a
+                //      DocumentSourceExtensionOptimizable and release the AST node handle.
+                else if constexpr (std::is_same_v<H, AggStageAstNodeHandle>) {
+                    if (host::HostAggStageAstNode::isHostAllocated(*handle.get())) {
+                        onAstHost(*static_cast<host::HostAggStageAstNode*>(handle.get()));
+                    } else {
+                        onAstExt(std::move(handle));
+                    }
+                }
+            },
+            node);
+    }
+}
+
+}  // namespace helper
 
 }  // namespace host
 

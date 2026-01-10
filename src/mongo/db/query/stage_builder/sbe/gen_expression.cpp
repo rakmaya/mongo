@@ -30,7 +30,6 @@
 #include "mongo/db/query/stage_builder/sbe/gen_expression.h"
 
 #include <boost/none.hpp>
-#include <boost/smart_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 // IWYU pragma: no_include "ext/alloc_traits.h"
 #include "mongo/base/error_codes.h"
@@ -328,6 +327,10 @@ public:
     void visit(const ExpressionSize* expr) final {}
     void visit(const ExpressionReverseArray* expr) final {}
     void visit(const ExpressionSortArray* expr) final {}
+    void visit(const ExpressionTopN* expr) final {}
+    void visit(const ExpressionTop* expr) final {}
+    void visit(const ExpressionBottomN* expr) final {}
+    void visit(const ExpressionBottom* expr) final {}
     void visit(const ExpressionSlice* expr) final {}
     void visit(const ExpressionIsArray* expr) final {}
     void visit(const ExpressionInternalFindAllValuesAtPath* expr) final {}
@@ -417,6 +420,9 @@ public:
     void visit(const ExpressionCreateObjectId* expr) final {}
     void visit(const ExpressionTestFeatureFlagLatest* expr) final {}
     void visit(const ExpressionTestFeatureFlagLastLTS* expr) final {}
+    void visit(const ExpressionSerializeEJSON*) final {}
+    void visit(const ExpressionDeserializeEJSON*) final {}
+    void visit(const ExpressionHash* expr) final {}
 
 private:
     ExpressionVisitorContext* _context;
@@ -518,6 +524,10 @@ public:
     void visit(const ExpressionSize* expr) final {}
     void visit(const ExpressionReverseArray* expr) final {}
     void visit(const ExpressionSortArray* expr) final {}
+    void visit(const ExpressionTopN* expr) final {}
+    void visit(const ExpressionTop* expr) final {}
+    void visit(const ExpressionBottomN* expr) final {}
+    void visit(const ExpressionBottom* expr) final {}
     void visit(const ExpressionSlice* expr) final {}
     void visit(const ExpressionIsArray* expr) final {}
     void visit(const ExpressionInternalFindAllValuesAtPath* expr) final {}
@@ -607,6 +617,9 @@ public:
     void visit(const ExpressionCreateObjectId* expr) final {}
     void visit(const ExpressionTestFeatureFlagLatest* expr) final {}
     void visit(const ExpressionTestFeatureFlagLastLTS* expr) final {}
+    void visit(const ExpressionSerializeEJSON*) final {}
+    void visit(const ExpressionDeserializeEJSON*) final {}
+    void visit(const ExpressionHash* expr) final {}
 
 private:
     ExpressionVisitorContext* _context;
@@ -2684,6 +2697,22 @@ public:
         pushExpr(_b.makeLet(frameId, SbExpr::makeSeq(std::move(arg)), std::move(exprSortArr)));
     }
 
+    void visit(const ExpressionTopN* expr) final {
+        visitTopNOrBottomN(expr, "topN"_sd);
+    }
+
+    void visit(const ExpressionTop* expr) final {
+        visitTopOrBottom(expr, "top"_sd);
+    }
+
+    void visit(const ExpressionBottomN* expr) final {
+        visitTopNOrBottomN(expr, "bottomN"_sd);
+    }
+
+    void visit(const ExpressionBottom* expr) final {
+        visitTopOrBottom(expr, "bottom"_sd);
+    }
+
     void visit(const ExpressionSlice* expr) final {
         unsupportedExpression(expr->getOpName());
     }
@@ -3432,6 +3461,21 @@ public:
         unsupportedExpression("$createObjectId");
     }
 
+    void visit(const ExpressionSerializeEJSON*) override {
+        // TODO(SERVER-114519): Support $serializeEJSON in SBE.
+        unsupportedExpression("$serializeEJSON");
+    }
+
+    void visit(const ExpressionDeserializeEJSON*) override {
+        // TODO(SERVER-114519): Support $deserializeEJSON in SBE.
+        unsupportedExpression("$deserializeEJSON");
+    }
+
+    void visit(const ExpressionHash* expr) final {
+        // TODO(SERVER-115462): Support $hash in SBE.
+        unsupportedExpression("$hash");
+    }
+
     void visit(const ExpressionTsSecond* expr) final {
         _context->ensureArity(1);
 
@@ -3533,6 +3577,92 @@ private:
         pushExpr(_b.makeLet(frameId,
                             SbExpr::makeSeq(std::move(inputExpr), std::move(placeExpr)),
                             std::move(abtExpr)));
+    }
+
+    /**
+     * Shared logic for $topN and $bottomN expressions
+     */
+    template <typename ExprType>
+    void visitTopNOrBottomN(const ExprType* expr, StringData functionName) {
+        auto input = popExpr();
+        auto n = popExpr();
+
+        auto frameId = _context->state.frameId();
+        SbVar nVar{frameId, 0};
+        SbVar inputVar{frameId, 1};
+
+        auto [specTag, specVal] = makeValue(expr->getSortPattern());
+        auto specConstant = _b.makeConstant(specTag, specVal);
+
+        auto nIsNegative = _b.makeBinaryOp(abt::Operations::Lt, nVar, _b.makeInt64Constant(0));
+        auto argumentIsNotArray = _b.makeNot(_b.makeFunction("isArray", inputVar));
+        auto nIsNotNumericOrIntegral =
+            _b.makeBinaryOp(abt::Operations::Or,
+                            _b.generateNonNumericCheck(nVar),
+                            _b.makeFillEmptyTrue(_b.makeBinaryOp(
+                                abt::Operations::Neq, nVar, _b.makeFunction("trunc", nVar))));
+
+        auto functionArgs = SbExpr::makeSeq(nVar, inputVar, std::move(specConstant));
+
+        auto collatorSlot = _context->state.getCollatorSlot();
+        if (collatorSlot) {
+            functionArgs.emplace_back(SbVar{*collatorSlot});
+        }
+
+        auto resultExpr = _b.buildMultiBranchConditionalFromCaseValuePairs(
+            SbExpr::makeExprPairVector(
+                SbExprPair{_b.generateNullMissingOrUndefined(nVar), _b.makeNullConstant()},
+                SbExprPair{std::move(nIsNotNumericOrIntegral),
+                           _b.makeFail(ErrorCodes::Error{1127469},
+                                       str::stream() << "$" << functionName
+                                                     << " requires 'n' to be an integer")},
+                SbExprPair{
+                    std::move(nIsNegative),
+                    _b.makeFail(ErrorCodes::Error{11274610},
+                                str::stream()
+                                    << "$" << functionName
+                                    << " requires a non-negative integer for the n argument")},
+                SbExprPair{_b.generateNullMissingOrUndefined(inputVar), _b.makeNullConstant()},
+                SbExprPair{std::move(argumentIsNotArray),
+                           _b.makeFail(ErrorCodes::Error{11274611},
+                                       str::stream() << "$" << functionName
+                                                     << " input argument must be an array")}),
+            _b.makeFunction(functionName, std::move(functionArgs)));
+        pushExpr(_b.makeLet(
+            frameId, SbExpr::makeSeq(std::move(n), std::move(input)), std::move(resultExpr)));
+    }
+
+    /**
+     * Shared logic for $top and $bottom expressions
+     */
+    template <typename ExprType>
+    void visitTopOrBottom(const ExprType* expr, StringData functionName) {
+        auto input = popExpr();
+
+        auto frameId = _context->state.frameId();
+        SbVar inputVar{frameId, 0};
+
+        auto [specTag, specVal] = makeValue(expr->getSortPattern());
+        auto specConstant = _b.makeConstant(specTag, specVal);
+
+        auto argumentIsNotArray = _b.makeNot(_b.makeFunction("isArray", inputVar));
+
+        auto functionArgs = SbExpr::makeSeq(inputVar, std::move(specConstant));
+
+        auto collatorSlot = _context->state.getCollatorSlot();
+        if (collatorSlot) {
+            functionArgs.emplace_back(SbVar{*collatorSlot});
+        }
+
+        auto resultExpr = _b.buildMultiBranchConditionalFromCaseValuePairs(
+            SbExpr::makeExprPairVector(
+                SbExprPair{_b.generateNullMissingOrUndefined(inputVar), _b.makeNullConstant()},
+                SbExprPair{std::move(argumentIsNotArray),
+                           _b.makeFail(ErrorCodes::Error{11274612},
+                                       str::stream() << "$" << functionName
+                                                     << " input argument must be an array")}),
+            _b.makeFunction(functionName, std::move(functionArgs)));
+        pushExpr(_b.makeLet(frameId, SbExpr::makeSeq(std::move(input)), std::move(resultExpr)));
     }
 
     /**

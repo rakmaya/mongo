@@ -36,7 +36,6 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/index/multikey_paths.h"
 #include "mongo/db/index_names.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/query/compiler/metadata/index_entry.h"
@@ -46,6 +45,7 @@
 #include "mongo/db/query/compiler/physical_model/index_bounds/index_bounds.h"
 #include "mongo/db/query/compiler/rewrites/matcher/expression_optimizer.h"
 #include "mongo/db/query/compiler/rewrites/matcher/expression_parameterization.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/modules.h"
 
@@ -95,9 +95,7 @@ public:
                 false,
                 false,
                 CoreIndexInfo::Identifier("test_foo"),
-                nullptr,
                 {},
-                nullptr,
                 nullptr};
     }
 
@@ -114,9 +112,7 @@ public:
                 false,
                 false,
                 IndexEntry::Identifier{"test_multikey"},
-                nullptr,
                 {},
-                nullptr,
                 nullptr};
     }
 
@@ -142,9 +138,7 @@ public:
                 false,
                 false,
                 IndexEntry::Identifier{"test_wildcard"},
-                nullptr,
                 {},
-                nullptr,
                 nullptr,
                 nullptr,
                 wildcardPos};

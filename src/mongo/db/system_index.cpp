@@ -43,17 +43,17 @@
 #include "mongo/db/exec/scoped_timer.h"
 #include "mongo/db/index_builds/index_builds_coordinator.h"
 #include "mongo/db/index_builds/index_builds_manager.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/index_catalog.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
-#include "mongo/db/local_catalog/index_key_validate.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
+#include "mongo/db/index_key_validate.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/intent_registry.h"
 #include "mongo/db/repl/replication_coordinator.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
@@ -158,7 +158,7 @@ Status verifySystemIndexes(OperationContext* opCtx, BSONObjBuilder* startupTimeE
             invariant(indexCatalog);
 
             // Make sure the old unique index from v2.4 on system.users doesn't exist.
-            std::vector<const IndexDescriptor*> indexes;
+            std::vector<const IndexCatalogEntry*> indexes;
             indexCatalog->findIndexesByKeyPattern(
                 opCtx, v1SystemUsersKeyPattern, IndexCatalog::InclusionPolicy::kReady, &indexes);
 
@@ -196,7 +196,7 @@ Status verifySystemIndexes(OperationContext* opCtx, BSONObjBuilder* startupTimeE
             const IndexCatalog* indexCatalog = collection->getIndexCatalog();
             invariant(indexCatalog);
 
-            std::vector<const IndexDescriptor*> indexes;
+            std::vector<const IndexCatalogEntry*> indexes;
             indexCatalog->findIndexesByKeyPattern(
                 opCtx, v3SystemRolesKeyPattern, IndexCatalog::InclusionPolicy::kReady, &indexes);
             if (indexes.empty()) {

@@ -137,15 +137,19 @@ RangeStatement RangeStatement::parse(RangeSpec spec) {
     return range;
 }
 
-REGISTER_DOCUMENT_SOURCE(densify,
-                         LiteParsedDocumentSourceDefault::parse,
-                         document_source_densify::createFromBson,
-                         AllowedWithApiStrict::kAlways);
+REGISTER_LITE_PARSED_DOCUMENT_SOURCE(densify,
+                                     DensifyLiteParsed::parse,
+                                     AllowedWithApiStrict::kAlways);
 
-REGISTER_INTERNAL_DOCUMENT_SOURCE(_internalDensify,
-                                  LiteParsedDocumentSourceDefault::parse,
-                                  DocumentSourceInternalDensify::createFromBson,
-                                  true);
+REGISTER_DOCUMENT_SOURCE_WITH_STAGE_PARAMS_DEFAULT(densify,
+                                                   document_source_densify,
+                                                   DensifyStageParams);
+
+REGISTER_INTERNAL_LITE_PARSED_DOCUMENT_SOURCE(_internalDensify, InternalDensifyLiteParsed::parse);
+REGISTER_DOCUMENT_SOURCE_WITH_STAGE_PARAMS_DEFAULT(_internalDensify,
+                                                   DocumentSourceInternalDensify,
+                                                   InternalDensifyStageParams);
+
 ALLOCATE_DOCUMENT_SOURCE_ID(_internalDensify, DocumentSourceInternalDensify::id)
 
 namespace document_source_densify {
@@ -364,7 +368,7 @@ DocumentSourceContainer::iterator DocumentSourceInternalDensify::combineSorts(
     return std::prev(itr);
 }
 
-DocumentSourceContainer::iterator DocumentSourceInternalDensify::doOptimizeAt(
+DocumentSourceContainer::iterator DocumentSourceInternalDensify::optimizeAt(
     DocumentSourceContainer::iterator itr, DocumentSourceContainer* container) {
     tassert(6059800, "Expected to optimize $densify stage", *itr == this);
 

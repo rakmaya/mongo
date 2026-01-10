@@ -30,28 +30,25 @@
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/json.h"
 #include "mongo/bson/oid.h"
 #include "mongo/db/client.h"
-#include "mongo/db/collection_crud/collection_write_path.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/dbdirectclient.h"
-#include "mongo/db/local_catalog/database.h"
+#include "mongo/db/dbhelpers.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/shard_catalog/database.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/dbtests/dbtests.h"  // IWYU pragma: keep
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 
-#include <memory>
 #include <string>
-#include <vector>
 
 namespace mongo {
 namespace CountTests {
@@ -84,7 +81,7 @@ public:
         _collection = acquireCollection(
             &_opCtx,
             CollectionAcquisitionRequest(nss(),
-                                         PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                         PlacementConcern(boost::none, ShardVersion::UNTRACKED()),
                                          repl::ReadConcernArgs::get(&_opCtx),
                                          AcquisitionPrerequisites::kWrite),
             MODE_IS);
@@ -112,7 +109,6 @@ protected:
     void insert(const char* s) {
         WriteUnitOfWork wunit(&_opCtx);
         const BSONObj o = fromjson(s);
-        OpDebug* const nullOpDebug = nullptr;
 
         if (o["_id"].eoo()) {
             BSONObjBuilder b;
@@ -120,16 +116,10 @@ protected:
             oid.init();
             b.appendOID("_id", &oid);
             b.appendElements(o);
-            collection_internal::insertDocument(&_opCtx,
-                                                _collection->getCollectionPtr(),
-                                                InsertStatement(b.obj()),
-                                                nullOpDebug,
-                                                false)
+            Helpers::insert(&_opCtx, _collection->getCollectionPtr(), b.obj())
                 .transitional_ignore();
         } else {
-            collection_internal::insertDocument(
-                &_opCtx, _collection->getCollectionPtr(), InsertStatement(o), nullOpDebug, false)
-                .transitional_ignore();
+            Helpers::insert(&_opCtx, _collection->getCollectionPtr(), o).transitional_ignore();
         }
         wunit.commit();
     }

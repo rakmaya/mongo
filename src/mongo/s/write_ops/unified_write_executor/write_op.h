@@ -29,11 +29,9 @@
 
 #pragma once
 
-#include "mongo/db/commands/query_cmd/bulk_write_common.h"
 #include "mongo/s/write_ops/write_command_ref.h"
+#include "mongo/s/write_ops/write_op_helper.h"
 #include "mongo/util/modules.h"
-
-#include <variant>
 
 #include <boost/optional.hpp>
 
@@ -46,113 +44,14 @@ enum WriteType {
 };
 
 using WriteOpId = size_t;
+using WriteOp = WriteOpRef;
 
-class WriteOp {
-public:
-    WriteOp(WriteOpRef ref) : _ref(std::move(ref)) {}
+inline WriteOpId getWriteOpId(const WriteOp& op) {
+    return op.getIndex();
+}
 
-    WriteOp(const BatchedCommandRequest& request, int index)
-        : WriteOp(WriteOpRef{request, index}) {}
-
-    WriteOp(const BulkWriteCommandRequest& request, int index)
-        : WriteOp(WriteOpRef{request, index}) {}
-
-    WriteOp(const write_ops::FindAndModifyCommandRequest& request) : WriteOp(WriteOpRef{request}) {}
-
-    WriteOpId getId() const {
-        return _ref.getIndex();
-    }
-
-    const NamespaceString& getNss() const {
-        return _ref.getNss();
-    }
-
-    boost::optional<UUID> getCollectionUUID() const {
-        return _ref.getCollectionUUID();
-    }
-
-    WriteType getType() const {
-        return WriteType(_ref.getOpType());
-    }
-
-    const boost::optional<mongo::EncryptionInformation>& getEncryptionInformation() const {
-        return _ref.getEncryptionInformation();
-    }
-
-    bool isFindAndModify() const {
-        return getCommand().visitRequest(
-            OverloadedVisitor{[&](const BatchedCommandRequest&) { return false; },
-                              [&](const BulkWriteCommandRequest&) { return false; },
-                              [&](const write_ops::FindAndModifyCommandRequest&) {
-                                  return true;
-                              }});
-    }
-
-    BulkWriteOpVariant getBulkWriteOp() const {
-        tassert(10394907,
-                "Unexpected findAndModify command to convert to bulkWrite op",
-                !isFindAndModify());
-        return _ref.visitOpData(OverloadedVisitor{
-            [&](const BSONObj& insertDoc) -> BulkWriteOpVariant {
-                return BulkWriteInsertOp(0, insertDoc);
-            },
-            [&](const write_ops::UpdateOpEntry& updateOp) -> BulkWriteOpVariant {
-                return bulk_write_common::toBulkWriteUpdate(updateOp);
-            },
-            [&](const write_ops::DeleteOpEntry& deleteOp) -> BulkWriteOpVariant {
-                return bulk_write_common::toBulkWriteDelete(deleteOp);
-            },
-            [&](const mongo::BulkWriteInsertOp& insertOp) -> BulkWriteOpVariant {
-                return insertOp;
-            },
-            [&](const mongo::BulkWriteUpdateOp& updateOp) -> BulkWriteOpVariant {
-                return updateOp;
-            },
-            [&](const mongo::BulkWriteDeleteOp& deleteOp) -> BulkWriteOpVariant {
-                return deleteOp;
-            },
-            [&](const write_ops::FindAndModifyCommandRequest&) -> BulkWriteOpVariant {
-                MONGO_UNREACHABLE;
-            }});
-    }
-
-    bool isMulti() const {
-        return _ref.getMulti();
-    }
-
-    WriteCommandRef getCommand() const {
-        return _ref.getCommand();
-    }
-
-    WriteOpRef getItemRef() const {
-        return _ref;
-    }
-
-    int getEffectiveStmtId() const {
-        auto cmdRef = _ref.getCommand();
-        int index = _ref.getIndex();
-
-        if (auto stmtIds = cmdRef.getStmtIds()) {
-            return stmtIds->at(index);
-        }
-
-        auto stmtId = cmdRef.getStmtId();
-        int32_t firstStmtId = stmtId ? *stmtId : 0;
-        return firstStmtId + index;
-    }
-
-    friend bool operator==(const WriteOp& lhs, const WriteOp& rhs) = default;
-
-    friend std::strong_ordering operator<=>(const WriteOp& lhs, const WriteOp& rhs) = default;
-
-    template <typename H>
-    friend H AbslHashValue(H h, const WriteOp& op) {
-        return H::combine(std::move(h), op._ref);
-    }
-
-private:
-    WriteOpRef _ref;
-};
-
+inline WriteType getWriteOpType(const WriteOp& op) {
+    return WriteType(op.getOpType());
+}
 }  // namespace unified_write_executor
 }  // namespace mongo

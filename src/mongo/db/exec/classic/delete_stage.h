@@ -36,12 +36,13 @@
 #include "mongo/db/exec/classic/working_set.h"
 #include "mongo/db/exec/plan_stats.h"
 #include "mongo/db/exec/write_stage_common.h"
-#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/profile_filter.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/compiler/physical_model/query_solution/stage_types.h"
 #include "mongo/db/session/logical_session_id.h"
+#include "mongo/db/shard_role/shard_role.h"
+#include "mongo/util/modules.h"
 
 #include <cstddef>
 #include <functional>
@@ -54,7 +55,7 @@ class OpDebug;
 class OperationContext;
 class PlanExecutor;
 
-struct DeleteStageParams {
+struct MONGO_MOD_PUBLIC DeleteStageParams {
     using DocumentCounter = std::function<size_t(const BSONObj&)>;
 
     DeleteStageParams()

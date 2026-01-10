@@ -1,4 +1,8 @@
-// @tags: [requires_fcv_73]
+// @tags: [
+//   requires_fcv_73,
+//   # Time-series collections have different _id properties.
+//   exclude_from_timeseries_crud_passthrough,
+// ]
 
 // Tests to ensure that duplicate fields on the same path in $or conditions are deduplicated.
 // Can be merged back into upsert_fields.js in 8.0 or later once it no longer needs to be excluded

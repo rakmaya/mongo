@@ -32,17 +32,15 @@
 #include "mongo/db/exec/sbe/expressions/expression.h"
 #include "mongo/db/exec/sbe/sbe_unittest.h"
 #include "mongo/db/exec/sbe/stages/co_scan.h"
-#include "mongo/db/exec/sbe/values/block_interface.h"
 #include "mongo/db/exec/sbe/values/slot.h"
 #include "mongo/db/exec/sbe/values/value.h"
-#include "mongo/db/exec/sbe/values/value_printer.h"
 #include "mongo/db/exec/sbe/vm/vm.h"
 #include "mongo/db/exec/sbe/vm/vm_printer.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/query/stage_builder/sbe/builder_data.h"
 #include "mongo/db/query/stage_builder/sbe/builder_state.h"
-#include "mongo/unittest/golden_test.h"
 #include "mongo/unittest/unittest.h"
+#include "mongo/util/modules.h"
 
 namespace mongo::sbe {
 
@@ -82,7 +80,7 @@ protected:
                  _expCtx,
                  false /* needsMerge */,
                  false /* allowDiskUse */,
-                 _expCtx->getIfrContext()} {
+                 *_expCtx->getIfrContext()} {
         _ctx.root = &_emptyStage;
     }
 
@@ -135,7 +133,7 @@ protected:
      */
     FastTuple<bool, value::TypeTags, value::Value> runExpression(const EExpression& expr) {
         auto compiledExpr = expr.compile(_ctx);
-        return _vm.run(compiledExpr.get());
+        return _vm.run(compiledExpr.get()).releaseToRaw();
     }
 
     /**
@@ -145,15 +143,8 @@ protected:
      */
     std::pair<value::TypeTags, value::Value> runCompiledExpression(
         const vm::CodeFragment* compiledExpr) {
-        auto [owned, tag, val] = _vm.run(compiledExpr);
-        if (owned) {
-            return {tag, val};
-        } else {
-            // It is possible that this result is a "view" into memory that is owned somewhere else.
-            // By creating a copy, we ensure it is safe for the caller to call 'releaseValue()' on
-            // the copied Value.
-            return value::copyValue(tag, val);
-        }
+        auto res = _vm.run(compiledExpr);
+        return res.releaseToOwnedRaw();
     }
 
     bool runCompiledExpressionPredicate(const vm::CodeFragment* compiledExpr) {
@@ -167,7 +158,7 @@ protected:
 
     void printCompiledExpression(std::ostream& os, const vm::CodeFragment& code) {
         os << "-- COMPILED EXPRESSION:" << std::endl;
-        vm::CodeFragmentPrinter(vm::CodeFragmentPrinter::PrintFormat::Stable).print(os, code);
+        vm::CodeFragmentPrinter(vm::CodeFragment::PrintFormat::Stable).print(os, code);
         os << std::endl << std::endl;
     }
 
@@ -193,10 +184,9 @@ protected:
         }
 
         try {
-            auto [owned, tag, val] = _vm.run(&code);
-            value::ValueGuard guard(owned, tag, val);
+            auto res = _vm.run(&code);
             os << "RESULT: ";
-            valuePrinter.writeValueToStream(tag, val);
+            valuePrinter.writeValueToStream(res.tag(), res.value());
             os << std::endl;
         } catch (const DBException& e) {
             os << "EXCEPTION: " << e.toString() << std::endl;

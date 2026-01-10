@@ -401,6 +401,8 @@ const skips = new Set([
     "$_internalChangeStreamAddPreImage",
     "$_internalChangeStreamCheckInvalidate",
     "$_internalChangeStreamCheckResumability",
+    // TODO SERVER-112325: Remove this stage once all mongos versions are guaranteed to not
+    // generate this stage in a change stream pipeline anymore.
     "$_internalChangeStreamCheckTopologyChange",
     "$_internalChangeStreamHandleTopologyChange",
     "$_internalChangeStreamInjectControlEvents",
@@ -458,6 +460,7 @@ const skips = new Set([
     "$searchMeta",
     "$sessionWindow",
     "$setMetadata",
+    "$setStreamMeta", // Tested in set_stream_meta_error.js
     "$setVariableFromSubPipeline",
     "$shardedDataDistribution",
     "$skip",
@@ -473,21 +476,7 @@ const allPipelines = [
 ];
 const testedStages = new Set(allPipelines.flatMap((pipeline) => pipeline.map((obj) => Object.keys(obj)[0])));
 
+// Confirm that every aggregation stage is either tested or explicitly skipped.
 for (const aggStage of aggStages) {
-    // Confirm that every aggregation stage is either tested or explicitly skipped.
-    if (testedStages.has(aggStage) || skips.has(aggStage)) {
-        continue;
-    }
-    // If we reach here, then the aggregation stage has not been tested or skipped. We confirm that
-    // this stage is a stub stage that is defined for tests in aggregation_stage_stub_parsers.json.
-    // If not, we will trigger the assertion and should test or skip the new stage.
-    try {
-        coll.aggregate([{[aggStage]: {}}]);
-        assert(false, aggStage + " has not been tested for null bytes.");
-    } catch (e) {
-        if (e.code !== 10918500) {
-            // Stub aggregation stage error code.
-            assert(false, aggStage + " has not been tested for null bytes.");
-        }
-    }
+    assert(testedStages.has(aggStage) || skips.has(aggStage), aggStage + " has not been tested for null bytes.");
 }

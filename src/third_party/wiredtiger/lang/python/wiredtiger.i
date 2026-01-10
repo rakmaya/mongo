@@ -53,6 +53,8 @@ This provides an API similar to the C API, with the following modifications:
 %feature("autodoc", "0");
 
 %pythoncode %{
+import os
+import errno
 from packing import pack, unpack
 ## @endcond
 %}
@@ -113,26 +115,27 @@ from packing import pack, unpack
 	$result = SWIG_NewPointerObj(SWIG_as_voidptr(*$1),
 	    SWIGTYPE_p___wt_connection, 0);
 }
+
+/*
+ * For Sessions and Cursors created in Python, each of WT_SESSION_IMPL
+ * and WT_CURSOR have a lang_private field that stores a pointer to the
+ * associated Python object.  {session,cursor}CloseHandler()
+ * functions reach into the associated Python object, set the 'this'
+ * attribute to None, and clear the lang_private field.
+ */
 %typemap(argout) WT_SESSION ** {
 	$result = SWIG_NewPointerObj(SWIG_as_voidptr(*$1),
 	    SWIGTYPE_p___wt_session, 0);
 	if (*$1 != NULL) {
-		PY_CALLBACK *pcb;
-
-		if (__wt_calloc_def((WT_SESSION_IMPL *)(*$1), 1, &pcb) != 0)
-			SWIG_exception_fail(SWIG_MemoryError, "WT calloc failed");
-		else {
-			Py_XINCREF($result);
-			pcb->pyobj = $result;
-			((WT_SESSION_IMPL *)(*$1))->lang_private = pcb;
-		}
+		Py_XINCREF($result);
+		((WT_SESSION_IMPL *)(*$1))->lang_private = $result;
 	}
 }
+
 %typemap(argout) WT_CURSOR ** {
 	$result = SWIG_NewPointerObj(SWIG_as_voidptr(*$1),
 	    SWIGTYPE_p___wt_cursor, 0);
 	if (*$1 != NULL) {
-		PY_CALLBACK *pcb;
 		uint64_t json, version_cursor;
 
 		json = (*$1)->flags & WT_CURSTD_DUMP_JSON;
@@ -150,13 +153,8 @@ from packing import pack, unpack
 		PyObject_SetAttrString($result, "value_format",
 		    PyString_InternFromString((*$1)->value_format));
 
-		if (__wt_calloc_def((WT_SESSION_IMPL *)(*$1)->session, 1, &pcb) != 0)
-			SWIG_exception_fail(SWIG_MemoryError, "WT calloc failed");
-		else {
-			Py_XINCREF($result);
-			pcb->pyobj = $result;
-			(*$1)->lang_private = pcb;
-		}
+		Py_XINCREF($result);
+		(*$1)->lang_private = $result;
 	}
 }
 
@@ -429,6 +427,32 @@ from packing import pack, unpack
 	$result = PyLong_FromUnsignedLongLong($1);
 }
 
+/*
+ * Typemaps for __wt_get_verbose_categories
+ */
+%typemap(in, numinputs=0) (const WT_NAME_FLAG **catp, size_t *countp) (const WT_NAME_FLAG *temp_cats, size_t temp_count) {
+    $1 = &temp_cats;
+    $2 = &temp_count;
+}
+
+%typemap(argout) (const WT_NAME_FLAG **catp, size_t *countp) {
+	/*
+	 * $1 refers to the temp_cats
+	 * $2 refers to the temp_count
+	 */
+	$result = PyList_New(*$2);
+	for (size_t i = 0; i < *$2; i++) {
+		PyObject *tuple = PyTuple_New(2);
+		PyTuple_SetItem(tuple, 0, PyUnicode_FromString((*$1)[i].name));
+		PyTuple_SetItem(tuple, 1, PyUnicode_FromString(__wt_verbose_category_string((*$1)[i].flag)));
+		PyList_SetItem($result, i, tuple);
+	}
+}
+
+%rename(wiredtiger_get_verbose_categories) __wt_get_verbose_categories;
+void
+__wt_get_verbose_categories(const WT_NAME_FLAG **catp, size_t *countp);
+
 /* Internal _set_key, _set_value methods take a 'bytes' object as parameter. */
 %pybuffer_binary(unsigned char *data, int);
 
@@ -440,10 +464,13 @@ from packing import pack, unpack
 
 		@copydoc class::method'''
 		try:
-			self._freecb()
-			return $action(self, *args)
-		finally:
+			ret = $action(self, *args)
 			self.this = None
+			return ret
+		except _wiredtiger.WiredTigerError as err:
+			if str(err) != os.strerror(errno.EBUSY):
+				self.this = None
+			raise
 %}
 %enddef
 DESTRUCTOR(__wt_connection, close)
@@ -505,23 +532,11 @@ DESTRUCTOR(__wt_file_system, fs_terminate)
 #define WT_SESSION_CLOSED		WT_SESSION
 #define WT_CONNECTION_CLOSED		WT_CONNECTION
 
-/*
- * For Connections, Sessions and Cursors created in Python, each of
- * WT_CONNECTION_IMPL, WT_SESSION_IMPL and WT_CURSOR have a
- * lang_private field that store a pointer to a PY_CALLBACK, alloced
- * during the various open calls.  {conn,session,cursor}CloseHandler()
- * functions reach into the associated Python object, set the 'this'
- * asttribute to None, and free the PY_CALLBACK.
- */
-typedef struct {
-	PyObject *pyobj;	/* the python Session/Cursor object */
-} PY_CALLBACK;
-
 static PyObject *wtError;
 static PyObject *wtRollbackError;
 
-static int sessionFreeHandler(WT_SESSION *session_arg);
-static int cursorFreeHandler(WT_CURSOR *cursor_arg);
+static int sessionClearHandler(WT_SESSION *session);
+static int cursorClearHandler(WT_CURSOR *cursor);
 static int unpackBytesOrString(PyObject *obj, void **data, size_t *size);
 
 #define WT_GETATTR(var, parent, name)					\
@@ -584,6 +599,8 @@ def wiredtiger_calc_modify(session, oldv, newv, maxdiff, nmod):
 def wiredtiger_calc_modify_string(session, oldv, newv, maxdiff, nmod):
 	return _wiredtiger_calc_modify_string(session, oldv, newv, maxdiff, nmod)
 
+def wiredtiger_dump_error_log(callback=None):
+	return _wiredtiger_dump_error_log(callback)
 %}
 
 /* Bail out if arg or arg.this is None, else set res to the C pointer. */
@@ -1033,8 +1050,8 @@ typedef int int_void;
 		return ((ret != 0) ? ret : (cmp < 0) ? -1 : (cmp == 0) ? 0 : 1);
 	}
 
-	int _freecb() {
-		return (cursorFreeHandler($self));
+	int _clear() {
+		return (cursorClearHandler($self));
 	}
 
 	/*
@@ -1180,16 +1197,16 @@ typedef int int_void;
 
 %extend __wt_session {
 	int _log_printf(const char *msg) {
-		return self->log_printf(self, "%s", msg);
+		return self->log_printf($self, "%s", msg);
 	}
 
-	int _freecb() {
-		return (sessionFreeHandler(self));
+	int _clear() {
+		return (sessionClearHandler($self));
 	}
 };
 
 %extend __wt_connection {
-	int _freecb() {
+	int _clear() {
 		return (0);
 	}
 };
@@ -1461,6 +1478,7 @@ OVERRIDE_METHOD(__wt_session, WT_SESSION, log_printf, (self, msg))
 %ignore wiredtiger_struct_unpack;
 
 %ignore wiredtiger_calc_modify;
+%ignore wiredtiger_dump_error_log;
 %ignore wiredtiger_extension_init;
 %ignore wiredtiger_extension_terminate;
 
@@ -1497,6 +1515,10 @@ extern int _wiredtiger_calc_modify(WT_SESSION *session,
 extern int _wiredtiger_calc_modify_string(WT_SESSION *session,
     const WT_ITEM *oldv, const WT_ITEM *newv,
     size_t maxdiff, WT_MODIFY *entries_string, int *nentriesp);
+
+/* A wrapper function for wiredtiger_dump_error_log, which takes a function argument. */
+extern int _wiredtiger_dump_error_log(PyObject *callback);
+
 %{
 int _wiredtiger_calc_modify(WT_SESSION *session,
     const WT_ITEM *oldv, const WT_ITEM *newv,
@@ -1512,6 +1534,76 @@ int _wiredtiger_calc_modify_string(WT_SESSION *session,
 {
 	return (wiredtiger_calc_modify(
 	    session, oldv, newv, maxdiff, entries_string, nentriesp));
+}
+
+/* Python callback for wiredtiger_dump_error_log. */
+#ifdef _WIN32
+__declspec(thread) static PyObject *wiredtiger_dump_error_log_callback = NULL;
+#else
+_Thread_local static PyObject *wiredtiger_dump_error_log_callback = NULL;
+#endif
+
+/* The callback function for wiredtiger_dump_error_log. */
+static int
+wiredtiger_dump_error_log_helper(const char *message)
+{
+	PyObject *arglist, *result;
+	int ret;
+
+	ret = 0;
+	arglist = NULL;
+	result = NULL;
+
+	if (wiredtiger_dump_error_log_callback == NULL)
+		return (EINVAL);
+
+	/* Build the argument list. */
+	if ((arglist = Py_BuildValue("(s)", message)) == NULL) {
+		ret = WT_ERROR;
+		goto err;
+	}
+
+	/* Call the Python function. */
+	result = PyObject_CallObject(wiredtiger_dump_error_log_callback, arglist);
+	if (result == NULL) {
+		ret = WT_ERROR;
+		goto err;
+	}
+
+	/* Set the error code, if provided. */
+	if (PyLong_Check(result))
+		ret = (int)PyLong_AsLong(result);
+
+err:
+	Py_XDECREF(arglist);
+	Py_XDECREF(result);
+	return (ret);
+}
+
+/* A wrapper function for wiredtiger_dump_error_log, which takes a function argument. */
+int _wiredtiger_dump_error_log(PyObject *callback)
+{
+	int ret;
+
+	if (callback == NULL || callback == Py_None)
+		ret = wiredtiger_dump_error_log(NULL);
+	else {
+		/*
+		 * Acquire the Global Interpreter Lock (GIL) to protect the Python object, and to call the
+		 * provided callback function safely.
+		 */
+		SWIG_PYTHON_THREAD_BEGIN_BLOCK;
+		Py_INCREF(callback);
+
+		wiredtiger_dump_error_log_callback = callback;
+		ret = wiredtiger_dump_error_log(wiredtiger_dump_error_log_helper);
+		wiredtiger_dump_error_log_callback = NULL;
+
+		Py_XDECREF(callback);
+		SWIG_PYTHON_THREAD_END_BLOCK;
+	}
+
+	return (ret);
 }
 
 /* Add event handler support. */
@@ -1587,7 +1679,8 @@ writeToPythonStream(const char *streamname, const char *message)
 	(void)PyObject_CallObject(flush_method, arglist2);
 	ret = 0;
 
-err:	Py_XDECREF(arglist2);
+err:
+	Py_XDECREF(arglist2);
 	Py_XDECREF(arglist);
 	Py_XDECREF(flush_method);
 	Py_XDECREF(write_method);
@@ -1620,22 +1713,20 @@ pythonMessageCallback(WT_EVENT_HANDLER *handler, WT_SESSION *session,
  * equivalent to 'pyobj.this = None' in Python.
  */
 static int
-pythonClose(PY_CALLBACK *pcb)
+pythonClose(PyObject *pyobj)
 {
-	int ret;
-
 	/*
 	 * Ensure the global interpreter lock is held - so that Python
 	 * doesn't shut down threads while we use them.
 	 */
 	SWIG_PYTHON_THREAD_BEGIN_BLOCK;
 
-	ret = 0;
-	if (PyObject_SetAttrString(pcb->pyobj, "this", Py_None) == -1) {
+	int ret = 0;
+	if (PyObject_SetAttrString(pyobj, "this", Py_None) == -1) {
 		SWIG_Error(SWIG_RuntimeError, "WT SetAttr failed");
 		ret = EINVAL;  /* any non-zero value will do. */
 	}
-	Py_XDECREF(pcb->pyobj);
+	Py_XDECREF(pyobj);
 
 	SWIG_PYTHON_THREAD_END_BLOCK;
 
@@ -1646,17 +1737,12 @@ pythonClose(PY_CALLBACK *pcb)
 static int
 sessionCloseHandler(WT_SESSION *session_arg)
 {
-	int ret;
-	PY_CALLBACK *pcb;
-	WT_SESSION_IMPL *session;
-
-	ret = 0;
-	session = (WT_SESSION_IMPL *)session_arg;
-	pcb = (PY_CALLBACK *)session->lang_private;
+	WT_SESSION_IMPL *session = (WT_SESSION_IMPL *)session_arg;
+	PyObject *pyobj = (PyObject *)session->lang_private;
 	session->lang_private = NULL;
-	if (pcb != NULL)
-		ret = pythonClose(pcb);
-	__wt_free(session, pcb);
+	int ret = 0;
+	if (pyobj != NULL)
+		ret = pythonClose(pyobj);
 
 	return (ret);
 }
@@ -1665,42 +1751,30 @@ sessionCloseHandler(WT_SESSION *session_arg)
 static int
 cursorCloseHandler(WT_CURSOR *cursor)
 {
-	int ret;
-	PY_CALLBACK *pcb;
-
-	ret = 0;
-	pcb = (PY_CALLBACK *)cursor->lang_private;
+	PyObject *pyobj = (PyObject *)cursor->lang_private;
 	cursor->lang_private = NULL;
-	if (pcb != NULL)
-		ret = pythonClose(pcb);
-	__wt_free(CUR2S(cursor), pcb);
+	int ret = 0;
+	if (pyobj != NULL)
+		ret = pythonClose(pyobj);
 
 	return (ret);
 }
 
 /* Session specific close handler. */
 static int
-sessionFreeHandler(WT_SESSION *session_arg)
+sessionClearHandler(WT_SESSION *session)
 {
-	PY_CALLBACK *pcb;
-	WT_SESSION_IMPL *session;
+	((WT_SESSION_IMPL *)session)->lang_private = NULL;
 
-	session = (WT_SESSION_IMPL *)session_arg;
-	pcb = (PY_CALLBACK *)session->lang_private;
-	session->lang_private = NULL;
-	__wt_free(session, pcb);
 	return (0);
 }
 
 /* Cursor specific close handler. */
 static int
-cursorFreeHandler(WT_CURSOR *cursor)
+cursorClearHandler(WT_CURSOR *cursor)
 {
-	PY_CALLBACK *pcb;
-
-	pcb = (PY_CALLBACK *)cursor->lang_private;
 	cursor->lang_private = NULL;
-	__wt_free(CUR2S(cursor), pcb);
+
 	return (0);
 }
 

@@ -35,8 +35,6 @@
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/index_builds/commit_quorum_options.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_options.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/oplog.h"
@@ -45,6 +43,8 @@
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/logical_session_id_gen.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_options.h"
 #include "mongo/db/transaction/transaction_operations.h"
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/util/decorable.h"
@@ -235,6 +235,11 @@ public:
                                    const Status& cause,
                                    bool fromMigrate,
                                    bool isTimeseries = false) = 0;
+
+    virtual void onSetMultikeyMetadata(OperationContext* opCtx,
+                                       const NamespaceString& nss,
+                                       const std::string& idxName,
+                                       const BSONObj& multikeyPaths) = 0;
 
     /**
      * 'recordIds' is a vector of recordIds corresponding to the inserted documents.
@@ -524,14 +529,10 @@ public:
      *
      * The 'commitOplogEntryOpTime' is passed in to be used as the OpTime of the oplog entry. The
      * 'commitTimestamp' is the timestamp at which the multi-document transaction was committed.
-     *
-     * The 'statements' are the list of CRUD operations to be applied in this transaction.
      */
-    virtual void onPreparedTransactionCommit(
-        OperationContext* opCtx,
-        OplogSlot commitOplogEntryOpTime,
-        Timestamp commitTimestamp,
-        const std::vector<repl::ReplOperation>& statements) noexcept = 0;
+    virtual void onPreparedTransactionCommit(OperationContext* opCtx,
+                                             OplogSlot commitOplogEntryOpTime,
+                                             Timestamp commitTimestamp) noexcept = 0;
 
     /**
      * Events for logical grouping of writes to be replicated atomically.
@@ -744,6 +745,29 @@ public:
                                  int64_t bytesDeleted,
                                  int64_t docsDeleted,
                                  repl::OpTime& opTime) = 0;
+
+    /**
+     * Called when a timeseries collection is upgraded from viewful to viewless format or viceversa.
+     *
+     * Logs an single oplog entry, so that all changes done for the upgrade/downgrade (create/drop
+     * view, rename system.buckets, metadata fixup) are replicated and applied atomically.
+     *
+     * The resulting format is the one consistent with the FCV; i.e. it is an upgrade if the
+     * viewless timeseries feature flag is enabled, and a downgrade if it is disabled.
+     *
+     * `nss` is the main namespace (i.e. without the 'system.buckets' prefix).
+     * `uuid` is the UUID associated of the time series collection.
+     * For viewful time series collections, that is the UUID of the system.buckets collection.
+     * `skipViewCreation` when true, indicates that the view should not be created during
+     * downgrade. This is used for non-primary shards in a sharded cluster, where only the
+     * primary shard of the database should have the view.
+     *
+     * TODO(SERVER-114573): Remove this method once 9.0 becomes lastLTS.
+     */
+    virtual void onUpgradeDowngradeViewlessTimeseries(OperationContext* opCtx,
+                                                      const NamespaceString& nss,
+                                                      const UUID& uuid,
+                                                      bool skipViewCreation = false) = 0;
 
     struct Times;
 

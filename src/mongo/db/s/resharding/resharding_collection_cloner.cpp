@@ -43,17 +43,15 @@
 #include "mongo/db/exec/document_value/value_comparator.h"
 #include "mongo/db/feature_flag.h"
 #include "mongo/db/generic_argument_util.h"
-#include "mongo/db/global_catalog/catalog_cache/catalog_cache.h"
 #include "mongo/db/global_catalog/chunk_manager.h"
-#include "mongo/db/global_catalog/router_role_api/router_role.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_catalog/operation_sharding_state.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/pipeline/pipeline_factory.h"
 #include "mongo/db/query/getmore_command_gen.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/repl/read_concern_level.h"
+#include "mongo/db/router_role/router_role.h"
+#include "mongo/db/router_role/routing_cache/catalog_cache.h"
 #include "mongo/db/s/resharding/document_source_resharding_ownership_match.h"
 #include "mongo/db/s/resharding/resharding_clone_fetcher.h"
 #include "mongo/db/s/resharding/resharding_data_copy_util.h"
@@ -64,6 +62,9 @@
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/logical_session_id_helpers.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/operation_sharding_state.h"
+#include "mongo/db/shard_role/shard_role_loop.h"
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/versioning_protocol/chunk_version.h"
 #include "mongo/db/versioning_protocol/shard_version.h"
@@ -186,9 +187,8 @@ ReshardingCollectionCloner::_queryOnceWithNaturalOrder(
     boost::optional<RouterRelaxCollectionUUIDConsistencyCheckBlock>
         routerRelaxCollectionUUIDConsistencyCheckBlock(boost::in_place_init_if, _relaxed, opCtx);
 
-    sharding::router::CollectionRouter router(opCtx->getServiceContext(), _sourceNss);
+    sharding::router::CollectionRouter router(opCtx, _sourceNss);
     auto dispatchResults = router.routeWithRoutingContext(
-        opCtx,
         "resharding collection cloner fetching with natural order (query stage)"_sd,
         [&](OperationContext* opCtx, RoutingContext& routingCtx) {
             AsyncRequestsSender::ShardHostMap designatedHostsMap;
@@ -396,7 +396,7 @@ void ReshardingCollectionCloner::writeOneBatch(OperationContext* opCtx,
                                                ShardId donorShard,
                                                HostAndPort donorHost,
                                                BSONObj resumeToken) {
-    resharding::data_copy::staleConfigShardLoop(opCtx, [&] {
+    shard_role_loop::withStaleShardRetry(opCtx, [&] {
         // ReshardingOpObserver depends on the collection metadata being known when processing
         // writes to the temporary resharding collection. We attach placement version IGNORED to the
         // write operations to retry on a StaleConfig error and allow the collection metadata to be

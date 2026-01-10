@@ -38,9 +38,6 @@
 #include "mongo/client/dbclient_cursor.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/exec/document_value/value.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/op_observer/op_observer_noop.h"
@@ -64,6 +61,9 @@
 #include "mongo/db/session/session_catalog.h"
 #include "mongo/db/session/session_catalog_mongod.h"
 #include "mongo/db/session/session_txn_record_gen.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/topology/cluster_role.h"
@@ -204,14 +204,11 @@ public:
     };
 
 
-    void onPreparedTransactionCommit(
-        OperationContext* opCtx,
-        OplogSlot commitOplogEntryOpTime,
-        Timestamp commitTimestamp,
-        const std::vector<repl::ReplOperation>& statements) noexcept override {
+    void onPreparedTransactionCommit(OperationContext* opCtx,
+                                     OplogSlot commitOplogEntryOpTime,
+                                     Timestamp commitTimestamp) noexcept override {
         ASSERT_TRUE(shard_role_details::getLocker(opCtx)->inAWriteUnitOfWork());
-        OpObserverNoop::onPreparedTransactionCommit(
-            opCtx, commitOplogEntryOpTime, commitTimestamp, statements);
+        OpObserverNoop::onPreparedTransactionCommit(opCtx, commitOplogEntryOpTime, commitTimestamp);
 
         uassert(ErrorCodes::OperationFailed,
                 "onPreparedTransactionCommit() failed",
@@ -704,7 +701,9 @@ TEST_F(ShardTransactionParticipantRetryableWritesTest,
     ASSERT(childTxnParticipant.checkStatementExecuted(opCtx(), 2000));
 }
 
-DEATH_TEST_REGEX_F(TransactionParticipantRetryableWritesTest,
+using TransactionParticipantRetryableWritesTestDeathTest =
+    TransactionParticipantRetryableWritesTest;
+DEATH_TEST_REGEX_F(TransactionParticipantRetryableWritesTestDeathTest,
                    CheckStatementExecutedForInvalidatedSelfTransactionParticipantInvariants,
                    R"#(Invariant failure.*retryableWriteTxnParticipantCatalog.isValid)#") {
     auto txnParticipant = TransactionParticipant::get(opCtx());
@@ -712,7 +711,9 @@ DEATH_TEST_REGEX_F(TransactionParticipantRetryableWritesTest,
     txnParticipant.checkStatementExecutedAndFetchOplogEntry(opCtx(), 0);
 }
 
-DEATH_TEST_REGEX_F(ShardTransactionParticipantRetryableWritesTest,
+using ShardTransactionParticipantRetryableWritesTestDeathTest =
+    ShardTransactionParticipantRetryableWritesTest;
+DEATH_TEST_REGEX_F(ShardTransactionParticipantRetryableWritesTestDeathTest,
                    CheckStatementExecutedForInvalidatedParentTransactionParticipantInvariants,
                    R"#(Invariant failure.*retryableWriteTxnParticipantCatalog.isValid)#") {
     const auto parentLsid = *opCtx()->getLogicalSessionId();
@@ -737,7 +738,7 @@ DEATH_TEST_REGEX_F(ShardTransactionParticipantRetryableWritesTest,
     childTxnParticipant.checkStatementExecutedAndFetchOplogEntry(opCtx(), 0);
 }
 
-DEATH_TEST_REGEX_F(ShardTransactionParticipantRetryableWritesTest,
+DEATH_TEST_REGEX_F(ShardTransactionParticipantRetryableWritesTestDeathTest,
                    CheckStatementExecutedForInvalidatedChildTransactionParticipantInvariants,
                    R"#(Invariant failure.*retryableWriteTxnParticipantCatalog.isValid)#") {
     const auto parentLsid = *opCtx()->getLogicalSessionId();
@@ -763,7 +764,7 @@ DEATH_TEST_REGEX_F(ShardTransactionParticipantRetryableWritesTest,
 }
 
 DEATH_TEST_REGEX_F(
-    TransactionParticipantRetryableWritesTest,
+    TransactionParticipantRetryableWritesTestDeathTest,
     WriteOpCompletedOnPrimaryForOldTransactionInvariants,
     R"#(Invariant failure.*sessionTxnRecord.getTxnNum\(\) == o\(\).activeTxnNumber)#") {
     auto txnParticipant = TransactionParticipant::get(opCtx());
@@ -808,7 +809,7 @@ DEATH_TEST_REGEX_F(
 }
 
 DEATH_TEST_REGEX_F(
-    TransactionParticipantRetryableWritesTest,
+    TransactionParticipantRetryableWritesTestDeathTest,
     WriteOpCompletedOnPrimaryForOldTransactionInvariantsMultiStmtIds,
     R"#(Invariant failure.*sessionTxnRecord.getTxnNum\(\) == o\(\).activeTxnNumber)#") {
     auto txnParticipant = TransactionParticipant::get(opCtx());
@@ -853,7 +854,7 @@ DEATH_TEST_REGEX_F(
 }
 
 DEATH_TEST_REGEX_F(
-    TransactionParticipantRetryableWritesTest,
+    TransactionParticipantRetryableWritesTestDeathTest,
     WriteOpCompletedOnPrimaryForInvalidatedTransactionInvariants,
     R"#(Invariant failure.*sessionTxnRecord.getTxnNum\(\) == o\(\).activeTxnNumber)#") {
     auto txnParticipant = TransactionParticipant::get(opCtx());

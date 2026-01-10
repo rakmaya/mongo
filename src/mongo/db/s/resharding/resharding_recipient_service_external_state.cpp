@@ -31,13 +31,13 @@
 
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/db/feature_flag.h"
-#include "mongo/db/global_catalog/catalog_cache/catalog_cache.h"
 #include "mongo/db/global_catalog/chunk_manager.h"
 #include "mongo/db/global_catalog/sharding_catalog_client.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_runtime.h"
+#include "mongo/db/router_role/routing_cache/catalog_cache.h"
 #include "mongo/db/s/resharding/resharding_donor_recipient_common.h"
 #include "mongo/db/server_options.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/collection_sharding_runtime.h"
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/sharding_environment/sharding_feature_flags_gen.h"
 #include "mongo/db/topology/sharding_state.h"
@@ -140,8 +140,8 @@ RecipientStateMachineExternalStateImpl::getCollectionOptions(
     boost::optional<Timestamp> afterClusterTime,
     StringData reason) {
     // Load the collection options from the primary shard for the database.
-    sharding::router::DBPrimaryRouter router(opCtx->getServiceContext(), nss.dbName());
-    return router.route(opCtx, reason, [&](OperationContext* opCtx, const CachedDatabaseInfo& cdb) {
+    sharding::router::DBPrimaryRouter router(opCtx, nss.dbName());
+    return router.route(reason, [&](OperationContext* opCtx, const CachedDatabaseInfo& cdb) {
         return MigrationDestinationManager::getCollectionOptions(
             opCtx,
             NamespaceStringOrUUID{nss.dbName(), uuid},
@@ -173,21 +173,20 @@ RecipientStateMachineExternalStateImpl::getCollectionIndexes(OperationContext* o
                                                              StringData reason,
                                                              bool expandSimpleCollation) {
     // Load the list of indexes from the shard which owns the global minimum chunk.
-    sharding::router::CollectionRouter router(opCtx->getServiceContext(), nss);
-    return router.route(
-        opCtx, reason, [&](OperationContext* opCtx, const CollectionRoutingInfo& cri) {
-            uassert(ErrorCodes::NamespaceNotFound,
-                    str::stream() << "Expected collection " << nss.toStringForErrorMsg()
-                                  << " to be tracked",
-                    cri.hasRoutingTable());
-            return MigrationDestinationManager::getCollectionIndexes(
-                opCtx,
-                nss,
-                cri.getChunkManager().getMinKeyShardIdWithSimpleCollation(),
-                cri,
-                afterClusterTime,
-                expandSimpleCollation);
-        });
+    sharding::router::CollectionRouter router(opCtx, nss);
+    return router.route(reason, [&](OperationContext* opCtx, const CollectionRoutingInfo& cri) {
+        uassert(ErrorCodes::NamespaceNotFound,
+                str::stream() << "Expected collection " << nss.toStringForErrorMsg()
+                              << " to be tracked",
+                cri.hasRoutingTable());
+        return MigrationDestinationManager::getCollectionIndexes(
+            opCtx,
+            nss,
+            cri.getChunkManager().getMinKeyShardIdWithSimpleCollation(),
+            cri,
+            afterClusterTime,
+            expandSimpleCollation);
+    });
 }
 
 /**
@@ -200,8 +199,8 @@ void RecipientStateMachineExternalStateImpl::route(
     const NamespaceString& nss,
     StringData reason,
     unique_function<void(OperationContext* opCtx, const CollectionRoutingInfo& cri)> callback) {
-    sharding::router::CollectionRouter router(opCtx->getServiceContext(), nss);
-    router.route(opCtx, reason, callback);
+    sharding::router::CollectionRouter router(opCtx, nss);
+    router.route(reason, callback);
 }
 
 void RecipientStateMachineExternalStateImpl::updateCoordinatorDocument(OperationContext* opCtx,

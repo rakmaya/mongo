@@ -35,13 +35,13 @@
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/db/client.h"
 #include "mongo/db/dbdirectclient.h"
-#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/repl/primary_only_service_test_fixture.h"
 #include "mongo/db/repl/repl_server_parameters_gen.h"
 #include "mongo/db/repl/wait_for_majority_service.h"
 #include "mongo/db/service_context_d_test_fixture.h"
+#include "mongo/db/shard_role/lock_manager/d_concurrency.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/executor/network_connection_hook.h"
 #include "mongo/executor/network_interface_factory.h"
 #include "mongo/executor/thread_pool_task_executor.h"
@@ -394,7 +394,8 @@ protected:
     std::shared_ptr<executor::TaskExecutor> _testExecutor;
 };
 
-DEATH_TEST_F(PrimaryOnlyServiceTest,
+using PrimaryOnlyServiceTestDeathTest = PrimaryOnlyServiceTest;
+DEATH_TEST_F(PrimaryOnlyServiceTestDeathTest,
              DoubleRegisterService,
              "Attempted to register PrimaryOnlyService (TestService) that is already registered") {
     PrimaryOnlyServiceRegistry registry;
@@ -633,7 +634,7 @@ TEST_F(PrimaryOnlyServiceTest, LookupInstanceHoldingIXLock) {
     instance->getCompletionFuture().get();
 }
 
-DEATH_TEST_F(PrimaryOnlyServiceTest,
+DEATH_TEST_F(PrimaryOnlyServiceTestDeathTest,
              LookupInstanceHoldingISLockWithoutAlwaysBeingInterruptible,
              "invariant") {
     // Make sure the instance doesn't complete before we try to look it up.

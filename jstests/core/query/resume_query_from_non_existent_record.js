@@ -22,8 +22,14 @@
  *   # The test explicitly tests with batchSize equal to 1 and the config fuzzer changes batchSize
  *   # that can cause a mimatch between results.
  *   does_not_support_config_fuzzer,
+ *   # TODO(SERVER-85322): Try to include this test(s).
+ *   exclude_from_timeseries_crud_passthrough,
  * ]
  */
+
+// killCursors on multi-cursors is unsupported when queries are dispatched to multiple mongoses.
+// pinToSingleMongos due to killCursors command.
+TestData.pinToSingleMongos = true;
 
 const collName = "resume_query_from_non_existent_record";
 const coll = db[collName];

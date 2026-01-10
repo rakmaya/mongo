@@ -40,13 +40,12 @@
 #include "mongo/bson/util/builder_fwd.h"
 #include "mongo/client/dbclient_cursor.h"
 #include "mongo/client/read_preference.h"
-#include "mongo/db/admission/execution_admission_context.h"
+#include "mongo/db/admission/execution_control/execution_admission_context.h"
 #include "mongo/db/commands/txn_cmds_gen.h"
 #include "mongo/db/commands/txn_two_phase_commit_cmds_gen.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/generic_argument_util.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/query/write_ops/write_ops_gen.h"
@@ -58,6 +57,7 @@
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/session/logical_session_id_helpers.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/idl/idl_parser.h"
@@ -695,6 +695,10 @@ Future<void> deleteCoordinatorDoc(txn::AsyncWorkScheduler& scheduler,
         [&scheduler, lsid, txnNumberAndRetryCounter] {
             return scheduler.scheduleWork(
                 [lsid, txnNumberAndRetryCounter](OperationContext* opCtx) {
+                    // Skip ticket acquisition to avoid a bottleneck on deleting the coordinator doc
+                    // in cases of high transaction concurrency.
+                    ScopedAdmissionPriority<ExecutionAdmissionContext> skipTicketAcquisition(
+                        opCtx, AdmissionContext::Priority::kExempt);
                     getTransactionCoordinatorWorkerCurOpRepository()->set(
                         opCtx,
                         lsid,

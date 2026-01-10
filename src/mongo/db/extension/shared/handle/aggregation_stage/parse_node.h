@@ -37,19 +37,57 @@
 
 namespace mongo::extension {
 
-class AggStageParseNodeHandle;
+class AggStageParseNodeAPI;
+
+template <>
+struct c_api_to_cpp_api<::MongoExtensionAggStageParseNode> {
+    using CppApi_t = AggStageParseNodeAPI;
+};
+
+using AggStageParseNodeHandle = OwnedHandle<::MongoExtensionAggStageParseNode>;
+
+using LogicalAggStageHandle = OwnedHandle<::MongoExtensionLogicalAggStage>;
+/**
+ * Represents the possible types of nodes created during expansion, as owned handles.
+ *
+ * Expansion can result in four types of nodes:
+ * 1. Host-defined parse node
+ * 2. Extension-defined parse node
+ * 3. Host-defined AST node
+ * 4. Extension-defined AST node
+ *
+ * This variant allows extension developers to return both host- and extension-defined nodes in
+ * AggStageParseNode::expand() without knowing the underlying implementation of host-defined
+ * nodes.
+ *
+ * The host is responsible for differentiating between host- and extension-defined nodes later
+ * on.
+ */
 using VariantNodeHandle = std::variant<AggStageParseNodeHandle, AggStageAstNodeHandle>;
 
 /**
- * AggStageParseNodeHandle is a wrapper around a
- * MongoExtensionAggStageParseNode.
+ * Represents the possible types of elements that can be in a MongoExtensionDPLArray, as owned
+ * handles.
+ *
+ * A MongoExtensionDPLArray can contain either parse nodes or logical stages. This variant allows
+ * extension developers to return both types in distributed plan logic.
  */
-class AggStageParseNodeHandle : public OwnedHandle<::MongoExtensionAggStageParseNode> {
+using VariantDPLHandle = std::variant<AggStageParseNodeHandle, LogicalAggStageHandle>;
+
+/**
+ * Wrapper function that converts a DPL array to a vector of RAII handles.
+ * This ensures template instantiation happens in parse_node.cpp where
+ * the specializations are visible.
+ */
+std::vector<VariantDPLHandle> dplArrayToRaiiVector(::MongoExtensionDPLArray& arr);
+
+/**
+ * AggStageParseNodeAPI is a wrapper around a MongoExtensionAggStageParseNode vtable API.
+ */
+class AggStageParseNodeAPI : public VTableAPI<::MongoExtensionAggStageParseNode> {
 public:
-    AggStageParseNodeHandle(absl::Nonnull<::MongoExtensionAggStageParseNode*> parseNode)
-        : OwnedHandle<::MongoExtensionAggStageParseNode>(parseNode) {
-        _assertValidVTable();
-    }
+    AggStageParseNodeAPI(::MongoExtensionAggStageParseNode* parseNode)
+        : VTableAPI<::MongoExtensionAggStageParseNode>(parseNode) {}
 
 
     /**
@@ -75,8 +113,18 @@ public:
      */
     std::vector<VariantNodeHandle> expand() const;
 
-protected:
-    void _assertVTableConstraints(const VTable_t& vtable) const override {
+    /**
+     * Clones this parse node into an identical parse node.
+     *
+     * On success, the ownership of the returned parse node is transferred to the caller.
+     *
+     * On failure, the call triggers an assertion and no ownership is transferred.
+     *
+     * The caller is responsible for managing the lifetime of the returned handle.
+     */
+    AggStageParseNodeHandle clone() const;
+
+    static void assertVTableConstraints(const VTable_t& vtable) {
         tassert(11217600, "AggStageParseNode 'get_name' is null", vtable.get_name != nullptr);
         tassert(10977600,
                 "AggStageParseNode 'get_query_shape' is null",
@@ -85,6 +133,7 @@ protected:
                 "AggStageParseNode 'get_expanded_size' is null",
                 vtable.get_expanded_size != nullptr);
         tassert(10977601, "AggStageParseNode 'expand' is null", vtable.expand != nullptr);
+        tassert(11565500, "AggStageParseNode 'clone' is null", vtable.clone != nullptr);
     }
 
 private:
@@ -96,4 +145,5 @@ private:
         return vtable().get_expanded_size(get());
     }
 };
+
 }  // namespace mongo::extension

@@ -35,13 +35,13 @@
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/admission/execution_admission_context.h"
+#include "mongo/db/admission/execution_control/execution_admission_context.h"
 #include "mongo/db/client.h"
 #include "mongo/db/collection_crud/collection_write_path.h"
 #include "mongo/db/commands/fsync.h"
 #include "mongo/db/commands/server_status/server_status_metric.h"
-#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
+#include "mongo/db/feature_flag.h"
+#include "mongo/db/internal_transactions_feature_flag_gen.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/repl/apply_ops_command_info.h"
 #include "mongo/db/repl/initial_sync/initial_syncer.h"
@@ -53,8 +53,12 @@
 #include "mongo/db/repl/replication_metrics.h"
 #include "mongo/db/repl/split_prepare_session_manager.h"
 #include "mongo/db/repl/transaction_oplog_application.h"
+#include "mongo/db/rss/replicated_storage_service.h"
+#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/lock_manager/d_concurrency.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/stats/timer_stats.h"
 #include "mongo/db/storage/control/journal_flusher.h"
@@ -319,9 +323,17 @@ void _addOplogChainOpsToWriterVectors(OperationContext* opCtx,
                                       std::vector<std::vector<OplogEntry>>* derivedOps,
                                       std::vector<std::vector<ApplierOperation>>* writerVectors,
                                       CachedCollectionProperties* collPropertiesCache,
-                                      RetryImageRectifier* retryImageRectifier) {
+                                      RetryImageRectifier* retryImageRectifier,
+                                      NamespaceHashSet* affectedNamespaces) {
     auto [txnOps, shouldSerialize] =
         readTransactionOperationsFromOplogChainAndCheckForCommands(opCtx, *op, *partialTxnList);
+
+    if (affectedNamespaces) {
+        std::for_each(txnOps.begin(), txnOps.end(), [&](const auto& op) {
+            affectedNamespaces->insert(op.getNss());
+        });
+    }
+
     auto& extractedOps = retryImageRectifier->storeExtractedOpsAndDeletes(
         std::move(txnOps), derivedOps, op->shouldPrepare());
 
@@ -468,6 +480,10 @@ OplogApplierImpl::OplogApplierImpl(executor::TaskExecutor* executor,
       _replCoord(replCoord),
       _workerPool(workerPool),
       _storageInterface(storageInterface) {
+    _disableTransactionUpdateCoalescing =
+        rss::ReplicatedStorageService::get(cc().getServiceContext())
+            .getPersistenceProvider()
+            .shouldDisableTransactionUpdateCoalescing();
 
     _oplogWriter =
         std::make_unique<OplogWriterImpl>(nullptr /* executor */,
@@ -477,7 +493,6 @@ OplogApplierImpl::OplogApplierImpl(executor::TaskExecutor* executor,
                                           replCoord,
                                           storageInterface,
                                           consistencyMarkers,
-                                          &noopOplogWriterObserver,
                                           OplogWriter::Options(options.skipWritesToOplog));
 }
 
@@ -581,7 +596,7 @@ void OplogApplierImpl::_run(OplogBuffer* oplogBuffer) {
         stdx::lock_guard<stdx::mutex> fsynclk(oplogApplierLockedFsync);
 
         // Obtain the validation lock to synchronise batch application with validation.
-        auto lk = CollectionValidation::ValidateState::obtainExclusiveValidationLock(&opCtx);
+        auto lk = CollectionValidation::obtainExclusiveValidationLock(&opCtx);
 
         // Apply the operations in this batch. '_applyOplogBatch' returns the optime of the
         // last op that was applied, which should be the last optime in the batch.
@@ -636,7 +651,12 @@ StatusWith<OpTime> OplogApplierImpl::_applyOplogBatch(OperationContext* opCtx,
     // Increment the batch size stat.
     oplogApplicationBatchSize.increment(ops.size());
 
-    std::vector<WorkerMultikeyPathInfo> multikeyVector(_workerPool->getStats().options.maxThreads);
+    // The worker pool's maxThreads can be updated at any point in time. So we record its current
+    // value here and use it to construct our different work vectors for the next batch of work to
+    // schedule.
+    const size_t nWorkers = _workerPool->getStats().options.maxThreads;
+    LOGV2_DEBUG(11280004, 2, "Number of workers for oplog application", "nWorkers"_attr = nWorkers);
+    std::vector<WorkerMultikeyPathInfo> multikeyVector(nWorkers);
     {
         // Each node records cumulative batch application stats for itself using this timer.
         TimerHolder timer(&applyBatchStats);
@@ -662,8 +682,7 @@ StatusWith<OpTime> OplogApplierImpl::_applyOplogBatch(OperationContext* opCtx,
         //   and create a pseudo oplog.
         std::vector<std::vector<OplogEntry>> derivedOps;
 
-        std::vector<std::vector<ApplierOperation>> writerVectors(
-            _workerPool->getStats().options.maxThreads);
+        std::vector<std::vector<ApplierOperation>> writerVectors(nWorkers);
         _fillWriterVectors(opCtx, &ops, &writerVectors, &derivedOps);
 
         // Wait for oplog writes to finish.
@@ -706,20 +725,34 @@ StatusWith<OpTime> OplogApplierImpl::_applyOplogBatch(OperationContext* opCtx,
         const bool isDataConsistent = getMinValid() < ops.front().getOpTime();
 
         {
-            std::vector<Status> statusVector(_workerPool->getStats().options.maxThreads,
-                                             Status::OK());
+            std::vector<Status> statusVector(nWorkers, Status::OK());
             // Doles out all the work to the writer pool threads. writerVectors is not modified,
             // but applyOplogBatchPerWorker will modify the vectors that it contains.
             invariant(writerVectors.size() == statusVector.size());
             for (size_t i = 0; i < writerVectors.size(); i++) {
-                if (writerVectors[i].empty())
+                if (writerVectors[i].empty()) {
                     continue;
+                }
 
                 _workerPool->schedule([this,
+                                       scheduled = Date_t::now(),
                                        &writer = writerVectors.at(i),
                                        &status = statusVector.at(i),
                                        &multikeyVector = multikeyVector.at(i),
-                                       isDataConsistent = isDataConsistent](auto scheduleStatus) {
+                                       isDataConsistent = isDataConsistent](Status scheduleStatus) {
+                    const auto dispatched = Date_t::now();
+                    const auto dispatchLatency = dispatched - scheduled;
+                    if (MONGO_unlikely(dispatchLatency > Seconds{10})) {
+                        LOGV2_DEBUG(9255700,
+                                    1,
+                                    "Oplog applier task took longer than expected to be dispatched "
+                                    "after being scheduled",
+                                    "dispatchLatency"_attr = dispatchLatency.toString(),
+                                    "scheduled"_attr = scheduled.toString(),
+                                    "dispatched"_attr = dispatched.toString(),
+                                    "scheduleStatus"_attr = scheduleStatus.toString());
+                    }
+
                     invariant(scheduleStatus);
                     auto opCtx = cc().makeOperationContext();
 
@@ -727,6 +760,17 @@ StatusWith<OpTime> OplogApplierImpl::_applyOplogBatch(OperationContext* opCtx,
                         return applyOplogBatchPerWorker(
                             opCtx.get(), &writer, &multikeyVector, isDataConsistent);
                     });
+
+                    const auto completed = Date_t::now();
+                    const auto executionTime = completed - scheduled;
+                    if (MONGO_unlikely(executionTime > Seconds{10})) {
+                        LOGV2_DEBUG(9255701,
+                                    1,
+                                    "Oplog applier task took longer to complete than expected",
+                                    "executionTime"_attr = executionTime.toString(),
+                                    "dispatched"_attr = dispatched.toString(),
+                                    "completed"_attr = completed.toString());
+                    }
                 });
             }
 
@@ -742,6 +786,8 @@ StatusWith<OpTime> OplogApplierImpl::_applyOplogBatch(OperationContext* opCtx,
                         "numOperationsInBatch"_attr = ops.size(),
                         "firstOperation"_attr = redact(ops.front().toBSONForLogging()),
                         "lastOperation"_attr = redact(ops.back().toBSONForLogging()),
+                        "firstOperationOpTime"_attr = ops.front().getOpTime(),
+                        "lastOperationOpTime"_attr = ops.back().getOpTime(),
                         "failedWriterThread"_attr = std::distance(statusVector.cbegin(), it),
                         "error"_attr = redact(status));
                     return status;
@@ -856,10 +902,8 @@ void OplogApplierImpl::_deriveOpsAndFillWriterVectors(
             continue;
         }
 
-        // We need to track all types of ops, including type 'n' (these are generated from chunk
-        // migrations).
-        if (sessionUpdateTracker) {
-            if (auto newOplogWrites = sessionUpdateTracker->updateSession(op)) {
+        auto addSessionUpdateOps = [&](NamespaceHashSet* affectedNamespaces) {
+            if (auto newOplogWrites = sessionUpdateTracker->updateSession(op, affectedNamespaces)) {
                 derivedOps->emplace_back(std::move(*newOplogWrites));
                 OplogApplierUtils::addDerivedOps(opCtx,
                                                  &derivedOps->back(),
@@ -867,11 +911,44 @@ void OplogApplierImpl::_deriveOpsAndFillWriterVectors(
                                                  &collPropertiesCache,
                                                  false /*serial*/);
             }
+        };
+
+        // Prepare entries in secondary mode do not come in their own batch, extract applyOps
+        // operations and fill writers with the extracted operations.
+        if (op.shouldPrepare() && (getOptions().mode == OplogApplication::Mode::kSecondary)) {
+            // Sessions should always be updated on steady-state oplog application.
+            invariant(sessionUpdateTracker);
+            // To set the affected namespaces for the transaction record from the prepared oplog,
+            // we must first parse the prepared oplog to obtain all individual operations to be able
+            // to parse each one.
+            auto affectedNamespaces = NamespaceHashSet();
+            auto affectedNamespacesPtr =
+                gFeatureFlagPreparedTransactionsPreciseCheckpoints.isEnabled() ? &affectedNamespaces
+                                                                               : nullptr;
+            auto* partialTxnList = getPartialTxnList(op);
+            _addOplogChainOpsToWriterVectors(opCtx,
+                                             &op,
+                                             partialTxnList,
+                                             derivedOps,
+                                             writerVectors,
+                                             &collPropertiesCache,
+                                             &retryImageRectifier,
+                                             affectedNamespacesPtr);
+            addSessionUpdateOps(affectedNamespacesPtr);
+            continue;
+        }
+
+        // We need to track all types of ops, including type 'n' (these are generated from chunk
+        // migrations).
+        if (sessionUpdateTracker) {
+            addSessionUpdateOps(nullptr /*affectedNamespaces*/);
 
             // If this is a delete for a config.images_collection entry that will be written later
             // in this batch, skip it.  We only check this when there is a sessionUpdateTracker,
             // because the operations passed in when there is no sessionUpdateTracker (which are
             // session table updates) should not be affecting the retry image table.
+            // TODO (SERVER-113735): Validate the following assumption.
+            // We should never have delete from the retry images table in a prepared transaction.
             if (retryImageRectifier.shouldSkipOp(&op)) {
                 continue;
             }
@@ -922,7 +999,8 @@ void OplogApplierImpl::_deriveOpsAndFillWriterVectors(
                                                  derivedOps,
                                                  writerVectors,
                                                  &collPropertiesCache,
-                                                 &retryImageRectifier);
+                                                 &retryImageRectifier,
+                                                 nullptr /*affectedNamespaces*/);
                 invariant(partialTxnList->empty(), op.toStringForLogging());
             } else {
                 // The applyOps entry was not generated as part of a transaction.
@@ -933,20 +1011,6 @@ void OplogApplierImpl::_deriveOpsAndFillWriterVectors(
                 OplogApplierUtils::addDerivedOps(
                     opCtx, &extractedOps, writerVectors, &collPropertiesCache, false /*serial*/);
             }
-            continue;
-        }
-
-        // Prepare entries in secondary mode do not come in their own batch, extract applyOps
-        // operations and fill writers with the extracted operations.
-        if (op.shouldPrepare() && (getOptions().mode == OplogApplication::Mode::kSecondary)) {
-            auto* partialTxnList = getPartialTxnList(op);
-            _addOplogChainOpsToWriterVectors(opCtx,
-                                             &op,
-                                             partialTxnList,
-                                             derivedOps,
-                                             writerVectors,
-                                             &collPropertiesCache,
-                                             &retryImageRectifier);
             continue;
         }
 
@@ -970,7 +1034,8 @@ void OplogApplierImpl::_deriveOpsAndFillWriterVectors(
                                              derivedOps,
                                              writerVectors,
                                              &collPropertiesCache,
-                                             &retryImageRectifier);
+                                             &retryImageRectifier,
+                                             nullptr /*affectedNamespaces*/);
             invariant(partialTxnList->empty(), op.toStringForLogging());
             continue;
         }
@@ -987,11 +1052,12 @@ void OplogApplierImpl::_fillWriterVectors(
     std::vector<OplogEntry>* ops,
     std::vector<std::vector<ApplierOperation>>* writerVectors,
     std::vector<std::vector<OplogEntry>>* derivedOps) noexcept {
-    SessionUpdateTracker sessionUpdateTracker;
+    SessionUpdateTracker sessionUpdateTracker(_disableTransactionUpdateCoalescing);
     _deriveOpsAndFillWriterVectors(opCtx, ops, writerVectors, derivedOps, &sessionUpdateTracker);
 
     auto newOplogWrites = sessionUpdateTracker.flushAll();
     if (!newOplogWrites.empty()) {
+        invariant(!_disableTransactionUpdateCoalescing);
         derivedOps->emplace_back(std::move(newOplogWrites));
         _deriveOpsAndFillWriterVectors(
             opCtx, &derivedOps->back(), writerVectors, derivedOps, nullptr);

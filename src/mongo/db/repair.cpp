@@ -31,23 +31,22 @@
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
-#include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/index_builds/rebuild_indexes.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_catalog.h"
-#include "mongo/db/local_catalog/collection_catalog_helper.h"
-#include "mongo/db/local_catalog/database_holder.h"
-#include "mongo/db/local_catalog/document_validation.h"
-#include "mongo/db/local_catalog/lock_manager/exception_util.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/repl_set_member_in_standalone_mode.h"
+#include "mongo/db/shard_role/lock_manager/exception_util.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/collection_catalog_helper.h"
+#include "mongo/db/shard_role/shard_catalog/database_holder.h"
+#include "mongo/db/shard_role/shard_catalog/document_validation.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/storage_engine.h"
 #include "mongo/db/storage/storage_repair_observer.h"
@@ -70,8 +69,7 @@
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
 namespace mongo {
-
-
+namespace {
 Status rebuildIndexesForNamespace(OperationContext* opCtx,
                                   const NamespaceString& nss,
                                   StorageEngine* engine) {
@@ -84,20 +82,12 @@ Status rebuildIndexesForNamespace(OperationContext* opCtx,
 
     opCtx->checkForInterrupt();
     CollectionWriter collWriter(opCtx, nss);
-    auto swIndexNameObjs = getIndexNameObjs(&(*collWriter));
-    if (!swIndexNameObjs.isOK())
-        return swIndexNameObjs.getStatus();
-
-    std::vector<BSONObj> indexSpecs = swIndexNameObjs.getValue().second;
-    Status status = rebuildIndexesOnCollection(opCtx, collWriter, indexSpecs, RepairData::kYes);
-    if (!status.isOK())
+    if (Status status = rebuildIndexesOnCollection(opCtx, collWriter); !status.isOK())
         return status;
 
     engine->flushAllFiles(opCtx, /*callerHoldsReadLock*/ false);
     return Status::OK();
 }
-
-namespace {
 
 /**
  * Re-opening the database can throw an InvalidIndexSpecificationOption error. This can occur if the

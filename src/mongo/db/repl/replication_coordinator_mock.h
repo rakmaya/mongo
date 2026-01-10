@@ -228,6 +228,8 @@ public:
 
     HostAndPort getMyHostAndPort() const override;
 
+    boost::optional<int> getMyMaintenancePort() const override;
+
     Status setFollowerMode(const MemberState& newState) override;
 
     Status setFollowerModeRollback(OperationContext* opCtx) override;
@@ -249,6 +251,8 @@ public:
     void appendSecondaryInfoData(BSONObjBuilder* result) override;
 
     void appendConnectionStats(executor::ConnectionPoolStats* stats) const override;
+
+    ThreadPool* getDbWorkThreadPool() const noexcept override;
 
     ReplSetConfig getConfig() const override;
 

@@ -300,12 +300,13 @@ __wti_verify_ckpt_load(WT_SESSION_IMPL *session, WT_BLOCK *block, WT_BLOCK_CKPT 
  *     Verify work done when a checkpoint is unloaded.
  */
 int
-__wti_verify_ckpt_unload(WT_SESSION_IMPL *session, WT_BLOCK *block)
+__wti_verify_ckpt_unload(WT_SESSION_IMPL *session, WT_BLOCK *block, bool skip_verify)
 {
     WT_DECL_RET;
 
-    /* Confirm we verified every checkpoint block. */
-    ret = __verify_ckptfrag_chk(session, block);
+    if (!skip_verify)
+        /* Confirm we verified every checkpoint block. */
+        ret = __verify_ckptfrag_chk(session, block);
 
     /* Discard the per-checkpoint fragment list. */
     __wt_free(session, block->fragckpt);
@@ -435,6 +436,9 @@ __verify_filefrag_chk(WT_SESSION_IMPL *session, WT_BLOCK *block)
         return (0);
 
     __wt_errx(session, "file ranges never verified: %" PRIu64, count);
+
+    __wti_block_extlist_dump_all(session, block);
+
     return (block->verify_strict ? WT_ERROR : 0);
 }
 
@@ -518,5 +522,8 @@ __verify_ckptfrag_chk(WT_SESSION_IMPL *session, WT_BLOCK *block)
         return (0);
 
     __wt_errx(session, "checkpoint ranges never verified: %" PRIu64, count);
+
+    __wti_block_extlist_dump_all(session, block);
+
     return (block->verify_strict ? WT_ERROR : 0);
 }

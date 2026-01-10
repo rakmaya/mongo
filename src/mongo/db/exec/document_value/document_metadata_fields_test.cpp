@@ -30,7 +30,6 @@
 #include "mongo/db/exec/document_value/document_metadata_fields.h"
 
 #include "mongo/base/string_data.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/exec/document_value/document_value_test_util.h"
 #include "mongo/idl/server_parameter_test_controller.h"
@@ -679,7 +678,7 @@ TEST(DocumentMetadataFieldsTest, SettingScoreDetailsWithScoreOverridesScore) {
     ASSERT_EQ(metadata.getScore(), 0.293);
 }
 
-DEATH_TEST_REGEX(DocumentMetadataFieldsTest,
+DEATH_TEST_REGEX(DocumentMetadataFieldsTestDeathTest,
                  ScoreDetailsWithScoreMetadataFailsIfScoreValueIsNonNumeric,
                  "Tripwire assertion.*9679300") {
     RAIIServerParameterControllerForTest featureFlagController("featureFlagRankFusionFull", true);
@@ -687,7 +686,7 @@ DEATH_TEST_REGEX(DocumentMetadataFieldsTest,
     metadata.setScoreAndScoreDetails(Value(BSON("value" << "string")));
 }
 
-DEATH_TEST_REGEX(DocumentMetadataFieldsTest,
+DEATH_TEST_REGEX(DocumentMetadataFieldsTestDeathTest,
                  ScoreDetailsWithScoreMetadataFailsIfScoreValueIsMissing,
                  "Tripwire assertion.*9679300") {
     RAIIServerParameterControllerForTest featureFlagController("featureFlagRankFusionFull", true);
@@ -695,18 +694,106 @@ DEATH_TEST_REGEX(DocumentMetadataFieldsTest,
     metadata.setScoreAndScoreDetails(Value(BSON("non-value" << "string")));
 }
 
-DEATH_TEST_REGEX(DocumentMetadataFieldsTest,
+DEATH_TEST_REGEX(DocumentMetadataFieldsTestDeathTest,
                  GetTimeseriesBucketMinTimeDoesntExist,
                  "Tripwire assertion.*6850100") {
     DocumentMetadataFields source;
     source.getTimeseriesBucketMinTime();
 }
 
-DEATH_TEST_REGEX(DocumentMetadataFieldsTest,
+DEATH_TEST_REGEX(DocumentMetadataFieldsTestDeathTest,
                  GetTimeseriesBucketMaxTimeDoesntExist,
                  "Tripwire assertion.*6850101") {
     DocumentMetadataFields source;
     source.getTimeseriesBucketMaxTime();
 }
 
+TEST(DocumentMetadataFieldsTest, EqualityOperatorWithEmptyMetadata) {
+    DocumentMetadataFields meta1;
+    DocumentMetadataFields meta2;
+
+    ASSERT_EQ(meta1, meta2);
+}
+
+TEST(DocumentMetadataFieldsTest, EqualityOperatorWithFieldNotSet) {
+    DocumentMetadataFields meta1;
+    meta1.setTextScore(5.0);
+    meta1.setVectorSearchScore(2.3);
+
+    DocumentMetadataFields meta2;
+    meta2.setTextScore(5.0);
+
+    ASSERT_NE(meta1, meta2);
+}
+
+TEST(DocumentMetadataFieldsTest, EqualityOperatorWithMultipleFields) {
+    DocumentMetadataFields meta1;
+    meta1.setTextScore(5.0);
+    meta1.setSearchScore(3.5);
+    meta1.setRandVal(0.42);
+
+    DocumentMetadataFields meta2;
+    meta2.setTextScore(5);  // Used int to test type sensitivity.
+    meta2.setSearchScore(3.5);
+    meta2.setRandVal(0.42);
+
+    ASSERT_EQ(meta1, meta2);
+}
+
+TEST(DocumentMetadataFieldsTest, EqualityOperatorWithDifferentValues) {
+    DocumentMetadataFields meta1;
+    meta1.setTextScore(5.0);
+    meta1.setSearchScore(3.5);
+    meta1.setRandVal(1);
+
+    DocumentMetadataFields meta2;
+    meta2.setTextScore(5);  // Used int to test type sensitivity.
+    meta2.setSearchScore(3.5);
+    meta2.setRandVal(0.42);
+
+    ASSERT_NE(meta1, meta2);
+}
+
+TEST(DocumentMetadataFieldsTest, EqualityOperatorWithSortKeyWithDifferentSingleElementFlag) {
+    DocumentMetadataFields meta1;
+    meta1.setSortKey(Value(BSON("a" << 1 << "b" << 2)), true);
+
+    DocumentMetadataFields meta2;
+    meta2.setSortKey(Value(BSON("a" << 1 << "b" << 2)), false);
+
+    ASSERT_NE(meta1, meta2);
+}
+
+TEST(DocumentMetadataFieldsTest, EqualityOperatorWithAllFields) {
+    const auto generateMeta = []() {
+        DocumentMetadataFields meta;
+        meta.setTextScore(5.0);
+        meta.setRandVal(0.42);
+        meta.setSortKey(Value(BSON("a" << 1 << "b" << 2)), false);
+        meta.setGeoNearDistance(10.5);
+        meta.setGeoNearPoint(
+            Value(BSON("type" << "Point" << "coordinates" << BSON_ARRAY(1.0 << 2.0))));
+        meta.setSearchScore(3.5);
+        meta.setSearchHighlights(Value{"foo"_sd});
+        meta.setIndexKey(BSON("b" << 1));
+        meta.setRecordId(RecordId{6});
+        meta.setSearchScoreDetails(BSON("scoreDetails" << "foo"));
+        meta.setSearchRootDocumentId(Value(1));
+        Date_t time;
+        meta.setTimeseriesBucketMinTime(time);
+        meta.setTimeseriesBucketMaxTime(time);
+        meta.setSearchSortValues(BSON("a" << 1));
+        meta.setVectorSearchScore(7.6);
+        meta.setSearchSequenceToken(Value("token1"_sd));
+        meta.setScore(2.5);
+        meta.setScoreDetails(Value(BSON("value" << 3 << "otherDetails"
+                                                << "foo")));
+        meta.setStream(Value("topic-stream"_sd));
+        return meta;
+    };
+    DocumentMetadataFields meta1 = generateMeta();
+    DocumentMetadataFields meta2 = generateMeta();
+
+    ASSERT_EQ(meta1, meta2);
+}
 }  // namespace mongo

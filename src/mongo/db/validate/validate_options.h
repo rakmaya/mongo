@@ -30,6 +30,9 @@
 #pragma once
 
 #include "mongo/bson/bson_validate.h"
+#include "mongo/util/modules.h"
+
+MONGO_MOD_PUBLIC;
 
 namespace mongo::CollectionValidation {
 
@@ -105,6 +108,7 @@ public:
                       bool logDiagnostics,
                       ValidationVersion validationVersion = currentValidationVersion,
                       boost::optional<std::string> verifyConfigurationOverride = boost::none,
+                      boost::optional<Timestamp> readTimestamp = boost::none,
                       boost::optional<std::vector<std::string>> hashPrefixes = boost::none,
                       boost::optional<std::vector<std::string>> revealHashedIds = boost::none);
 
@@ -122,8 +126,7 @@ public:
     bool isFullValidation() const {
         return _validateMode == ValidateMode::kForegroundFull ||
             _validateMode == ValidateMode::kForegroundFullCheckBSON ||
-            _validateMode == ValidateMode::kForegroundFullEnforceFastCount ||
-            _validateMode == ValidateMode::kCollectionHash;
+            _validateMode == ValidateMode::kForegroundFullEnforceFastCount;
     }
 
     bool isFullIndexValidation() const {
@@ -156,6 +159,10 @@ public:
      */
     bool enforceFastCountRequested() const {
         return _validateMode == ValidateMode::kForegroundFullEnforceFastCount;
+    }
+
+    const boost::optional<Timestamp>& getReadTimestamp() const {
+        return _readTimestamp;
     }
 
     const boost::optional<std::vector<std::string>>& getHashPrefixes() const {
@@ -204,6 +211,8 @@ private:
     const ValidationVersion _validationVersion;
 
     const boost::optional<std::string> _verifyConfigurationOverride;
+
+    const boost::optional<Timestamp> _readTimestamp;
 
     const boost::optional<std::vector<std::string>> _hashPrefixes;
 

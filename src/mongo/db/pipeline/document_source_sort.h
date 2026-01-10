@@ -54,6 +54,7 @@
 #include "mongo/logv2/log_attr.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/bufreader.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/time_support.h"
 
 #include <cstdint>
@@ -71,7 +72,10 @@
 
 namespace mongo {
 
-class DocumentSourceSort final : public DocumentSource {
+DEFINE_LITE_PARSED_STAGE_DEFAULT_DERIVED(Sort);
+DEFINE_LITE_PARSED_STAGE_DEFAULT_DERIVED(InternalBoundedSort);
+
+class MONGO_MOD_NEEDS_REPLACEMENT DocumentSourceSort final : public DocumentSource {
 public:
     static constexpr StringData kMin = "min"_sd;
     static constexpr StringData kMax = "max"_sd;
@@ -244,12 +248,11 @@ public:
         return _sortExecutor->hasLimit();
     }
 
-protected:
     /**
      * Attempts to absorb a subsequent $limit stage so that it can perform a top-k sort.
      */
-    DocumentSourceContainer::iterator doOptimizeAt(DocumentSourceContainer::iterator itr,
-                                                   DocumentSourceContainer* container) final;
+    DocumentSourceContainer::iterator optimizeAt(DocumentSourceContainer::iterator itr,
+                                                 DocumentSourceContainer* container);
 
 private:
     friend boost::intrusive_ptr<exec::agg::Stage> documentSourceSortToStageFn(

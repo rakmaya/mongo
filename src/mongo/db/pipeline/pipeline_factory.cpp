@@ -30,15 +30,44 @@
 #include "mongo/db/pipeline/pipeline_factory.h"
 
 #include "mongo/db/pipeline/aggregate_command_gen.h"
+#include "mongo/db/pipeline/lite_parsed_pipeline.h"
 #include "mongo/db/pipeline/optimization/optimize.h"
 #include "mongo/db/pipeline/search/search_helper_bson_obj.h"
 #include "mongo/db/views/resolved_view.h"
 
+#include <algorithm>
+#include <iterator>
+
 namespace mongo::pipeline_factory {
+std::unique_ptr<Pipeline> makePipeline(BSONElement rawPipelineElement,
+                                       const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                                       MakePipelineOptions opts) {
+    tassert(11524600,
+            "Expected array for makePipeline() with BSONElement input",
+            rawPipelineElement.type() == BSONType::array);
+    auto rawStages = rawPipelineElement.Array();
+
+    std::vector<BSONObj> rawPipeline;
+    rawPipeline.reserve(rawStages.size());
+    std::transform(rawStages.cbegin(),
+                   rawStages.cend(),
+                   std::back_inserter(rawPipeline),
+                   [](const BSONElement& el) {
+                       uassert(11524601,
+                               "Pipeline array element must be an object",
+                               el.type() == BSONType::object);
+                       return el.embeddedObject();
+                   });
+
+    return makePipeline(rawPipeline, expCtx, opts);
+}
+
 std::unique_ptr<Pipeline> makePipeline(const std::vector<BSONObj>& rawPipeline,
                                        const boost::intrusive_ptr<ExpressionContext>& expCtx,
                                        MakePipelineOptions opts) {
-    auto pipeline = Pipeline::parse(rawPipeline, expCtx, opts.validator);
+    LiteParsedPipeline liteParsedPipeline =
+        LiteParsedPipeline(expCtx->getNamespaceString(), rawPipeline);
+    auto pipeline = Pipeline::parseFromLiteParsed(liteParsedPipeline, expCtx, opts.validator);
 
     expCtx->initializeReferencedSystemVariables();
 
@@ -89,7 +118,9 @@ std::unique_ptr<Pipeline> makePipeline(AggregateCommandRequest& aggRequest,
                                                   : opts.readConcern;
     }
 
-    auto pipeline = Pipeline::parse(aggRequest.getPipeline(), expCtx, opts.validator);
+    LiteParsedPipeline liteParsedPipeline =
+        LiteParsedPipeline(expCtx->getNamespaceString(), aggRequest.getPipeline());
+    auto pipeline = Pipeline::parseFromLiteParsed(liteParsedPipeline, expCtx, opts.validator);
     if (opts.optimize) {
         pipeline_optimization::optimizePipeline(*pipeline);
     }
@@ -129,8 +160,7 @@ std::unique_ptr<Pipeline> viewPipelineHelperForSearch(
     // (from the _id values returned by mongot), apply the view's data transforms, and pass
     // said transformed documents through the rest of the user pipeline.
     const ResolvedView resolvedView{resolvedNs.ns, std::move(resolvedNs.pipeline), BSONObj()};
-    subPipelineExpCtx->setView(
-        boost::make_optional(std::make_pair(originalNs, resolvedView.getPipeline())));
+    subPipelineExpCtx->setView(resolvedView.toViewInfo(originalNs));
 
     // return the user pipeline without appending the view stages.
     return makePipeline(currentPipeline, subPipelineExpCtx, opts);
@@ -168,5 +198,13 @@ std::unique_ptr<Pipeline> makePipelineFromViewDefinition(
                             std::make_move_iterator(currentPipeline.end()));
 
     return makePipeline(resolvedPipeline, subPipelineExpCtx, opts);
+}
+
+std::unique_ptr<Pipeline> makeFacetPipeline(const std::vector<BSONObj>& rawPipeline,
+                                            const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                                            PipelineValidatorCallback validator) {
+    LiteParsedPipeline liteParsedPipeline(expCtx->getNamespaceString(), rawPipeline);
+    return Pipeline::parseFromLiteParsed(
+        liteParsedPipeline, expCtx, validator, true /*isFacetPipeline*/);
 }
 }  // namespace mongo::pipeline_factory

@@ -16,6 +16,9 @@
 //   # This test has statements that do not support non-local read concern.
 //   does_not_support_causal_consistency,
 //   requires_getmore,
+//   # Time series collections cannot be used as a source for `viewOn` or have view-like
+//   # limitations in this context.
+//   exclude_from_timeseries_crud_passthrough,
 // ]
 
 // Integration tests for the collation feature.

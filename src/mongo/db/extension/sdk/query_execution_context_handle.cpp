@@ -31,13 +31,23 @@
 
 namespace mongo::extension::sdk {
 
-ExtensionGenericStatus QueryExecutionContextHandle::checkForInterrupt() const {
-    assertValid();
-
+ExtensionGenericStatus QueryExecutionContextAPI::checkForInterrupt() const {
+    // ExtensionGenericStatus defaults to OK, check_for_interrupt will only update the status if an
+    // interrupt was detected.
     ExtensionGenericStatus queryStatus;
     invokeCAndConvertStatusToException(
         [&]() { return vtable().check_for_interrupt(get(), &queryStatus); });
     return queryStatus;
+}
+
+UnownedOperationMetricsHandle QueryExecutionContextAPI::getMetrics(
+    MongoExtensionExecAggStage* execStage) const {
+
+    MongoExtensionOperationMetrics* metrics = nullptr;
+    invokeCAndConvertStatusToException(
+        [&]() { return vtable().get_metrics(get(), execStage, &metrics); });
+
+    return UnownedOperationMetricsHandle(metrics);
 }
 
 }  // namespace mongo::extension::sdk

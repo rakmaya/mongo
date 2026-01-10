@@ -32,7 +32,8 @@
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/admission/execution_admission_context.h"
+#include "mongo/db/admission/execution_control/execution_admission_context.h"
+#include "mongo/db/admission/execution_control/execution_control_parameters_gen.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/exec/classic/batched_delete_stage.h"
@@ -41,10 +42,6 @@
 #include "mongo/db/global_catalog/ddl/shard_key_index_util.h"
 #include "mongo/db/global_catalog/ddl/sharding_util.h"
 #include "mongo/db/keypattern.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/lock_manager/exception_util.h"
-#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/persistent_task_store.h"
 #include "mongo/db/query/explain_options.h"
@@ -57,9 +54,14 @@
 #include "mongo/db/s/balancer_stats_registry.h"
 #include "mongo/db/s/range_deleter_service.h"
 #include "mongo/db/s/range_deletion_task_gen.h"
+#include "mongo/db/shard_role/lock_manager/exception_util.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_role.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/sharding_environment/sharding_runtime_d_params_gen.h"
 #include "mongo/db/sharding_environment/sharding_statistics.h"
 #include "mongo/db/storage/exceptions.h"
+#include "mongo/db/topology/vector_clock/vector_clock.h"
 #include "mongo/logv2/log.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/platform/compiler.h"
@@ -336,8 +338,11 @@ StatusWith<std::pair<int, int>> deleteRangeInBatches(OperationContext* opCtx,
                                                      const UUID& collectionUuid,
                                                      const BSONObj& keyPattern,
                                                      const ChunkRange& range) {
-    ScopedAdmissionPriority<ExecutionAdmissionContext> deprioritizeExecutionControl(
-        opCtx, AdmissionContext::Priority::kLow);
+    boost::optional<ScopedAdmissionPriority<ExecutionAdmissionContext>>
+        deprioritizeExecutionControl;
+    if (admission::execution_control::gBackgroundTasksDeprioritization.load()) {
+        deprioritizeExecutionControl.emplace(opCtx, AdmissionContext::Priority::kLow);
+    }
 
     suspendRangeDeletion.pauseWhileSet(opCtx);
 
@@ -600,9 +605,23 @@ size_t checkForConflictingDeletions(OperationContext* opCtx,
 
 void persistRangeDeletionTaskLocally(OperationContext* opCtx,
                                      const RangeDeletionTask& deletionTask,
-                                     const WriteConcernOptions& writeConcern) {
+                                     const WriteConcernOptions& writeConcern,
+                                     bool doNotPersistIfDocCoveringSameRangeAlreadyExists) {
     PersistentTaskStore<RangeDeletionTask> store(NamespaceString::kRangeDeletionNamespace);
     try {
+        if (doNotPersistIfDocCoveringSameRangeAlreadyExists) {
+            const auto sameBoundsAlreadyCovered =
+                BSON(RangeDeletionTask::kCollectionUuidFieldName
+                     << deletionTask.getCollectionUuid()
+                     << RangeDeletionTask::kRangeFieldName + "." + ChunkRange::kMinFieldName
+                     << deletionTask.getRange().getMin()
+                     << RangeDeletionTask::kRangeFieldName + "." + ChunkRange::kMaxFieldName
+                     << deletionTask.getRange().getMax());
+            if (store.count(opCtx, sameBoundsAlreadyCovered) > 0) {
+                return;
+            }
+        }
+
         store.add(opCtx, deletionTask, writeConcern);
     } catch (const ExceptionFor<ErrorCodes::DuplicateKey>&) {
         // Convert a DuplicateKey error to an anonymous error.
@@ -789,6 +808,48 @@ void setPreMigrationShardVersionOnRangeDeletionTasks(OperationContext* opCtx) {
     }()});
     update.getWriteCommandRequestBase().setOrdered(false);
     write_ops::checkWriteErrors(client.update(update));
+}
+
+RangeDeletionTask createAndPersistRangeDeletionTask(
+    OperationContext* opCtx,
+    const UUID& migrationId,
+    const NamespaceString& nss,
+    const UUID& collectionUuid,
+    const ShardId& donorShardId,
+    const ChunkRange& range,
+    CleanWhenEnum whenToClean,
+    const bool pending,
+    const boost::optional<KeyPattern>& shardKeyPattern,
+    const boost::optional<ChunkVersion>& preMigrationShardVersion,
+    const WriteConcernOptions& writeConcern,
+    bool doNotPersistIfDocCoveringSameRangeAlreadyExists) {
+    RangeDeletionTask task(migrationId, nss, collectionUuid, donorShardId, range, whenToClean);
+    const auto currentTime = VectorClock::get(opCtx)->getTime();
+    task.setTimestamp(currentTime.clusterTime().asTimestamp());
+    if (pending) {
+        task.setPending(pending);
+    }
+    task.setKeyPattern(shardKeyPattern);
+    task.setPreMigrationShardVersion(preMigrationShardVersion);
+    persistRangeDeletionTaskLocally(
+        opCtx, task, writeConcern, doNotPersistIfDocCoveringSameRangeAlreadyExists);
+
+    return task;
+}
+
+boost::optional<RangeDeletionTask> getRangeDeletionTask(OperationContext* opCtx,
+                                                        const UUID& collectionUuid,
+                                                        const ChunkRange& range) {
+    PersistentTaskStore<RangeDeletionTask> store(NamespaceString::kRangeDeletionNamespace);
+    boost::optional<RangeDeletionTask> deletionTask;
+
+    auto filter = getQueryFilterForRangeDeletionTask(collectionUuid, range);
+
+    store.forEach(opCtx, filter, [&](const RangeDeletionTask& task) {
+        deletionTask.emplace(task);
+        return false;
+    });
+    return deletionTask;
 }
 }  // namespace rangedeletionutil
 }  // namespace mongo

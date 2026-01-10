@@ -28,21 +28,20 @@
  */
 
 /**
- * This file contains minimal tests for sbe::ScanStage and sbe::ParallelScanStage.
+ * This file contains minimal tests for sbe::ScanStage.
  */
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/json.h"
-#include "mongo/db/collection_crud/collection_write_path.h"
+#include "mongo/db/dbhelpers.h"
 #include "mongo/db/exec/sbe/sbe_plan_stage_test.h"
-#include "mongo/db/exec/sbe/stages/scan.h"
+#include "mongo/db/exec/sbe/stages/generic_scan.h"
 #include "mongo/db/exec/sbe/stages/stages.h"
 #include "mongo/db/exec/sbe/values/slot.h"
 #include "mongo/db/exec/sbe/values/value.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/query/compiler/physical_model/query_solution/stage_types.h"
 #include "mongo/db/query/multiple_collection_accessor.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
 #include "mongo/logv2/log.h"
 #include "mongo/unittest/unittest.h"
 
@@ -57,15 +56,10 @@ namespace mongo::sbe {
 class ScanStageTest : public PlanStageTestFixture {
 public:
     void insertDocuments(const std::vector<BSONObj>& docs) {
-        std::vector<InsertStatement> inserts{docs.begin(), docs.end()};
-
         AutoGetCollection agc(operationContext(), _nss, LockMode::MODE_IX);
-        {
-            WriteUnitOfWork wuow{operationContext()};
-            ASSERT_OK(collection_internal::insertDocuments(
-                operationContext(), *agc, inserts.begin(), inserts.end(), nullptr /* opDebug */));
-            wuow.commit();
-        }
+        WriteUnitOfWork wuow{operationContext()};
+        ASSERT_OK(Helpers::insert(operationContext(), *agc, docs));
+        wuow.commit();
     }
 
     MultipleCollectionAccessor createCollection(const std::vector<BSONObj>& docs,
@@ -96,51 +90,7 @@ protected:
         NamespaceString::createNamespaceString_forTest("testdb.sbe_scan_stage");
 };
 
-TEST_F(ScanStageTest, scanStage) {
-    auto colls =
-        createCollection({fromjson("{_id: 0, a: 1}"), fromjson("{_id: 1, a: 2}")}, boost::none);
-    UUID uuid = colls.getMainCollection()->uuid();
-    DatabaseName dbName = _nss.dbName();
-
-    auto [inputTag, inputVal] = stage_builder::makeValue(BSONArray());
-    value::ValueGuard inputGuard{inputTag, inputVal};
-    auto [expectedTag, expectedVal] = stage_builder::makeValue(
-        BSON_ARRAY(BSON("_id" << 0 << "a" << 1) << BSON("_id" << 1 << "a" << 2)));
-    value::ValueGuard expectedGuard{expectedTag, expectedVal};
-
-    auto makeStageFn = [uuid, dbName](value::SlotId scanSlot, std::unique_ptr<PlanStage> stage) {
-        sbe::value::SlotVector scanFieldSlots;
-        auto scanStage = sbe::makeS<sbe::ScanStage>(uuid,
-                                                    dbName,
-                                                    scanSlot,
-                                                    boost::none /* recordIdSlot */,
-                                                    boost::none /* snapshotIdSlot */,
-                                                    boost::none /* indexIdentSlot */,
-                                                    boost::none /* indexKeySlot */,
-                                                    boost::none /* indexKeyPatternSlot */,
-                                                    std::vector<std::string>{} /* scanFieldNames */,
-                                                    scanFieldSlots,
-                                                    boost::none /* seekRecordIdSlot */,
-                                                    boost::none /* minRecordIdSlot */,
-                                                    boost::none /* maxRecordIdSlot */,
-                                                    true /* forward */,
-                                                    nullptr /* yieldPolicy */,
-                                                    kEmptyPlanNodeId,
-                                                    ScanCallbacks{},
-                                                    false /* useRandomCursor */,
-                                                    false /* participateInTrialRunTracking */,
-                                                    false /* includeScanStartRecordId */,
-                                                    false /* includeScanEndRecordId */);
-
-        return std::make_pair(scanSlot, std::move(scanStage));
-    };
-
-    inputGuard.reset();
-    expectedGuard.reset();
-    runTest(inputTag, inputVal, expectedTag, expectedVal, makeStageFn);
-}
-
-TEST_F(ScanStageTest, ParallelScanStage) {
+TEST_F(ScanStageTest, genericScanStage) {
     auto colls =
         createCollection({fromjson("{_id: 0, a: 1}"), fromjson("{_id: 1, a: 2}")}, boost::none);
     UUID uuid = colls.getMainCollection()->uuid();
@@ -155,21 +105,22 @@ TEST_F(ScanStageTest, ParallelScanStage) {
     auto makeStageFn = [uuid, dbName](value::SlotId scanSlot, std::unique_ptr<PlanStage> stage) {
         sbe::value::SlotVector scanFieldSlots;
         auto scanStage =
-            sbe::makeS<sbe::ParallelScanStage>(uuid,
-                                               dbName,
-                                               scanSlot,
-                                               boost::none /* recordIdSlot */,
-                                               boost::none /* snapshotIdSlot */,
-                                               boost::none /* indexIdentSlot */,
-                                               boost::none /* indexKeySlot */,
-                                               boost::none /* indexKeyPatternSlot */,
-                                               std::vector<std::string>{} /* scanFieldNames */,
-                                               scanFieldSlots,
-                                               nullptr /* yieldPolicy */,
-                                               kEmptyPlanNodeId,
-                                               ScanCallbacks{},
-                                               false /* participateInTrialRunTracking */
-            );
+            sbe::makeS<sbe::GenericScanStage>(uuid,
+                                              dbName,
+                                              scanSlot,
+                                              boost::none /* recordIdSlot */,
+                                              boost::none /* snapshotIdSlot */,
+                                              boost::none /* indexIdentSlot */,
+                                              boost::none /* indexKeySlot */,
+                                              boost::none /* indexKeyPatternSlot */,
+                                              std::vector<std::string>{} /* scanFieldNames */,
+                                              scanFieldSlots,
+                                              true /* forward */,
+                                              nullptr /* yieldPolicy */,
+                                              kEmptyPlanNodeId,
+                                              nullptr /* scanOpenCallback */,
+                                              false /* participateInTrialRunTracking */);
+
         return std::make_pair(scanSlot, std::move(scanStage));
     };
 

@@ -55,6 +55,8 @@
 
 namespace mongo {
 
+DEFINE_LITE_PARSED_STAGE_DEFAULT_DERIVED(BucketAuto);
+
 /**
  * The $bucketAuto stage takes a user-specified number of buckets and automatically determines
  * boundaries such that the values are approximately equally distributed between those buckets.
@@ -69,7 +71,7 @@ public:
     void addVariableRefs(std::set<Variables::Id>* refs) const final;
 
     const char* getSourceName() const final;
-    boost::intrusive_ptr<DocumentSource> optimize() final;
+    boost::intrusive_ptr<DocumentSource> optimize();
 
     static const Id& id;
 

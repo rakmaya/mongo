@@ -34,7 +34,8 @@
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/oid.h"
-#include "mongo/db/admission/execution_admission_context.h"
+#include "mongo/db/admission/execution_control/execution_admission_context.h"
+#include "mongo/db/admission/execution_control/execution_control_parameters_gen.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands/fsync.h"
@@ -42,20 +43,8 @@
 #include "mongo/db/exec/classic/batched_delete_stage.h"
 #include "mongo/db/exec/classic/delete_stage.h"
 #include "mongo/db/exec/collection_scan_common.h"
-#include "mongo/db/global_catalog/catalog_cache/catalog_cache.h"
+#include "mongo/db/index_key_validate.h"
 #include "mongo/db/index_names.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_catalog.h"
-#include "mongo/db/local_catalog/collection_options.h"
-#include "mongo/db/local_catalog/index_catalog.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
-#include "mongo/db/local_catalog/index_key_validate.h"
-#include "mongo/db/local_catalog/lock_manager/exception_util.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
-#include "mongo/db/local_catalog/shard_role_catalog/operation_sharding_state.h"
-#include "mongo/db/local_catalog/shard_role_catalog/shard_filtering_metadata_refresh.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_debug.h"
 #include "mongo/db/pipeline/expression_context_builder.h"
@@ -70,6 +59,17 @@
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/lock_manager/exception_util.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/collection_options.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
+#include "mongo/db/shard_role/shard_catalog/operation_sharding_state.h"
+#include "mongo/db/shard_role/shard_role.h"
+#include "mongo/db/shard_role/shard_role_loop.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/timeseries/timeseries_constants.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
@@ -79,7 +79,6 @@
 #include "mongo/db/versioning_protocol/chunk_version.h"
 #include "mongo/db/versioning_protocol/shard_version.h"
 #include "mongo/db/versioning_protocol/shard_version_factory.h"
-#include "mongo/db/versioning_protocol/stale_exception.h"
 #include "mongo/logv2/log.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/platform/compiler.h"
@@ -115,9 +114,16 @@ MONGO_FAIL_POINT_DEFINE(hangTTLMonitorBetweenPasses);
 auto& ttlPasses = *MetricBuilder<Counter64>{"ttl.passes"};
 auto& ttlSubPasses = *MetricBuilder<Counter64>{"ttl.subPasses"};
 
+// Tracks the total amount of time spent deleting documents in TTL passes.
+auto& ttlDurationMicros = *MetricBuilder<Counter64>{"ttl.durationMicros"};
+
 // Tracks the number of deleted documents, as well as the number of deleted keys from indexes.
 auto& ttlDeletedDocuments = *MetricBuilder<Counter64>{"ttl.deletedDocuments"};
 auto& ttlDeletedKeys = *MetricBuilder<Counter64>{"ttl.deletedKeys"};
+
+// Tracks the number of documents and keys examined in TTL passes.
+auto& ttlExaminedDocuments = *MetricBuilder<Counter64>{"ttl.examinedDocuments"};
+auto& ttlExaminedKeys = *MetricBuilder<Counter64>{"ttl.examinedKeys"};
 
 // Tracks the number of TTL deletes skipped due to a TTL secondary index being present, but not
 // valid for TTL removal. A non-zero value indicates there is a TTL non-conformant index present and
@@ -193,11 +199,11 @@ RecordIdBound makeCollScanEndBound(const CollectionPtr& collection, Date_t expir
     return RecordIdBound(record_id_helpers::keyForDate(expirationDate));
 }
 
-const IndexDescriptor* getValidTTLIndex(OperationContext* opCtx,
-                                        TTLCollectionCache* ttlCollectionCache,
-                                        const CollectionPtr& collection,
-                                        const BSONObj& spec,
-                                        std::string indexName) {
+const IndexCatalogEntry* getValidTTLIndex(OperationContext* opCtx,
+                                          TTLCollectionCache* ttlCollectionCache,
+                                          const CollectionPtr& collection,
+                                          const BSONObj& spec,
+                                          std::string indexName) {
     if (!spec.hasField(IndexDescriptor::kExpireAfterSecondsFieldName)) {
         ttlCollectionCache->deregisterTTLIndexByName(collection->uuid(), indexName);
         return nullptr;
@@ -207,13 +213,14 @@ const IndexDescriptor* getValidTTLIndex(OperationContext* opCtx,
         return nullptr;
     }
 
-    const IndexDescriptor* desc = collection->getIndexCatalog()->findIndexByName(opCtx, indexName);
-    if (!desc) {
+    const auto entry = collection->getIndexCatalog()->findIndexByName(opCtx, indexName);
+    if (!entry) {
         LOGV2_DEBUG(22535, 1, "index not found; skipping ttl job", "index"_attr = spec);
         return nullptr;
     }
 
-    if (IndexType::INDEX_BTREE != IndexNames::nameToType(desc->getAccessMethodName())) {
+    if (IndexType::INDEX_BTREE !=
+        IndexNames::nameToType(entry->descriptor()->getAccessMethodName())) {
         LOGV2_ERROR(22541,
                     "special index can't be used as a TTL index, skipping TTL job",
                     "index"_attr = spec);
@@ -232,7 +239,7 @@ const IndexDescriptor* getValidTTLIndex(OperationContext* opCtx,
         return nullptr;
     }
 
-    return desc;
+    return entry;
 }
 
 }  // namespace
@@ -346,8 +353,11 @@ void TTLMonitor::shutdown() {
 }
 
 void TTLMonitor::_doTTLPass(OperationContext* opCtx, Date_t at) {
-    ScopedAdmissionPriority<ExecutionAdmissionContext> deprioritizeExecutionControl(
-        opCtx, AdmissionContext::Priority::kLow);
+    boost::optional<ScopedAdmissionPriority<ExecutionAdmissionContext>>
+        deprioritizeExecutionControl;
+    if (admission::execution_control::gBackgroundTasksDeprioritization.load()) {
+        deprioritizeExecutionControl.emplace(opCtx, AdmissionContext::Priority::kLow);
+    }
 
     // Don't do work if we are a secondary (TTL will be handled by primary)
     auto replCoordinator = repl::ReplicationCoordinator::get(opCtx);
@@ -492,41 +502,26 @@ bool TTLMonitor::_doTTLIndexDelete(OperationContext* opCtx,
                 opCtx, at, ttlCollectionCache, coll, info.getIndexName());
         }
     } catch (const ExceptionFor<ErrorCategory::StaleShardVersionError>& ex) {
-        // The TTL index tried to delete some information from a sharded collection
-        // through a direct operation against the shard but the filtering metadata was
-        // not available or the index version in the cache was stale.
+        // The TTL index tried to delete some information from a sharded collection through a direct
+        // operation against the shard but the filtering metadata was not available.
         //
         // The current TTL task cannot be completed. However, if the critical section is
         // not held the code below will fire an asynchronous refresh, hoping that the
         // next time this task is re-executed the filtering information is already
-        // present. It will also invalidate the cache, causing the index information to be refreshed
-        // on the next attempt.
+        // present.
         if (auto staleInfo = ex.extraInfo<StaleConfigInfo>();
             staleInfo && !staleInfo->getCriticalSectionSignal()) {
             auto executor = Grid::get(opCtx)->getExecutorPool()->getFixedExecutor();
             ExecutorFuture<void>(executor)
-                .then([serviceContext = opCtx->getServiceContext(), nss, staleInfo] {
-                    ThreadClient tc("TTLShardVersionRecovery",
-                                    serviceContext->getService(ClusterRole::ShardServer));
-                    auto uniqueOpCtx = tc->makeOperationContext();
-                    auto opCtx = uniqueOpCtx.get();
-
-                    // Updates version in cache in case index version is stale.
-                    if (staleInfo->getVersionWanted()) {
-                        Grid::get(opCtx)->catalogCache()->onStaleCollectionVersion(
-                            *nss, staleInfo->getVersionWanted());
-                    }
-
-                    FilteringMetadataCache::get(opCtx)
-                        ->onCollectionPlacementVersionMismatch(
-                            opCtx,
-                            *nss,
-                            staleInfo->getVersionWanted()
-                                ? boost::make_optional(
-                                      staleInfo->getVersionWanted()->placementVersion())
-                                : boost::none)
-                        .ignore();
-                })
+                .then(
+                    [serviceContext = opCtx->getServiceContext(), nss, staleError = ex.toStatus()] {
+                        ThreadClient tc("TTLShardVersionRecovery",
+                                        serviceContext->getService(ClusterRole::ShardServer));
+                        auto uniqueOpCtx = tc->makeOperationContext();
+                        auto opCtx = uniqueOpCtx.get();
+                        shard_role_loop::RetryContext shardRoleRetryCtx;
+                        shard_role_loop::handleStaleError(opCtx, staleError, shardRoleRetryCtx);
+                    })
                 .getAsync([](auto) {});
         }
         LOGV2_WARNING(6353000,
@@ -561,12 +556,12 @@ bool TTLMonitor::_deleteExpiredWithIndex(OperationContext* opCtx,
     }
 
     BSONObj spec = collectionPtr->getIndexSpec(indexName);
-    const IndexDescriptor* desc =
-        getValidTTLIndex(opCtx, ttlCollectionCache, collectionPtr, spec, indexName);
-
-    if (!desc) {
+    const auto entry = getValidTTLIndex(opCtx, ttlCollectionCache, collectionPtr, spec, indexName);
+    if (!entry) {
         return false;
     }
+
+    const auto desc = entry->descriptor();
 
     LOGV2_DEBUG(22533,
                 1,
@@ -614,7 +609,7 @@ bool TTLMonitor::_deleteExpiredWithIndex(OperationContext* opCtx,
     auto exec = InternalPlanner::deleteWithIndexScan(opCtx,
                                                      collection,
                                                      std::move(params),
-                                                     desc,
+                                                     entry,
                                                      startKey,
                                                      endKey,
                                                      BoundInclusion::kIncludeBothStartAndEndKeys,
@@ -624,17 +619,21 @@ bool TTLMonitor::_deleteExpiredWithIndex(OperationContext* opCtx,
 
     try {
         const auto numDeletedDocs = exec->executeDelete();
-        const auto numDeletedKeys = opDebug.additiveMetrics.keysDeleted.value_or(0ll);
+        const auto numDeletedKeys = opDebug.getAdditiveMetrics().keysDeleted.value_or(0ll);
         ttlDeletedDocuments.increment(numDeletedDocs);
         ttlDeletedKeys.increment(numDeletedKeys);
 
-        const auto duration = Milliseconds(timer.millis());
+        const auto duration = timer.elapsed();
         PlanSummaryStats summaryStats;
         const auto& explainer = exec->getPlanExplainer();
         explainer.getSummaryStats(&summaryStats);
+        ttlExaminedDocuments.increment(summaryStats.totalDocsExamined);
+        ttlExaminedKeys.increment(summaryStats.totalKeysExamined);
+        ttlDurationMicros.increment(durationCount<Microseconds>(duration));
+
         if (shouldLogSlowOpWithSampling(opCtx,
                                         logv2::LogComponent::kIndex,
-                                        duration,
+                                        duration_cast<Milliseconds>(duration),
                                         Milliseconds(serverGlobalParams.slowMS.load()))
                 .first) {
             LOGV2(5479200,
@@ -645,7 +644,7 @@ bool TTLMonitor::_deleteExpiredWithIndex(OperationContext* opCtx,
                   "numKeysDeleted"_attr = numDeletedKeys,
                   "numKeysExamined"_attr = summaryStats.totalKeysExamined,
                   "numDocsExamined"_attr = summaryStats.totalDocsExamined,
-                  "duration"_attr = duration);
+                  "duration"_attr = duration_cast<Milliseconds>(duration));
         }
 
         if (batchingEnabled) {
@@ -773,17 +772,21 @@ bool TTLMonitor::_performDeleteExpiredWithCollscan(OperationContext* opCtx,
 
     try {
         const auto numDeletedDocs = exec->executeDelete();
-        const auto numDeletedKeys = opDebug.additiveMetrics.keysDeleted.value_or(0ll);
+        const auto numDeletedKeys = opDebug.getAdditiveMetrics().keysDeleted.value_or(0ll);
         ttlDeletedDocuments.increment(numDeletedDocs);
         ttlDeletedKeys.increment(numDeletedKeys);
 
-        const auto duration = Milliseconds(timer.millis());
+        const auto duration = timer.elapsed();
         PlanSummaryStats summaryStats;
         const auto& explainer = exec->getPlanExplainer();
         explainer.getSummaryStats(&summaryStats);
+        ttlExaminedDocuments.increment(summaryStats.totalDocsExamined);
+        ttlExaminedKeys.increment(summaryStats.totalKeysExamined);
+        ttlDurationMicros.increment(durationCount<Microseconds>(duration));
+
         if (shouldLogSlowOpWithSampling(opCtx,
                                         logv2::LogComponent::kIndex,
-                                        duration,
+                                        duration_cast<Milliseconds>(duration),
                                         Milliseconds(serverGlobalParams.slowMS.load()))
                 .first) {
             LOGV2(5400702,
@@ -793,7 +796,7 @@ bool TTLMonitor::_performDeleteExpiredWithCollscan(OperationContext* opCtx,
                   "numKeysDeleted"_attr = numDeletedKeys,
                   "numKeysExamined"_attr = summaryStats.totalKeysExamined,
                   "numDocsExamined"_attr = summaryStats.totalDocsExamined,
-                  "duration"_attr = duration,
+                  "duration"_attr = duration_cast<Milliseconds>(duration),
                   "extendedRange"_attr =
                       collection.getCollectionPtr()->getRequiresTimeseriesExtendedRangeSupport());
         }
@@ -834,12 +837,24 @@ long long TTLMonitor::getTTLSubPasses_forTest() {
     return ttlSubPasses.get();
 }
 
+long long TTLMonitor::getTTLDurationMicros_forTest() {
+    return ttlDurationMicros.get();
+}
+
 long long TTLMonitor::getTTLDeletedDocuments_forTest() {
     return ttlDeletedDocuments.get();
 }
 
 long long TTLMonitor::getTTLDeletedKeys_forTest() {
     return ttlDeletedKeys.get();
+}
+
+long long TTLMonitor::getTTLExaminedDocuments_forTest() {
+    return ttlExaminedDocuments.get();
+}
+
+long long TTLMonitor::getTTLExaminedKeys_forTest() {
+    return ttlExaminedKeys.get();
 }
 
 long long TTLMonitor::getInvalidTTLIndexSkips_forTest() {

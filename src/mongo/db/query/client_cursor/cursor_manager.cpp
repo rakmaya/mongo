@@ -238,8 +238,8 @@ StatusWith<ClientCursorPin> CursorManager::pinCursor(
     CurOp::get(opCtx)->debug().setQueryShapeHash(opCtx, cursor->_queryShapeHash);
 
     // Pass along queryStats context so it is retrievable after query execution for storing metrics.
-    CurOp::get(opCtx)->debug().queryStatsInfo.keyHash = cursor->_queryStatsKeyHash;
-    CurOp::get(opCtx)->debug().queryStatsInfo.willNeverExhaust =
+    CurOp::get(opCtx)->debug().getQueryStatsInfo().keyHash = cursor->_queryStatsKeyHash;
+    CurOp::get(opCtx)->debug().getQueryStatsInfo().willNeverExhaust =
         cursor->_queryStatsWillNeverExhaust;
     // Pass along 'isChangeStreamQuery' for serverStatus metrics.
     CurOp::get(opCtx)->debug().isChangeStreamQuery = cursor->_isChangeStreamQuery;
@@ -282,7 +282,8 @@ void CursorManager::unpin(OperationContext* opCtx,
     // interesting in proactively cleaning up that cursor's resources. In these cases, we
     // proactively delete the cursor. In other cases we preserve the error code so that the client
     // will see the reason the cursor was killed when asking for the next batch.
-    if (interruptStatus == ErrorCodes::Interrupted || cursor->isKillPending()) {
+    if (interruptStatus == ErrorCodes::Interrupted ||
+        interruptStatus == ErrorCodes::InterruptedDueToOverload || cursor->isKillPending()) {
         LOGV2(20530,
               "Removing cursor after completing batch",
               "cursorId"_attr = cursor->cursorid(),
@@ -388,7 +389,7 @@ ClientCursorPin CursorManager::registerCursor(OperationContext* opCtx,
 
     // Make sure the PlanExecutor isn't registered, since we will register the ClientCursor wrapping
     // it.
-    invariant(cursorParams.exec);
+    tassert(11177210, "cursorParams.exec must not be null", cursorParams.exec);
     cursorParams.exec.get_deleter().dismissDisposal();
 
     // Note we must hold the registration lock from now until insertion into '_cursorMap' to ensure

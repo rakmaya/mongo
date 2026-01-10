@@ -3,10 +3,11 @@
 ############################################
 # A configuration for disaggregated storage.
 backup=0
+background_compact=0
 block_cache=0
 checkpoint=on
 precise_checkpoint=1
-disagg.page_log=palm
+disagg.page_log=palite
 disagg.enabled=1
 disagg.layered=1
 runs.source=layered
@@ -25,3 +26,5 @@ ops.prepare=0
 quiet=0
 runs.in_memory=0
 transaction.timestamps=1
+tiered_storage.flush_frequency=0
+tiered_storage.storage_source=off

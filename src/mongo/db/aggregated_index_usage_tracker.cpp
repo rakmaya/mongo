@@ -34,13 +34,12 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/commands/server_status/server_status.h"
 #include "mongo/db/index_names.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
 
-#include <utility>
 
 namespace mongo {
 namespace {
@@ -129,7 +128,7 @@ IndexFeatures IndexFeatures::make(const IndexDescriptor* desc, bool internal) {
     features.internal = internal;
     features.partial = desc->isPartial();
     features.prepareUnique = desc->prepareUnique();
-    features.sparse = desc->isSparse();
+    features.sparse = desc->isSetSparseByUser();
     features.ttl = desc->infoObj().hasField(IndexDescriptor::kExpireAfterSecondsFieldName);
     features.type = indexType;
     features.unique = desc->unique();

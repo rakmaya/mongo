@@ -41,6 +41,7 @@
 #include "mongo/db/update/modifier_node.h"
 #include "mongo/db/update/update_node.h"
 #include "mongo/db/update/update_node_visitor.h"
+#include "mongo/util/modules.h"
 
 #include <memory>
 
@@ -87,8 +88,8 @@ private:
         return context == Context::kAll ? "$set" : "$setOnInsert";
     }
 
-    BSONObj operatorValue() const final {
-        return BSON("" << val);
+    BSONObj operatorValue(const SerializationOptions& opts) const final {
+        return BSON("" << opts.serializeLiteral(val));
     }
 };
 

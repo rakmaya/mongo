@@ -29,13 +29,14 @@
 
 #pragma once
 
-#include "mongo/db/local_catalog/clustered_collection_util.h"
-#include "mongo/db/local_catalog/collection.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/compiler/logical_model/sort_pattern/sort_pattern.h"
 #include "mongo/db/query/indexability.h"
 #include "mongo/db/query/query_knobs_gen.h"
+#include "mongo/db/shard_role/shard_catalog/clustered_collection_util.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/util/modules.h"
 
 namespace mongo {
 /**
@@ -52,7 +53,7 @@ bool isMatchIdHackEligible(MatchExpression* me);
 /**
  * Returns true if 'query' describes an exact-match query on _id.
  */
-bool isSimpleIdQuery(const BSONObj& query);
+MONGO_MOD_NEEDS_REPLACEMENT bool isSimpleIdQuery(const BSONObj& query);
 
 /**
  * Returns 'true' if 'query' on the given 'collection' can be answered using a special IDHACK plan,
@@ -147,6 +148,36 @@ inline ExpressEligibility isExpressEligible(OperationContext* opCtx,
     }
 
     return ExpressEligibility::Ineligible;
+}
+
+inline bool isInternalOrDirectClient(Client* client) {
+    return client->isInternalClient() || client->isInDirectClient();
+}
+
+/**
+ * Verifies that users did not specify the internal fields 'originalQueryShapeHash' and
+ * 'querySettings' directly.
+ */
+template <typename T>
+concept hasOriginalQueryShapeHash = requires(const T& t) { t.getOriginalQueryShapeHash(); };
+template <typename T>
+concept hasQuerySettings = requires(const T& t) { t.getQuerySettings(); };
+
+template <typename T>
+requires hasOriginalQueryShapeHash<T>
+void assertInternalParamsAreSetByInternalClients(Client* client, T& req) {
+    const bool isInternalOrDirect = isInternalOrDirectClient(client);
+
+    // Only check 'querySettings' if the command accepts it.
+    if constexpr (hasQuerySettings<T>) {
+        uassert(7923000,
+                "BSON field 'querySettings' is an unknown field",
+                isInternalOrDirect || !req.getQuerySettings().has_value());
+    }
+
+    uassert(10742702,
+            "BSON field 'originalQueryShapeHash' is an unknown field",
+            isInternalOrDirect || !req.getOriginalQueryShapeHash().has_value());
 }
 
 bool isSortSbeCompatible(const SortPattern& sortPattern);

@@ -49,9 +49,6 @@ filters:
   - "cluster_write*":
     approvers:
       - 10gen/query-execution-router
-  - "shard_targeting_helpers*":
-    approvers:
-      - 10gen/query-optimization
   - "append_raw_responses_test.cpp":
     approvers:
       - 10gen/server-networking-and-observability
@@ -64,9 +61,18 @@ filters:
   - "load_balancer_support*":
     approvers:
       - 10gen/server-networking-and-observability
+  - "client_metadata_propagation_egress_hook*":
+    approvers:
+      - 10gen/server-networking-and-observability
   - "balancer_feature_flag*":
     approvers:
       - 10gen/server-cluster-scalability
   - "sharding_task_executor_pool*":
     approvers:
       - 10gen/server-networking-and-observability
+  - "sharding_task_executor.*":
+    approvers:
+      - 10gen/server-catalog-and-routing-routing-and-topology
+  - "sharding_task_executor_test.cpp":
+    approvers:
+      - 10gen/server-catalog-and-routing-routing-and-topology

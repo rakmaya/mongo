@@ -47,9 +47,6 @@
 #include "mongo/db/commands.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/global_catalog/chunk_manager.h"
-#include "mongo/db/global_catalog/router_role_api/cluster_commands_helpers.h"
-#include "mongo/db/global_catalog/router_role_api/collection_routing_info_targeter.h"
-#include "mongo/db/global_catalog/router_role_api/router_role.h"
 #include "mongo/db/logical_time.h"
 #include "mongo/db/matcher/extensions_callback_noop.h"
 #include "mongo/db/matcher/extensions_callback_real.h"
@@ -68,17 +65,21 @@
 #include "mongo/db/query/query_settings/query_settings_service.h"
 #include "mongo/db/query/query_shape/distinct_cmd_shape.h"
 #include "mongo/db/query/query_shape/query_shape.h"
+#include "mongo/db/query/query_shape/query_shape_hash.h"
 #include "mongo/db/query/query_stats/distinct_key.h"
 #include "mongo/db/query/query_stats/query_stats.h"
 #include "mongo/db/query/shard_key_diagnostic_printer.h"
 #include "mongo/db/query/timeseries/timeseries_translation.h"
 #include "mongo/db/query/view_response_formatter.h"
-#include "mongo/db/raw_data_operation.h"
 #include "mongo/db/read_concern_support_result.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/repl/read_concern_level.h"
+#include "mongo/db/router_role/cluster_commands_helpers.h"
+#include "mongo/db/router_role/collection_routing_info_targeter.h"
+#include "mongo/db/router_role/router_role.h"
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/shard_catalog/raw_data_operation.h"
 #include "mongo/db/sharding_environment/client/shard.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/db/version_context.h"
@@ -137,6 +138,11 @@ std::unique_ptr<CanonicalQuery> parseDistinctCmd(
             "BSON field 'querySettings' is an unknown field",
             !distinctCommand->getQuerySettings().has_value());
 
+    // Forbid users from passing 'originalQueryShapeHash' explicitly.
+    uassert(10742700,
+            "BSON field 'originalQueryShapeHash' is an unknown field",
+            !distinctCommand->getOriginalQueryShapeHash().has_value());
+
     auto expCtx = ExpressionContextBuilder{}
                       .fromRequest(opCtx, *distinctCommand, defaultCollator)
                       .ns(nss)
@@ -179,18 +185,37 @@ std::unique_ptr<CanonicalQuery> parseDistinctCmd(
                                                         std::move(parsedDistinct));
 }
 
-BSONObj prepareDistinctForPassthrough(const BSONObj& cmd,
-                                      const query_settings::QuerySettings& qs,
-                                      const bool requestQueryStats) {
+BSONObj prepareDistinctForPassthrough(
+    const OperationContext* opCtx,
+    const BSONObj& cmd,
+    const query_settings::QuerySettings& qs,
+    const bool requestQueryStats,
+    const boost::optional<query_shape::QueryShapeHash>& queryShapeHash) {
     const auto qsBson = qs.toBSON();
-    if (requestQueryStats || !qsBson.isEmpty()) {
+    if (requestQueryStats || !qsBson.isEmpty() || queryShapeHash) {
         BSONObjBuilder bob(cmd);
         // Append distinct command with the query settings and includeQueryStatsMetrics if needed.
         if (requestQueryStats) {
-            bob.append("includeQueryStatsMetrics", true);
+            bob.append(DistinctCommandRequest::kIncludeQueryStatsMetricsFieldName, true);
         }
         if (!qsBson.isEmpty()) {
-            bob.append("querySettings", qsBson);
+            bob.append(DistinctCommandRequest::kQuerySettingsFieldName, qsBson);
+        }
+
+        // Pass the queryShapeHash to the shards. We must validate that all participating shards can
+        // understand 'originalQueryShapeHash' and therefore check the feature flag. We use the last
+        // LTS when the FCV is uninitialized, even though distinct commands cannot execute during
+        // initial sync. This is because the feature is exclusively for observability enhancements
+        // and should only be applied when we are confident that the shard can correctly read this
+        // field, ensuring the query will not error.
+        if (feature_flags::gFeatureFlagOriginalQueryShapeHash
+                .isEnabledUseLastLTSFCVWhenUninitialized(
+                    VersionContext::getDecoration(opCtx),
+                    serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+            if (queryShapeHash) {
+                bob.append(DistinctCommandRequest::kOriginalQueryShapeHashFieldName,
+                           queryShapeHash->toHexString());
+            }
         }
         return CommandHelpers::filterCommandRequestForPassthrough(bob.done());
     }
@@ -267,9 +292,8 @@ public:
         const BSONObj& originalCmdObj = opMsgRequest.body;
         const NamespaceString originalNss(parseNs(opMsgRequest.parseDbName(), originalCmdObj));
 
-        sharding::router::CollectionRouter router{opCtx->getServiceContext(), originalNss};
+        sharding::router::CollectionRouter router(opCtx, originalNss);
         return router.routeWithRoutingContext(
-            opCtx,
             "explain distinct"_sd,
             [&](OperationContext* opCtx, RoutingContext& originalRoutingCtx) {
                 // Clear the bodyBuilder since this lambda function may be retried if the router
@@ -281,7 +305,7 @@ public:
                 BSONObj cmdObj = originalCmdObj;
                 auto nss = originalNss;
                 const auto targeter = CollectionRoutingInfoTargeter(opCtx, nss);
-                auto& routingCtx = translateNssForRawDataAccordingToRoutingInfo(
+                auto& routingCtx = performTimeseriesTranslationAccordingToRoutingInfo(
                     opCtx,
                     originalNss,
                     targeter,
@@ -386,9 +410,9 @@ public:
         CommandHelpers::handleMarkKillOnClientDisconnect(opCtx);
         NamespaceString originalNss(parseNs(dbName, originalCmdObj));
         try {
-            sharding::router::CollectionRouter router{opCtx->getServiceContext(), originalNss};
+            sharding::router::CollectionRouter router(opCtx, originalNss);
             return router.routeWithRoutingContext(
-                opCtx, getName(), [&](OperationContext* opCtx, RoutingContext& originalRoutingCtx) {
+                getName(), [&](OperationContext* opCtx, RoutingContext& originalRoutingCtx) {
                     // Clear the bodyBuilder since this lambda function may be retried if the router
                     // cache is stale.
                     result.resetToEmpty();
@@ -398,7 +422,7 @@ public:
                     BSONObj cmdObj = originalCmdObj;
                     auto nss = originalNss;
                     const auto targeter = CollectionRoutingInfoTargeter(opCtx, nss);
-                    auto& routingCtx = translateNssForRawDataAccordingToRoutingInfo(
+                    auto& routingCtx = performTimeseriesTranslationAccordingToRoutingInfo(
                         opCtx,
                         originalNss,
                         targeter,
@@ -428,9 +452,15 @@ public:
                     // We will decide if remote query stats metrics should be collected.
                     bool requestQueryStats =
                         query_stats::shouldRequestRemoteMetrics(CurOp::get(opCtx)->debug());
+                    boost::optional<query_shape::QueryShapeHash> queryShapeHash =
+                        CurOp::get(opCtx)->debug().getQueryShapeHash();
 
                     BSONObj distinctReadyForPassthrough = prepareDistinctForPassthrough(
-                        cmdObj, canonicalQuery->getExpCtx()->getQuerySettings(), requestQueryStats);
+                        opCtx,
+                        cmdObj,
+                        canonicalQuery->getExpCtx()->getQuerySettings(),
+                        requestQueryStats,
+                        queryShapeHash);
 
 
                     const auto& cri = routingCtx.getCollectionRoutingInfo(nss);
@@ -526,8 +556,10 @@ public:
                             if (shardMetrics.isABSONObj()) {
                                 auto metrics = CursorMetrics::parse(
                                     shardMetrics.Obj(), IDLParserContext("CursorMetrics"));
-                                CurOp::get(opCtx)->debug().additiveMetrics.aggregateCursorMetrics(
-                                    metrics);
+                                CurOp::get(opCtx)
+                                    ->debug()
+                                    .getAdditiveMetrics()
+                                    .aggregateCursorMetrics(metrics);
                             }
                         }
                     }
@@ -552,7 +584,7 @@ public:
 
                     CurOp::get(opCtx)->setEndOfOpMetrics(n);
                     collectQueryStatsMongos(
-                        opCtx, std::move(CurOp::get(opCtx)->debug().queryStatsInfo.key));
+                        opCtx, std::move(CurOp::get(opCtx)->debug().getQueryStatsInfo().key));
 
                     return true;
                 });
@@ -571,7 +603,7 @@ public:
             result.appendArray("values", BSONObj());
             CurOp::get(opCtx)->setEndOfOpMetrics(0);
             collectQueryStatsMongos(opCtx,
-                                    std::move(CurOp::get(opCtx)->debug().queryStatsInfo.key));
+                                    std::move(CurOp::get(opCtx)->debug().getQueryStatsInfo().key));
             return true;
         }
     }
@@ -599,8 +631,8 @@ public:
 
         // We must store the key in distinct to prevent collecting query stats when the aggregation
         // runs.
-        auto ownedQueryStatsKey = std::move(curOp->debug().queryStatsInfo.key);
-        curOp->debug().queryStatsInfo.disableForSubqueryExecution = true;
+        auto ownedQueryStatsKey = std::move(curOp->debug().getQueryStatsInfo().key);
+        curOp->debug().getQueryStatsInfo().disableForSubqueryExecution = true;
 
         // Skip privilege checking if we are in an explain.
         if (verbosity) {
@@ -635,7 +667,8 @@ public:
         }
 
         const auto privileges = uassertStatusOK(
-            auth::getPrivilegesForAggregate(AuthorizationSession::get(opCtx->getClient()),
+            auth::getPrivilegesForAggregate(opCtx,
+                                            AuthorizationSession::get(opCtx->getClient()),
                                             distinctAggRequest.getNamespace(),
                                             distinctAggRequest,
                                             true /* isMongos */));

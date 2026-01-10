@@ -27,12 +27,12 @@
  *    it in the license file.
  */
 
-#include "mongo/db/local_catalog/catalog_test_fixture.h"
 #include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/query/plan_yield_policy_sbe.h"
 #include "mongo/db/query/query_fcv_environment_for_test.h"
 #include "mongo/db/query/stage_builder/stage_builder_util.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_test_fixture.h"
 
 #include <benchmark/benchmark.h>
 
@@ -55,7 +55,8 @@ public:
                                                      std::string indexName,
                                                      double lowBound,
                                                      double highBound) {
-        auto child = std::make_unique<IndexScanNode>(createIndexEntry(BSON(index << 1), indexName));
+        auto child =
+            std::make_unique<IndexScanNode>(kNss, createIndexEntry(BSON(index << 1), indexName));
         IndexBounds bounds{};
         OrderedIntervalList oil(index);
         oil.intervals.emplace_back(BSON("" << lowBound << "" << highBound), true, true);
@@ -77,7 +78,7 @@ public:
     }
 
 private:
-    void _doTest() override {}
+    void TestBody() override {}
 
     void setUp() final {
         CatalogTestFixture::setUp();
@@ -101,9 +102,7 @@ private:
                           false /*sparse*/,
                           false /*unique*/,
                           IndexEntry::Identifier{indexName},
-                          nullptr /*filterExpr*/,
                           BSONObj() /*infoObj*/,
-                          nullptr /*collatorInterface*/,
                           nullptr /*wildcardProjection*/);
     }
 };
@@ -145,7 +144,7 @@ void BM_Simple(benchmark::State& state) {
 
     // Create QuerySolution
     auto child = fixture.makeIndexScanNode("x1", "index1", -INFINITY, kIndexUpperBound);
-    auto root = std::make_unique<FetchNode>(std::move(child));
+    auto root = std::make_unique<FetchNode>(std::move(child), kNss);
 
     auto bsonObj = fixture.buildFilter(state.range(0), false);
     root->filter = std::move(

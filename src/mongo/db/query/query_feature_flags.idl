@@ -28,6 +28,7 @@
 
 global:
     cpp_namespace: "mongo::feature_flags"
+    mod_visibility: public
 
 feature_flags:
     featureFlagChangeStreamPreciseShardTargeting:
@@ -39,9 +40,9 @@ feature_flags:
     featureFlagSbeAccumulators:
         description: "Feature flag to enable single-purpose SBE $group accumulators."
         cpp_varname: gFeatureFlagSbeAccumulators
-        default: false
+        default: true
         fcv_gated: false
-        incremental_rollout_phase: in_development
+        incremental_rollout_phase: rollout
 
     featureFlagSbeFull:
         description:
@@ -57,17 +58,11 @@ feature_flags:
         default: true
         version: 7.2
         fcv_gated: true
-        fcv_context_unaware: true
+        check_against_fcv: legacy_fcv_snapshot_only
 
     featureFlagAggOutTimeseries:
         description: "Feature flag for enabling support for $out to write to time-series collections"
         cpp_varname: gFeatureFlagAggOutTimeseries
-        default: true
-        fcv_gated: false
-
-    featureFlagVectorSearchPublicPreview:
-        description: "Feature flag to enable vector search for public preview."
-        cpp_varname: gFeatureFlagVectorSearchPublicPreview
         default: true
         fcv_gated: false
 
@@ -95,7 +90,7 @@ feature_flags:
         default: true
         version: 8.0
         fcv_gated: true
-        fcv_context_unaware: true
+        check_against_fcv: legacy_fcv_snapshot_only
 
     featureFlagSearchBatchSizeTuning:
         description: "Feature flag to enable batchSize tuning for search queries."
@@ -115,7 +110,8 @@ feature_flags:
             "Feature flag to enable referencing array indices in $map, $filter, and $reduce
             expressions."
         cpp_varname: gFeatureFlagExposeArrayIndexInMapFilterReduce
-        default: false
+        default: true
+        version: 8.3
         fcv_gated: true
 
     featureFlagBinDataConvertNumeric:
@@ -195,7 +191,7 @@ feature_flags:
         default: true
         version: 8.1
         fcv_gated: true
-        fcv_context_unaware: true
+        check_against_fcv: legacy_fcv_snapshot_only
 
     featureFlagSearchHybridScoringFull:
         description:
@@ -224,25 +220,34 @@ feature_flags:
     featureFlagCurrentDate:
         description: "Feature flag to enable $currentDate expression"
         cpp_varname: gFeatureFlagCurrentDate
-        default: false
+        default: true
+        version: 8.3
         fcv_gated: true
 
     featureFlagMultiPlanLimiter:
         description: "Feature flag to enable MultiPlan rate limiter."
         cpp_varname: gfeatureFlagMultiPlanLimiter
         fcv_gated: false
-        incremental_rollout_phase: in_development
+        incremental_rollout_phase: rollout
 
     featureFlagSbeUpgradeBinaryTrees:
         description: "Feature flag to enable N-ary ABT nodes"
         cpp_varname: gFeatureFlagSbeUpgradeBinaryTrees
         fcv_gated: false
-        incremental_rollout_phase: in_development
+        incremental_rollout_phase: rollout
 
     featureFlagUUIDExpression:
         description: "Feature flag to enable $createUUID expression"
         cpp_varname: gFeatureFlagUUIDExpression
-        default: false
+        default: true
+        version: 8.3
+        fcv_gated: true
+
+    featureFlagTopNBottomNExpressions:
+        description: "Feature flag to enable $topN, $top, $bottomN and $bottom expressions"
+        cpp_varname: gFeatureFlagTopNBottomNExpressions
+        default: true
+        version: 8.3
         fcv_gated: true
 
     featureFlagPQSBackfill:
@@ -255,7 +260,8 @@ feature_flags:
     featureFlagConvertBinDataVectors:
         description: "Feature flag to enable converting to and from BinDataVectors and BSON Arrays"
         cpp_varname: gFeatureFlagConvertBinDataVectors
-        default: false
+        default: true
+        version: 8.3
         fcv_gated: true
 
     featureFlagVectorSimilarityExpressions:
@@ -271,6 +277,12 @@ feature_flags:
         description: "Feature flag to enable loading extensions via the Extensions API."
         cpp_varname: gFeatureFlagExtensionsAPI
         default: false
+        fcv_gated: false
+
+    featureFlagExtensionStubParsers:
+        description: "Test feature flag for extension stub parser fallback registration. Used to test incremental rollout of extension stage parsers."
+        cpp_varname: gFeatureFlagExtensionStubParsers
+        incremental_rollout_phase: in_development
         fcv_gated: false
 
     featureFlagMqlJsEngineGap:
@@ -292,6 +304,12 @@ feature_flags:
         default: false
         fcv_gated: true
 
+    featureFlagQueryStatsCBRMetrics:
+        description: "Feature flag to enable cost-based ranker metrics in query stats."
+        cpp_varname: gFeatureFlagQueryStatsCBRMetrics
+        default: false
+        fcv_gated: true
+
     featureFlagQueryStatsMetricsSubsections:
         description: "Feature flag to enable query stats metrics being reorganized into subsections, rather than a flat structure."
         cpp_varname: gFeatureFlagQueryStatsMetricsSubsections
@@ -302,5 +320,38 @@ feature_flags:
         description: "Feature flag to enable extract_field_paths SBE stage."
         cpp_varname: gFeatureFlagExtractFieldPathsSbeStage
         fcv_gated: false
+        default: true
+        incremental_rollout_phase: rollout
+
+    featureFlagPathArrayness:
+        description: "Feature flag to enable tracking of path arrayness."
+        cpp_varname: gFeatureFlagPathArrayness
+        fcv_gated: false
         default: false
+
+    featureFlagUnifiedWriteExecutor:
+        description: "Feature flag to use the unified write executor."
+        cpp_varname: "gFeatureFlagUnifiedWriteExecutor"
+        default: true
+        fcv_gated: false
+        incremental_rollout_phase: rollout
+
+    featureFlagOriginalQueryShapeHash:
+        description: "Feature flag to to pass 'originalQueryShapeHash' field in commands from router to shards."
+        cpp_varname: gFeatureFlagOriginalQueryShapeHash
+        default: true
+        version: 8.3
+        fcv_gated: true
+
+    featureFlagVectorSearchExtension:
+        description: "Feature flag to enable vector search extension functionality."
+        cpp_varname: gFeatureFlagVectorSearchExtension
+        default: false
+        fcv_gated: false
         incremental_rollout_phase: in_development
+
+    featureFlagMergeStageInsertWithUpdateBackup:
+        description: "Feature flag to enable $merge stage strategy that tries to insert documents and falls back to update in case of errors"
+        cpp_varname: gFeatureFlagMergeStageInsertWithUpdateBackup
+        default: true
+        fcv_gated: false

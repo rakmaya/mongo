@@ -35,6 +35,7 @@
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/pipeline/document_source.h"
+#include "mongo/db/pipeline/document_source_change_stream.h"
 #include "mongo/db/pipeline/document_source_change_stream_gen.h"
 #include "mongo/db/pipeline/document_source_match.h"
 #include "mongo/db/pipeline/expression_context.h"
@@ -42,11 +43,17 @@
 #include "mongo/db/pipeline/stage_constraints.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/db/query/tailable_mode_gen.h"
+#include "mongo/util/modules.h"
 
 #include <boost/optional/optional.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
+
+DECLARE_STAGE_PARAMS_DERIVED_DEFAULT(ChangeStreamOplogMatch);
+using ChangeStreamOplogMatchLiteParsed =
+    DocumentSourceChangeStreamLiteParsedInternal<ChangeStreamOplogMatchStageParams>;
+
 /**
  * A custom subclass of DocumentSourceMatch which is used to generate a $match stage to be applied
  * on the oplog. The stage requires itself to be the first stage in the pipeline.
@@ -91,9 +98,8 @@ public:
         return id;
     }
 
-protected:
-    DocumentSourceContainer::iterator doOptimizeAt(DocumentSourceContainer::iterator itr,
-                                                   DocumentSourceContainer* container) final;
+    DocumentSourceContainer::iterator optimizeAt(DocumentSourceContainer::iterator itr,
+                                                 DocumentSourceContainer* container);
 
 private:
     /**

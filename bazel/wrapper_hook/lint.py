@@ -26,6 +26,8 @@ SUPPORTED_EXTENSIONS = (
     ".defs",
     ".inl",
     ".idl",
+    ".yml",
+    ".yaml",
 )
 
 
@@ -99,11 +101,14 @@ class LintRunner:
             "src/mongo/db/modules/enterprise/src/streams/util/tests/concurrent_memory_aggregator_test.cpp",
             # TODO(SERVER-101375): Remove the exemptions below once resolved.
             "src/mongo/platform/decimal128_dummy.cpp",
-            # TODO(SERVER-112684): Remove the exemptions below once resolved.
-            "src/mongo/util/processinfo_emscripten.cpp",
-            "src/mongo/util/processinfo_macOS.cpp",
-            "src/mongo/util/processinfo_solaris.cpp",
         }
+
+        exempted_subpaths = [
+            # Skip files in bazel_rules_mongo, since it has its own Bazel repo
+            "bazel_rules_mongo",
+            # vim creates temporary c++ files that aren't part of the tree
+            "/.vim/",
+        ]
 
         typed_files_in_targets = [line for line in files_with_targets if line.endswith(f".{ext}")]
 
@@ -129,11 +134,8 @@ class LintRunner:
         new_list = []
         for file in all_typed_files:
             if file not in typed_files_in_targets_set and file not in exempt_list:
-                if "bazel_rules_mongo" in file:
-                    # Skip files in bazel_rules_mongo, since it has its own Bazel repo
-                    continue
-
-                new_list.append(file)
+                if not any(subpath in file for subpath in exempted_subpaths):
+                    new_list.append(file)
 
         if len(new_list) != 0:
             print(f"Found {type_name} files without BUILD.bazel definitions:")
@@ -148,8 +150,8 @@ class LintRunner:
             self.fail = True
             if not self.keep_going:
                 raise LinterFail("File missing bazel target.")
-
-        print(f"All {type_name} files have BUILD.bazel targets!")
+        else:
+            print(f"All {type_name} files have BUILD.bazel targets!")
 
     def run_bazel(self, target: str, args: List = []):
         p = subprocess.run([self.bazel_bin, "run", target] + (["--"] + args if args else []))
@@ -302,7 +304,7 @@ def run_rules_lint(bazel_bin: str, args: List[str]):
     )
     lint_all = parsed_args.all or "..." in args or "//..." in args
     files_to_lint = [arg for arg in args if not arg.startswith("-")]
-    if not lint_all and files_to_lint:
+    if not lint_all and not files_to_lint:
         origin_branch = parsed_args.origin_branch
         max_distance = 100
         distance = _git_distance([f"{origin_branch}..HEAD"])
@@ -335,7 +337,10 @@ def run_rules_lint(bazel_bin: str, args: List[str]):
     if lint_all:
         lr.run_bazel("//buildscripts:pyrightlint", ["lint-all"])
     elif any(file.endswith(".py") for file in files_to_lint):
-        lr.run_bazel("//buildscripts:pyrightlint", ["lints"] + files_to_lint)
+        lr.run_bazel(
+            "//buildscripts:pyrightlint",
+            ["lints"] + [str(file) for file in files_to_lint if file.endswith(".py")],
+        )
 
     if lint_all or "poetry.lock" in files_to_lint or "pyproject.toml" in files_to_lint:
         lr.run_bazel("//buildscripts:poetry_lock_check")
@@ -345,9 +350,9 @@ def run_rules_lint(bazel_bin: str, args: List[str]):
             "buildscripts:validate_evg_project_config",
             [
                 f"--evg-project-name={parsed_args.lint_yaml_project}",
-                "--evg-auth-config=.evergreen.yml",
             ],
         )
+        lr.run_bazel("//buildscripts:yamllinters")
 
     if lint_all or parsed_args.large_files:
         lr.run_bazel("buildscripts:large_file_check", ["--exclude", "src/third_party/*"])
@@ -408,7 +413,7 @@ def run_rules_lint(bazel_bin: str, args: List[str]):
     )
 
     # Actually run the lint itself
-    subprocess.run([bazel_bin, "build"] + args, check=True)
+    subprocess.run([bazel_bin, "build"] + args, check=True, stdout=sys.stdout, stderr=sys.stderr)
 
     # Parse out the reports from the build events
     filter_expr = '.namedSetOfFiles | values | .files[] | select(.name | endswith($ext)) | ((.pathPrefix | join("/")) + "/" + .name)'

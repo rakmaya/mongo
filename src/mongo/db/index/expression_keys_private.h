@@ -35,13 +35,12 @@
 #include "mongo/bson/ordering.h"
 #include "mongo/db/hasher.h"
 #include "mongo/db/index/index_access_method.h"
-#include "mongo/db/local_catalog/index_catalog.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/record_id.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog.h"
 #include "mongo/db/storage/key_string/key_string.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/shared_buffer_fragment.h"
-
-#include <vector>
 
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
@@ -99,7 +98,7 @@ public:
                             const BSONObj& obj,
                             const BSONObj& keyPattern,
                             int hashVersion,
-                            bool isSparse,
+                            bool isSetSparseByUser,
                             const CollatorInterface* collator,
                             KeyStringSet* keys,
                             key_string::Version keyStringVersion,

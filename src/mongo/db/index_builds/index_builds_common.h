@@ -30,15 +30,14 @@
 #pragma once
 
 #include "mongo/bson/bsonobj.h"
+#include "mongo/db/storage/storage_engine.h"
 #include "mongo/db/version_context.h"
+#include "mongo/util/modules.h"
 
 #include <string>
 #include <vector>
 
-namespace mongo {
-
-class StorageEngine;
-class DatabaseName;
+namespace MONGO_MOD_PUBLIC mongo {
 
 /**
  * Encapsulates metadata fields associated with an index build.
@@ -48,7 +47,7 @@ struct IndexBuildInfo {
 
     /**
      * Generates new idents and initializes all ident-related member fields.
-     * TODO SERVER-106716: Remove VersionContext parameter
+     * TODO SERVER-109578: Remove VersionContext parameter
      */
     IndexBuildInfo(BSONObj specObj,
                    StorageEngine& storageEngine,
@@ -62,7 +61,7 @@ struct IndexBuildInfo {
 
     /**
      * Generates new idents and initializes all member fields tracking idents of temporary tables.
-     * TODO SERVER-106716: Remove VersionContext parameter
+     * TODO SERVER-109578: Remove VersionContext parameter
      */
     void setInternalIdents(StorageEngine& storageEngine, const VersionContext& vCtx);
 
@@ -89,7 +88,7 @@ struct IndexBuildInfo {
 
 /**
  * Constructs IndexBuildInfo instances from the given index specs.
- * TODO SERVER-106716: Remove VersionContext parameter
+ * TODO SERVER-109578: Remove VersionContext parameter
  */
 std::vector<IndexBuildInfo> toIndexBuildInfoVec(const std::vector<BSONObj>& specs,
                                                 StorageEngine& storageEngine,
@@ -111,4 +110,4 @@ std::vector<std::string> toIndexNames(const std::vector<IndexBuildInfo>& indexes
  */
 std::vector<BSONObj> toIndexSpecs(const std::vector<IndexBuildInfo>& indexes);
 
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUBLIC mongo

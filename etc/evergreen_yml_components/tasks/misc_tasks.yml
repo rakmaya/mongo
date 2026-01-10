@@ -15,6 +15,10 @@ variables:
         params:
           exec_timeout_secs: 7200 # 2 hrs
           timeout_secs: 600 # 10 mins
+      - func: "set up remote credentials"
+        vars:
+          aws_key_remote: ${aws_key}
+          aws_secret_remote: ${aws_secret}
       - func: "antithesis image build and push"
         vars:
           suite: suite_name
@@ -52,16 +56,6 @@ variables:
     private_key_file: src/powercycle.pem
     private_key_remote: ${__project_aws_ssh_key_value}
 
-  - &sbom_upload_config_vars
-    CONTAINER_COMMAND: podman # podman or docker
-    CONTAINER_IMAGE: 901841024863.dkr.ecr.us-east-1.amazonaws.com/release-infrastructure/silkbomb:2.0
-    CONTAINER_OPTIONS: --pull=always --platform="linux/amd64" -it --rm
-    CONTAINER_ENV_FILES: ${workdir}/kondukto_credentials.env
-    CONTAINER_VOLUMES: ${workdir}:/workdir
-    KODUKTO_ROLE_ARN: arn:aws:iam::119629040606:role/kondukto
-    SBOM_FILE_PATH: ${workdir}/sbom.json
-    LOCAL_REPO_PATH: ${workdir}/src
-
 ################################################
 #                    Tasks                     #
 ################################################
@@ -77,6 +71,10 @@ tasks:
     commands:
       - func: "do setup"
       - func: "do setup for antithesis"
+      - func: "set up remote credentials"
+        vars:
+          aws_key_remote: ${aws_key}
+          aws_secret_remote: ${aws_secret}
       - func: "antithesis image build and push"
         vars:
           suite: concurrency_sharded_stepdown_terminate_kill_primary_with_balancer_and_config_transitions_and_add_remove_shard
@@ -94,6 +92,10 @@ tasks:
     commands:
       - func: "do setup"
       - func: "do setup for antithesis"
+      - func: "set up remote credentials"
+        vars:
+          aws_key_remote: ${aws_key}
+          aws_secret_remote: ${aws_secret}
       - func: "antithesis image build and push"
         vars:
           suite: concurrency_sharded_replication_with_balancer_and_config_transitions_and_add_remove_shard
@@ -111,6 +113,10 @@ tasks:
     commands:
       - func: "do setup"
       - func: "do setup for antithesis"
+      - func: "set up remote credentials"
+        vars:
+          aws_key_remote: ${aws_key}
+          aws_secret_remote: ${aws_secret}
       - func: "antithesis image build and push"
         vars:
           suite: jstestfuzz_sharded_with_config_transitions
@@ -128,6 +134,10 @@ tasks:
     commands:
       - func: "do setup"
       - func: "do setup for antithesis"
+      - func: "set up remote credentials"
+        vars:
+          aws_key_remote: ${aws_key}
+          aws_secret_remote: ${aws_secret}
       - func: "antithesis image build and push"
         vars:
           suite: concurrency_sharded_multi_stmt_txn_stepdown_terminate_kill_primary
@@ -145,6 +155,10 @@ tasks:
     commands:
       - func: "do setup"
       - func: "do setup for antithesis"
+      - func: "set up remote credentials"
+        vars:
+          aws_key_remote: ${aws_key}
+          aws_secret_remote: ${aws_secret}
       - func: "antithesis image build and push"
         vars:
           suite: concurrency_sharded_stepdown_terminate_kill_primary_with_balancer
@@ -162,6 +176,10 @@ tasks:
     commands:
       - func: "do setup"
       - func: "do setup for antithesis"
+      - func: "set up remote credentials"
+        vars:
+          aws_key_remote: ${aws_key}
+          aws_secret_remote: ${aws_secret}
       - func: "antithesis image build and push"
         vars:
           suite: concurrency_sharded_initial_sync
@@ -179,6 +197,10 @@ tasks:
     commands:
       - func: "do setup"
       - func: "do setup for antithesis"
+      - func: "set up remote credentials"
+        vars:
+          aws_key_remote: ${aws_key}
+          aws_secret_remote: ${aws_secret}
       - func: "antithesis image build and push"
         vars:
           suite: replica_sets_initsync_jscore_passthrough
@@ -196,6 +218,10 @@ tasks:
     commands:
       - func: "do setup"
       - func: "do setup for antithesis"
+      - func: "set up remote credentials"
+        vars:
+          aws_key_remote: ${aws_key}
+          aws_secret_remote: ${aws_secret}
       - func: "antithesis image build and push"
         vars:
           suite: concurrency_sharded_stepdown_terminate_kill_primary_with_balancer
@@ -216,6 +242,10 @@ tasks:
     commands:
       - func: "do setup"
       - func: "do setup for antithesis"
+      - func: "set up remote credentials"
+        vars:
+          aws_key_remote: ${aws_key}
+          aws_secret_remote: ${aws_secret}
       - func: "antithesis image build and push"
         vars:
           suite: concurrency_sharded_replication
@@ -237,6 +267,10 @@ tasks:
     commands:
       - func: "do setup"
       - func: "do setup for antithesis"
+      - func: "set up remote credentials"
+        vars:
+          aws_key_remote: ${aws_key}
+          aws_secret_remote: ${aws_secret}
       - func: "antithesis image build and push"
         vars:
           suite: core
@@ -254,6 +288,10 @@ tasks:
     commands:
       - func: "do setup"
       - func: "do setup for antithesis"
+      - func: "set up remote credentials"
+        vars:
+          aws_key_remote: ${aws_key}
+          aws_secret_remote: ${aws_secret}
       - func: "antithesis image build and push"
         vars:
           suite: fcv_upgrade_downgrade_sharded_collections_jscore_passthrough
@@ -273,6 +311,10 @@ tasks:
     commands:
       - func: "do setup"
       - func: "do setup for antithesis"
+      - func: "set up remote credentials"
+        vars:
+          aws_key_remote: ${aws_key}
+          aws_secret_remote: ${aws_secret}
       - func: "antithesis image build and push"
         vars:
           suite: jstestfuzz_sharded
@@ -290,11 +332,59 @@ tasks:
     commands:
       - func: "do setup"
       - func: "do setup for antithesis"
+      - func: "set up remote credentials"
+        vars:
+          aws_key_remote: ${aws_key}
+          aws_secret_remote: ${aws_secret}
       - func: "antithesis image build and push"
         vars:
           suite: replica_sets_jscore_passthrough
           resmoke_args: >-
             --runAllFeatureFlagTests
+
+  - <<: *antithesis_task_template
+    name: antithesis_replica_sets_basic_js_commands
+    tags:
+      [
+        "assigned_to_jira_team_devprod_correctness",
+        "experimental",
+        "antithesis",
+      ]
+    commands:
+      - func: "do setup"
+      - func: "do setup for antithesis"
+      - func: "set up remote credentials"
+        vars:
+          aws_key_remote: ${aws_key}
+          aws_secret_remote: ${aws_secret}
+      - func: "antithesis image build and push"
+        vars:
+          suite: replica_sets_jscore_passthrough
+          resmoke_args: >-
+            --runAllFeatureFlagTests
+          antithesis_test_composer_dir: basic_js_commands
+
+  - <<: *antithesis_task_template
+    name: antithesis_sharding_basic_js_commands
+    tags:
+      [
+        "assigned_to_jira_team_devprod_correctness",
+        "experimental",
+        "antithesis",
+      ]
+    commands:
+      - func: "do setup"
+      - func: "do setup for antithesis"
+      - func: "set up remote credentials"
+        vars:
+          aws_key_remote: ${aws_key}
+          aws_secret_remote: ${aws_secret}
+      - func: "antithesis image build and push"
+        vars:
+          suite: sharding_jscore_passthrough
+          resmoke_args: >-
+            --runAllFeatureFlagTests
+          antithesis_test_composer_dir: basic_js_commands
 
   - <<: *antithesis_task_template
     name: antithesis_replica_sets_lag_oplog_application_jscore_passthrough
@@ -307,6 +397,10 @@ tasks:
     commands:
       - func: "do setup"
       - func: "do setup for antithesis"
+      - func: "set up remote credentials"
+        vars:
+          aws_key_remote: ${aws_key}
+          aws_secret_remote: ${aws_secret}
       - func: "antithesis image build and push"
         vars:
           suite: replica_sets_lag_oplog_application_jscore_passthrough
@@ -324,6 +418,10 @@ tasks:
     commands:
       - func: "do setup"
       - func: "do setup for antithesis"
+      - func: "set up remote credentials"
+        vars:
+          aws_key_remote: ${aws_key}
+          aws_secret_remote: ${aws_secret}
       - func: "antithesis image build and push"
         vars:
           suite: replica_sets_kill_primary_jscore_passthrough
@@ -341,6 +439,10 @@ tasks:
     commands:
       - func: "do setup"
       - func: "do setup for antithesis"
+      - func: "set up remote credentials"
+        vars:
+          aws_key_remote: ${aws_key}
+          aws_secret_remote: ${aws_secret}
       - func: "antithesis image build and push"
         vars:
           suite: replica_sets_kill_secondaries_jscore_passthrough
@@ -358,6 +460,10 @@ tasks:
     commands:
       - func: "do setup"
       - func: "do setup for antithesis"
+      - func: "set up remote credentials"
+        vars:
+          aws_key_remote: ${aws_key}
+          aws_secret_remote: ${aws_secret}
       - func: "antithesis image build and push"
         vars:
           suite: replica_sets_initsync_lagged_sync_source_jscore_passthrough
@@ -668,10 +774,30 @@ tasks:
       - func: "set up venv"
       - func: "upload pip requirements"
       - func: "get engflow creds"
+      - command: github.generate_token
+        params:
+          owner: ${github_org}
+          repo: ${github_repo}
+          expansion_name: github_token_temp
+      - command: subprocess.exec
+        params:
+          binary: "bash"
+          args:
+            - "-c"
+            - |
+              echo "github_token: ${github_token_temp}" >> github_expansions.yml
+      - command: expansions.update
+        params:
+          file: github_expansions.yml
+      - func: "f_expansions_write"
       - func: "bazel run"
         vars:
           target: >-
             //:codeowners -- --check --expansions-file ../expansions.yml
+      - func: "bazel run"
+        vars:
+          target: >-
+            @bazel_rules_mongo//codeowners:check_github_codeowner_errors -- --expansions-file ../expansions.yml
 
   - name: bazel_run_lint
     tags:
@@ -696,11 +822,12 @@ tasks:
       - func: "cleanup environment"
       - func: "set up venv"
       - func: "upload pip requirements"
+      - func: "configure evergreen api credentials"
       - func: "get engflow creds"
       - func: "bazel run"
         vars:
           target: >-
-            lint //... --lint-yaml=${project} --large-files
+            --lockfile_mode=error lint //... --lint-yaml=${project} --large-files
 
   # Check that the mutational fuzzer can parse all JS filess.
   - name: lint_fuzzer_sanity_all
@@ -773,6 +900,37 @@ tasks:
             - "merged_decls.json"
             - "--parse-only"
 
+  - name: lint_markdown_links
+    tags:
+      [
+        "assigned_to_jira_team_devprod_build",
+        "development_critical_single_variant",
+        "lint",
+      ]
+    commands:
+      - command: timeout.update
+        params:
+          # 60 mins
+          exec_timeout_secs: 3600
+      - func: "f_expansions_write"
+      - command: manifest.load
+      - func: "git get project and add git tag"
+      - func: "f_expansions_write"
+      - func: "kill processes"
+      - func: "cleanup environment"
+      - func: "set up venv"
+      - func: "upload pip requirements"
+      - func: "get engflow creds"
+      - command: subprocess.exec
+        type: test
+        params:
+          binary: bash
+          args:
+            - "./src/evergreen/run_python_script.sh"
+            - "buildscripts/lint_markdown_links.py"
+            - "--root=src/mongo"
+            - "--verbose"
+
   - name: bazel_coverage
     tags: ["assigned_to_jira_team_devprod_correctness", "auxiliary"]
     depends_on:
@@ -805,7 +963,7 @@ tasks:
             --test_tag_filters=mongo_unittest_debug,-final_target,-code_coverage_quarantine_debug
             --test_timeout=1800
             --verbose_failures
-            --instrumentation_filter=^//src/mongo[/:],-^//src/mongo/util:boost_assert_shim,-^//src/mongo/util:icu,-^//src/mongo/db/modules/enterprise/src/streams[/:]
+            --instrumentation_filter=^//src/mongo[/:],-^//src/mongo/util:boost_assert_shim,-^//src/mongo/util:icu,-^//src/mongo/db/modules/enterprise/src/streams/third_party[/:]
 
   - name: unit_test_group1_no_sandbox
     tags: ["assigned_to_jira_team_devprod_build", "auxiliary"]
@@ -1041,12 +1199,15 @@ tasks:
           targets: //src/mongo/...
           compiling_for_test: true
           task_compile_flags: ${unittest_compile_flags}
-          test_timeout_sec: 600
+          test_timeout_sec: 660 # Allow extra 60s for coredump on abort
           bazel_args: >-
             --config=evg
             --linkstatic=False
+            --separate_debug=False
             --test_tag_filters=mongo_unittest,-final_target,-intermediate_debug,-incompatible_with_bazel_remote_test
             --build_tag_filters=mongo_unittest,-incompatible_with_bazel_remote_test
+            --keep_going
+            --test_arg=--showEachTest
 
   - name: unit_tests_remote_exec_incompatible
     tags: ["assigned_to_jira_team_devprod_correctness", "auxiliary"]
@@ -1067,12 +1228,15 @@ tasks:
           targets: //src/mongo/...
           compiling_for_test: true
           task_compile_flags: ${unittest_compile_flags}
-          test_timeout_sec: 600
+          test_timeout_sec: 660 # Allow extra 60s for coredump on abort
           bazel_args: >-
             --config=evg
             --include_autogenerated_targets=True
+            --separate_debug=False
             --test_tag_filters=incompatible_with_bazel_remote_test,-intermediate_debug,-final_target
             --build_tag_filters=incompatible_with_bazel_remote_test
+            --keep_going
+            --test_arg=--showEachTest
 
   - name: unit_test_group1
     tags: ["assigned_to_jira_team_devprod_correctness", "auxiliary"]
@@ -1093,12 +1257,15 @@ tasks:
           targets: //src/mongo/...
           compiling_for_test: true
           task_compile_flags: ${unittest_compile_flags}
-          test_timeout_sec: 600
+          test_timeout_sec: 660 # Allow extra 60s for coredump on abort
           bazel_args: >-
             --config=evg
             --include_autogenerated_targets=True
+            --separate_debug=False
             --test_tag_filters=mongo_unittest_first_group,-intermediate_debug,-final_target
             --build_tag_filters=mongo_unittest_first_group
+            --keep_going
+            --test_arg=--showEachTest
 
   - name: unit_test_group2
     tags: ["assigned_to_jira_team_devprod_correctness", "auxiliary"]
@@ -1119,12 +1286,15 @@ tasks:
           targets: //src/mongo/...
           compiling_for_test: true
           task_compile_flags: ${unittest_compile_flags}
-          test_timeout_sec: 600
+          test_timeout_sec: 660 # Allow extra 60s for coredump on abort
           bazel_args: >-
             --config=evg
             --include_autogenerated_targets=True
+            --separate_debug=False
             --test_tag_filters=mongo_unittest_second_group,-intermediate_debug,-tracing_test,-final_target
             --build_tag_filters=mongo_unittest_second_group
+            --keep_going
+            --test_arg=--showEachTest
 
   - name: unit_test_group3
     tags: ["assigned_to_jira_team_devprod_correctness", "auxiliary"]
@@ -1145,12 +1315,15 @@ tasks:
           targets: //src/mongo/...
           compiling_for_test: true
           task_compile_flags: ${unittest_compile_flags}
-          test_timeout_sec: 600
+          test_timeout_sec: 660 # Allow extra 60s for coredump on abort
           bazel_args: >-
             --config=evg
             --include_autogenerated_targets=True
+            --separate_debug=False
             --test_tag_filters=mongo_unittest_third_group,-intermediate_debug,-final_target
             --build_tag_filters=mongo_unittest_third_group
+            --keep_going
+            --test_arg=--showEachTest
 
   - name: unit_test_group4
     tags: ["assigned_to_jira_team_devprod_correctness", "auxiliary"]
@@ -1171,12 +1344,15 @@ tasks:
           targets: //src/mongo/...
           compiling_for_test: true
           task_compile_flags: ${unittest_compile_flags}
-          test_timeout_sec: 600
+          test_timeout_sec: 660 # Allow extra 60s for coredump on abort
           bazel_args: >-
             --config=evg
             --include_autogenerated_targets=True
+            --separate_debug=False
             --test_tag_filters=mongo_unittest_fourth_group,-intermediate_debug,-final_target
             --build_tag_filters=mongo_unittest_fourth_group
+            --keep_going
+            --test_arg=--showEachTest
 
   - name: unit_test_group5
     tags: ["assigned_to_jira_team_devprod_correctness", "auxiliary"]
@@ -1197,12 +1373,15 @@ tasks:
           targets: //src/mongo/...
           compiling_for_test: true
           task_compile_flags: ${unittest_compile_flags}
-          test_timeout_sec: 600
+          test_timeout_sec: 660 # Allow extra 60s for coredump on abort
           bazel_args: >-
             --config=evg
             --include_autogenerated_targets=True
+            --separate_debug=False
             --test_tag_filters=mongo_unittest_fifth_group,-intermediate_debug,-final_target
             --build_tag_filters=mongo_unittest_fifth_group
+            --keep_going
+            --test_arg=--showEachTest
 
   - name: unit_test_group6
     tags: ["assigned_to_jira_team_devprod_correctness", "auxiliary"]
@@ -1223,12 +1402,15 @@ tasks:
           targets: //src/mongo/...
           compiling_for_test: true
           task_compile_flags: ${unittest_compile_flags}
-          test_timeout_sec: 600
+          test_timeout_sec: 660 # Allow extra 60s for coredump on abort
           bazel_args: >-
             --config=evg
             --include_autogenerated_targets=True
+            --separate_debug=False
             --test_tag_filters=mongo_unittest_sixth_group,-intermediate_debug,-final_target
             --build_tag_filters=mongo_unittest_sixth_group
+            --keep_going
+            --test_arg=--showEachTest
 
   - name: unit_test_group7
     tags: ["assigned_to_jira_team_devprod_correctness", "auxiliary"]
@@ -1249,12 +1431,15 @@ tasks:
           targets: //src/mongo/...
           compiling_for_test: true
           task_compile_flags: ${unittest_compile_flags}
-          test_timeout_sec: 600
+          test_timeout_sec: 660 # Allow extra 60s for coredump on abort
           bazel_args: >-
             --config=evg
             --include_autogenerated_targets=True
+            --separate_debug=False
             --test_tag_filters=mongo_unittest_seventh_group,-intermediate_debug,-final_target
             --build_tag_filters=mongo_unittest_seventh_group
+            --keep_going
+            --test_arg=--showEachTest
 
   - name: unit_test_group8
     tags: ["assigned_to_jira_team_devprod_correctness", "auxiliary"]
@@ -1275,12 +1460,15 @@ tasks:
           targets: //src/mongo/...
           compiling_for_test: true
           task_compile_flags: ${unittest_compile_flags}
-          test_timeout_sec: 600
+          test_timeout_sec: 660 # Allow extra 60s for coredump on abort
           bazel_args: >-
             --config=evg
             --include_autogenerated_targets=True
+            --separate_debug=False
             --test_tag_filters=mongo_unittest_eighth_group,-intermediate_debug,-final_target
             --build_tag_filters=mongo_unittest_eighth_group
+            --keep_going
+            --test_arg=--showEachTest
 
   - name: monitor_build_status
     tags: ["assigned_to_jira_team_devprod_correctness", "auxiliary"]
@@ -1531,19 +1719,8 @@ tasks:
           <<: *powercycle_remote_credentials
         timeout_secs: 1800 # 30 minute timeout for no output
 
-  - name: run_smoke_tests_gen
-    tags:
-      [
-        "assigned_to_jira_team_devprod_correctness",
-        "development_critical_single_variant",
-        "requires_large_host",
-        "incompatible_windows",
-      ]
-    commands:
-      - func: "generate smoke test tasks"
-
   - name: push_mongod_to_ecr
-    tags: ["assigned_to_jira_team_disag_mongod"]
+    tags: ["assigned_to_jira_team_server_disagg", "auxiliary"]
     depends_on:
       - name: package
     commands:
@@ -1774,9 +1951,88 @@ tasks:
             GITHUB_REPO: ${github_repo}
             GITHUB_TOKEN: ${github_token}
 
+  - name: update_sbom
+    tags: ["auxiliary", "assigned_to_jira_team_platsec_server"]
+    exec_timeout_secs: 3600 # 60 minute timeout
+    commands:
+      - command: manifest.load
+      - command: git.get_project
+        params:
+          directory: src
+          clone_depth: 1
+      - func: "f_expansions_write"
+      - func: "restore git history and tags"
+      - func: "add git tag"
+      - func: "f_expansions_write"
+      - func: "kill processes"
+      - func: "cleanup environment"
+      - func: "set up venv"
+      - command: ec2.assume_role
+        display_name: Assume Silkbomb IAM role (access to Endor Labs API key)
+        params:
+          role_arn: arn:aws:iam::119629040606:role/silkbomb
+      - command: subprocess.exec
+        display_name: Write Endor Labs API credentials to config.yml
+        params:
+          binary: bash
+          silent: true
+          include_expansions_in_env:
+            [AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN]
+          env:
+            ENDOR_CONFIG_PATH: "${workdir}/.endorctl"
+            ENDOR_NAMESPACE: ${ENDOR_NAMESPACE}
+          args:
+            - "src/evergreen/write_endor_credentials.sh"
+      - command: subprocess.exec
+        display_name: Install endorctl
+        params:
+          binary: bash
+          env:
+            ENDOR_INSTALL_PATH: ${workdir}
+            ENDOR_CONFIG_PATH: "${workdir}/.endorctl"
+          args:
+            - "src/buildscripts/sbom/install_endorctl.sh"
+      - command: subprocess.exec
+        display_name: Generate SBOM file
+        params:
+          binary: bash
+          args:
+            - "src/evergreen/run_python_script.sh"
+            - "buildscripts/sbom/generate_sbom.py"
+            - "--project=https://github.com/10gen/mongo.git"
+            - "--target=branch"
+            - "--branch=${branch_name}"
+            - "--endorctl-path=${workdir}/endorctl"
+            - "--config-path=${workdir}/.endorctl"
+            - "--namespace=${ENDOR_NAMESPACE}"
+            - "--save-warnings=${workdir}/generate_sbom_py_warnings.txt"
+      - command: subprocess.exec
+        display_name: Generate third-party readme file
+        params:
+          binary: bash
+          args:
+            - "src/evergreen/run_python_script.sh"
+            - "src/third_party/scripts/gen_thirdpartyreadme.py"
+      - command: subprocess.exec
+        display_name: Create pull request for SBOM files, if changed
+        params:
+          binary: bash
+          include_expansions_in_env:
+            - MONGO_PR_BOT_APP_ID
+            - MONGO_PR_BOT_PRIVATE_KEY
+          args:
+            - "src/evergreen/run_python_script.sh"
+            - "buildscripts/sbom/sbom_files_pr.py"
+            - "--github-owner=${github_org}"
+            - "--github-repo=${github_repo}"
+            - "--base-branch=${branch_name}"
+            - "--new-branch=SERVER-111072/sbom_update_${branch_name}"
+            - "--pr-title=SERVER-111072 Auto-generated SBOM files [${branch_name}]"
+            - "--saved-warnings=${workdir}/generate_sbom_py_warnings.txt"
+
   - name: upload_sbom_via_silkbomb_if_changed
     allowed_requesters: ["commit"]
-    tags: []
+    tags: ["auxiliary", "assigned_to_jira_team_platsec_server"]
     exec_timeout_secs: 600 # 10 minute timeout
     commands:
       - command: manifest.load
@@ -1790,19 +2046,17 @@ tasks:
         display_name: Assume Silkbomb IAM role
         params:
           role_arn: arn:aws:iam::119629040606:role/silkbomb
-      - command: shell.exec
+      - command: subprocess.exec
         display_name: Write temporary AWS credentials to Silkbomb environment file
         params:
+          binary: bash
           silent: true
-          shell: bash
           include_expansions_in_env:
             [AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN]
-          script: |
-            cat << EOF > ${workdir}/silkbomb.env
-            AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
-            AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
-            AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN}
-            EOF
+          env:
+            SILKBOMB_ENV_FILE: "${workdir}/silkbomb.env"
+          args:
+            - "src/evergreen/write_silkbomb_env.sh"
       - command: ec2.assume_role
         display_name: Assume DevProd Platforms ECR readonly IAM role
         params:
@@ -2028,7 +2282,7 @@ tasks:
 
   - name: create_todo_tickets
     patchable: false
-    tags: []
+    tags: ["auxiliary", "assigned_to_jira_team_devprod_build"]
     exec_timeout_secs: 600 # 10 minute timeout
     commands:
       - command: manifest.load

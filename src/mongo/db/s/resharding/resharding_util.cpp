@@ -38,15 +38,12 @@
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/feature_flag.h"
-#include "mongo/db/global_catalog/catalog_cache/catalog_cache.h"
 #include "mongo/db/global_catalog/chunk_manager.h"
 #include "mongo/db/global_catalog/ddl/sharding_catalog_manager.h"
 #include "mongo/db/global_catalog/shard_key_pattern.h"
 #include "mongo/db/global_catalog/sharding_catalog_client.h"
 #include "mongo/db/global_catalog/type_chunk.h"
 #include "mongo/db/global_catalog/type_tags.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/lock_manager/exception_util.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/operation_context.h"
@@ -57,15 +54,20 @@
 #include "mongo/db/repl/oplog_entry_gen.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/wait_for_majority_service.h"
+#include "mongo/db/router_role/routing_cache/catalog_cache.h"
 #include "mongo/db/s/resharding/document_source_resharding_add_resume_id.h"
 #include "mongo/db/s/resharding/document_source_resharding_iterate_transaction.h"
 #include "mongo/db/s/resharding/resharding_noop_o2_field_gen.h"
 #include "mongo/db/s/resharding/resharding_server_parameters_gen.h"
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/lock_manager/exception_util.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/topology/shard_registry.h"
+#include "mongo/otel/telemetry_context_holder.h"
+#include "mongo/otel/traces/telemetry_context_serialization.h"
 #include "mongo/s/resharding/common_types_gen.h"
 #include "mongo/s/resharding/resharding_feature_flag_gen.h"
 #include "mongo/stdx/unordered_set.h"
@@ -514,6 +516,10 @@ bool isUnshardCollection(const boost::optional<ReshardingProvenanceEnum>& proven
     return provenance && provenance.get() == ReshardingProvenanceEnum::kUnshardCollection;
 }
 
+bool isRewriteCollection(const boost::optional<ReshardingProvenanceEnum>& provenance) {
+    return provenance && provenance.get() == ReshardingProvenanceEnum::kRewriteCollection;
+}
+
 std::shared_ptr<ThreadPool> makeThreadPoolForMarkKilledExecutor(const std::string& poolName) {
     return std::make_shared<ThreadPool>([&] {
         ThreadPool::Options options;
@@ -522,11 +528,6 @@ std::shared_ptr<ThreadPool> makeThreadPoolForMarkKilledExecutor(const std::strin
         options.maxThreads = 1;
         return options;
     }());
-}
-
-boost::optional<Status> coordinatorAbortedError() {
-    return Status{ErrorCodes::ReshardCollectionAborted,
-                  "Recieved abort from the resharding coordinator"};
 }
 
 void validatePerformVerification(const VersionContext& vCtx,
@@ -567,11 +568,8 @@ ReshardingCoordinatorDocument createReshardingCoordinatorDoc(
         (!setProvenance ||
          (*request.getProvenance() == ReshardingProvenanceEnum::kReshardCollection))) {
         auto tsOptions = collEntry.getTimeseriesFields().get().getTimeseriesOptions();
-        shardkeyutil::validateTimeseriesShardKey(
-            tsOptions.getTimeField(), tsOptions.getMetaField(), request.getKey());
         shardKeySpec =
-            uassertStatusOK(timeseries::createBucketsShardKeySpecFromTimeseriesShardKeySpec(
-                tsOptions, request.getKey()));
+            shardkeyutil::validateAndTranslateTimeseriesShardKey(tsOptions, request.getKey());
     }
 
     auto tempReshardingNss = resharding::constructTemporaryReshardingNss(nss, collEntry.getUuid());
@@ -621,6 +619,12 @@ ReshardingCoordinatorDocument createReshardingCoordinatorDoc(
     }
     coordinatorDoc.setNumSamplesPerChunk(request.getNumSamplesPerChunk());
     coordinatorDoc.setDemoMode(request.getDemoMode());
+    auto telemetryContext =
+        otel::TelemetryContextHolder::getDecoration(opCtx).getTelemetryContext();
+    if (telemetryContext) {
+        auto telemetryCtxBSON = otel::traces::TelemetryContextSerializer::toBSON(telemetryContext);
+        coordinatorDoc.setTelemetryContext(telemetryCtxBSON);
+    }
     return coordinatorDoc;
 }
 
@@ -712,6 +716,11 @@ Milliseconds getMajorityReplicationLag(OperationContext* opCtx) {
     const auto& replCoord = repl::ReplicationCoordinator::get(opCtx);
     const auto lastAppliedWallTime = replCoord->getMyLastAppliedOpTimeAndWallTime().wallTime;
     const auto lastCommittedWallTime = replCoord->getLastCommittedOpTimeAndWallTime().wallTime;
+    // TODO SERVER-113571 Remove this if block and adjust the replication lag calculation (if
+    // needed).
+    if (lastCommittedWallTime == Date_t()) {
+        return Milliseconds(0);
+    }
 
     if (!lastAppliedWallTime.isFormattable() || !lastCommittedWallTime.isFormattable()) {
         return Milliseconds(0);

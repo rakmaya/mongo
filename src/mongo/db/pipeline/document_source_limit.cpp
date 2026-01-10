@@ -34,7 +34,6 @@
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/pipeline/expression_context.h"
-#include "mongo/db/pipeline/lite_parsed_document_source.h"
 #include "mongo/db/query/allowed_contexts.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
@@ -53,17 +52,17 @@ DocumentSourceLimit::DocumentSourceLimit(const intrusive_ptr<ExpressionContext>&
                                          long long limit)
     : DocumentSource(kStageName, pExpCtx), _limit(limit) {}
 
-REGISTER_DOCUMENT_SOURCE(limit,
-                         LiteParsedDocumentSourceDefault::parse,
-                         DocumentSourceLimit::createFromBson,
-                         AllowedWithApiStrict::kAlways);
-ALLOCATE_DOCUMENT_SOURCE_ID(limit, DocumentSourceLimit::id)
+REGISTER_LITE_PARSED_DOCUMENT_SOURCE(limit, LimitLiteParsed::parse, AllowedWithApiStrict::kAlways);
+
+REGISTER_DOCUMENT_SOURCE_WITH_STAGE_PARAMS_DEFAULT(limit, DocumentSourceLimit, LimitStageParams);
+
+ALLOCATE_DOCUMENT_SOURCE_ID(limit, DocumentSourceLimit::id);
 
 constexpr StringData DocumentSourceLimit::kStageName;
 
-DocumentSourceContainer::iterator DocumentSourceLimit::doOptimizeAt(
+DocumentSourceContainer::iterator DocumentSourceLimit::optimizeAt(
     DocumentSourceContainer::iterator itr, DocumentSourceContainer* container) {
-    invariant(*itr == this);
+    tassert(11282987, "Expecting DocumentSource iterator pointing to this stage", *itr == this);
 
     if (std::next(itr) == container->end()) {
         return container->end();

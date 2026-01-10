@@ -39,10 +39,10 @@
 #include "mongo/db/update/update_leaf_node.h"
 #include "mongo/db/update/update_node.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
 
 #include <cstdint>
 #include <map>
-#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -214,9 +214,10 @@ protected:
     void produceSerializationMap(
         FieldRef* currentPath,
         std::map<std::string, std::vector<std::pair<std::string, BSONObj>>>*
-            operatorOrientedUpdates) const override {
+            operatorOrientedUpdates,
+        const SerializationOptions& opts) const override {
         (*operatorOrientedUpdates)[std::string{operatorName()}].emplace_back(
-            currentPath->dottedField(), operatorValue());
+            opts.serializeFieldRef(*currentPath), operatorValue(opts));
     }
 
 private:
@@ -231,7 +232,7 @@ private:
      * the keyname. For example, for the input syntax: {$set: {a: 3}}, this function would return:
      * {"": 3} in BSON.
      */
-    virtual BSONObj operatorValue() const = 0;
+    virtual BSONObj operatorValue(const SerializationOptions& opts) const = 0;
 
     ApplyResult applyToNonexistentElement(ApplyParams applyParams,
                                           UpdateNodeApplyParams updateNodeApplyParams) const;

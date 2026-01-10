@@ -108,7 +108,8 @@ public:
 
     std::unique_ptr<PlanStageStats> getStats(bool includeDebugInfo) const final;
     const SpecificStats* getSpecificStats() const final;
-    std::vector<DebugPrinter::Block> debugPrint() const final;
+    void doDebugPrint(std::vector<DebugPrinter::Block>& ret,
+                      DebugPrintInfo& debugPrintInfo) const final;
     size_t estimateCompileTimeSize() const final;
 
 protected:
@@ -126,11 +127,11 @@ protected:
     }
 
 private:
-    using HashTableType = std::unordered_map<value::MaterializedRow,  // NOLINT
+    using HashTableType = std::unordered_map<value::FixedSizeRow<1 /*N*/>,
                                              std::vector<size_t>,
-                                             value::MaterializedRowHasher,
-                                             value::MaterializedRowEq>;
-    using BufferType = std::vector<value::MaterializedRow>;
+                                             value::FixedSizeSingleRowHasher,
+                                             value::SingleRowFixedSizeRowEq>;
+    using BufferType = std::vector<value::FixedSizeRow<1 /*N*/>>;
     using HashKeyAccessor = value::MaterializedRowKeyAccessor<HashTableType::iterator>;
     using BufferAccessor = value::MaterializedRowAccessor<BufferType>;
 

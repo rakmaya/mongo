@@ -34,21 +34,21 @@
 #include "mongo/bson/json.h"
 #include "mongo/bson/oid.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/global_catalog/catalog_cache/catalog_cache.h"
-#include "mongo/db/global_catalog/catalog_cache/catalog_cache_test_fixture.h"
 #include "mongo/db/global_catalog/chunk_manager.h"
 #include "mongo/db/global_catalog/chunks_test_util.h"
 #include "mongo/db/global_catalog/shard_key_pattern.h"
-#include "mongo/db/global_catalog/shard_key_pattern_query_util.h"
 #include "mongo/db/global_catalog/type_chunk.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/collation/collator_interface_mock.h"
+#include "mongo/db/router_role/routing_cache/catalog_cache.h"
+#include "mongo/db/router_role/routing_cache/catalog_cache_test_fixture.h"
 #include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/db/versioning_protocol/chunk_version.h"
 #include "mongo/db/versioning_protocol/database_version.h"
+#include "mongo/s/query/shard_key_pattern_query_util.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/intrusive_counter.h"
@@ -518,21 +518,21 @@ TEST_F(ChunkManagerQueryTest, SnapshotQueryWithMoreShardsThanLatestMetadata) {
     chunk1.setHistory({ChunkHistory(*chunk1.getOnCurrentShardSince(), ShardId("0")),
                        ChunkHistory(Timestamp(1, 0), ShardId("1"))});
 
-    ChunkManager chunkManager(makeStandaloneRoutingTableHistory(
-                                  oldRoutingTable.makeUpdated(boost::none /* timeseriesFields */,
-                                                              boost::none /* reshardingFields */,
-                                                              true,
-                                                              false, /* unsplittable */
-                                                              {chunk1})),
-                              Timestamp(5, 0));
+    PointInTimeChunkManager cm(makeStandaloneRoutingTableHistory(
+                                   oldRoutingTable.makeUpdated(boost::none /* timeseriesFields */,
+                                                               boost::none /* reshardingFields */,
+                                                               true,
+                                                               false, /* unsplittable */
+                                                               {chunk1})),
+                               Timestamp(5, 0));
 
     std::set<ShardId> shardIds;
-    chunkManager.getShardIdsForRange(BSON("x" << MINKEY), BSON("x" << MAXKEY), &shardIds);
+    cm.getShardIdsForRange(BSON("x" << MINKEY), BSON("x" << MAXKEY), &shardIds);
     ASSERT_EQ(2, shardIds.size());
 
     const auto expCtx = make_intrusive<ExpressionContextForTest>();
     shardIds.clear();
-    getShardIdsForQuery(expCtx, BSON("x" << BSON("$gt" << -20)), {}, chunkManager, &shardIds);
+    getShardIdsForQuery(expCtx, BSON("x" << BSON("$gt" << -20)), {}, cm, &shardIds);
     ASSERT_EQ(2, shardIds.size());
 }
 
@@ -573,7 +573,7 @@ TEST_F(ChunkManagerQueryTest, TestKeyBelongsToShard) {
                                            boost::none /* reshardingFields */,
                                            true,
                                            chunkVec);
-    ChunkManager cm(makeStandaloneRoutingTableHistory(std::move(rt)), clusterTime);
+    PointInTimeChunkManager cm(makeStandaloneRoutingTableHistory(std::move(rt)), clusterTime);
 
     auto chunkIt = chunks.begin();
     while (chunkIt != chunks.end()) {

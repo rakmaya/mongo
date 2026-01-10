@@ -32,6 +32,7 @@
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/db/tenant_id.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/options_parser/environment.h"
 
 #include <cstddef>
@@ -50,7 +51,8 @@ public:
           maxCacheOverflowFileSizeGBDeprecated(0),
           liveRestoreThreads(0),
           liveRestoreReadSizeMB(0),
-          useIndexPrefixCompression(false) {};
+          useIndexPrefixCompression(false),
+          statisticsSetting("fast") {};
 
     Status store(const optionenvironment::Environment& params);
 
@@ -63,24 +65,25 @@ public:
     double evictionUpdatesTriggerGB{0};
     std::string journalCompressor;
     int zstdCompressorLevel;
-    bool directoryForIndexes;
+    // NEEDS REPLACEMENT: this should really be a storage option not a WT option.
+    MONGO_MOD_NEEDS_REPLACEMENT bool directoryForIndexes;
     double maxCacheOverflowFileSizeGBDeprecated;
     std::string engineConfig;
     std::string liveRestoreSource;
     int liveRestoreThreads;
     double liveRestoreReadSizeMB;
-    int flattenLeafPageDelta;
 
     std::string collectionBlockCompressor;
     bool useIndexPrefixCompression;
     std::string collectionConfig;
     std::string indexConfig;
+    std::string statisticsSetting;
 
     static Status validateWiredTigerCompressor(const std::string&);
     static Status validateSpillWiredTigerCompressor(const std::string&,
                                                     const boost::optional<TenantId>&);
     static Status validateWiredTigerLiveRestoreReadSizeMB(int);
-
+    static Status validateStatisticsSetting(const std::string&);
 
     /**
      * Returns current history file size limit in MB.
@@ -91,6 +94,7 @@ public:
     }
 };
 
-extern WiredTigerGlobalOptions wiredTigerGlobalOptions;
+// NEEDS REPLACEMENT: this should really be a storage option not a WT option.
+MONGO_MOD_NEEDS_REPLACEMENT extern WiredTigerGlobalOptions wiredTigerGlobalOptions;
 
 }  // namespace mongo

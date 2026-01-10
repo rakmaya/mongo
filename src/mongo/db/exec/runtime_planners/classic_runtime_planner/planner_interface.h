@@ -37,6 +37,7 @@
 #include "mongo/db/exec/classic/working_set.h"
 #include "mongo/db/exec/plan_cache_util.h"
 #include "mongo/db/exec/runtime_planners/planner_interface.h"
+#include "mongo/db/exec/trial_period_utils.h"
 #include "mongo/db/query/compiler/physical_model/query_solution/query_solution.h"
 #include "mongo/db/query/plan_cache/classic_plan_cache.h"
 #include "mongo/db/query/plan_executor.h"
@@ -44,8 +45,9 @@
 #include "mongo/db/query/query_planner.h"
 #include "mongo/db/query/query_planner_params.h"
 #include "mongo/db/query/stage_builder/classic_stage_builder.h"
+#include "mongo/db/query/write_ops/canonical_update.h"
 #include "mongo/db/query/write_ops/parsed_delete.h"
-#include "mongo/db/query/write_ops/parsed_update.h"
+#include "mongo/util/modules.h"
 
 namespace mongo::classic_runtime_planner {
 
@@ -58,7 +60,7 @@ public:
     ClassicPlannerInterface(PlannerData plannerData);
 
     ClassicPlannerInterface(PlannerData plannerData,
-                            QueryPlanner::CostBasedRankerResult costBasedRankerData);
+                            QueryPlanner::PlanRankingResult planRankingResult);
 
     /**
      * Function which adds the necessary stages for the generated PlanExecutor to perform deletes.
@@ -69,7 +71,7 @@ public:
     /**
      * Function which adds the necessary stages for the generated PlanExecutor to perform updates.
      */
-    void addUpdateStage(ParsedUpdate* parsedUpdate,
+    void addUpdateStage(CanonicalUpdate* canonicalUpdate,
                         projection_ast::Projection* projection,
                         UpdateStageParams updateStageParams);
     /**
@@ -90,6 +92,11 @@ public:
     std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> makeExecutor(
         std::unique_ptr<CanonicalQuery> canonicalQuery) final;
 
+    /**
+     * Extracts the WorkingSet used by this planner.
+     */
+    std::unique_ptr<WorkingSet> extractWorkingSet();
+
 protected:
     std::unique_ptr<PlanStage> buildExecutableTree(const QuerySolution& qs);
 
@@ -106,9 +113,20 @@ protected:
     boost::optional<size_t> cachedPlanHash() const;
     WorkingSet* ws() const;
 
-    QueryPlanner::CostBasedRankerResult _costBasedRankerResult;
+    QueryPlanner::PlanRankingResult _planRankingResult;
     stage_builder::PlanStageToQsnMap _planStageQsnMap;
     std::vector<std::unique_ptr<PlanStage>> _cbrRejectedPlanStages;
+
+    /**
+     * Planner state enum. Describes the planner status:
+     * kNotInitialized: The planner has not made any planning decision yet, so neither a solution
+     *       can be extracted nor an executor built.
+     * kInitialized: The planner has picked a plan, so either
+     *       a solution could be extracted or an executor built.
+     * kDisposed: The planner has already either built an executor or
+     *       extracted a solution, so no further action can be taken.
+     */
+    enum { kNotInitialized, kInitialized, kDisposed } _state = kNotInitialized;
 
 private:
     virtual Status doPlan(PlanYieldPolicy* planYieldPolicy) = 0;
@@ -117,7 +135,6 @@ private:
 
     NamespaceString makeNamespaceString();
 
-    enum { kNotInitialized, kInitialized, kDisposed } _state = kNotInitialized;
     std::unique_ptr<PlanStage> _root;
     NamespaceString _nss;
     PlannerData _plannerData;
@@ -128,7 +145,7 @@ private:
  */
 class IdHackPlanner final : public ClassicPlannerInterface {
 public:
-    IdHackPlanner(PlannerData plannerData, const IndexDescriptor* descriptor);
+    IdHackPlanner(PlannerData plannerData, const IndexCatalogEntry* entry);
 
 private:
     Status doPlan(PlanYieldPolicy* planYieldPolicy) override;
@@ -144,7 +161,7 @@ class SingleSolutionPassthroughPlanner final : public ClassicPlannerInterface {
 public:
     SingleSolutionPassthroughPlanner(PlannerData plannerData,
                                      std::unique_ptr<QuerySolution> querySolution,
-                                     QueryPlanner::CostBasedRankerResult cbrResult);
+                                     QueryPlanner::PlanRankingResult planRankingResult);
 
 private:
     Status doPlan(PlanYieldPolicy* planYieldPolicy) override;
@@ -180,12 +197,33 @@ class MultiPlanner final : public ClassicPlannerInterface {
 public:
     MultiPlanner(PlannerData plannerData,
                  std::vector<std::unique_ptr<QuerySolution>> solutions,
-                 QueryPlanner::CostBasedRankerResult cbrResult);
+                 QueryPlanner::PlanRankingResult planRankingResult);
+
+    /**
+     * Runs the trial period by working all candidate plans for as long as given in 'trialConfig'.
+     */
+    Status runTrials(trial_period::TrialPhaseConfig trialConfig);
+
+    /**
+     * Returns the specific stats from the multi-planner stage.
+     */
+    const MultiPlanStats* getSpecificStats() const;
+
+    /**
+     * Picks the best plan among the candidate plans after the trial period has been run.
+     */
+    Status pickBestPlan();
+    std::unique_ptr<QuerySolution> extractQuerySolution() override;
+    trial_period::TrialPhaseConfig getTrialPhaseConfig() const {
+        return _multiplanStage->getTrialPhaseConfig();
+    }
+
+    MultiPlanStage::EstimationResult estimateAllPlans() const {
+        return _multiplanStage->estimateAllPlans();
+    }
 
 private:
     Status doPlan(PlanYieldPolicy* planYieldPolicy) override;
-
-    std::unique_ptr<QuerySolution> extractQuerySolution() override;
 
     MultiPlanStage* _multiplanStage;
 };

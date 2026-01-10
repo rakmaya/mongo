@@ -33,9 +33,9 @@
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/global_catalog/chunk_manager.h"
-#include "mongo/db/global_catalog/router_role_api/ns_targeter.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/write_ops/write_ops_parsers.h"
+#include "mongo/db/router_role/ns_targeter.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/rpc/write_concern_error_detail.h"
@@ -45,6 +45,7 @@
 #include "mongo/s/write_ops/pause_migrations_during_multi_updates_enablement.h"
 #include "mongo/s/write_ops/wc_error.h"
 #include "mongo/s/write_ops/write_op.h"
+#include "mongo/s/write_ops/write_op_helper.h"
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/util/modules.h"
 
@@ -307,39 +308,6 @@ void populateCollectionUUIDMismatch(OperationContext* opCtx,
                                     boost::optional<std::string>* actualCollection,
                                     bool* hasContactedPrimaryShard);
 
-class BatchCommandSizeEstimatorBase {
-public:
-    BatchCommandSizeEstimatorBase() = default;
-    virtual ~BatchCommandSizeEstimatorBase() = default;
-
-    virtual int getBaseSizeEstimate() const = 0;
-    virtual int getOpSizeEstimate(int opIdx, const ShardId& shard) const = 0;
-    virtual void addOpToBatch(int opIdx, const ShardId& shard) = 0;
-
-protected:
-    // Copy/move constructors and assignment operators are declared protected to prevent slicing.
-    // Derived classes can supply public copy/move constructors and assignment operators if desired.
-    BatchCommandSizeEstimatorBase(const BatchCommandSizeEstimatorBase&) = default;
-    BatchCommandSizeEstimatorBase(BatchCommandSizeEstimatorBase&&) = default;
-    BatchCommandSizeEstimatorBase& operator=(const BatchCommandSizeEstimatorBase&) = default;
-    BatchCommandSizeEstimatorBase& operator=(BatchCommandSizeEstimatorBase&&) = default;
-};
-
-class BatchedCommandSizeEstimator final : public BatchCommandSizeEstimatorBase {
-public:
-    explicit BatchedCommandSizeEstimator(OperationContext* opCtx,
-                                         const BatchedCommandRequest& clientRequest);
-
-    int getBaseSizeEstimate() const final;
-    int getOpSizeEstimate(int opIdx, const ShardId& shardId) const final;
-    void addOpToBatch(int opIdx, const ShardId& shardId) final {}
-
-private:
-    const BatchedCommandRequest& _clientRequest;
-    const bool _isRetryableWriteOrInTransaction;
-    const int _baseSizeEstimate;
-};
-
 // Helper function to target ready writeOps. See BatchWriteOp::targetBatch for details.
 StatusWith<WriteType> targetWriteOps(OperationContext* opCtx,
                                      std::vector<WriteOp>& writeOps,
@@ -347,6 +315,6 @@ StatusWith<WriteType> targetWriteOps(OperationContext* opCtx,
                                      bool recordTargetErrors,
                                      PauseMigrationsDuringMultiUpdatesEnablement& pauseMigrations,
                                      GetTargeterFn getTargeterFn,
-                                     BatchCommandSizeEstimatorBase& sizeEstimator,
+                                     write_op_helpers::BatchCommandSizeEstimatorBase& sizeEstimator,
                                      TargetedBatchMap& batchMap);
 }  // namespace mongo

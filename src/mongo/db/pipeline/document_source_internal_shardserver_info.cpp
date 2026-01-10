@@ -47,11 +47,15 @@
 
 namespace mongo {
 
-REGISTER_DOCUMENT_SOURCE(_internalShardServerInfo,
-                         DocumentSourceInternalShardServerInfo::LiteParsed::parse,
-                         DocumentSourceInternalShardServerInfo::createFromBson,
-                         AllowedWithApiStrict::kNeverInVersion1);
-ALLOCATE_DOCUMENT_SOURCE_ID(_internalShardServerInfo, DocumentSourceInternalShardServerInfo::id)
+REGISTER_LITE_PARSED_DOCUMENT_SOURCE(_internalShardServerInfo,
+                                     DocumentSourceInternalShardServerInfo::LiteParsed::parse,
+                                     AllowedWithApiStrict::kNeverInVersion1);
+
+REGISTER_DOCUMENT_SOURCE_WITH_STAGE_PARAMS_DEFAULT(_internalShardServerInfo,
+                                                   DocumentSourceInternalShardServerInfo,
+                                                   InternalShardServerInfoStageParams);
+
+ALLOCATE_DOCUMENT_SOURCE_ID(_internalShardServerInfo, DocumentSourceInternalShardServerInfo::id);
 
 boost::intrusive_ptr<DocumentSource> DocumentSourceInternalShardServerInfo::createFromBson(
     BSONElement elem, const boost::intrusive_ptr<ExpressionContext>& expCtx) {

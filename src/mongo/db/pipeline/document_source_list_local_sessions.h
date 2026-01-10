@@ -61,6 +61,8 @@
 
 namespace mongo {
 
+DECLARE_STAGE_PARAMS_DERIVED_DEFAULT(ListLocalSessions);
+
 ListSessionsSpec listSessionsParseSpec(StringData stageName, const BSONElement& spec);
 PrivilegeVector listSessionsRequiredPrivileges(const ListSessionsSpec& spec,
                                                const boost::optional<TenantId>& tenantId);
@@ -75,22 +77,22 @@ class DocumentSourceListLocalSessions final : public DocumentSource {
 public:
     static constexpr StringData kStageName = "$listLocalSessions"_sd;
 
-    class LiteParsed final : public LiteParsedDocumentSource {
+    class LiteParsed final : public LiteParsedDocumentSourceDefault<LiteParsed> {
     public:
         static std::unique_ptr<LiteParsed> parse(const NamespaceString& nss,
                                                  const BSONElement& spec,
                                                  const LiteParserOptions& options) {
 
             return std::make_unique<LiteParsed>(
-                spec.fieldName(),
+                spec,
                 nss.tenantId(),
                 listSessionsParseSpec(DocumentSourceListLocalSessions::kStageName, spec));
         }
 
-        explicit LiteParsed(std::string parseTimeName,
-                            const boost::optional<TenantId>& tenantId,
-                            const ListSessionsSpec& spec)
-            : LiteParsedDocumentSource(std::move(parseTimeName)),
+        LiteParsed(const BSONElement& specElem,
+                   const boost::optional<TenantId>& tenantId,
+                   const ListSessionsSpec& spec)
+            : LiteParsedDocumentSourceDefault(specElem),
               _spec(spec),
               _privileges(listSessionsRequiredPrivileges(_spec, tenantId)) {}
 
@@ -109,6 +111,10 @@ public:
 
         bool isInitialSource() const final {
             return true;
+        }
+
+        std::unique_ptr<StageParams> getStageParams() const final {
+            return std::make_unique<ListLocalSessionsStageParams>(_originalBson);
         }
 
         ReadConcernSupportResult supportsReadConcern(repl::ReadConcernLevel level,

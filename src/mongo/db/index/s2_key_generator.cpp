@@ -30,6 +30,7 @@
 #include "mongo/db/index/s2_key_generator.h"
 
 #include "mongo/base/error_codes.h"
+#include "mongo/db/field_ref.h"
 #include "mongo/db/geo/geometry_container.h"
 #include "mongo/db/query/bson/multikey_dotted_path_support.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
@@ -423,7 +424,7 @@ void getS2Keys(SharedBufferFragmentBuilder& pooledBufferBuilder,
     size_t posInIdx = 0;
 
     try {
-        size_t maxNumKeys = gIndexMaxNumGeneratedKeysPerDocument;
+        size_t maxNumKeys = gIndexMaxNumGeneratedKeysPerDocument.load();
         // We output keys in the same order as the fields we index.
         for (const auto& keyElem : keyPattern) {
             // First, we get the keys that this field adds.  Either they're added literally from

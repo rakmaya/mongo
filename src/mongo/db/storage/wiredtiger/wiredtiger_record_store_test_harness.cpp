@@ -30,11 +30,11 @@
 #include "mongo/db/storage/wiredtiger/wiredtiger_record_store_test_harness.h"
 
 #include "mongo/base/initializer.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/rss/replicated_storage_service.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_record_store.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_recovery_unit.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_util.h"
@@ -87,7 +87,8 @@ std::unique_ptr<RecordStore> WiredTigerHarnessHelper::newRecordStore(
     boost::optional<UUID> uuid) {
     ServiceContext::UniqueOperationContext opCtx(newOperationContext());
     auto& provider = rss::ReplicatedStorageService::get(opCtx.get()).getPersistenceProvider();
-    const auto res = _engine->createRecordStore(provider, nss, ident, recordStoreOptions);
+    auto& ru = *shard_role_details::getRecoveryUnit(opCtx.get());
+    const auto res = _engine->createRecordStore(provider, ru, nss, ident, recordStoreOptions);
     return _engine->getRecordStore(opCtx.get(), nss, ident, recordStoreOptions, uuid);
 }
 
@@ -108,13 +109,14 @@ std::unique_ptr<RecordStore> WiredTigerHarnessHelper::newOplogRecordStoreNoInit(
     oplogRecordStoreOptions.oplogMaxSize = 1024 * 1024 * 1024;
     ServiceContext::UniqueOperationContext opCtx(newOperationContext());
     auto& provider = rss::ReplicatedStorageService::get(opCtx.get()).getPersistenceProvider();
+    auto& ru = *shard_role_details::getRecoveryUnit(opCtx.get());
     const auto res = _engine->createRecordStore(
-        provider, NamespaceString::kRsOplogNamespace, ident, oplogRecordStoreOptions);
+        provider, ru, NamespaceString::kRsOplogNamespace, ident, oplogRecordStoreOptions);
 
     // Cannot use 'getRecordStore', which automatically starts the the oplog manager.
     return std::make_unique<WiredTigerRecordStore::Oplog>(
         _engine.get(),
-        WiredTigerRecoveryUnit::get(*shard_role_details::getRecoveryUnit(opCtx.get())),
+        WiredTigerRecoveryUnit::get(ru),
         WiredTigerRecordStore::Oplog::Params{.uuid = UUID::gen(),
                                              .ident = ident,
                                              .engineName = std::string{kWiredTigerEngineName},

@@ -40,21 +40,20 @@
 #include "mongo/db/global_catalog/chunk_manager.h"
 #include "mongo/db/global_catalog/shard_key_pattern.h"
 #include "mongo/db/global_catalog/type_chunk.h"
-#include "mongo/db/local_catalog/catalog_control.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/create_collection.h"
-#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
-#include "mongo/db/local_catalog/shard_role_catalog/collection_metadata.h"
-#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_runtime.h"
-#include "mongo/db/local_catalog/shard_role_catalog/database_sharding_runtime.h"
-#include "mongo/db/local_catalog/shard_role_catalog/operation_sharding_state.h"
 #include "mongo/db/query/client_cursor/cursor_manager.h"
 #include "mongo/db/query/internal_plans.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/collection_metadata.h"
+#include "mongo/db/shard_role/shard_catalog/collection_sharding_runtime.h"
+#include "mongo/db/shard_role/shard_catalog/create_collection.h"
+#include "mongo/db/shard_role/shard_catalog/database_sharding_runtime.h"
+#include "mongo/db/shard_role/shard_catalog/operation_sharding_state.h"
+#include "mongo/db/shard_role/shard_role.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/db/sharding_environment/shard_server_test_fixture.h"
 #include "mongo/db/storage/recovery_unit.h"
@@ -152,7 +151,7 @@ void MultipleCollectionAccessorTest::installShardedCollectionMetadata(
         auto coll = acquireCollection(
             operationContext(),
             CollectionAcquisitionRequest(nss,
-                                         PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                         PlacementConcern(boost::none, ShardVersion::UNTRACKED()),
                                          repl::ReadConcernArgs::get(operationContext()),
                                          AcquisitionPrerequisites::kWrite),
             MODE_IX);
@@ -182,13 +181,12 @@ void MultipleCollectionAccessorTest::installShardedCollectionMetadata(
         RoutingTableHistoryValueHandle(std::make_shared<RoutingTableHistory>(std::move(rt)),
                                        ComparableChunkVersion::makeComparableChunkVersion(version));
 
-    const auto collectionMetadata =
-        CollectionMetadata(ChunkManager(rtHandle, boost::none), kMyShardName);
+    const auto collectionMetadata = CollectionMetadata(CurrentChunkManager(rtHandle), kMyShardName);
 
     auto coll = acquireCollection(
         operationContext(),
         CollectionAcquisitionRequest(nss,
-                                     PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                     PlacementConcern(boost::none, ShardVersion::UNTRACKED()),
                                      repl::ReadConcernArgs::get(operationContext()),
                                      AcquisitionPrerequisites::kWrite),
         MODE_IX);
@@ -206,6 +204,7 @@ TEST_F(MultipleCollectionAccessorTest, mainCollectionViaAcquisition) {
     auto accessor = MultipleCollectionAccessor(acquisition);
     ASSERT_EQ(acquisition.getCollectionPtr(), accessor.getMainCollection());
     ASSERT_EQ(acquisition.uuid(), accessor.getMainCollectionAcquisition().uuid());
+    ASSERT_FALSE(accessor.hasNonExistentMainCollection());
 }
 
 TEST_F(MultipleCollectionAccessorTest, mainViewViaAcquisition) {
@@ -220,6 +219,7 @@ TEST_F(MultipleCollectionAccessorTest, mainViewViaAcquisition) {
 
     auto accessor = MultipleCollectionAccessor(acquisition);
     ASSERT_FALSE(accessor.hasMainCollection());
+    ASSERT_FALSE(accessor.hasNonExistentMainCollection());
 }
 
 TEST_F(MultipleCollectionAccessorTest, secondaryCollectionsViaAcquisition) {
@@ -299,6 +299,26 @@ TEST_F(MultipleCollectionAccessorTest, secondaryViewsViaAcquisition) {
     // Views return a null CollectionPtr.
     ASSERT_FALSE(accessor.lookupCollection(secondaryView1));
     ASSERT_FALSE(accessor.lookupCollection(secondaryView2));
+}
+
+TEST_F(MultipleCollectionAccessorTest, nonExistentCollection) {
+    // Create a namespace for a collection that doesn't exist in the catalog.
+    const NamespaceString nonExistentNss =
+        NamespaceString::createNamespaceString_forTest(dbNameTestDb, "nonExistent");
+
+    // Acquire the non-existent collection (this should succeed but the collection won't exist).
+    const auto acquisition = acquireCollectionOrView(
+        operationContext(),
+        CollectionAcquisitionRequest::fromOpCtx(
+            operationContext(), nonExistentNss, AcquisitionPrerequisites::kRead),
+        MODE_IS);
+
+    auto accessor = MultipleCollectionAccessor(acquisition);
+
+    ASSERT_TRUE(accessor.hasNonExistentMainCollection());
+    ASSERT_FALSE(accessor.hasMainCollection());
+    // getMainCollection() should return a null CollectionPtr.
+    ASSERT_FALSE(accessor.getMainCollection());
 }
 
 }  // namespace

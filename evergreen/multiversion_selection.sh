@@ -9,10 +9,6 @@ set -o verbose
 activate_venv
 setup_db_contrib_tool
 
-export PIPX_HOME="${workdir}/pipx"
-export PIPX_BIN_DIR="${workdir}/pipx/bin"
-export PATH="$PATH:$PIPX_BIN_DIR"
-
 edition="${multiversion_edition}"
 platform="${multiversion_platform}"
 architecture="${multiversion_architecture}"
@@ -42,7 +38,7 @@ local_args="--edition $edition \
   --debug \
   --fallbackToMaster \
   ${last_lts_arg} \
-  ${last_continuous_arg} 6.0 7.0"
+  ${last_continuous_arg} 6.0 7.0 8.0.16"
 
 remote_invocation="${base_command} ${evergreen_args} ${local_args}"
 eval "${remote_invocation}"

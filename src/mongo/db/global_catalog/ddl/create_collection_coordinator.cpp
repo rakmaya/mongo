@@ -45,7 +45,6 @@
 #include "mongo/db/database_name.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/generic_argument_util.h"
-#include "mongo/db/global_catalog/catalog_cache/catalog_cache.h"
 #include "mongo/db/global_catalog/chunk_manager.h"
 #include "mongo/db/global_catalog/ddl/create_collection_coordinator_document_gen.h"
 #include "mongo/db/global_catalog/ddl/notify_sharding_event_gen.h"
@@ -58,7 +57,6 @@
 #include "mongo/db/global_catalog/ddl/sharding_ddl_util.h"
 #include "mongo/db/global_catalog/ddl/sharding_recovery_service.h"
 #include "mongo/db/global_catalog/ddl/sharding_util.h"
-#include "mongo/db/global_catalog/router_role_api/cluster_commands_helpers.h"
 #include "mongo/db/global_catalog/sharding_catalog_client.h"
 #include "mongo/db/global_catalog/type_chunk.h"
 #include "mongo/db/global_catalog/type_collection.h"
@@ -66,19 +64,6 @@
 #include "mongo/db/global_catalog/type_namespace_placement_gen.h"
 #include "mongo/db/global_catalog/type_tags.h"
 #include "mongo/db/keypattern.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_catalog.h"
-#include "mongo/db/local_catalog/collection_catalog_helper.h"
-#include "mongo/db/local_catalog/collection_uuid_mismatch.h"
-#include "mongo/db/local_catalog/ddl/create_gen.h"
-#include "mongo/db/local_catalog/ddl/list_collections_gen.h"
-#include "mongo/db/local_catalog/ddl/list_indexes_gen.h"
-#include "mongo/db/local_catalog/lock_manager/exception_util.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
-#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_runtime.h"
-#include "mongo/db/local_catalog/shard_role_catalog/shard_filtering_metadata_refresh.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/db/query/collation/collator_interface.h"
@@ -87,10 +72,25 @@
 #include "mongo/db/repl/change_stream_oplog_notification.h"
 #include "mongo/db/repl/read_concern_level.h"
 #include "mongo/db/repl/repl_client_info.h"
+#include "mongo/db/router_role/cluster_commands_helpers.h"
+#include "mongo/db/router_role/routing_cache/catalog_cache.h"
 #include "mongo/db/s/forwardable_operation_metadata.h"
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/logical_session_id.h"
+#include "mongo/db/shard_role/ddl/create_gen.h"
+#include "mongo/db/shard_role/ddl/list_collections_gen.h"
+#include "mongo/db/shard_role/ddl/list_indexes_gen.h"
+#include "mongo/db/shard_role/lock_manager/exception_util.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/collection_catalog_helper.h"
+#include "mongo/db/shard_role/shard_catalog/collection_sharding_runtime.h"
+#include "mongo/db/shard_role/shard_catalog/collection_uuid_mismatch.h"
+#include "mongo/db/shard_role/shard_catalog/shard_filtering_metadata_refresh.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/sharding_environment/client/shard.h"
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/sharding_environment/shard_id.h"
@@ -103,8 +103,8 @@
 #include "mongo/db/timeseries/timeseries_options.h"
 #include "mongo/db/topology/shard_registry.h"
 #include "mongo/db/topology/sharding_state.h"
+#include "mongo/db/topology/vector_clock/vector_clock_mutable.h"
 #include "mongo/db/transaction/transaction_api.h"
-#include "mongo/db/vector_clock/vector_clock_mutable.h"
 #include "mongo/db/versioning_protocol/chunk_version.h"
 #include "mongo/db/versioning_protocol/shard_version.h"
 #include "mongo/db/versioning_protocol/shard_version_factory.h"
@@ -284,8 +284,7 @@ bool isTimeseries(const boost::optional<CollectionAcquisition>& collection) {
 
 bool viewlessTimeseriesEnabled(OperationContext* opCtx) {
     return gFeatureFlagCreateViewlessTimeseriesCollections.isEnabled(
-        VersionContext::getDecoration(opCtx),
-        serverGlobalParams.featureCompatibility.acquireFCVSnapshot());
+        VersionContext::getDecoration(opCtx));
 }
 
 bool shouldUseRawDataOperations(OperationContext* opCtx) {
@@ -692,10 +691,14 @@ void checkLocalCatalogCollectionOptions(OperationContext* opCtx,
             "expected the target collection to exist",
             targetColl.has_value() && targetColl->exists());
 
+    uassert(ErrorCodes::IllegalOperation,
+            "Can't register a temporary collection in the sharding catalog.",
+            !targetColl->getCollectionPtr()->isTemporary());
+
     assertTimeseriesLocalCatalogConsistency(opCtx, targetColl->getCollectionPtr().get());
 
     if (request.getRegisterExistingCollectionInGlobalCatalog()) {
-        // No need to check for collection options when registering an existing collection
+        // No need to check for further collection options when registering an existing collection
         return;
     }
 
@@ -738,7 +741,7 @@ void checkLocalCatalogCollectionOptions(OperationContext* opCtx,
 void checkShardingCatalogCollectionOptions(OperationContext* opCtx,
                                            const NamespaceString& targetNss,
                                            const ShardsvrCreateCollectionRequest& request,
-                                           const ChunkManager& cm) {
+                                           const CurrentChunkManager& cm) {
     if (request.getRegisterExistingCollectionInGlobalCatalog()) {
         // No need for checking the sharding catalog when tracking a collection for the first time
         return;
@@ -922,17 +925,17 @@ boost::optional<CreateCollectionResponse> checkIfCollectionExistsWithSameOptions
             "Expected optTargetCollUUID to be set unless creating system.sessions",
             optTargetCollUUID || missingSessionsCollectionLocally);
 
-    // 2. Make sure we're not trying to track a temporary collection upon moveCollection
+    // 2. Make sure we're not trying to track a temporary aggregation collection upon moveCollection
     if (request.getRegisterExistingCollectionInGlobalCatalog()) {
         DBDirectClient client(opCtx);
-        const auto isTemporaryCollection =
+        const auto isTemporaryAggregationCollection =
             client.count(NamespaceString::kAggTempCollections,
                          BSON("_id" << NamespaceStringUtil::serialize(
                                   *optTargetNss, SerializationContext::stateDefault())));
-        if (isTemporaryCollection) {
-            // Return UNSHARDED version for the coordinator to gracefully terminate without
+        if (isTemporaryAggregationCollection) {
+            // Return UNTRACKED version for the coordinator to gracefully terminate without
             // registering the collection
-            return CreateCollectionResponse{ShardVersion::UNSHARDED()};
+            return CreateCollectionResponse{ShardVersion::UNTRACKED()};
         }
     }
 
@@ -1130,20 +1133,6 @@ void exitCriticalSectionsOnCoordinator(OperationContext* opCtx,
         defaultMajorityWriteConcernDoNotUse(),
         ShardingRecoveryService::FilteringMetadataClearer(),
         throwIfReasonDiffers);
-}
-
-/*
- * Check the requested shardKey is a timefield, then convert it to a shardKey compatible for the
- * bucket collection.
- */
-BSONObj validateAndTranslateShardKey(OperationContext* opCtx,
-                                     const TypeCollectionTimeseriesFields& timeseriesFields,
-                                     const BSONObj& shardKey) {
-    shardkeyutil::validateTimeseriesShardKey(
-        timeseriesFields.getTimeField(), timeseriesFields.getMetaField(), shardKey);
-
-    return uassertStatusOK(timeseries::createBucketsShardKeySpecFromTimeseriesShardKeySpec(
-        timeseriesFields.getTimeseriesOptions(), shardKey));
 }
 
 /**
@@ -1795,8 +1784,8 @@ void CreateCollectionCoordinator::_translateRequestParameters(OperationContext* 
     // Assign the correct shard key: in case of timeseries, the shard key must be converted.
     KeyPattern keyPattern;
     if (optExtendedTimeseriesFields && isSharded(_request)) {
-        keyPattern = validateAndTranslateShardKey(
-            opCtx, *optExtendedTimeseriesFields, *_request.getShardKey());
+        keyPattern = shardkeyutil::validateAndTranslateTimeseriesShardKey(
+            optExtendedTimeseriesFields->getTimeseriesOptions(), *_request.getShardKey());
     } else {
         keyPattern = *_request.getShardKey();
     }

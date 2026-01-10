@@ -28,7 +28,7 @@ const collName = "coll";
 const indexSpec = {a: 1};
 const indexName = "non_resumable_index_build";
 
-// TODO(SERVER-109349): Remove this check when the feature flag is removed.
+// TODO(SERVER-109578): Remove this check when the feature flag is removed.
 if (!FeatureFlagUtil.isPresentAndEnabled(primary.getDB(dbName), "PrimaryDrivenIndexBuilds")) {
     jsTest.log.info("Skipping: featureFlagPrimaryDrivenIndexBuilds is disabled");
     rst.stopSet();
@@ -64,10 +64,10 @@ let buildUUID = extractUUIDFromObject(
 jsTest.log.info(`buildUUID: ${tojson(buildUUID)}`);
 
 jsTest.log.info("6. CommitQuorum is kDisabled (0) while primary-driven");
-assert.commandFailedWithCode(
+assert.commandWorked(
     primary.getDB(dbName).runCommand({setIndexCommitQuorum: collName, indexNames: [indexName], commitQuorum: 1}),
-    ErrorCodes.BadValue,
 );
+assert(checkLog.checkContainsWithCountJson(primary, 11302401, undefined, 1), "Expecting to see log with id 11302401");
 
 jsTest.log.info("7. Simulate primary failure while build is paused");
 rst.stop(primary, undefined, {forRestart: true, skipValidation: true});

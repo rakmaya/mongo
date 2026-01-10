@@ -29,7 +29,6 @@
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/client.h"
@@ -37,20 +36,18 @@
 #include "mongo/db/exec/classic/distinct_scan.h"
 #include "mongo/db/exec/classic/plan_stage.h"
 #include "mongo/db/exec/classic/working_set.h"
-#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
+#include "mongo/db/index_builds/index_build_test_helpers.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/query/compiler/optimizer/index_bounds_builder/index_bounds_builder.h"
 #include "mongo/db/query/compiler/physical_model/index_bounds/index_bounds.h"
-#include "mongo/db/query/compiler/physical_model/interval/interval.h"
-#include "mongo/db/query/plan_executor.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/shard_role.h"
 #include "mongo/dbtests/dbtests.h"  // IWYU pragma: keep
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/intrusive_counter.h"
 
 #include <cstddef>
 #include <set>
@@ -80,7 +77,7 @@ public:
     }
 
     void addIndex(const BSONObj& obj) {
-        ASSERT_OK(dbtests::createIndex(&_opCtx, nss.ns_forTest(), obj));
+        ASSERT_OK(createIndex(&_opCtx, nss.ns_forTest(), obj));
     }
 
     void insert(const BSONObj& obj) {
@@ -127,7 +124,7 @@ CollectionAcquisition acquireCollForRead(OperationContext* opCtx, const Namespac
     return acquireCollection(
         opCtx,
         CollectionAcquisitionRequest(nss,
-                                     PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                     PlacementConcern(boost::none, ShardVersion::UNTRACKED()),
                                      repl::ReadConcernArgs::get(opCtx),
                                      AcquisitionPrerequisites::kRead),
         MODE_IS);
@@ -156,7 +153,7 @@ public:
         const CollectionPtr& collPtr = collection.getCollectionPtr();
 
         // Set up the distinct stage.
-        std::vector<const IndexDescriptor*> indexes;
+        std::vector<const IndexCatalogEntry*> indexes;
         collPtr->getIndexCatalog()->findIndexesByKeyPattern(
             &_opCtx, BSON("a" << 1), IndexCatalog::InclusionPolicy::kReady, &indexes);
         ASSERT_EQ(indexes.size(), 1U);
@@ -222,7 +219,7 @@ public:
         const auto coll = acquireCollForRead(&_opCtx, nss);
 
         // Set up the distinct stage.
-        std::vector<const IndexDescriptor*> indexes;
+        std::vector<const IndexCatalogEntry*> indexes;
         coll.getCollectionPtr()->getIndexCatalog()->findIndexesByKeyPattern(
             &_opCtx, BSON("a" << 1), IndexCatalog::InclusionPolicy::kReady, &indexes);
         MONGO_verify(indexes.size() == 1);
@@ -288,7 +285,7 @@ public:
 
         const auto coll = acquireCollForRead(&_opCtx, nss);
 
-        std::vector<const IndexDescriptor*> indices;
+        std::vector<const IndexCatalogEntry*> indices;
         coll.getCollectionPtr()->getIndexCatalog()->findIndexesByKeyPattern(
             &_opCtx, BSON("a" << 1 << "b" << 1), IndexCatalog::InclusionPolicy::kReady, &indices);
         ASSERT_EQ(1U, indices.size());

@@ -30,18 +30,22 @@
 #include "mongo/db/commands/query_cmd/aggregation_execution_state.h"
 
 #include "mongo/db/exec/disk_use_options_gen.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_uuid_mismatch.h"
 #include "mongo/db/pipeline/expression_context_builder.h"
-#include "mongo/db/pipeline/initialize_auto_get_helper.h"
+#include "mongo/db/pipeline/pipeline_factory.h"
 #include "mongo/db/pipeline/search/search_helper.h"
 #include "mongo/db/profile_settings.h"
+#include "mongo/db/query/collection_query_info.h"
 #include "mongo/db/query/multiple_collection_accessor.h"
 #include "mongo/db/query/query_request_helper.h"
 #include "mongo/db/query/query_settings/query_settings_service.h"
-#include "mongo/db/raw_data_operation.h"
+#include "mongo/db/shard_role/initialize_auto_get_helper.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_uuid_mismatch.h"
+#include "mongo/db/shard_role/shard_catalog/operation_sharding_state.h"
+#include "mongo/db/shard_role/shard_catalog/raw_data_operation.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/db/timeseries/timeseries_request_util.h"
+#include "mongo/db/topology/sharding_state.h"
 #include "mongo/db/version_context.h"
 #include "mongo/db/views/view_catalog_helpers.h"
 
@@ -464,12 +468,12 @@ StatusWith<ResolvedNamespaceMap> AggExState::resolveInvolvedNamespaces() const {
     return resolvedNamespaces;
 }
 
-void AggExState::performValidationChecks() {
+void AggExState::performValidationChecks() const {
     auto request = getRequest();
     auto& liteParsedPipeline = _aggReqDerivatives->liteParsedPipeline;
 
     liteParsedPipeline.validate(_opCtx);
-    aggregation_request_helper::validateRequestForAPIVersion(_opCtx, request);
+    aggregation_request_helper::validateRequestWithClient(_opCtx, request);
     aggregation_request_helper::validateRequestFromClusterQueryWithoutShardKey(request);
 
     // If we are in a transaction, check whether the parsed pipeline supports being in
@@ -485,17 +489,26 @@ bool AggExState::canReadUnderlyingCollectionLocally(const CollectionRoutingInfo&
     const auto myShardId = ShardingState::get(_opCtx)->shardId();
     const auto atClusterTime = repl::ReadConcernArgs::get(_opCtx).getArgsAtClusterTime();
 
-    const auto chunkManagerMaybeAtClusterTime = atClusterTime
-        ? ChunkManager::makeAtTime(cri.getChunkManager(), atClusterTime->asTimestamp())
-        : cri.getChunkManager();
+    auto isNssLocalFunc = [&](const auto& cm) {
+        if (cm.isSharded()) {
+            return false;
+        } else if (cm.isUnsplittable()) {
+            return cm.getMinKeyShardIdWithSimpleCollation() == myShardId;
+        } else {
+            return cri.getDbPrimaryShardId() == myShardId;
+        }
+    };
 
-    if (chunkManagerMaybeAtClusterTime.isSharded()) {
-        return false;
-    } else if (chunkManagerMaybeAtClusterTime.isUnsplittable()) {
-        return chunkManagerMaybeAtClusterTime.getMinKeyShardIdWithSimpleCollation() == myShardId;
+    bool isNssLocal;
+    if (atClusterTime) {
+        auto pitChunkManager =
+            PointInTimeChunkManager::make(cri.getChunkManager(), atClusterTime->asTimestamp());
+        isNssLocal = isNssLocalFunc(pitChunkManager);
     } else {
-        return cri.getDbPrimaryShardId() == myShardId;
+        isNssLocal = isNssLocalFunc(cri.getChunkManager());
     }
+
+    return isNssLocal;
 }
 
 Status AggExState::collatorCompatibleWithPipeline(const CollatorInterface* collator) const {
@@ -595,11 +608,11 @@ std::unique_ptr<AggCatalogState> AggExState::createAggCatalogState() {
 }
 
 ResolvedViewAggExState::ResolvedViewAggExState(AggExState&& baseState,
-                                               std::unique_ptr<AggCatalogState>& aggCatalogStage,
+                                               const AggCatalogState& aggCatalogState,
                                                const ViewDefinition& view)
     : AggExState(std::move(baseState)),
       _originalAggReqDerivatives(std::move(_aggReqDerivatives)),
-      _resolvedView(uassertStatusOK(aggCatalogStage->resolveView(
+      _resolvedView(uassertStatusOK(aggCatalogState.resolveView(
           _opCtx,
           _originalAggReqDerivatives->request.getNamespace(),
           view.timeseries() ? _originalAggReqDerivatives->request.getCollation() : boost::none))),
@@ -621,18 +634,18 @@ ResolvedViewAggExState::ResolvedViewAggExState(AggExState&& baseState,
 }
 
 StatusWith<std::unique_ptr<ResolvedViewAggExState>> ResolvedViewAggExState::create(
-    AggExState&& aggExState, std::unique_ptr<AggCatalogState>& aggCatalogState) {
-    invariant(aggCatalogState->lockAcquired());
+    std::shared_ptr<AggExState> aggExState, const AggCatalogState& aggCatalogState) {
+    invariant(aggCatalogState.lockAcquired());
 
     // Resolve the request's collation and check that the default collation of 'view' is compatible
     // with the operation's collation. The collation resolution and check are both skipped if the
     // request did not specify a collation.
-    tassert(10240800, "Expected a view", aggCatalogState->getMainCollectionOrView().isView());
+    tassert(10240800, "Expected a view", aggCatalogState.getMainCollectionOrView().isView());
     const auto& viewDefinition =
-        aggCatalogState->getMainCollectionOrView().getView().getViewDefinition();
+        aggCatalogState.getMainCollectionOrView().getView().getViewDefinition();
 
-    if (!aggExState.getRequest().getCollation().get_value_or(BSONObj()).isEmpty()) {
-        auto [collatorToUse, collatorToUseMatchesDefault] = aggCatalogState->resolveCollator();
+    if (!aggExState->getRequest().getCollation().get_value_or(BSONObj()).isEmpty()) {
+        auto [collatorToUse, collatorToUseMatchesDefault] = aggCatalogState.resolveCollator();
         if (!CollatorInterface::collatorsMatch(viewDefinition.defaultCollator(),
                                                collatorToUse.get()) &&
             !viewDefinition.timeseries()) {
@@ -644,7 +657,7 @@ StatusWith<std::unique_ptr<ResolvedViewAggExState>> ResolvedViewAggExState::crea
     // Create the ResolvedViewAggExState object which will resolve the view upon
     // initialization.
     return std::make_unique<ResolvedViewAggExState>(
-        std::move(aggExState), aggCatalogState, viewDefinition);
+        std::move(*aggExState), aggCatalogState, viewDefinition);
 }
 
 std::unique_ptr<Pipeline> ResolvedViewAggExState::applyViewToPipeline(
@@ -657,7 +670,8 @@ std::unique_ptr<Pipeline> ResolvedViewAggExState::applyViewToPipeline(
         // which will account for those rewrites.
         // TODO SERVER-101599 remove this code once 9.0 becomes last LTS. By then only viewless
         // timeseries collections will exist.
-        return Pipeline::parse(getRequest().getPipeline(), expCtx);
+        return pipeline_factory::makePipeline(
+            getRequest().getPipeline(), expCtx, pipeline_factory::kOptionsMinimal);
     } else if (search_helpers::isMongotPipeline(pipeline.get())) {
         // For search queries on views don't do any of the pipeline stitching that is done for
         // normal views.
@@ -667,7 +681,8 @@ std::unique_ptr<Pipeline> ResolvedViewAggExState::applyViewToPipeline(
     // Parse the view pipeline, then stitch the user pipeline and view pipeline together
     // to build the total aggregation pipeline.
     auto userPipeline = std::move(pipeline);
-    pipeline = Pipeline::parse(getResolvedView().getPipeline(), expCtx);
+    pipeline = pipeline_factory::makePipeline(
+        getResolvedView().getPipeline(), expCtx, pipeline_factory::kOptionsMinimal);
     pipeline->appendPipeline(std::move(userPipeline));
     return pipeline;
 }
@@ -687,7 +702,8 @@ ScopedSetShardRole ResolvedViewAggExState::setShardRole(const CollectionRoutingI
                 OperationShardingState::get(_opCtx).getShardVersion(underlyingNss);
         }
 
-        return originalShardVersion ? originalShardVersion->placementConflictTime() : boost::none;
+        return originalShardVersion ? originalShardVersion->placementConflictTime_DEPRECATED()
+                                    : boost::none;
     }();
 
     if (cri.hasRoutingTable()) {
@@ -695,17 +711,19 @@ ScopedSetShardRole ResolvedViewAggExState::setShardRole(const CollectionRoutingI
 
         auto sv = cri.getShardVersion(myShardId);
         if (optPlacementConflictTimestamp) {
-            sv.setPlacementConflictTime(*optPlacementConflictTimestamp);
+            sv.setPlacementConflictTime_DEPRECATED(*optPlacementConflictTimestamp);
         }
         return ScopedSetShardRole(
             _opCtx, underlyingNss, sv /*shardVersion*/, boost::none /*databaseVersion*/);
     } else {
-        auto sv = ShardVersion::UNSHARDED();
+        auto sv = ShardVersion::UNTRACKED();
+        auto dbv = cri.getDbVersion();
         if (optPlacementConflictTimestamp) {
-            sv.setPlacementConflictTime(*optPlacementConflictTimestamp);
+            sv.setPlacementConflictTime_DEPRECATED(*optPlacementConflictTimestamp);
+            dbv.setPlacementConflictTime_DEPRECATED(*optPlacementConflictTimestamp);
         }
         return ScopedSetShardRole(
-            _opCtx, underlyingNss, sv /*shardVersion*/, cri.getDbVersion() /*databaseVersion*/);
+            _opCtx, underlyingNss, sv /*shardVersion*/, dbv /*databaseVersion*/);
     }
 }
 
@@ -749,30 +767,68 @@ boost::intrusive_ptr<ExpressionContext> AggCatalogState::createExpressionContext
     const auto& resolvedNamespaces = uassertStatusOK(_aggExState.resolveInvolvedNamespaces());
     auto requiresExtendedRange = requiresExtendedRangeSupportForTimeseries(resolvedNamespaces);
 
-    auto expCtx = ExpressionContextBuilder{}
-                      .fromRequest(_aggExState.getOpCtx(),
-                                   _aggExState.getRequest(),
-                                   allowDiskUseByDefault.load())
-                      .collator(std::move(collator))
-                      .collUUID(getUUID())
-                      .mongoProcessInterface(MongoProcessInterface::create(_aggExState.getOpCtx()))
-                      .mayDbProfile(CurOp::get(_aggExState.getOpCtx())->dbProfileLevel() > 0)
-                      .ns(_aggExState.hasChangeStream() ? _aggExState.getOriginalNss()
-                                                        : _aggExState.getExecutionNss())
-                      .resolvedNamespace(std::move(resolvedNamespaces))
-                      .originalNs(_aggExState.getOriginalNss())
-                      .requiresTimeseriesExtendedRangeSupport(requiresExtendedRange)
-                      .tmpDir(boost::filesystem::path(storageGlobalParams.dbpath) / "_tmp")
-                      .collationMatchesDefault(collationMatchesDefault)
-                      .canBeRejected(canPipelineBeRejected)
-                      .explain(_aggExState.getVerbosity())
-                      .build();
+
+    ExpressionContextBuilder builder;
+    builder
+        .fromRequest(_aggExState.getOpCtx(), _aggExState.getRequest(), allowDiskUseByDefault.load())
+        .collator(std::move(collator))
+        .collUUID(getUUID())
+        .mongoProcessInterface(MongoProcessInterface::create(_aggExState.getOpCtx()))
+        .mayDbProfile(CurOp::get(_aggExState.getOpCtx())->dbProfileLevel() > 0)
+        .ns(_aggExState.hasChangeStream() ? _aggExState.getOriginalNss()
+                                          : _aggExState.getExecutionNss())
+        .resolvedNamespace(std::move(resolvedNamespaces))
+        .originalNs(_aggExState.getOriginalNss())
+        .requiresTimeseriesExtendedRangeSupport(requiresExtendedRange)
+        .tmpDir(boost::filesystem::path(storageGlobalParams.dbpath) / "_tmp")
+        .collationMatchesDefault(collationMatchesDefault)
+        .canBeRejected(canPipelineBeRejected)
+        .explain(_aggExState.getVerbosity())
+        .ifrContext(_aggExState.getIfrContext());
+
+    if (feature_flags::gFeatureFlagPathArrayness.isEnabled()) {
+        // Get the mainCollection and all secondary collections so that we can access the
+        // PathArrayness info in each.
+        const auto& mainColl = getCollections().getMainCollection();
+        const auto& secondaryColls = getCollections().getSecondaryCollections();
+
+        // Fetch the PathArrayness map for any secondary collections.
+        stdx::unordered_map<NamespaceString, std::shared_ptr<const PathArrayness>>
+            secondaryCollsPathArrayness;
+        for (const auto& [nss, coll] : secondaryColls) {
+            if (!coll) {
+                continue;
+            }
+            secondaryCollsPathArrayness.emplace(nss,
+                                                CollectionQueryInfo::get(coll).getPathArrayness());
+        }
+
+        // TODO: SERVER-111384: When removing feature flag, we can collapse the builder into one
+        // chained call.
+        builder
+            .mainCollPathArrayness(mainColl ? CollectionQueryInfo::get(mainColl).getPathArrayness()
+                                            : nullptr)
+            .secondaryCollsPathArrayness(std::move(secondaryCollsPathArrayness));
+    }
+
+    auto expCtx = builder.build();
 
     if (_aggExState.getRequest().getIsHybridSearch()) {
         expCtx->setIsHybridSearch();
     }
 
     return expCtx;
+}
+
+BSONObj AggCatalogState::getShardKey() const {
+    if (lockAcquired() && getMainCollectionOrView().isCollection()) {
+        const auto& mainCollShardingDescription =
+            getMainCollectionOrView().getCollection().getShardingDescription();
+        if (mainCollShardingDescription.isSharded()) {
+            return mainCollShardingDescription.getShardKeyPattern().toBSON();
+        }
+    }
+    return BSONObj();
 }
 
 void AggCatalogState::validate() const {

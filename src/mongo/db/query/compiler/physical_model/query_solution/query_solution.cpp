@@ -35,12 +35,10 @@
 #include "mongo/bson/util/builder_fwd.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/field_ref.h"
-#include "mongo/db/index/multikey_paths.h"
 #include "mongo/db/index_names.h"
 #include "mongo/db/keypattern.h"
-#include "mongo/db/local_catalog/clustered_collection_util.h"
-#include "mongo/db/matcher/expression_algo.h"
 #include "mongo/db/matcher/expression_geo.h"
+#include "mongo/db/namespace_string.h"
 #include "mongo/db/query/collation/collation_index_key.h"
 #include "mongo/db/query/compiler/logical_model/projection/projection_ast_util.h"
 #include "mongo/db/query/compiler/optimizer/index_bounds_builder/index_bounds_builder.h"
@@ -48,6 +46,7 @@
 #include "mongo/db/query/compiler/physical_model/query_solution/query_solution_helpers.h"
 #include "mongo/db/query/query_planner_common.h"
 #include "mongo/db/query/stage_memory_limit_knobs/knobs.h"
+#include "mongo/db/shard_role/shard_catalog/clustered_collection_util.h"
 
 #include <algorithm>
 #include <queue>
@@ -124,11 +123,45 @@ void getAllSecondaryNamespacesHelper(const QuerySolutionNode* qsn,
         return;
     }
 
-    if (auto eqLookupNode = dynamic_cast<const EqLookupNode*>(qsn)) {
-        NamespaceString nss(eqLookupNode->foreignCollection);
-        if (nss != mainNss) {
-            secondaryNssSet.emplace(std::move(nss));
-        }
+    if (auto node = dynamic_cast<const EqLookupNode*>(qsn);
+        node && node->foreignCollection != mainNss) {
+        secondaryNssSet.emplace(node->foreignCollection);
+    }
+
+    if (auto node = dynamic_cast<const IndexScanNode*>(qsn); node && node->nss != mainNss) {
+        secondaryNssSet.emplace(node->nss);
+    }
+
+    if (auto node = dynamic_cast<const FetchNode*>(qsn); node && node->nss != mainNss) {
+        secondaryNssSet.emplace(node->nss);
+    }
+
+    if (auto node = dynamic_cast<const CollectionScanNode*>(qsn); node && node->nss != mainNss) {
+        secondaryNssSet.emplace(node->nss);
+    }
+
+    if (auto node = dynamic_cast<const CountScanNode*>(qsn); node && node->nss != mainNss) {
+        secondaryNssSet.emplace(node->nss);
+    }
+
+    if (auto node = dynamic_cast<const DistinctNode*>(qsn); node && node->nss != mainNss) {
+        secondaryNssSet.emplace(node->nss);
+    }
+
+    if (auto node = dynamic_cast<const TextMatchNode*>(qsn); node && node->nss != mainNss) {
+        secondaryNssSet.emplace(node->nss);
+    }
+
+    if (auto node = dynamic_cast<const SearchNode*>(qsn); node && node->nss != mainNss) {
+        secondaryNssSet.emplace(node->nss);
+    }
+
+    if (auto node = dynamic_cast<const GeoNear2DNode*>(qsn); node && node->nss != mainNss) {
+        secondaryNssSet.emplace(node->nss);
+    }
+
+    if (auto node = dynamic_cast<const GeoNear2DSphereNode*>(qsn); node && node->nss != mainNss) {
+        secondaryNssSet.emplace(node->nss);
     }
 
     for (auto&& child : qsn->children) {
@@ -297,11 +330,11 @@ std::string QuerySolution::summaryString() const {
     return sb.str();
 }
 
-void QuerySolution::assignNodeIds(QsnIdGenerator& idGenerator, QuerySolutionNode& node) {
+void QuerySolution::assignNodeIds(PlanNodeId& lastNodeId, QuerySolutionNode& node) {
     for (auto&& child : node.children) {
-        assignNodeIds(idGenerator, *child);
+        assignNodeIds(lastNodeId, *child);
     }
-    node._nodeId = idGenerator.generate();
+    node._nodeId = ++lastNodeId;
 }
 
 void QuerySolution::extendWith(std::unique_ptr<QuerySolutionNode> extensionRoot) {
@@ -338,8 +371,8 @@ void QuerySolution::setRoot(std::unique_ptr<QuerySolutionNode> root) {
     _root = std::move(root);
     _enumeratorExplainInfo.hitScanLimit = _root->getScanLimit();
 
-    QsnIdGenerator idGenerator;
-    assignNodeIds(idGenerator, *_root);
+    PlanNodeId lastNodeId = 0;
+    assignNodeIds(lastNodeId, *_root);
 }
 
 std::vector<NamespaceStringOrUUID> QuerySolution::getAllSecondaryNamespaces(
@@ -659,6 +692,8 @@ std::unique_ptr<QuerySolutionNode> MergeSortNode::clone() const {
 void FetchNode::appendToString(str::stream* ss, int indent) const {
     addIndent(ss, indent);
     *ss << "FETCH\n";
+    addIndent(ss, indent + 1);
+    *ss << "ns = " << toStringForLogging(nss) << '\n';
     if (nullptr != filter) {
         addIndent(ss, indent + 1);
         StringBuilder sb;
@@ -673,7 +708,7 @@ void FetchNode::appendToString(str::stream* ss, int indent) const {
 }
 
 std::unique_ptr<QuerySolutionNode> FetchNode::clone() const {
-    auto copy = std::make_unique<FetchNode>();
+    auto copy = std::make_unique<FetchNode>(this->nss);
     cloneBaseData(copy.get());
     return copy;
 }
@@ -682,8 +717,9 @@ std::unique_ptr<QuerySolutionNode> FetchNode::clone() const {
 // IndexScanNode
 //
 
-IndexScanNode::IndexScanNode(IndexEntry indexEntry)
-    : index(std::move(indexEntry)),
+IndexScanNode::IndexScanNode(NamespaceString nss, IndexEntry indexEntry)
+    : nss(std::move(nss)),
+      index(std::move(indexEntry)),
       direction(1),
       addKeyMetadata(false),
       shouldDedup(index.multikey),
@@ -692,6 +728,8 @@ IndexScanNode::IndexScanNode(IndexEntry indexEntry)
 void IndexScanNode::appendToString(str::stream* ss, int indent) const {
     addIndent(ss, indent);
     *ss << "IXSCAN\n";
+    addIndent(ss, indent + 1);
+    *ss << "ns = " << toStringForLogging(nss) << '\n';
     addIndent(ss, indent + 1);
     *ss << "indexName = " << index.identifier.catalogName << '\n';
     addIndent(ss, indent + 1);
@@ -1218,7 +1256,7 @@ void IndexScanNode::computeProperties() {
 }
 
 std::unique_ptr<QuerySolutionNode> IndexScanNode::clone() const {
-    auto copy = std::make_unique<IndexScanNode>(this->index);
+    auto copy = std::make_unique<IndexScanNode>(this->nss, this->index);
     cloneBaseData(copy.get());
 
     copy->direction = this->direction;
@@ -1543,7 +1581,7 @@ void GeoNear2DNode::appendToString(str::stream* ss, int indent) const {
 }
 
 std::unique_ptr<QuerySolutionNode> GeoNear2DNode::clone() const {
-    auto copy = std::make_unique<GeoNear2DNode>(this->index);
+    auto copy = std::make_unique<GeoNear2DNode>(this->nss, this->index);
     cloneBaseData(copy.get());
 
     copy->nq = this->nq;
@@ -1576,7 +1614,7 @@ void GeoNear2DSphereNode::appendToString(str::stream* ss, int indent) const {
 }
 
 std::unique_ptr<QuerySolutionNode> GeoNear2DSphereNode::clone() const {
-    auto copy = std::make_unique<GeoNear2DSphereNode>(this->index);
+    auto copy = std::make_unique<GeoNear2DSphereNode>(this->nss, this->index);
     cloneBaseData(copy.get());
 
     copy->nq = this->nq;
@@ -1631,7 +1669,7 @@ void DistinctNode::appendToString(str::stream* ss, int indent) const {
 }
 
 std::unique_ptr<QuerySolutionNode> DistinctNode::clone() const {
-    auto copy = std::make_unique<DistinctNode>(this->index);
+    auto copy = std::make_unique<DistinctNode>(this->nss, this->index);
     cloneBaseData(copy.get());
 
     copy->direction = this->direction;
@@ -1668,7 +1706,7 @@ void CountScanNode::appendToString(str::stream* ss, int indent) const {
 }
 
 std::unique_ptr<QuerySolutionNode> CountScanNode::clone() const {
-    auto copy = std::make_unique<CountScanNode>(this->index);
+    auto copy = std::make_unique<CountScanNode>(this->nss, this->index);
     cloneBaseData(copy.get());
 
     copy->startKey = this->startKey;
@@ -1750,7 +1788,7 @@ void TextMatchNode::appendToString(str::stream* ss, int indent) const {
 }
 
 std::unique_ptr<QuerySolutionNode> TextMatchNode::clone() const {
-    auto copy = std::make_unique<TextMatchNode>(index, ftsQuery->clone(), wantTextScore);
+    auto copy = std::make_unique<TextMatchNode>(nss, index, ftsQuery->clone(), wantTextScore);
     cloneBaseData(copy.get());
     copy->indexPrefix = indexPrefix;
     return copy;
@@ -1927,7 +1965,7 @@ void SentinelNode::appendToString(str::stream* ss, int indent) const {
 
 std::unique_ptr<QuerySolutionNode> SearchNode::clone() const {
     return std::make_unique<SearchNode>(
-        isSearchMeta, searchQuery, limit, sortSpec, remoteCursorId, remoteCursorVars);
+        nss, isSearchMeta, searchQuery, limit, sortSpec, remoteCursorId, remoteCursorVars);
 }
 
 void SearchNode::appendToString(str::stream* ss, int indent) const {

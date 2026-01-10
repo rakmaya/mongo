@@ -721,6 +721,7 @@ jsTest.log("Change shard key with retryable write - findAndModify.");
     // Insert document to be updated.
     assert.commandWorked(retrySessionDB[collName].insert({skey: -10}));
 
+    // TODO SERVER-114994 findAndModify support in UWE.
     // Retryable write findAndModify that would change the shard key. Uses a txn internally. Throws
     // on error.
     retrySessionDB[collName].findAndModify({query: {skey: -10}, update: {$set: {skey: 10}}});

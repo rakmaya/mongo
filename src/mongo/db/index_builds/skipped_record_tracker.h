@@ -29,31 +29,24 @@
 
 #pragma once
 
-#include <boost/container/small_vector.hpp>
-// IWYU pragma: no_include "boost/intrusive/detail/iterator.hpp"
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/db/index/multikey_paths.h"
-#include "mongo/db/local_catalog/index_catalog_entry.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/record_id.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog_entry.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/temporary_record_store.h"
 #include "mongo/platform/atomic_word.h"
+#include "mongo/util/modules.h"
 
 #include <cstdint>
 #include <memory>
 #include <string>
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/type_traits/decay.hpp>
 
 namespace mongo {
-
-class IndexCatalogEntry;
-
 /**
  * Records keys that have violated index key constraints. The keys are backed by a temporary table
  * that is created and destroyed by this tracker.

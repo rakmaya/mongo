@@ -30,12 +30,8 @@
 #include "mongo/db/repl/oplog.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/client.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/create_collection.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
 #include "mongo/db/repl/member_state.h"
 #include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/repl/oplog_entry_gen.h"
@@ -45,6 +41,10 @@
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
 #include "mongo/db/service_context_d_test_fixture.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/create_collection.h"
+#include "mongo/db/shard_role/shard_role.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/unittest/barrier.h"
@@ -57,13 +57,10 @@
 #include <iterator>
 #include <map>
 #include <memory>
-#include <mutex>
 #include <ostream>
-#include <type_traits>
 #include <utility>
 #include <vector>
 
-#include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
 #include <fmt/format.h>
 
@@ -415,7 +412,7 @@ TEST_F(CreateIndexForApplyOpsTest, GeneratesNewIdentIfNone) {
     auto index =
         collection.getCollectionPtr()->getIndexCatalog()->findIndexByName(opCtx.get(), "a_1");
     ASSERT(index);
-    ASSERT(index->getEntry()->getIdent().starts_with("index-"));
+    ASSERT(index->getIdent().starts_with("index-"));
 }
 
 TEST_F(CreateIndexForApplyOpsTest, UsesIdentIfSpecified) {
@@ -441,7 +438,7 @@ TEST_F(CreateIndexForApplyOpsTest, UsesIdentIfSpecified) {
     ASSERT(catalog->findIndexByIdent(opCtx.get(), ident));
     auto index = catalog->findIndexByName(opCtx.get(), "a_1");
     ASSERT(index);
-    ASSERT_EQ(index->getEntry()->getIdent(), ident);
+    ASSERT_EQ(index->getIdent(), ident);
 }
 
 TEST_F(CreateIndexForApplyOpsTest, MetadataValidation) {

@@ -49,10 +49,13 @@ namespace mongo {
 using boost::intrusive_ptr;
 using std::list;
 
-REGISTER_DOCUMENT_SOURCE(shardedDataDistribution,
-                         DocumentSourceShardedDataDistribution::LiteParsed::parse,
-                         DocumentSourceShardedDataDistribution::createFromBson,
-                         AllowedWithApiStrict::kAlways);
+REGISTER_LITE_PARSED_DOCUMENT_SOURCE(shardedDataDistribution,
+                                     DocumentSourceShardedDataDistribution::LiteParsed::parse,
+                                     AllowedWithApiStrict::kAlways);
+
+REGISTER_DOCUMENT_SOURCE_CONTAINER_WITH_STAGE_PARAMS_DEFAULT(shardedDataDistribution,
+                                                             DocumentSourceShardedDataDistribution,
+                                                             ShardedDataDistributionStageParams);
 
 list<intrusive_ptr<DocumentSource>> DocumentSourceShardedDataDistribution::createFromBson(
     BSONElement elem, const intrusive_ptr<ExpressionContext>& expCtx) {

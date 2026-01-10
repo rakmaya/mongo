@@ -29,19 +29,10 @@
 
 #pragma once
 
-#include <vector>
-
-namespace mongo {
-
-class IndexBuildEntry;
-class CollectionPtr;
-class CommitQuorumOptions;
-class OperationContext;
-class Status;
-template <typename T>
-class StatusWith;
-class UUID;
-struct HostAndPort;
+#include "mongo/db/index_builds/index_build_entry_gen.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/util/modules.h"
 
 /**
  * Format of IndexBuildEntry:
@@ -58,7 +49,7 @@ struct HostAndPort;
  *	}
  */
 
-namespace indexbuildentryhelpers {
+namespace mongo::indexbuildentryhelpers {
 
 /**
  * Creates the "config.system.indexBuilds" collection if it does not already exist.
@@ -68,7 +59,7 @@ namespace indexbuildentryhelpers {
  * The collection should exist before calling any other helper functions to prevent them from
  * failing.
  */
-void ensureIndexBuildEntriesNamespaceExists(OperationContext* opCtx);
+MONGO_MOD_PUBLIC void ensureIndexBuildEntriesNamespaceExists(OperationContext* opCtx);
 
 /**
  * Persist the host and port information about the replica set members that have voted to commit an
@@ -144,5 +135,4 @@ Status setCommitQuorum_forTest(OperationContext* opCtx,
                                UUID indexBuildUUID,
                                CommitQuorumOptions commitQuorumOptions);
 
-}  // namespace indexbuildentryhelpers
-}  // namespace mongo
+}  // namespace mongo::indexbuildentryhelpers

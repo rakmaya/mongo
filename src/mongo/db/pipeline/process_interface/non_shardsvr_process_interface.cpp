@@ -38,19 +38,6 @@
 #include "mongo/db/exec/agg/pipeline_builder.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/index_builds/index_builds_coordinator.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/create_collection.h"
-#include "mongo/db/local_catalog/database.h"
-#include "mongo/db/local_catalog/ddl/list_databases_gen.h"
-#include "mongo/db/local_catalog/drop_collection.h"
-#include "mongo/db/local_catalog/index_catalog.h"
-#include "mongo/db/local_catalog/list_indexes.h"
-#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
-#include "mongo/db/local_catalog/lock_manager/exception_util.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/rename_collection.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/pipeline/document_source_cursor.h"
 #include "mongo/db/pipeline/pipeline_factory.h"
@@ -59,6 +46,19 @@
 #include "mongo/db/query/write_ops/write_ops.h"
 #include "mongo/db/query/write_ops/write_ops_exec.h"
 #include "mongo/db/repl/speculative_majority_read_info.h"
+#include "mongo/db/shard_role/ddl/list_databases_gen.h"
+#include "mongo/db/shard_role/lock_manager/d_concurrency.h"
+#include "mongo/db/shard_role/lock_manager/exception_util.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/create_collection.h"
+#include "mongo/db/shard_role/shard_catalog/database.h"
+#include "mongo/db/shard_role/shard_catalog/drop_collection.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/list_indexes.h"
+#include "mongo/db/shard_role/shard_catalog/rename_collection.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/timeseries/timeseries_request_util.h"
@@ -78,16 +78,14 @@ NonShardServerProcessInterface::finalizeAndMaybePreparePipelineForExecution(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     std::unique_ptr<Pipeline> pipeline,
     bool attachCursorAfterOptimizing,
-    std::function<void(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                       Pipeline* pipeline,
-                       CollectionMetadata collData)> finalizePipeline,
+    std::function<void(Pipeline* pipeline)> optimizePipeline,
     ShardTargetingPolicy shardTargetingPolicy,
     boost::optional<BSONObj> readConcern,
     bool shouldUseCollectionDefaultCollator) {
     return finalizeAndAttachCursorToPipelineForLocalRead(expCtx,
                                                          std::move(pipeline),
                                                          attachCursorAfterOptimizing,
-                                                         finalizePipeline,
+                                                         optimizePipeline,
                                                          shouldUseCollectionDefaultCollator);
 }
 
@@ -199,7 +197,7 @@ boost::optional<Document> NonShardServerProcessInterface::lookupSingleDocument(
     return lookedUpDocument;
 }
 
-Status NonShardServerProcessInterface::insert(
+MongoProcessInterface::InsertResult NonShardServerProcessInterface::insert(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     const NamespaceString& ns,
     std::unique_ptr<write_ops::InsertCommandRequest> insertCommand,
@@ -208,37 +206,34 @@ Status NonShardServerProcessInterface::insert(
     auto writeResults =
         write_ops_exec::performInserts(expCtx->getOperationContext(), *insertCommand);
 
-    // Need to check each result in the batch since the writes are unordered.
-    for (const auto& result : writeResults.results) {
-        if (result.getStatus() != Status::OK()) {
-            return result.getStatus();
+    InsertResult results;
+    results.reserve(writeResults.results.size());
+    for (size_t i = 0; i < writeResults.results.size(); ++i) {
+        Status status = writeResults.results[i].getStatus();
+        if (!status.isOK()) {
+            results.emplace_back(static_cast<int32_t>(i), std::move(status));
         }
     }
-    return Status::OK();
+    return results;
 }
 
-Status NonShardServerProcessInterface::insertTimeseries(
+MongoProcessInterface::InsertResult NonShardServerProcessInterface::insertTimeseries(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     const NamespaceString& ns,
     std::unique_ptr<write_ops::InsertCommandRequest> insertCommand,
     const WriteConcernOptions& wc,
     boost::optional<OID> targetEpoch) {
-    try {
-        auto [preConditions, _] =
-            timeseries::getCollectionPreConditionsAndIsTimeseriesLogicalRequest(
-                expCtx->getOperationContext(),
-                ns,
-                *insertCommand,
-                insertCommand->getCollectionUUID());
-        auto insertReply = timeseries::write_ops::performTimeseriesWrites(
-            expCtx->getOperationContext(), *insertCommand, preConditions);
+    auto [preConditions, _] = timeseries::getCollectionPreConditionsAndIsTimeseriesLogicalRequest(
+        expCtx->getOperationContext(), ns, *insertCommand, insertCommand->getCollectionUUID());
+    auto insertReply = timeseries::write_ops::performTimeseriesWrites(
+        expCtx->getOperationContext(), *insertCommand, preConditions);
 
-        checkWriteErrors(insertReply.getWriteCommandReplyBase());
-    } catch (DBException& ex) {
-        ex.addContext(str::stream() << "time-series insert failed: " << ns.toStringForErrorMsg());
-        throw;
+    InsertResult result;
+    if (insertReply.getWriteErrors().has_value()) {
+        result.assign(insertReply.getWriteErrors()->begin(), insertReply.getWriteErrors()->end());
+        uassert(10903400, "Write errors must not be empty", !result.empty());
     }
-    return Status::OK();
+    return result;
 }
 
 StatusWith<MongoProcessInterface::UpdateResult> NonShardServerProcessInterface::update(
@@ -375,8 +370,10 @@ void NonShardServerProcessInterface::dropTempCollection(OperationContext* opCtx,
     dropCollection(opCtx, nss);
 }
 
-BSONObj NonShardServerProcessInterface::preparePipelineAndExplain(
-    std::unique_ptr<Pipeline> pipeline, ExplainOptions::Verbosity verbosity) {
+BSONObj NonShardServerProcessInterface::finalizePipelineAndExplain(
+    std::unique_ptr<Pipeline> pipeline,
+    ExplainOptions::Verbosity verbosity,
+    std::function<void(Pipeline* pipeline)> optimizePipeline) {
     std::vector<Value> pipelineVec;
     auto firstStage = pipeline->peekFront();
     auto opts = SerializationOptions{.verbosity = verbosity};
@@ -391,7 +388,9 @@ BSONObj NonShardServerProcessInterface::preparePipelineAndExplain(
             pipelineVec = pipeline->writeExplainOps(opts);
         }
     } else {
-        auto pipelineWithCursor = attachCursorSourceToPipelineForLocalRead(std::move(pipeline));
+        const boost::intrusive_ptr<ExpressionContext>& pipelineCtx = pipeline->getContext();
+        auto pipelineWithCursor = finalizeAndAttachCursorToPipelineForLocalRead(
+            pipelineCtx, std::move(pipeline), true, optimizePipeline);
         // If we need execution stats, this runs the plan in order to gather the stats.
         if (verbosity >= ExplainOptions::Verbosity::kExecStats) {
             auto execPipelineWithCursor = exec::agg::buildPipeline(pipelineWithCursor->freeze());

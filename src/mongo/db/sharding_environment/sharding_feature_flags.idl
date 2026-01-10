@@ -30,6 +30,7 @@
 
 global:
     cpp_namespace: "mongo"
+    mod_visibility: needs_replacement
 
 feature_flags:
     featureFlagConcurrencyInChunkMigration:
@@ -60,7 +61,7 @@ feature_flags:
         default: true
         version: 8.0
         fcv_gated: true
-        fcv_context_unaware: true
+        check_against_fcv: legacy_fcv_snapshot_only
     # TODO (SERVER-81037): enable this feature flag once it's possible to detect prepare conflicts on the catalog
     featureFlagCreateCollectionInPreparedTransactions:
         description: "Feature flag protecting the codepath allowing to create collections in prepared transactions "
@@ -74,7 +75,7 @@ feature_flags:
         default: true
         version: 8.0
         fcv_gated: true
-        fcv_context_unaware: true
+        check_against_fcv: legacy_fcv_snapshot_only
     # TODO (SERVER-77915): Remove once 8.0 becomes last LTS.
     featureFlag80CollectionCreationPath:
         description:
@@ -85,14 +86,7 @@ feature_flags:
         default: true
         version: 8.0
         fcv_gated: true
-        fcv_context_unaware: true
-    featureFlagReplicaSetEndpoint:
-        description:
-            When enabled, allows users to connect to a single-shard cluster with no dedicated config
-            server using a replica set connection string.
-        cpp_varname: feature_flags::gFeatureFlagReplicaSetEndpoint
-        default: false
-        fcv_gated: true
+        check_against_fcv: legacy_fcv_snapshot_only
     featureFlagCreateDatabaseDDLCoordinator:
         description: >
             Feature flag for enabling the sharding DDL coordinator for database creation.
@@ -141,7 +135,8 @@ feature_flags:
             "Feature flag to enable the authoritative model to read database metadata from
             stored shard-local information"
         cpp_varname: feature_flags::gShardAuthoritativeDbMetadataCRUD
-        default: false
+        default: true
+        version: 8.3
         fcv_gated: true
     # TODO (SERVER-98118): remove once 9.0 becomes last LTS.
     featureFlagShardAuthoritativeDbMetadataDDL:
@@ -155,7 +150,8 @@ feature_flags:
             If this feature flag is disabled by a FCV downgrade, all DDL coordinators checking
             this flag are drained when finalizing the downgrade.
         cpp_varname: feature_flags::gShardAuthoritativeDbMetadataDDL
-        default: false
+        default: true
+        version: 8.3
         fcv_gated: true
         enable_on_transitional_fcv_UNSAFE: true
     # TODO (SERVER-89169): remove once 9.0 becomes last LTS.
@@ -237,5 +233,21 @@ feature_flags:
     featureFlagPreventDirectShardDDLsDuringPromotion:
         description: "Enable the prevention of direct shard connection DDL operations during addShard"
         cpp_varname: feature_flags::gFeatureFlagPreventDirectShardDDLsDuringPromotion
-        default: false
+        default: true
+        version: 8.3
+        fcv_gated: true
+    # TODO (SERVER-115179): remove feature once 9.0 becomes LTS.
+    featureFlagAddTransactionRuntimeContextAsAGenericArgument:
+        description:
+            "Feature flag to notify that the placementConflictTime is being kept in TransactionParticipant
+            instead of being a ShardVersion/DatabaseVersion field."
+        cpp_varname: feature_flags::gAddTransactionRuntimeContextAsAGenericArgument
+        default: true
+        version: 8.3
+        fcv_gated: true
+    featureFlagTransitionToCatalogShard:
+        description: "Feature flag for transitioning a config server in and out of config shard mode"
+        cpp_varname: gFeatureFlagTransitionToCatalogShard
+        default: true
+        version: 8.0
         fcv_gated: true

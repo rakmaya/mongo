@@ -41,10 +41,14 @@ namespace mongo {
 constexpr StringData DocumentSourceChangeStreamAddPostImage::kStageName;
 constexpr StringData DocumentSourceChangeStreamAddPostImage::kFullDocumentFieldName;
 
-REGISTER_INTERNAL_DOCUMENT_SOURCE(_internalChangeStreamAddPostImage,
-                                  LiteParsedDocumentSourceChangeStreamInternal::parse,
-                                  DocumentSourceChangeStreamAddPostImage::createFromBson,
-                                  true);
+
+REGISTER_INTERNAL_LITE_PARSED_DOCUMENT_SOURCE(_internalChangeStreamAddPostImage,
+                                              ChangeStreamAddPostImageLiteParsed::parse);
+
+REGISTER_DOCUMENT_SOURCE_WITH_STAGE_PARAMS_DEFAULT(_internalChangeStreamAddPostImage,
+                                                   DocumentSourceChangeStreamAddPostImage,
+                                                   ChangeStreamAddPostImageStageParams);
+
 ALLOCATE_DOCUMENT_SOURCE_ID(_internalChangeStreamAddPostImage,
                             DocumentSourceChangeStreamAddPostImage::id)
 

@@ -29,33 +29,17 @@
 
 #include "mongo/db/startup_recovery.h"
 
-#include <algorithm>
-#include <memory>
-#include <string>
-#include <utility>
-#include <vector>
-
-#include <absl/container/flat_hash_map.h>
-#include <boost/filesystem/directory.hpp>
-#include <boost/filesystem/operations.hpp>
-#include <boost/filesystem/path.hpp>
-#include <boost/iterator/iterator_facade.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-// IWYU pragma: no_include "boost/system/detail/error_code.hpp"
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/change_stream_pre_image_util.h"
 #include "mongo/db/commands/feature_compatibility_version.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/dbhelpers.h"
+#include "mongo/db/exec/scoped_timer.h"
 #include "mongo/db/feature_compatibility_version_document_gen.h"
 #include "mongo/db/feature_compatibility_version_documentation.h"
 #include "mongo/db/index/index_constants.h"
@@ -64,33 +48,31 @@
 #include "mongo/db/index_builds/multi_index_block.h"
 #include "mongo/db/index_builds/rebuild_indexes.h"
 #include "mongo/db/index_builds/resumable_index_builds_gen.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/catalog_repair.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_catalog.h"
-#include "mongo/db/local_catalog/collection_options.h"
-#include "mongo/db/local_catalog/create_collection.h"
-#include "mongo/db/local_catalog/database.h"
-#include "mongo/db/local_catalog/database_holder.h"
-#include "mongo/db/local_catalog/drop_collection.h"
-#include "mongo/db/local_catalog/index_catalog.h"
-#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
-#include "mongo/db/local_catalog/lock_manager/exception_util.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/mongod_options_storage_gen.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/record_id_helpers.h"
 #include "mongo/db/repair.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/repl/repl_set_member_in_standalone_mode.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/rss/replicated_storage_service.h"
-#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/lock_manager/d_concurrency.h"
+#include "mongo/db/shard_role/lock_manager/exception_util.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_repair.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/collection_options.h"
+#include "mongo/db/shard_role/shard_catalog/create_collection.h"
+#include "mongo/db/shard_role/shard_catalog/database.h"
+#include "mongo/db/shard_role/shard_catalog/database_holder.h"
+#include "mongo/db/shard_role/shard_catalog/drop_collection.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog.h"
+#include "mongo/db/shard_role/shard_role.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/control/journal_flusher.h"
 #include "mongo/db/storage/kv/kv_engine.h"
 #include "mongo/db/storage/storage_options.h"
@@ -99,7 +81,6 @@
 #include "mongo/db/timeseries/timeseries_extended_range.h"
 #include "mongo/db/validate/collection_validation.h"
 #include "mongo/db/validate/validate_results.h"
-#include "mongo/db/versioning_protocol/database_version.h"
 #include "mongo/db/versioning_protocol/shard_version.h"
 #include "mongo/logv2/log.h"
 #include "mongo/platform/compiler.h"
@@ -111,6 +92,17 @@
 #include "mongo/util/str.h"
 #include "mongo/util/string_map.h"
 #include "mongo/util/version/releases.h"
+
+#include <algorithm>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/filesystem/directory.hpp>
+#include <boost/filesystem/operations.hpp>
+#include <boost/filesystem/path.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
@@ -163,7 +155,7 @@ Status restoreMissingFeatureCompatibilityVersionDocument(
     const auto fcvColl = acquireCollection(
         opCtx,
         CollectionAcquisitionRequest(fcvNss,
-                                     PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                     PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
                                      repl::ReadConcernArgs::get(opCtx),
                                      AcquisitionPrerequisites::kWrite),
         MODE_IX);
@@ -190,7 +182,7 @@ Status restoreMissingFeatureCompatibilityVersionDocument(
 
         writeConflictRetry(opCtx, "insertFCVDocument", fcvNss, [&] {
             WriteUnitOfWork wunit(opCtx);
-            uassertStatusOK(Helpers::insert(opCtx, fcvColl, fcvDoc.toBSON()));
+            uassertStatusOK(Helpers::insert(opCtx, fcvColl.getCollectionPtr(), fcvDoc.toBSON()));
             wunit.commit();
         });
     }
@@ -377,7 +369,7 @@ void clearTempFilesExceptForResumableBuilds(const std::vector<ResumeIndexInfo>& 
     for (const auto& resumeInfo : indexBuildsToResume) {
         const auto& indexes = resumeInfo.getIndexes();
         for (const auto& index : indexes) {
-            boost::optional<StringData> indexFilename = index.getFileName();
+            boost::optional<StringData> indexFilename = index.getStorageIdentifier();
             if (indexFilename) {
                 resumableIndexFiles.insert(std::string{*indexFilename});
             }
@@ -467,7 +459,7 @@ void cleanupPreImagesCollectionAfterUncleanShutdown(OperationContext* opCtx) {
                 acquireCollection(opCtx,
                                   CollectionAcquisitionRequest(
                                       NamespaceString::kChangeStreamPreImagesNamespace,
-                                      PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                      PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
                                       repl::ReadConcernArgs::get(opCtx),
                                       AcquisitionPrerequisites::kUnreplicatedWrite),
                                   MODE_IX);
@@ -798,9 +790,10 @@ void offlineValidate(OperationContext* opCtx) {
 void startupRecovery(OperationContext* opCtx,
                      StorageEngine* storageEngine,
                      StorageEngine::LastShutdownState lastShutdownState,
-                     BSONObjBuilder* startupTimeElapsedBuilder = nullptr) {
+                     BSONObjBuilder* startupTimeElapsedBuilder = nullptr,
+                     bool afterDataReady = false) {
     auto& rss = rss::ReplicatedStorageService::get(opCtx);
-    if (rss.getPersistenceProvider().shouldDelayDataAccessDuringStartup()) {
+    if (rss.getPersistenceProvider().shouldDelayDataAccessDuringStartup() && !afterDataReady) {
         LOGV2(10985327,
               "Skip startupRecovery; it will be handled later when WT loads the "
               "checkpoint");
@@ -884,7 +877,11 @@ void repairAndRecoverDatabases(OperationContext* opCtx,
     const bool usingReplication =
         repl::ReplicationCoordinator::get(opCtx)->getSettings().isReplSet();
     if (isWriteableStorageEngine() && !usingReplication) {
-        FeatureCompatibilityVersion::setIfCleanStartup(opCtx, repl::StorageInterface::get(opCtx));
+        const auto minumumRequiredFCV = rss::ReplicatedStorageService::get(opCtx)
+                                            .getPersistenceProvider()
+                                            .getMinimumRequiredFCV();
+        FeatureCompatibilityVersion::setIfCleanStartup(
+            opCtx, repl::StorageInterface::get(opCtx), minumumRequiredFCV);
     }
 
     if (storageGlobalParams.repair) {
@@ -901,7 +898,8 @@ void repairAndRecoverDatabases(OperationContext* opCtx,
  * In no case will it create an FCV document nor run repair or read-only recovery.
  */
 void runStartupRecovery(OperationContext* opCtx,
-                        StorageEngine::LastShutdownState lastShutdownState) {
+                        StorageEngine::LastShutdownState lastShutdownState,
+                        bool afterDataReady) {
     auto const storageEngine = opCtx->getServiceContext()->getStorageEngine();
     Lock::GlobalWrite lk(opCtx);
 
@@ -910,7 +908,7 @@ void runStartupRecovery(OperationContext* opCtx,
     const bool usingReplication =
         repl::ReplicationCoordinator::get(opCtx)->getSettings().isReplSet();
     invariant(usingReplication);
-    startupRecovery(opCtx, storageEngine, lastShutdownState);
+    startupRecovery(opCtx, storageEngine, lastShutdownState, nullptr, afterDataReady);
 }
 
 void recoverChangeStreamCollections(OperationContext* opCtx,

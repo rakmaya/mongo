@@ -32,7 +32,6 @@
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/json.h"
@@ -51,32 +50,14 @@
 #include "mongo/db/index/multikey_paths.h"
 #include "mongo/db/index_builds/index_build_entry_helpers.h"
 #include "mongo/db/index_builds/index_build_interceptor.h"
+#include "mongo/db/index_builds/index_build_test_helpers.h"
 #include "mongo/db/index_builds/multi_index_block.h"
 #include "mongo/db/index_builds/skipped_record_tracker.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_catalog.h"
-#include "mongo/db/local_catalog/create_collection.h"
-#include "mongo/db/local_catalog/database.h"
-#include "mongo/db/local_catalog/document_validation.h"
-#include "mongo/db/local_catalog/drop_database.h"
-#include "mongo/db/local_catalog/drop_indexes.h"
-#include "mongo/db/local_catalog/durable_catalog.h"
-#include "mongo/db/local_catalog/durable_catalog_entry_metadata.h"
-#include "mongo/db/local_catalog/index_catalog.h"
-#include "mongo/db/local_catalog/index_catalog_entry.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
-#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
-#include "mongo/db/local_catalog/lock_manager/exception_util.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/logical_time.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/op_observer/op_observer_impl.h"
 #include "mongo/db/op_observer/op_observer_registry.h"
-#include "mongo/db/op_observer/op_observer_util.h"
 #include "mongo/db/op_observer/operation_logger_impl.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/wildcard_multikey_paths.h"
@@ -105,7 +86,6 @@
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/repl/storage_interface_impl.h"
 #include "mongo/db/repl/timestamp_block.h"
-#include "mongo/db/rss/replicated_storage_service.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/service_context_d_test_fixture.h"
 #include "mongo/db/session/logical_session_id.h"
@@ -113,6 +93,24 @@
 #include "mongo/db/session/session_catalog.h"
 #include "mongo/db/session/session_catalog_mongod.h"
 #include "mongo/db/session/session_txn_record_gen.h"
+#include "mongo/db/shard_role/lock_manager/d_concurrency.h"
+#include "mongo/db/shard_role/lock_manager/exception_util.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/create_collection.h"
+#include "mongo/db/shard_role/shard_catalog/database.h"
+#include "mongo/db/shard_role/shard_catalog/document_validation.h"
+#include "mongo/db/shard_role/shard_catalog/drop_database.h"
+#include "mongo/db/shard_role/shard_catalog/drop_indexes.h"
+#include "mongo/db/shard_role/shard_catalog/durable_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/durable_catalog_entry_metadata.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog_entry.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
+#include "mongo/db/shard_role/shard_role.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/damage_vector.h"
 #include "mongo/db/storage/mdb_catalog.h"
 #include "mongo/db/storage/record_data.h"
@@ -123,13 +121,13 @@
 #include "mongo/db/storage/storage_engine.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/tenant_id.h"
+#include "mongo/db/topology/vector_clock/vector_clock.h"
+#include "mongo/db/topology/vector_clock/vector_clock_mutable.h"
 #include "mongo/db/transaction/session_catalog_mongod_transaction_interface_impl.h"
 #include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/db/transaction/transaction_participant_gen.h"
 #include "mongo/db/update/document_diff_serialization.h"
 #include "mongo/db/update/update_oplog_entry_serialization.h"
-#include "mongo/db/vector_clock/vector_clock.h"
-#include "mongo/db/vector_clock/vector_clock_mutable.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
@@ -155,13 +153,9 @@
 #include <set>
 #include <string>
 #include <tuple>
-#include <type_traits>
 #include <utility>
 #include <vector>
 
-#include <boost/container/flat_set.hpp>
-#include <boost/container/small_vector.hpp>
-#include <boost/container/vector.hpp>
 #include <boost/optional.hpp>
 #include <fmt/format.h>
 
@@ -169,92 +163,11 @@
 
 namespace mongo {
 namespace {
-
-Status createIndexFromSpec(OperationContext* opCtx,
-                           VectorClockMutable* clock,
-                           StringData ns,
-                           const BSONObj& spec) {
-    NamespaceString nss = NamespaceString::createNamespaceString_forTest(ns);
-
-    // Make sure we haven't already locked this namespace. An AutoGetCollection already instantiated
-    // on this namespace would have a dangling Collection pointer after this function has run.
-    invariant(!shard_role_details::getLocker(opCtx)->isCollectionLockedForMode(nss, MODE_IX));
-
-    AutoGetDb autoDb(opCtx, nss.dbName(), MODE_X);
-    {
-        WriteUnitOfWork wunit(opCtx);
-        CollectionWriter writer{opCtx, nss};
-        auto coll = writer.getWritableCollection(opCtx);
-        if (!coll) {
-            auto db = autoDb.ensureDbExists(opCtx);
-            invariant(db);
-            coll = db->createCollection(opCtx, NamespaceString::createNamespaceString_forTest(ns));
-        }
-        invariant(coll);
-        wunit.commit();
-    }
-
-    auto storageEngine = opCtx->getServiceContext()->getStorageEngine();
-    auto indexBuildInfo =
-        IndexBuildInfo(spec, *storageEngine, nss.dbName(), VersionContext::getDecoration(opCtx));
-    MultiIndexBlock indexer;
-    CollectionWriter collection(opCtx, nss);
-    ScopeGuard abortOnExit(
-        [&] { indexer.abortIndexBuild(opCtx, collection, MultiIndexBlock::kNoopOnCleanUpFn); });
-    Status status =
-        indexer
-            .init(
-                opCtx,
-                collection,
-                {indexBuildInfo},
-                [opCtx, clock] {
-                    if (opCtx->writesAreReplicated() &&
-                        shard_role_details::getRecoveryUnit(opCtx)->getCommitTimestamp().isNull()) {
-                        uassertStatusOK(shard_role_details::getRecoveryUnit(opCtx)->setTimestamp(
-                            clock->tickClusterTime(1).asTimestamp()));
-                    }
-                },
-                MultiIndexBlock::InitMode::SteadyState,
-                boost::none,
-                /*generateTableWrites=*/true)
-            .getStatus();
-    if (status == ErrorCodes::IndexAlreadyExists) {
-        return Status::OK();
-    }
-    if (!status.isOK()) {
-        return status;
-    }
-    status = indexer.insertAllDocumentsInCollection(opCtx, nss);
-    if (!status.isOK()) {
-        return status;
-    }
-    status = indexer.retrySkippedRecords(opCtx, collection.get());
-    if (!status.isOK()) {
-        return status;
-    }
-    status = indexer.checkConstraints(opCtx, collection.get());
-    if (!status.isOK()) {
-        return status;
-    }
-    WriteUnitOfWork wunit(opCtx);
-    ASSERT_OK(indexer.commit(opCtx,
-                             collection.getWritableCollection(opCtx),
-                             MultiIndexBlock::kNoopOnCreateEachFn,
-                             MultiIndexBlock::kNoopOnCommitFn));
-    if (opCtx->writesAreReplicated()) {
-        LogicalTime indexTs = clock->tickClusterTime(1);
-        ASSERT_OK(shard_role_details::getRecoveryUnit(opCtx)->setTimestamp(indexTs.asTimestamp()));
-    }
-    wunit.commit();
-    abortOnExit.dismiss();
-    return Status::OK();
-}
-
 CollectionAcquisition acquireCollForRead(OperationContext* opCtx, const NamespaceString& nss) {
     return acquireCollection(
         opCtx,
         CollectionAcquisitionRequest(nss,
-                                     PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                     PlacementConcern(boost::none, ShardVersion::UNTRACKED()),
                                      repl::ReadConcernArgs::get(opCtx),
                                      AcquisitionPrerequisites::kRead),
         MODE_IS);
@@ -426,7 +339,8 @@ public:
         }
     }
 
-    void create(NamespaceString nss) const {
+    UUID create(NamespaceString nss) const {
+        const auto uuid = UUID::gen();
         ::mongo::writeConflictRetry(_opCtx, "deleteAll", nss, [&] {
             shard_role_details::getRecoveryUnit(_opCtx)->setTimestampReadSource(
                 RecoveryUnit::ReadSource::kNoTimestamp);
@@ -451,9 +365,10 @@ public:
                 ASSERT_OK(
                     shard_role_details::getRecoveryUnit(_opCtx)->setTimestamp(Timestamp(1, 1)));
             }
-            invariant(db->createCollection(_opCtx, nss));
+            invariant(db->createCollection(_opCtx, nss, {.uuid = uuid}));
             wunit.commit();
         });
+        return uuid;
     }
 
     void insertDocument(const CollectionPtr& coll, const InsertStatement& stmt) {
@@ -1546,10 +1461,7 @@ TEST_F(StorageTimestampTest, SecondarySetWildcardIndexMultikeyOnInsert) {
     uassertStatusOK(oplogApplier.applyOplogBatch(_opCtx, ops));
 
     const auto collAcq = acquireCollForRead(_opCtx, nss);
-    auto wildcardIndexDescriptor =
-        collAcq.getCollectionPtr()->getIndexCatalog()->findIndexByName(_opCtx, indexName);
-    const IndexCatalogEntry* entry =
-        collAcq.getCollectionPtr()->getIndexCatalog()->getEntry(wildcardIndexDescriptor);
+    auto entry = collAcq.getCollectionPtr()->getIndexCatalog()->findIndexByName(_opCtx, indexName);
     {
         // Verify that, even though op2 was applied first, the multikey state is observed in all
         // WiredTiger transactions that can contain the data written by op1.
@@ -1642,10 +1554,7 @@ TEST_F(StorageTimestampTest, SecondarySetWildcardIndexMultikeyOnUpdate) {
     uassertStatusOK(oplogApplier.applyOplogBatch(_opCtx, ops));
 
     const auto collAcq = acquireCollForRead(_opCtx, nss);
-    auto wildcardIndexDescriptor =
-        collAcq.getCollectionPtr()->getIndexCatalog()->findIndexByName(_opCtx, indexName);
-    const IndexCatalogEntry* entry =
-        collAcq.getCollectionPtr()->getIndexCatalog()->getEntry(wildcardIndexDescriptor);
+    auto entry = collAcq.getCollectionPtr()->getIndexCatalog()->findIndexByName(_opCtx, indexName);
     {
         // Verify that, even though op2 was applied first, the multikey state is observed in all
         // WiredTiger transactions that can contain the data written by op1.
@@ -1899,7 +1808,7 @@ TEST_F(StorageTimestampTest, SetMinValidAppliedThrough) {
  */
 class KVDropDatabase : public StorageTimestampTest {
 private:
-    void _doTest() override {
+    void TestBody() override {
         // Not actually called.
     }
 
@@ -2021,12 +1930,7 @@ TEST(SimpleStorageTimestampTest, KVDropDatabasePrimary) {
  * entry is processed. Secondaries will look at the logical clock when completing the index
  * build. This is safe so long as completion is not racing with secondary oplog application.
  */
-class TimestampIndexBuilds : public StorageTimestampTest {
-private:
-    void _doTest() override {
-        // Not actually called.
-    }
-
+class TimestampIndexBuilds : public StorageTimestampTest, public testing::WithParamInterface<bool> {
 public:
     void run(bool simulatePrimary) {
         const bool simulateSecondary = !simulatePrimary;
@@ -2164,17 +2068,10 @@ public:
         }
     }
 };
+INSTANTIATE_TEST_SUITE_P(, TimestampIndexBuilds, testing::Values(false, true));
 
-TEST(SimpleStorageTimestampTest, TimestampIndexBuilds) {
-    {
-        TimestampIndexBuilds test;
-        test.run(false);
-    }
-    // Reconstruct the datafiles from scratch across tests.
-    {
-        TimestampIndexBuilds test;
-        test.run(true);
-    }
+TEST_P(TimestampIndexBuilds, Build) {
+    run(GetParam());
 }
 
 TEST_F(StorageTimestampTest, TimestampMultiIndexBuilds) {
@@ -2192,7 +2089,7 @@ TEST_F(StorageTimestampTest, TimestampMultiIndexBuilds) {
 
     NamespaceString nss =
         NamespaceString::createNamespaceString_forTest("unittests.timestampMultiIndexBuilds");
-    create(nss);
+    auto collUUID = create(nss);
 
     std::vector<std::string> origIdents;
     {
@@ -2230,11 +2127,25 @@ TEST_F(StorageTimestampTest, TimestampMultiIndexBuilds) {
                                << "a_1");
         auto index2 = BSON("v" << kIndexVersion << "key" << BSON("b" << 1) << "name"
                                << "b_1");
-        auto createIndexesCmdObj =
-            BSON("createIndexes" << nss.coll() << "indexes" << BSON_ARRAY(index1 << index2)
-                                 << "commitQuorum" << 0);
-        BSONObj result;
-        ASSERT(client.runCommand(nss.dbName(), createIndexesCmdObj, result)) << result;
+        auto indexBuildInfo1 = IndexBuildInfo(index1, std::string{"index-1"});
+        indexBuildInfo1.setInternalIdents(*storageEngine, VersionContext::getDecoration(_opCtx));
+        auto indexBuildInfo2 = IndexBuildInfo(index2, std::string{"index-2"});
+        indexBuildInfo2.setInternalIdents(*storageEngine, VersionContext::getDecoration(_opCtx));
+
+        auto buildUUID = UUID::gen();
+        const IndexBuildsCoordinator::IndexBuildOptions options = {.commitQuorum =
+                                                                       CommitQuorumOptions(1)};
+        auto fut = unittest::assertGet(
+            IndexBuildsCoordinator::get(_opCtx)->startIndexBuild(_opCtx,
+                                                                 nss.dbName(),
+                                                                 collUUID,
+                                                                 {indexBuildInfo1, indexBuildInfo2},
+                                                                 buildUUID,
+                                                                 IndexBuildProtocol::kTwoPhase,
+                                                                 options));
+        ASSERT_OK(IndexBuildsCoordinator::get(_opCtx)->voteCommitIndexBuild(
+            _opCtx, buildUUID, repl::ReplicationCoordinator::get(_opCtx)->getMyHostAndPort()));
+        unittest::assertGet(fut.getNoThrow());
     }
 
     auto indexCreateInitTs =
@@ -2299,7 +2210,7 @@ TEST_F(StorageTimestampTest, TimestampMultiIndexBuildsDuringRename) {
 
     NamespaceString nss = NamespaceString::createNamespaceString_forTest(
         "unittests.timestampMultiIndexBuildsDuringRename");
-    create(nss);
+    auto collUUID = create(nss);
 
     {
         auto collAcq = acquireCollection(
@@ -2326,24 +2237,29 @@ TEST_F(StorageTimestampTest, TimestampMultiIndexBuildsDuringRename) {
 
     DBDirectClient client(_opCtx);
     {
-        // Disable index build commit quorum as we don't have support of replication subsystem
-        // for voting.
         auto index1 = BSON("v" << kIndexVersion << "key" << BSON("a" << 1) << "name"
                                << "a_1");
         auto index2 = BSON("v" << kIndexVersion << "key" << BSON("b" << 1) << "name"
                                << "b_1");
-        auto createIndexesCmdObj =
-            BSON("createIndexes" << nss.coll() << "indexes" << BSON_ARRAY(index1 << index2)
-                                 << "commitQuorum" << 0);
-        BSONObj result;
-        ASSERT(client.runCommand(nss.dbName(), createIndexesCmdObj, result)) << result;
+        auto indexBuildInfo1 = IndexBuildInfo(index1, std::string{"index-1"});
+        indexBuildInfo1.setInternalIdents(*storageEngine, VersionContext::getDecoration(_opCtx));
+        auto indexBuildInfo2 = IndexBuildInfo(index2, std::string{"index-2"});
+        indexBuildInfo2.setInternalIdents(*storageEngine, VersionContext::getDecoration(_opCtx));
+        auto buildUUID = UUID::gen();
+        const IndexBuildsCoordinator::IndexBuildOptions options = {.commitQuorum =
+                                                                       CommitQuorumOptions(1)};
+        auto fut = unittest::assertGet(
+            IndexBuildsCoordinator::get(_opCtx)->startIndexBuild(_opCtx,
+                                                                 nss.dbName(),
+                                                                 collUUID,
+                                                                 {indexBuildInfo1, indexBuildInfo2},
+                                                                 buildUUID,
+                                                                 IndexBuildProtocol::kTwoPhase,
+                                                                 options));
+        ASSERT_OK(IndexBuildsCoordinator::get(_opCtx)->voteCommitIndexBuild(
+            _opCtx, buildUUID, repl::ReplicationCoordinator::get(_opCtx)->getMyHostAndPort()));
+        unittest::assertGet(fut.getNoThrow());
     }
-
-    auto collAcq = acquireCollection(
-        _opCtx,
-        CollectionAcquisitionRequest::fromOpCtx(_opCtx, nss, AcquisitionPrerequisites::kWrite),
-        MODE_X);
-    ;
 
     NamespaceString renamedNss = NamespaceString::createNamespaceString_forTest(
         "unittestsRename.timestampMultiIndexBuildsDuringRename");
@@ -2422,7 +2338,7 @@ TEST_F(StorageTimestampTest, TimestampAbortIndexBuild) {
 
     NamespaceString nss =
         NamespaceString::createNamespaceString_forTest("unittests.timestampAbortIndexBuild");
-    create(nss);
+    auto collUUID = create(nss);
 
     std::vector<std::string> origIdents;
     {
@@ -2460,19 +2376,26 @@ TEST_F(StorageTimestampTest, TimestampAbortIndexBuild) {
     }
 
     {
-        // Disable index build commit quorum as we don't have support of replication subsystem
-        // for voting.
         auto index1 = BSON("v" << kIndexVersion << "key" << BSON("a" << 1) << "name"
                                << "a_1"
                                << "unique" << true);
-        auto createIndexesCmdObj =
-            BSON("createIndexes" << nss.coll() << "indexes" << BSON_ARRAY(index1) << "commitQuorum"
-                                 << 0);
 
-        DBDirectClient client(_opCtx);
-        BSONObj result;
-        ASSERT_FALSE(client.runCommand(nss.dbName(), createIndexesCmdObj, result));
-        ASSERT_EQUALS(ErrorCodes::DuplicateKey, getStatusFromCommandResult(result));
+        auto indexBuildInfo1 = IndexBuildInfo(index1, std::string{"index-1"});
+        indexBuildInfo1.setInternalIdents(*storageEngine, VersionContext::getDecoration(_opCtx));
+        auto buildUUID = UUID::gen();
+        const IndexBuildsCoordinator::IndexBuildOptions options = {.commitQuorum =
+                                                                       CommitQuorumOptions(1)};
+        auto fut = unittest::assertGet(
+            IndexBuildsCoordinator::get(_opCtx)->startIndexBuild(_opCtx,
+                                                                 nss.dbName(),
+                                                                 collUUID,
+                                                                 {indexBuildInfo1},
+                                                                 buildUUID,
+                                                                 IndexBuildProtocol::kTwoPhase,
+                                                                 options));
+        ASSERT_OK(IndexBuildsCoordinator::get(_opCtx)->voteCommitIndexBuild(
+            _opCtx, buildUUID, repl::ReplicationCoordinator::get(_opCtx)->getMyHostAndPort()));
+        ASSERT_EQUALS(ErrorCodes::DuplicateKey, fut.getNoThrow().getStatus().code());
     }
 
     // Confirm that startIndexBuild and abortIndexBuild oplog entries have been written to the
@@ -2756,10 +2679,10 @@ TEST_F(StorageTimestampTest, IndexBuildsResolveErrorsDuringStateChangeToPrimary)
         }
 
         auto indexCatalog = collection->getIndexCatalog();
-        buildingIndex = indexCatalog->getEntry(indexCatalog->findIndexByName(
+        buildingIndex = indexCatalog->findIndexByName(
             _opCtx,
             "a_1_b_1",
-            IndexCatalog::InclusionPolicy::kReady | IndexCatalog::InclusionPolicy::kUnfinished));
+            IndexCatalog::InclusionPolicy::kReady | IndexCatalog::InclusionPolicy::kUnfinished);
         ASSERT(buildingIndex);
 
         ASSERT_OK(indexer.insertAllDocumentsInCollection(_opCtx, nss));
@@ -2767,9 +2690,7 @@ TEST_F(StorageTimestampTest, IndexBuildsResolveErrorsDuringStateChangeToPrimary)
         ASSERT_TRUE(buildingIndex->indexBuildInterceptor()->areAllWritesApplied(_opCtx));
 
         // There should be one skipped record from the collection scan.
-        ASSERT_FALSE(
-            buildingIndex->indexBuildInterceptor()->getSkippedRecordTracker()->areAllRecordsApplied(
-                _opCtx));
+        ASSERT_TRUE(buildingIndex->indexBuildInterceptor()->hasAnySkippedRecords(_opCtx));
     }
 
     // As a primary, stop ignoring indexing errors.
@@ -2793,16 +2714,12 @@ TEST_F(StorageTimestampTest, IndexBuildsResolveErrorsDuringStateChangeToPrimary)
     }
 
     // There should skipped records from failed collection scans and writes.
-    ASSERT_FALSE(
-        buildingIndex->indexBuildInterceptor()->getSkippedRecordTracker()->areAllRecordsApplied(
-            _opCtx));
+    ASSERT_TRUE(buildingIndex->indexBuildInterceptor()->hasAnySkippedRecords(_opCtx));
     // This fails because the bad record is still invalid.
     auto status = indexer.retrySkippedRecords(_opCtx, collection.get());
     ASSERT_EQ(status.code(), ErrorCodes::CannotIndexParallelArrays);
 
-    ASSERT_FALSE(
-        buildingIndex->indexBuildInterceptor()->getSkippedRecordTracker()->areAllRecordsApplied(
-            _opCtx));
+    ASSERT_TRUE(buildingIndex->indexBuildInterceptor()->hasAnySkippedRecords(_opCtx));
     ASSERT_TRUE(buildingIndex->indexBuildInterceptor()->areAllWritesApplied(_opCtx));
 
     // Update one documents to be valid, and delete the other. These modifications are written
@@ -2811,11 +2728,7 @@ TEST_F(StorageTimestampTest, IndexBuildsResolveErrorsDuringStateChangeToPrimary)
     {
         RecordId badRecord = Helpers::findOne(_opCtx, collectionAcquisition, BSON("_id" << 1));
         WriteUnitOfWork wuow(_opCtx);
-        collection_internal::deleteDocument(_opCtx,
-                                            collectionAcquisition.getCollectionPtr(),
-                                            kUninitializedStmtId,
-                                            badRecord,
-                                            nullptr);
+        Helpers::deleteByRid(_opCtx, collectionAcquisition, badRecord);
         wuow.commit();
     }
 
@@ -2827,9 +2740,7 @@ TEST_F(StorageTimestampTest, IndexBuildsResolveErrorsDuringStateChangeToPrimary)
 
     // This succeeds because the bad documents are now either valid or removed.
     ASSERT_OK(indexer.retrySkippedRecords(_opCtx, collection.get()));
-    ASSERT_TRUE(
-        buildingIndex->indexBuildInterceptor()->getSkippedRecordTracker()->areAllRecordsApplied(
-            _opCtx));
+    ASSERT_FALSE(buildingIndex->indexBuildInterceptor()->hasAnySkippedRecords(_opCtx));
     ASSERT_TRUE(buildingIndex->indexBuildInterceptor()->areAllWritesApplied(_opCtx));
     ASSERT_OK(indexer.checkConstraints(_opCtx, collection.get()));
 
@@ -3134,7 +3045,7 @@ TEST_F(StorageTimestampTest, MultipleTimestampsForMultikeyWrites) {
 
     NamespaceString nss =
         NamespaceString::createNamespaceString_forTest("unittests.timestampVectoredInsertMultikey");
-    create(nss);
+    auto collUUID = create(nss);
 
     {
         auto collAcq = acquireCollection(
@@ -3153,17 +3064,30 @@ TEST_F(StorageTimestampTest, MultipleTimestampsForMultikeyWrites) {
 
     DBDirectClient client(_opCtx);
     {
+        const auto storageEngine = _opCtx->getServiceContext()->getStorageEngine();
         auto index1 = BSON("v" << kIndexVersion << "key" << BSON("a" << 1) << "name"
                                << "a_1");
         auto index2 = BSON("v" << kIndexVersion << "key" << BSON("b" << 1) << "name"
                                << "b_1");
-        // Disable index build commit quorum as we don't have support of replication subsystem for
-        // voting.
-        auto createIndexesCmdObj =
-            BSON("createIndexes" << nss.coll() << "indexes" << BSON_ARRAY(index1 << index2)
-                                 << "commitQuorum" << 0);
-        BSONObj result;
-        ASSERT(client.runCommand(nss.dbName(), createIndexesCmdObj, result)) << result;
+        auto indexBuildInfo1 = IndexBuildInfo(index1, std::string{"index-1"});
+        indexBuildInfo1.setInternalIdents(*storageEngine, VersionContext::getDecoration(_opCtx));
+        auto indexBuildInfo2 = IndexBuildInfo(index2, std::string{"index-2"});
+        indexBuildInfo2.setInternalIdents(*storageEngine, VersionContext::getDecoration(_opCtx));
+
+        auto buildUUID = UUID::gen();
+        const IndexBuildsCoordinator::IndexBuildOptions options = {.commitQuorum =
+                                                                       CommitQuorumOptions(1)};
+        auto fut = unittest::assertGet(
+            IndexBuildsCoordinator::get(_opCtx)->startIndexBuild(_opCtx,
+                                                                 nss.dbName(),
+                                                                 collUUID,
+                                                                 {indexBuildInfo1, indexBuildInfo2},
+                                                                 buildUUID,
+                                                                 IndexBuildProtocol::kTwoPhase,
+                                                                 options));
+        ASSERT_OK(IndexBuildsCoordinator::get(_opCtx)->voteCommitIndexBuild(
+            _opCtx, buildUUID, repl::ReplicationCoordinator::get(_opCtx)->getMyHostAndPort()));
+        unittest::assertGet(fut.getNoThrow());
     }
 
     auto collAcq = acquireCollection(
@@ -3380,7 +3304,8 @@ TEST_F(RetryableFindAndModifyTest, RetryableFindAndModifyUpdateWithDamages) {
                                                            collection_internal::kUpdateNoIndexes,
                                                            nullptr /* indexesAffected */,
                                                            nullptr /* opDebug */,
-                                                           &args);
+                                                           &args,
+                                                           nullptr /*cursor*/);
         wuow.commit();
         ASSERT_OK(statusWith.getStatus());
     }

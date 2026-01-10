@@ -31,7 +31,6 @@
 
 #include "mongo/bson/bson_depth.h"
 #include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
@@ -60,7 +59,15 @@ void _extractAllElementsAlongPath(const BSONObj& obj,
                                   MultikeyComponents* arrayComponents) {
     size_t idx = path.find('.');
     if (idx != std::string::npos) {
-        invariant(depth != std::numeric_limits<BSONDepthIndex>::max());
+        tassert(
+            11177100,
+            fmt::format(
+                "Exceeded max depth while processing dotted path '{}'. Attempted depth={} exceeds "
+                "BSONDepthIndex numeric limit={}",
+                path,
+                depth,
+                std::numeric_limits<BSONDepthIndex>::max()),
+            depth != std::numeric_limits<BSONDepthIndex>::max());
         StringData left = path.substr(0, idx);
         StringData next = path.substr(idx + 1, path.size());
 

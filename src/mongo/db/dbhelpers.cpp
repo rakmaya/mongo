@@ -35,18 +35,9 @@
 #include "mongo/db/collection_crud/collection_write_path.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/index/index_access_method.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/clustered_collection_util.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_catalog.h"
-#include "mongo/db/local_catalog/collection_operation_source.h"
-#include "mongo/db/local_catalog/db_raii.h"
-#include "mongo/db/local_catalog/index_catalog.h"
-#include "mongo/db/local_catalog/index_catalog_entry.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
 #include "mongo/db/matcher/extensions_callback_real.h"
+#include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/profile_settings.h"
 #include "mongo/db/query/canonical_query.h"
@@ -63,13 +54,22 @@
 #include "mongo/db/query/write_ops/write_ops_parsers.h"
 #include "mongo/db/record_id_helpers.h"
 #include "mongo/db/repl/oplog.h"
+#include "mongo/db/session/logical_session_id.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/clustered_collection_util.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/collection_operation_source.h"
+#include "mongo/db/shard_role/shard_catalog/db_raii.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog_entry.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
 #include "mongo/db/storage/snapshot.h"
 #include "mongo/util/assert_util.h"
 
 #include <string>
 #include <utility>
 
-#include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
@@ -159,9 +159,9 @@ bool Helpers::findById(OperationContext* opCtx,
     }
 
     const IndexCatalog* catalog = collection->getIndexCatalog();
-    const IndexDescriptor* desc = catalog->findIdIndex(opCtx);
+    const auto entry = catalog->findIdIndex(opCtx);
 
-    if (!desc) {
+    if (!entry) {
         if (clustered_util::isClusteredOnId(collection->getClusteredInfo())) {
             Snapshotted<BSONObj> doc;
             if (collection->findDoc(opCtx,
@@ -176,7 +176,6 @@ bool Helpers::findById(OperationContext* opCtx,
         return false;
     }
 
-    const IndexCatalogEntry* entry = catalog->getEntry(desc);
     // TODO(SERVER-103399): Investigate usage validity of CollectionPtr::CollectionPtr_UNSAFE
     auto recordId = entry->accessMethod()->asSortedData()->findSingle(
         opCtx,
@@ -195,16 +194,15 @@ RecordId Helpers::findById(OperationContext* opCtx,
                            const BSONObj& idquery) {
     MONGO_verify(collection);
     const IndexCatalog* catalog = collection->getIndexCatalog();
-    const IndexDescriptor* desc = catalog->findIdIndex(opCtx);
-    if (!desc && clustered_util::isClusteredOnId(collection->getClusteredInfo())) {
+    const auto entry = catalog->findIdIndex(opCtx);
+    if (!entry && clustered_util::isClusteredOnId(collection->getClusteredInfo())) {
         // There is no explicit IndexDescriptor for _id on a collection clustered by _id. However,
         // the RecordId can be constructed directly from the input.
         return record_id_helpers::keyForObj(
             IndexBoundsBuilder::objFromElement(idquery["_id"], collection->getDefaultCollator()));
     }
 
-    uassert(13430, "no _id index", desc);
-    const IndexCatalogEntry* entry = catalog->getEntry(desc);
+    uassert(13430, "no _id index", entry);
     return entry->accessMethod()->asSortedData()->findSingle(
         opCtx,
         *shard_role_details::getRecoveryUnit(opCtx),
@@ -334,17 +332,31 @@ void Helpers::update(OperationContext* opCtx,
     ::mongo::update(opCtx, coll, request);
 }
 
-Status Helpers::insert(OperationContext* opCtx,
-                       const CollectionAcquisition& coll,
-                       const BSONObj& doc) {
+Status Helpers::insert(OperationContext* opCtx, const CollectionPtr& coll, const BSONObj& doc) {
     AutoStatsTracker statsTracker(opCtx,
-                                  coll.nss(),
+                                  coll->ns(),
                                   Top::LockType::WriteLocked,
                                   AutoStatsTracker::LogMode::kUpdateTopAndCurOp,
                                   DatabaseProfileSettings::get(opCtx->getServiceContext())
-                                      .getDatabaseProfileLevel(coll.nss().dbName()));
-    return collection_internal::insertDocument(
-        opCtx, coll.getCollectionPtr(), InsertStatement{doc}, &CurOp::get(opCtx)->debug());
+                                      .getDatabaseProfileLevel(coll->ns().dbName()));
+    std::vector<InsertStatement> inserts;
+    inserts.emplace_back(doc);
+    return collection_internal::insertDocuments(
+        opCtx, coll, inserts.begin(), inserts.end(), &CurOp::get(opCtx)->debug(), false);
+}
+
+Status Helpers::insert(OperationContext* opCtx,
+                       const CollectionPtr& coll,
+                       std::span<const BSONObj> docs) {
+    AutoStatsTracker statsTracker(opCtx,
+                                  coll->ns(),
+                                  Top::LockType::WriteLocked,
+                                  AutoStatsTracker::LogMode::kUpdateTopAndCurOp,
+                                  DatabaseProfileSettings::get(opCtx->getServiceContext())
+                                      .getDatabaseProfileLevel(coll->ns().dbName()));
+    std::vector<InsertStatement> inserts(docs.begin(), docs.end());
+    return collection_internal::insertDocuments(
+        opCtx, coll, inserts.begin(), inserts.end(), &CurOp::get(opCtx)->debug(), false);
 }
 
 void Helpers::deleteByRid(OperationContext* opCtx,

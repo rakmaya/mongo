@@ -31,20 +31,20 @@
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonmisc.h"
-#include "mongo/db/admission/execution_admission_context.h"
+#include "mongo/db/admission/execution_control/execution_admission_context.h"
 #include "mongo/db/collection_crud/collection_write_path.h"
 #include "mongo/db/index/index_access_method.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/collection_options.h"
-#include "mongo/db/local_catalog/index_catalog.h"
-#include "mongo/db/local_catalog/lock_manager/exception_util.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/lock_manager/exception_util.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/collection_options.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/control/journal_flusher.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/storage_engine.h"
@@ -113,7 +113,7 @@ boost::optional<MinValidDocument> ReplicationConsistencyMarkersImpl::_getMinVali
 
 void ReplicationConsistencyMarkersImpl::_updateMinValidDocument(OperationContext* opCtx,
                                                                 const BSONObj& updateSpec) {
-    // TODO SERVER-104434: Writes on minValid document should always be untimestamped even if the
+    // TODO SERVER-104334: Writes on minValid document should always be untimestamped even if the
     // collection is timestamped. We allow an untimestamped write in this instance so that WT
     // doesn't complain about timestamp violations if it encounters a timestamped entry during very
     // rapid upgrades.
@@ -287,13 +287,12 @@ Status ReplicationConsistencyMarkersImpl::_upsertOplogTruncateAfterPointDocument
             if (!_oplogTruncateRecordId) {
                 auto idIndex = collection->getIndexCatalog()->findIdIndex(opCtx);
 
-                const IndexCatalogEntry* entry = collection->getIndexCatalog()->getEntry(idIndex);
-                auto indexAccess = entry->accessMethod()->asSortedData();
+                auto indexAccess = idIndex->accessMethod()->asSortedData();
 
                 auto recordId = indexAccess->findSingle(opCtx,
                                                         *shard_role_details::getRecoveryUnit(opCtx),
                                                         collection,
-                                                        entry,
+                                                        idIndex,
                                                         kOplogTruncateAfterPointId);
 
                 if (recordId.isNull()) {

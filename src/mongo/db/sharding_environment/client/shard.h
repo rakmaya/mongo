@@ -53,6 +53,7 @@
 #include "mongo/s/write_ops/batched_command_request.h"
 #include "mongo/s/write_ops/batched_command_response.h"
 #include "mongo/util/duration.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/net/hostandport.h"
 
 #include <functional>
@@ -76,7 +77,7 @@ class RemoteCommandTargeter;
  * Presents an interface for talking to shards, regardless of whether that shard is remote or is
  * the current (local) shard.
  */
-class Shard {
+class MONGO_MOD_PUBLIC Shard {
 public:
     struct CommandResponse {
         CommandResponse(boost::optional<HostAndPort> hostAndPort,
@@ -213,6 +214,8 @@ public:
         ShardSharedStateCache::Stats* _stats;
         bool _recordedAttempted = false;
         bool _previousAttemptOverloaded = false;
+        // The number of retries that avoided a server that previously returned an overload error.
+        std::int64_t _numRetargets = 0;
     };
 
     /**
@@ -321,15 +324,15 @@ public:
      *
      * isRetriableError() routes to either of the static functions depending on object type.
      */
-    static bool localIsRetriableError(ErrorCodes::Error code,
+    static bool localIsRetriableError(const Status& code,
                                       std::span<const std::string> errorLabels,
                                       RetryPolicy options);
 
-    static bool remoteIsRetriableError(ErrorCodes::Error code,
+    static bool remoteIsRetriableError(const Status& status,
                                        std::span<const std::string> errorLabels,
                                        RetryPolicy options);
 
-    virtual bool isRetriableError(ErrorCodes::Error code,
+    virtual bool isRetriableError(const Status& status,
                                   std::span<const std::string> errorLabels,
                                   RetryPolicy options) const = 0;
 
@@ -402,17 +405,28 @@ public:
                                                          Milliseconds maxTimeMSOverride);
 
     /**
-     * Synchronously run the aggregation request, with a best effort honoring of request
-     * options. `callback` will be called with the batch and resume token contained in each
-     * response. `callback` should return `true` to execute another getmore. Returning `false` will
-     * send a `killCursors`. If the aggregation results are exhausted, there will be no additional
-     * calls to `callback`.
+     * Synchronously runs the aggregation request, with a best effort to honor the request
+     * options. `onBatch` is a callback that will be called with the batch and resume token
+     * contained in each response. `onBatch` should return `true` to execute another getmore.
+     * Returning `false` will send a `killCursors`. If the aggregation results are exhausted,
+     * there will be no additional calls to `onBatch`.
+     *
+     * `onRetry` is a callback that will be called when the aggregation process is restarted.
+     * Depending on the retry policy, the function might restart the entire aggregation process. The
+     * `onRetry` callback is used to signal a retry so that the caller can cleanup any state
+     * affected by the `onBatch` callback.
+     *
+     * If using a retry policy other than kNoRetry, the entire aggregation may be retried after some
+     * batches have already been processed, so the onRetry callback should reset any state modified
+     * by previous invocations of onBatch.
      */
     Status runAggregation(
         OperationContext* opCtx,
         const AggregateCommandRequest& aggRequest,
+        RetryPolicy retryPolicy,
         std::function<bool(const std::vector<BSONObj>& batch,
-                           const boost::optional<BSONObj>& postBatchResumeToken)> callback);
+                           const boost::optional<BSONObj>& postBatchResumeToken)> onBatch,
+        std::function<void(const Status&)> onRetry);
 
     /**
      * Synchronously run an aggregation request like runAggregation, but return a vector containing

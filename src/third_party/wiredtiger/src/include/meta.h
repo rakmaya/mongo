@@ -47,6 +47,10 @@
 #define WT_DISAGG_METADATA_MAIN_PAGE_ID 1                        /* Page ID for the main metadata */
 #define WT_DISAGG_METADATA_MAX_PAGE_ID 1                         /* Max page ID in the metadata */
 
+#define WT_DISAGG_KEY_PROVIDER_TABLE_ID 2     /* Table ID for encryption key data */
+#define WT_DISAGG_KEY_PROVIDER_MAIN_PAGE_ID 1 /* Page ID for the main key provider table */
+#define WT_DISAGG_KEY_PROVIDER_MAX_PAGE_ID 1  /* Max page ID in the key provider table */
+
 #define WT_SYSTEM_PREFIX "system:"                               /* System URI prefix */
 #define WT_SYSTEM_CKPT_TS "checkpoint_timestamp"                 /* Checkpoint timestamp name */
 #define WT_SYSTEM_CKPT_URI "system:checkpoint"                   /* Checkpoint timestamp URI */
@@ -130,3 +134,17 @@ struct __wt_blkincr {
                               /* AUTOMATIC FLAG VALUE GENERATION STOP 8 */
     uint8_t flags;
 };
+
+/*
+ * WT_DISAGG_METADATA --
+ *     Disaggregated storage metadata structure.
+ *     Note: The strings are not null-terminated.
+ */
+typedef struct __wt_disagg_metadata {
+    const char *checkpoint;        /* Checkpoint metadata string */
+    size_t checkpoint_len;         /* Length of checkpoint metadata string */
+    uint64_t checkpoint_timestamp; /* Checkpoint timestamp */
+
+    const char *key_provider; /* Key provider metadata string */
+    size_t key_provider_len;  /* Length of key provider metadata string */
+} WT_DISAGG_METADATA;

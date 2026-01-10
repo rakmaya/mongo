@@ -32,6 +32,7 @@
 #include "mongo/logv2/bson_formatter.h"
 #include "mongo/logv2/plain_formatter.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
 
 #include <boost/log/attributes/attribute_value_set.hpp>
 #include <boost/log/attributes/value_extraction.hpp>
@@ -39,7 +40,7 @@
 #include <boost/log/sinks.hpp>
 
 namespace mongo::logv2 {
-class UserAssertSink
+class MONGO_MOD_NEEDS_REPLACEMENT UserAssertSink
     : public boost::log::sinks::
           basic_formatted_sink_backend<char, boost::log::sinks::concurrent_feeding> {
 public:

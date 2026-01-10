@@ -33,7 +33,6 @@ from wtscenario import make_scenarios
 
 # test_layered27.py
 # Test draining the ingest table
-@wttest.skip_for_hook("tiered", "FIXME-WT-14938: crashing with tiered hook.")
 @disagg_test_class
 class test_layered27(wttest.WiredTigerTestCase):
     conn_base_config = ',create,statistics=(all),statistics_log=(wait=1,json=true,on_close=true),' \
@@ -82,7 +81,7 @@ class test_layered27(wttest.WiredTigerTestCase):
         oplog.insert(t, 100 * self.multiplier)
         oplog.update(t, 200 * self.multiplier)
 
-        # FIXME-WT-15388: Re-enable once we can abandon changes after stepping down.
+        # FIXME-WT-15763: Re-enable once we can abandon changes after stepping down.
         # oplog.apply(self, self.session, 100 * self.multiplier, 300 * self.multiplier)
         # oplog.check(self, self.session, 0, 400 * self.multiplier)
 
@@ -142,7 +141,7 @@ class test_layered27(wttest.WiredTigerTestCase):
         # Delete some updates
         oplog.remove(t, 100 * self.multiplier)
 
-        # FIXME-WT-15388: Re-enable once we can abandon changes after stepping down.
+        # FIXME-WT-15763: Re-enable once we can abandon changes after stepping down.
         # oplog.apply(self, self.session, 100 * self.multiplier, 100 * self.multiplier)
         # oplog.check(self, self.session, 0, 200 * self.multiplier)
 
@@ -203,7 +202,7 @@ class test_layered27(wttest.WiredTigerTestCase):
         oplog.remove(t, 100 * self.multiplier)
         oplog.insert(t, 100 * self.multiplier, 0)
 
-        # FIXME-WT-15388: Re-enable once we can abandon changes after stepping down.
+        # FIXME-WT-15763: Re-enable once we can abandon changes after stepping down.
         # oplog.apply(self, self.session, 100 * self.multiplier, 200 * self.multiplier)
         # oplog.check(self, self.session, 0, 300 * self.multiplier)
 

@@ -36,12 +36,12 @@
 #include "mongo/db/auth/resource_pattern.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/generic_argument_util.h"
-#include "mongo/db/global_catalog/catalog_cache/catalog_cache.h"
 #include "mongo/db/global_catalog/ddl/set_allow_migrations_gen.h"
 #include "mongo/db/global_catalog/ddl/sharded_ddl_commands_gen.h"
-#include "mongo/db/global_catalog/router_role_api/cluster_commands_helpers.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/router_role/cluster_commands_helpers.h"
+#include "mongo/db/router_role/routing_cache/catalog_cache.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/sharding_environment/client/shard.h"
 #include "mongo/db/sharding_environment/grid.h"
@@ -84,9 +84,8 @@ public:
             shardsvrRequest.setSetAllowMigrationsRequest(allowMigrationsRequest);
             generic_argument_util::setMajorityWriteConcern(shardsvrRequest);
 
-            sharding::router::DBPrimaryRouter router(opCtx->getServiceContext(), nss.dbName());
-            router.route(opCtx,
-                         Request::kCommandParameterFieldName,
+            sharding::router::DBPrimaryRouter router(opCtx, nss.dbName());
+            router.route(Request::kCommandParameterFieldName,
                          [&](OperationContext* opCtx, const CachedDatabaseInfo& dbInfo) {
                              auto cmdResponse =
                                  executeCommandAgainstDatabasePrimaryOnlyAttachingDbVersion(

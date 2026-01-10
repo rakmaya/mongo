@@ -29,25 +29,17 @@
 
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/json.h"
 #include "mongo/client/dbclient_base.h"
 #include "mongo/db/client.h"
-#include "mongo/db/collection_crud/collection_write_path.h"
 #include "mongo/db/curop.h"
+#include "mongo/db/dbhelpers.h"
 #include "mongo/db/exec/classic/index_scan.h"
 #include "mongo/db/exec/classic/plan_stage.h"
 #include "mongo/db/exec/classic/working_set.h"
 #include "mongo/db/exec/plan_stats.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/database.h"
-#include "mongo/db/local_catalog/db_raii.h"
-#include "mongo/db/local_catalog/index_catalog.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
-#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
@@ -55,13 +47,16 @@
 #include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/query/compiler/physical_model/index_bounds/index_bounds.h"
 #include "mongo/db/query/compiler/physical_model/interval/interval.h"
-#include "mongo/db/query/plan_executor.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/database.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/dbtests/dbtests.h"  // IWYU pragma: keep
 #include "mongo/unittest/unittest.h"
-#include "mongo/util/intrusive_counter.h"
 
 #include <memory>
 #include <string>
@@ -100,7 +95,7 @@ public:
         _collection = acquireCollection(
             &_opCtx,
             CollectionAcquisitionRequest(nss(),
-                                         PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                         PlacementConcern(boost::none, ShardVersion::UNTRACKED()),
                                          repl::ReadConcernArgs::get(&_opCtx),
                                          AcquisitionPrerequisites::kWrite),
             MODE_IX);
@@ -108,10 +103,8 @@ public:
 
     void insert(const BSONObj& doc) {
         WriteUnitOfWork wunit(&_opCtx);
-        OpDebug* const nullOpDebug = nullptr;
         // TODO(SERVER-103403): Investigate usage validity of CollectionPtr::CollectionPtr_UNSAFE
-        ASSERT_OK(collection_internal::insertDocument(
-            &_opCtx, _collection->getCollectionPtr(), InsertStatement(doc), nullOpDebug, false));
+        ASSERT_OK(Helpers::insert(&_opCtx, _collection->getCollectionPtr(), doc));
         wunit.commit();
     }
 
@@ -147,7 +140,7 @@ public:
 
     IndexScan* createIndexScanSimpleRange(BSONObj startKey, BSONObj endKey) {
         const IndexCatalog* catalog = _collection->getCollectionPtr()->getIndexCatalog();
-        std::vector<const IndexDescriptor*> indexes;
+        std::vector<const IndexCatalogEntry*> indexes;
         catalog->findIndexesByKeyPattern(
             &_opCtx, BSON("x" << 1), IndexCatalog::InclusionPolicy::kReady, &indexes);
         ASSERT_EQ(indexes.size(), 1U);
@@ -173,7 +166,7 @@ public:
                                bool dedup = false,
                                MatchExpression* filter = nullptr) {
         const IndexCatalog* catalog = _collection->getCollectionPtr()->getIndexCatalog();
-        std::vector<const IndexDescriptor*> indexes;
+        std::vector<const IndexCatalogEntry*> indexes;
         catalog->findIndexesByKeyPattern(
             &_opCtx, BSON("x" << 1), IndexCatalog::InclusionPolicy::kReady, &indexes);
         ASSERT_EQ(indexes.size(), 1U);

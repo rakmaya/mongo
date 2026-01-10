@@ -44,14 +44,13 @@
 #include "mongo/util/functional.h"
 #include "mongo/util/future.h"
 #include "mongo/util/invalidating_lru_cache.h"
-#include "mongo/util/modules_incompletely_marked_header.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/str.h"
 #include "mongo/util/time_support.h"
 
 #include <iterator>
 #include <map>
 #include <memory>
-#include <mutex>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -66,7 +65,7 @@ namespace mongo {
 /**
  * Serves as a container of the non-templatised parts of the ReadThroughCache class below.
  */
-class ReadThroughCacheBase {
+class MONGO_MOD_PRIVATE ReadThroughCacheBase {
     ReadThroughCacheBase(const ReadThroughCacheBase&) = delete;
     ReadThroughCacheBase& operator=(const ReadThroughCacheBase&) = delete;
 
@@ -121,7 +120,7 @@ private:
 };
 
 template <typename Result, typename Key, typename Value, typename Time, typename... LookupArgs>
-struct ReadThroughCacheLookup {
+struct MONGO_MOD_PUBLIC ReadThroughCacheLookup {
     using Fn = unique_function<Result(OperationContext*,
                                       const Key&,
                                       const Value& cachedValue,
@@ -130,7 +129,8 @@ struct ReadThroughCacheLookup {
 };
 
 template <typename Result, typename Key, typename Value, typename... LookupArgs>
-struct ReadThroughCacheLookup<Result, Key, Value, CacheNotCausallyConsistent, LookupArgs...> {
+struct MONGO_MOD_PUBLIC
+    ReadThroughCacheLookup<Result, Key, Value, CacheNotCausallyConsistent, LookupArgs...> {
     using Fn = unique_function<Result(
         OperationContext*, const Key&, const Value& cachedValue, const LookupArgs... lookupArgs)>;
 };
@@ -150,6 +150,7 @@ struct ReadThroughCacheLookup<Result, Key, Value, CacheNotCausallyConsistent, Lo
 template <typename Key,
           typename Value,
           typename Time = CacheNotCausallyConsistent,
+          typename MutexType = stdx::mutex,
           typename... LookupArgs>
 class MONGO_MOD_OPEN ReadThroughCache : public ReadThroughCacheBase {
     /**
@@ -535,7 +536,7 @@ public:
      * invocation of `lookup`. Specifically, several concurrent invocations of `acquire` for the
      * same key may group together for a single `lookup`.
      */
-    ReadThroughCache(stdx::mutex& mutex,
+    ReadThroughCache(MutexType& mutex,
                      Service* service,
                      ThreadPoolInterface& threadPool,
                      LookupFn lookupFn,
@@ -672,7 +673,7 @@ private:
     // Used to protect the shared below. Has a lock level of 3, meaning that while held, any code is
     // only allowed to take '_cancelTokensMutex' (which in turn is allowed to be followed by the
     // Client lock).
-    stdx::mutex& _mutex;
+    MutexType& _mutex;
 
     // Blocking function which will be invoked to retrieve entries from the backing store. It will
     // be supplied with the arguments specified by the LookupArgs parameter pack.
@@ -719,8 +720,8 @@ private:
  *      inProgress.signalWaiters(result);
  * }
  */
-template <typename Key, typename Value, typename Time, typename... LookupArgs>
-class ReadThroughCache<Key, Value, Time, LookupArgs...>::InProgressLookup {
+template <typename Key, typename Value, typename Time, typename MutexType, typename... LookupArgs>
+class ReadThroughCache<Key, Value, Time, MutexType, LookupArgs...>::InProgressLookup {
 public:
     InProgressLookup(ReadThroughCache& cache,
                      Key key,

@@ -31,13 +31,12 @@
 #include "mongo/db/update/current_date_node.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/logical_time.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/service_context.h"
-#include "mongo/db/vector_clock/vector_clock_mutable.h"
+#include "mongo/db/topology/vector_clock/vector_clock_mutable.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
 #include "mongo/util/time_support.h"
@@ -72,10 +71,11 @@ Status CurrentDateNode::init(BSONElement modExpr,
         for (auto&& elem : modExpr.Obj()) {
             if (elem.fieldNameStringData() == kType) {
                 if (elem.type() == BSONType::string) {
-                    if (elem.valueStringData() == kDate) {
+                    StringData valueString = elem.valueStringData();
+                    if (valueString == kDate) {
                         _typeIsDate = true;
                         foundValidType = true;
-                    } else if (elem.valueStringData() == kTimestamp) {
+                    } else if (valueString == kTimestamp) {
                         _typeIsDate = false;
                         foundValidType = true;
                     }
@@ -116,7 +116,9 @@ void CurrentDateNode::setValueForNewElement(mutablebson::Element* element) const
     setValue(_service, element, _typeIsDate);
 }
 
-BSONObj CurrentDateNode::operatorValue() const {
+BSONObj CurrentDateNode::operatorValue(const SerializationOptions& opts) const {
+    // We do not need to do any special serialization here, because type is simply an enum with only
+    // two possible values.
     BSONObjBuilder bob;
     {
         BSONObjBuilder subBuilder(bob.subobjStart(""));

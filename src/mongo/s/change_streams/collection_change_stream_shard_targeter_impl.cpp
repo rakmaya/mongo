@@ -29,19 +29,27 @@
 
 #include "mongo/s/change_streams/collection_change_stream_shard_targeter_impl.h"
 
-#include "mongo/db/pipeline/change_stream_read_mode.h"
+#include "mongo/db/pipeline/change_stream.h"
 #include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/s/change_streams/collection_change_stream_db_absent_state_event_handler.h"
 #include "mongo/s/change_streams/collection_change_stream_db_present_state_event_handler.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/assert_util.h"
 
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
+
+// Prefix that will be added to all log messages emitted by this stage.
+#define STAGE_LOG_PREFIX "CollectionChangeStreamShardTargeterImpl: "
+
 namespace mongo {
 
 ShardTargeterDecision CollectionChangeStreamShardTargeterImpl::initialize(
     OperationContext* opCtx, Timestamp atClusterTime, ChangeStreamReaderContext& readerCtx) {
-    auto placement =
-        _fetcher->fetch(opCtx, readerCtx.getChangeStream().getNamespace(), atClusterTime);
+    auto placement = _fetcher->fetch(opCtx,
+                                     readerCtx.getChangeStream().getNamespace(),
+                                     atClusterTime,
+                                     false /* checkIfPointInTimeIsInFuture */,
+                                     false /* ignoreRemovedShards */);
     if (placement.getStatus() == HistoricalPlacementStatus::NotAvailable) {
         return ShardTargeterDecision::kSwitchToV1;
     }
@@ -70,6 +78,8 @@ ShardTargeterDecision CollectionChangeStreamShardTargeterImpl::handleEvent(
             "CollectionChangeStreamShardTargeterImpl::_eventHandler must be present for handling "
             "control events",
             _eventHandler);
+    LOGV2_DEBUG(
+        11132500, 3, STAGE_LOG_PREFIX "Handling event", "controlEvent"_attr = event.toString());
 
     auto controlEvent = parseControlEvent(event);
     return readerContext.inDegradedMode()
@@ -95,6 +105,12 @@ CollectionChangeStreamShardTargeterImpl::getEventHandler() const {
 
 void CollectionChangeStreamShardTargeterImpl::setEventHandler(
     std::unique_ptr<ChangeStreamShardTargeterStateEventHandler> eventHandler) {
+    tassert(11132501, "ChangeStreamShardTargeterStateEventHandler must be provided", eventHandler);
+    LOGV2_DEBUG(11132502,
+                3,
+                STAGE_LOG_PREFIX "Setting event handler",
+                "previousEventHandler"_attr = _eventHandler ? _eventHandler->toString() : "none",
+                "newEventHandler"_attr = eventHandler->toString());
     _eventHandler = std::move(eventHandler);
 }
 

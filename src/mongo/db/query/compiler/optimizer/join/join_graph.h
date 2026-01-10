@@ -31,6 +31,9 @@
 
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/compiler/optimizer/join/logical_defs.h"
+#include "mongo/util/modules.h"
+
+#include <algorithm>
 
 /** This file introduces the join optimizer's logical model. It defines classes representing a join
  * graph and its components.
@@ -38,13 +41,33 @@
 namespace mongo::join_ordering {
 /** The maximum number of nodes which can participate in one join.
  */
-constexpr uint32_t kMaxNodesInJoin = 64;
+constexpr size_t kHardMaxNodesInJoin = 64;
 
-/** NodeSet is a bitset representation of a subset of join nodes. It is used to efficiently track
- * which nodes are included in an intermediate join. This compact representation is highly effective
- * for the join reordering algorithm.
+/** The maximum number of edges in a Join Graph.
  */
-using NodeSet = std::bitset<kMaxNodesInJoin>;
+constexpr size_t kHardMaxEdgesInJoin = 4096;
+
+/** The maximum number of predicates in a Join Graph.
+ */
+constexpr size_t kHardMaxPredicatesInJoin = std::numeric_limits<PredicateId>::max();
+
+/** NodeSet is a bitset representation of a subset of join nodes. It is used to efficiently
+ * track which nodes are included in an intermediate join. This compact representation is highly
+ * effective for the join reordering algorithm.
+ */
+using NodeSet = std::bitset<kHardMaxNodesInJoin>;
+
+std::string nodeSetToString(const NodeSet& set, size_t numNodesToPrint = kHardMaxNodesInJoin);
+
+/**
+ * Creates NodeSet from the list of node ids.
+ */
+template <typename... NodeIds>
+NodeSet makeNodeSet(NodeIds... nodeIds) {
+    NodeSet nodeSet;
+    ((void)nodeSet.set(nodeIds), ...);
+    return nodeSet;
+}
 
 /** JoinNode represents a single occurrence of a collection in a query. A new join node is created
 for each time a collection appears. This ensures every instance is uniquely identified within the
@@ -83,69 +106,237 @@ struct JoinPredicate {
     /** Serializes the Join Predicate to BSON.
      */
     BSONObj toBSON() const;
+
+    friend auto operator<=>(const JoinPredicate& lhs, const JoinPredicate& rhs) = default;
 };
 
-/** Represents a join edge between two sets of collections.
+/**
+ * Represents an undirected join edge between two sets of collections.
  *
- * Only one-to-one connections are currently supported. To prepare for future many-to-many join edge
- * support, the left and right sides are defined as NodeSets.
+ * These edges support only one to one connections and considered to be the first-class citizens of
+ * the join graph, since complex not one-to-one edges cannot be used in join plan enumeration
+ * and to be stored separately with indexes >= kMaxNodesInJoin.
  */
 struct JoinEdge {
     using PredicateList = absl::InlinedVector<JoinPredicate, 2>;
 
     PredicateList predicates;
 
-    NodeSet left;
-    NodeSet right;
+    NodeId left;
+    NodeId right;
 
     NodeSet getBitset() const {
-        return left | right;
+        return makeNodeSet(left, right);
     }
 
     /** Serializes the Join Edge to BSON.
      */
     BSONObj toBSON() const;
+
+    /**
+     * Return a new edge with left/right node sets and predicates swapped. This is useful for code
+     * which relies on the order of the predicates of the edge, despite the edge being undirected.
+     */
+    JoinEdge reverseEdge() const;
+
+    /**
+     * Insert in a new predicate to the edge, it is no-op if the predicate already is presented.
+     * The function assumes that the predicate has the same orientation (left/right side) as the
+     * edge.
+     */
+    void insertPredicate(JoinPredicate pred);
+
+    /**
+     * Insert the predicates from the range ['first', 'last'), which are not yet presented in the
+     * edge. The function assumes that the predicates have the same orientation (left/right side) as
+     * the edge.
+     */
+    template <typename It>
+    void insertPredicates(It first, It last) {
+        std::for_each(first, last, [this](JoinPredicate pred) { insertPredicate(pred); });
+    }
 };
 
-/** A join graph is a logical model that represents the joins in a query. It consists of join nodes
- * and join edges. The nodes represent the collections being queried, and the edges represent the
- * predicates that connect them.
+/**
+ * Defines size limits for graphs during build operation.
  */
-class JoinGraph {
+struct JoinGraphBuildParams {
+    static size_t getInBounds(size_t value, size_t begin, size_t end) {
+        return std::max(begin, std::min(end, value));
+    }
+
+    JoinGraphBuildParams()
+        : JoinGraphBuildParams(kHardMaxNodesInJoin, kHardMaxEdgesInJoin, kHardMaxPredicatesInJoin) {
+    }
+
+    JoinGraphBuildParams(size_t maxNodes,
+                         size_t maxEdges,
+                         size_t maxPredicates = kHardMaxPredicatesInJoin)
+        : maxNodesInJoin(getInBounds(maxNodes, 2, kHardMaxNodesInJoin)),
+          maxEdgesInJoin(getInBounds(maxEdges, 1, kHardMaxEdgesInJoin)),
+          maxPredicatesInJoin(getInBounds(maxPredicates, 1, kHardMaxPredicatesInJoin)) {}
+
+    JoinGraphBuildParams(const JoinGraphBuildParams&) = default;
+
+    // Maximum number of nodes in a join. Must be in [2, kMaxNodesInJoin].
+    const size_t maxNodesInJoin{kHardMaxNodesInJoin};
+
+    // Maximum number of edges in a join. Must be in [1, kMaxEdgesInJoin].
+    const size_t maxEdgesInJoin{kHardMaxEdgesInJoin};
+
+    // Maximum number of edges in a join. Must be in [1, kMaxPredicatesInJoin].
+    const size_t maxPredicatesInJoin{kHardMaxPredicatesInJoin};
+};
+
+/**
+ * Used to build a JoinGraph.
+ */
+class MutableJoinGraph {
 public:
-    /** Return the list of edges which can merge two intermediate joins.
+    MutableJoinGraph() = default;
+    explicit MutableJoinGraph(JoinGraphBuildParams buildParams) : _buildParams(buildParams) {}
+    MutableJoinGraph(MutableJoinGraph&&) noexcept = default;
+    MutableJoinGraph& operator=(MutableJoinGraph&&) noexcept = default;
+
+    /**
+     * Adds a new node. Returns the id of the new node or boost::none if the maximum number of join
+     * nodes has been reached.
      */
-    std::vector<EdgeId> getJoinEdges(NodeSet left, NodeSet right) const;
+    boost::optional<NodeId> addNode(NamespaceString collectionName,
+                                    std::unique_ptr<CanonicalQuery> cq,
+                                    boost::optional<FieldPath> embedPath);
 
-    /** Get neighbors of the given node.
+    /**
+     * Adds a new edge or add predicates if the edge with the specified 'left' and 'right' exists.
+     * Returns the id of the edge or boost::none if the maximum number of join edges has been
+     * reached.
      */
-    NodeSet getNeighbors(NodeId nodeIndex) const;
+    boost::optional<EdgeId> addEdge(NodeId left, NodeId right, JoinEdge::PredicateList predicates);
 
-    NodeId addNode(NamespaceString collectionName,
-                   std::unique_ptr<CanonicalQuery> cq,
-                   boost::optional<FieldPath> embedPath);
-
-    EdgeId addEdge(NodeSet left, NodeSet right, JoinEdge::PredicateList predicates);
-
-    EdgeId addSimpleEqualityEdge(NodeId leftNode,
-                                 NodeId rightNode,
-                                 PathId leftPathId,
-                                 PathId rightPathId);
+    /**
+     * Adds a new edge or add predicates if the edge with the specified 'left' and 'right' exists.
+     * Returns the id of the edge or boost::none if the maximum number of join edges has been
+     * reached.
+     */
+    boost::optional<EdgeId> addSimpleEqualityEdge(NodeId leftNode,
+                                                  NodeId rightNode,
+                                                  PathId leftPathId,
+                                                  PathId rightPathId) {
+        return addEdge(leftNode, rightNode, {{JoinPredicate::Eq, leftPathId, rightPathId}});
+    }
 
     const JoinNode& getNode(NodeId nodeId) const {
-        return _nodes[nodeId];
+        if constexpr (kDebugBuild) {
+            return _nodes.at(nodeId);
+        } else {
+            return _nodes[nodeId];
+        }
     }
 
     const JoinEdge& getEdge(EdgeId edgeId) const {
-        return _edges[edgeId];
+        if constexpr (kDebugBuild) {
+            return _edges.at(edgeId);
+        } else {
+            return _edges[edgeId];
+        }
     }
 
     size_t numNodes() const {
         return _nodes.size();
     }
 
-    size_t numEdges() const {
-        return _edges.size();
+    EdgeId numEdges() const {
+        return static_cast<EdgeId>(_edges.size());
+    }
+
+    const std::vector<JoinEdge>& edges() const {
+        return _edges;
+    }
+
+private:
+    friend class JoinGraph;
+
+    /**
+     * Creates a new edge with the specified 'left' and 'right' nodesets and 'predicates'. It's the
+     * only correct way to create edges and must not be called for an existing edge, since it
+     * maintains the invariant that only a single edge exists between any two node sets containing
+     * the conjunction of all predicates.
+     */
+    boost::optional<EdgeId> makeEdge(NodeId left, NodeId right, JoinEdge::PredicateList predicates);
+
+    /**
+     * Adds the predicates to the edge, returns EdgeId if the predicates were successfully added.
+     */
+    boost::optional<EdgeId> updateEdge(EdgeId edgeId,
+                                       NodeId leftSideOfPredicates,
+                                       JoinEdge::PredicateList predicates);
+
+    const JoinGraphBuildParams _buildParams;
+    size_t _numberOfAddedPredicates{0};
+
+    std::vector<JoinNode> _nodes;
+    std::vector<JoinEdge> _edges;
+    // Maps a pair of nodeIds to the edge that connects them.
+    absl::flat_hash_map<NodeSet, EdgeId> _edgeMap;
+};
+
+
+/** A join graph is a logical model that represents the joins in a query. It consists of join nodes
+ * and join edges. The nodes represent the collections being queried, and the edges represent the
+ * predicates that connect them. This data structure is immutable.
+ */
+class JoinGraph {
+public:
+    explicit JoinGraph(MutableJoinGraph graph)
+        : _nodes(std::move(graph._nodes)),
+          _edges(std::move(graph._edges)),
+          _edgeMap(std::move(graph._edgeMap)) {}
+
+    /** Return the list of edges which can merge two intermediate joins.
+     */
+    std::vector<EdgeId> getJoinEdges(NodeSet left, NodeSet right) const;
+
+    /**
+     * Returns a list of edges that connect the nodes in 'nodes'.
+     */
+    std::vector<EdgeId> getEdgesForSubgraph(NodeSet nodes) const;
+
+    /** Get neighbors of the given node.
+     */
+    NodeSet getNeighbors(NodeId nodeIndex) const;
+
+    const JoinNode& getNode(NodeId nodeId) const {
+        if constexpr (kDebugBuild) {
+            return _nodes.at(nodeId);
+        } else {
+            return _nodes[nodeId];
+        }
+    }
+
+    const CanonicalQuery* accessPathAt(NodeId nodeId) const {
+        return getNode(nodeId).accessPath.get();
+    }
+
+    const JoinEdge& getEdge(EdgeId edgeId) const {
+        if constexpr (kDebugBuild) {
+            return _edges.at(edgeId);
+        } else {
+            return _edges[edgeId];
+        }
+    }
+
+    /**
+     * Returns EdgeId of the edge that connects u and v. This check is order-independent, meaning
+     * the returned edge might be (u, v) or (v, u).
+     */
+    boost::optional<EdgeId> findEdge(NodeId u, NodeId v) const;
+
+    size_t numNodes() const {
+        return _nodes.size();
+    }
+
+    EdgeId numEdges() const {
+        return static_cast<EdgeId>(_edges.size());
     }
 
     /** Serializes the Join Graph to BSON.
@@ -159,8 +350,15 @@ public:
         return toBSON().jsonString(/*format*/ ExtendedCanonicalV2_0_0, pretty);
     }
 
+    const std::vector<JoinEdge>& edges() const {
+        return _edges;
+    }
+
 private:
     std::vector<JoinNode> _nodes;
     std::vector<JoinEdge> _edges;
+    // Maps a pair of nodeIds to the edge that connects them.
+    absl::flat_hash_map<NodeSet, EdgeId> _edgeMap;
 };
+
 }  // namespace mongo::join_ordering

@@ -128,10 +128,23 @@ extractMetadataPredicates(std::unique_ptr<MatchExpression> expr,
  * $_internalUnpackBucket is an internal stage for materializing time-series measurements from
  * time-series collections. It should never be used anywhere outside the MongoDB server.
  */
-REGISTER_DOCUMENT_SOURCE(_internalUnpackBucket,
-                         LiteParsedDocumentSourceDefault::parse,
-                         DocumentSourceInternalUnpackBucket::createFromBsonInternal,
-                         AllowedWithApiStrict::kAlways);
+REGISTER_LITE_PARSED_DOCUMENT_SOURCE(_internalUnpackBucket,
+                                     InternalUnpackBucketLiteParsed::parse,
+                                     AllowedWithApiStrict::kAlways);
+
+DocumentSourceContainer internalUnpackBucketStageParamsToDocumentSourceFn(
+    const std::unique_ptr<StageParams>& stageParams,
+    const boost::intrusive_ptr<ExpressionContext>& expCtx) {
+    auto* typedParams = dynamic_cast<InternalUnpackBucketStageParams*>(stageParams.get());
+    return {DocumentSourceInternalUnpackBucket::createFromBsonInternal(
+        typedParams->getOriginalBson(), expCtx)};
+}
+
+ALLOCATE_STAGE_PARAMS_ID(_internalUnpackBucket, InternalUnpackBucketStageParams::id);
+REGISTER_STAGE_PARAMS_TO_DOCUMENT_SOURCE_MAPPING(_internalUnpackBucket,
+                                                 InternalUnpackBucketStageParams::id,
+                                                 internalUnpackBucketStageParamsToDocumentSourceFn)
+
 ALLOCATE_DOCUMENT_SOURCE_ID(_internalUnpackBucket, DocumentSourceInternalUnpackBucket::id)
 
 /*
@@ -139,10 +152,22 @@ ALLOCATE_DOCUMENT_SOURCE_ID(_internalUnpackBucket, DocumentSourceInternalUnpackB
  * "metaField" parameters and is only used for special known use cases by other MongoDB products
  * rather than user applications.
  */
-REGISTER_DOCUMENT_SOURCE(_unpackBucket,
-                         LiteParsedDocumentSourceDefault::parse,
-                         DocumentSourceInternalUnpackBucket::createFromBsonExternal,
-                         AllowedWithApiStrict::kAlways);
+REGISTER_LITE_PARSED_DOCUMENT_SOURCE(_unpackBucket,
+                                     ExternalUnpackBucketLiteParsed::parse,
+                                     AllowedWithApiStrict::kAlways);
+
+DocumentSourceContainer externalUnpackBucketStageParamsToDocumentSourceFn(
+    const std::unique_ptr<StageParams>& stageParams,
+    const boost::intrusive_ptr<ExpressionContext>& expCtx) {
+    auto* typedParams = dynamic_cast<ExternalUnpackBucketStageParams*>(stageParams.get());
+    return {DocumentSourceInternalUnpackBucket::createFromBsonExternal(
+        typedParams->getOriginalBson(), expCtx)};
+}
+
+ALLOCATE_STAGE_PARAMS_ID(_unpackBucket, ExternalUnpackBucketStageParams::id);
+REGISTER_STAGE_PARAMS_TO_DOCUMENT_SOURCE_MAPPING(_unpackBucket,
+                                                 ExternalUnpackBucketStageParams::id,
+                                                 externalUnpackBucketStageParamsToDocumentSourceFn)
 
 namespace {
 using timeseries::BucketSpec;
@@ -311,15 +336,6 @@ boost::intrusive_ptr<DocumentSourceGroup> createBucketGroupForReorder(
     newGroup->setSbeCompatibility(SbeCompatibility::noRequirements);
 
     return newGroup;
-}
-
-// Optimize the section of the pipeline before the $_internalUnpackBucket stage.
-void optimizePrefix(DocumentSourceContainer::iterator itr, DocumentSourceContainer* container) {
-    auto prefix = DocumentSourceContainer(container->begin(), itr);
-    pipeline_optimization::optimizeContainer(&prefix);
-    pipeline_optimization::optimizeEachStage(&prefix);
-    container->erase(container->begin(), itr);
-    container->splice(itr, prefix);
 }
 
 boost::intrusive_ptr<Expression> handleDateTruncRewrite(
@@ -1679,26 +1695,14 @@ DocumentSourceContainer::iterator DocumentSourceInternalUnpackBucket::optimizeAt
         return itr;
     }
 
-    invariant(*itr == this);
-    DocumentSourceContainer::iterator unpackBucket = itr;
+    tassert(11282989, "Expecting DocumentSource iterator pointing to this stage", *itr == this);
 
-    itr = std::next(itr);
+    _optimizingRestOfPipeline = true;
+    ON_BLOCK_EXIT([this] { _optimizingRestOfPipeline = false; });
 
-    try {
-        while (itr != container->end()) {
-            if (itr == unpackBucket) {
-                itr = std::next(itr);
-                if (itr == container->end())
-                    break;
-            }
-            itr = (*itr).get()->optimizeAt(itr, container);
-        }
-    } catch (DBException& ex) {
-        ex.addContext("Failed to optimize pipeline");
-        throw;
-    }
+    pipeline_optimization::optimizeContainer(*getExpCtx(), container, std::next(itr));
 
-    return itr;
+    return container->end();
 }
 
 DepsTracker DocumentSourceInternalUnpackBucket::getRestPipelineDependencies(
@@ -1759,10 +1763,14 @@ bool DocumentSourceInternalUnpackBucket::tryToAbsorbTopKSortIntoGroup(
         prospectiveSort, /*prospectiveSortItr=*/std::next(itr), container);
 }
 
-DocumentSourceContainer::iterator DocumentSourceInternalUnpackBucket::doOptimizeAt(
+DocumentSourceContainer::iterator DocumentSourceInternalUnpackBucket::optimizeAt(
     DocumentSourceContainer::iterator itr, DocumentSourceContainer* container) {
 
-    invariant(*itr == this);
+    tassert(11282988, "Expecting DocumentSource iterator pointing to this stage", *itr == this);
+
+    if (_optimizingRestOfPipeline) {
+        return std::next(itr);
+    }
 
     // See ../query/timeseries/README.md for a description of all the rewrites implemented in this
     // function. The order of optimizations in this function is important, since some optimizations
@@ -2044,7 +2052,7 @@ DocumentSourceContainer::iterator DocumentSourceInternalUnpackBucket::doOptimize
             }
             // We want to optimize the rest of the pipeline to ensure the stages are in their
             // optimal position and expressions have been optimized to allow for certain rewrites.
-            pipeline_optimization::optimizeEndOfPipeline(itr, container);
+            pipeline_optimization::optimizeEndOfPipeline(*getExpCtx(), itr, container);
         }
 
         if (std::next(itr) == container->end()) {
@@ -2151,7 +2159,7 @@ DocumentSourceContainer::iterator DocumentSourceInternalUnpackBucket::doOptimize
         auto itrToMatch = std::next(itr);
         while (std::next(itrToMatch) != container->end() &&
                dynamic_cast<DocumentSourceMatch*>(std::next(itrToMatch)->get())) {
-            nextMatch->doOptimizeAt(itrToMatch, container);
+            nextMatch->optimizeAt(itrToMatch, container);
         }
 
         auto predicates = createPredicatesOnBucketLevelField(nextMatch->getMatchExpression());

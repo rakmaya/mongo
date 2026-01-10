@@ -171,7 +171,7 @@ void BlockToRowStage::prepareDeblock() {
             size_t idxInTvVec = 0;
             for (size_t i = 0; i < deblocked.count(); ++i) {
                 if (selectivityVector.empty() || selectivityVector[i]) {
-                    tvVec[idxInTvVec++] = std::pair(deblocked[i].first, deblocked[i].second);
+                    tvVec[idxInTvVec++] = std::pair(deblocked[i].tag, deblocked[i].value);
                 }
             }
         }
@@ -261,9 +261,8 @@ const SpecificStats* BlockToRowStage::getSpecificStats() const {
     return nullptr;
 }
 
-std::vector<DebugPrinter::Block> BlockToRowStage::debugPrint() const {
-    auto ret = PlanStage::debugPrint();
-
+void BlockToRowStage::doDebugPrint(std::vector<DebugPrinter::Block>& ret,
+                                   DebugPrintInfo& debugPrintInfo) const {
     ret.emplace_back(DebugPrinter::Block("blocks[`"));
     for (size_t i = 0; i < _blockSlotIds.size(); ++i) {
         if (i) {
@@ -285,9 +284,7 @@ std::vector<DebugPrinter::Block> BlockToRowStage::debugPrint() const {
     DebugPrinter::addIdentifier(ret, _bitmapSlotId);
 
     DebugPrinter::addNewLine(ret);
-    DebugPrinter::addBlocks(ret, _children[0]->debugPrint());
-
-    return ret;
+    DebugPrinter::addBlocks(ret, _children[0]->debugPrint(debugPrintInfo));
 }
 
 size_t BlockToRowStage::estimateCompileTimeSize() const {

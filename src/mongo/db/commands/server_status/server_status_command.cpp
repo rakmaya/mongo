@@ -39,7 +39,7 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
-#include "mongo/db/admission/execution_admission_context.h"
+#include "mongo/db/admission/execution_control/execution_admission_context.h"
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/resource_pattern.h"
@@ -47,10 +47,10 @@
 #include "mongo/db/commands/server_status/server_status.h"
 #include "mongo/db/commands/server_status/server_status_metric.h"
 #include "mongo/db/database_name.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/logv2/log.h"
 #include "mongo/platform/atomic_word.h"
@@ -152,6 +152,16 @@ public:
         const auto& allElem = cmdObj["all"];
         bool includeAllSections = stdx::to_underlying(allElem.type()) ? allElem.trueValue() : false;
 
+        const auto& noneElem = cmdObj["none"];
+        bool excludeAllSections =
+            stdx::to_underlying(noneElem.type()) ? noneElem.trueValue() : false;
+
+        if (MONGO_unlikely(includeAllSections && excludeAllSections)) {
+            // {all: 1} and {none: 1} cannot both be specified.
+            uasserted(ErrorCodes::InvalidOptions, "Cannot provide both 'all' and 'none' options");
+        }
+
+
         // --- all sections
         auto registry = ServerStatusSectionRegistry::instance();
         for (auto i = registry->begin(); i != registry->end(); ++i) {
@@ -161,7 +171,7 @@ public:
                 continue;
             }
 
-            bool include = section->includeByDefault();
+            bool include = !excludeAllSections && section->includeByDefault();
             const auto& elem = cmdObj[section->getSectionName()];
             if (stdx::to_underlying(elem.type())) {
                 include = elem.trueValue();
@@ -194,7 +204,7 @@ public:
 
         // --- counters
         auto metricsEl = cmdObj["metrics"_sd];
-        if (metricsEl.eoo() || metricsEl.trueValue()) {
+        if ((!excludeAllSections && metricsEl.eoo()) || metricsEl.trueValue()) {
             // Always gather the role-agnostic metrics. If `opCtx` has a role,
             // additionally merge that role's associated metrics.
             std::vector<const MetricTree*> metricTrees;

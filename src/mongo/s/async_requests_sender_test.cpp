@@ -588,40 +588,5 @@ TEST_F(AsyncRequestsSenderTest, MultipleRetriesSystemOverloaded) {
 
     future.default_timed_get();
 }
-
-TEST_F(AsyncRequestsSenderTest, SystemOverloadedDeprioritizedServerTargeting) {
-    FailPointEnableBlock _{"setBackoffDelayForTesting", BSON("backoffDelayMs" << 0)};
-    std::vector<AsyncRequestsSender::Request> requests;
-    requests.emplace_back(kTestShardIds[0], BSON("find" << "bar"));
-
-    auto ars = AsyncRequestsSender(operationContext(),
-                                   executor(),
-                                   kTestNss.dbName(),
-                                   requests,
-                                   ReadPreferenceSetting{ReadPreference::PrimaryPreferred},
-                                   Shard::RetryPolicy::kIdempotent,
-                                   nullptr,
-                                   {});
-
-    auto future = launchAsync([&] {
-        auto response = ars.next();
-        ASSERT(response.swResponse.getStatus().isOK());
-
-        // We assert that the response is coming from a secondary target because retrying with a
-        // system overloaded error causes targeting metadata to deprioritize the overloaded server.
-        ASSERT_EQ(response.swResponse.getValue().target, kTestShardHosts[0][1]);
-    });
-
-    onCommand([&](const auto& request) {
-        return createErrorSystemOverloaded(ErrorCodes::IngressRequestRateLimitExceeded);
-    });
-
-    onCommand([&](const auto& request) {
-        return createErrorCursorResponse(Status{ErrorCodes::CommandFailed, "test"});
-    });
-
-    future.default_timed_get();
-}
-
 }  // namespace
 }  // namespace mongo

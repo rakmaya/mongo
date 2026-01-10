@@ -44,6 +44,7 @@
 #include "mongo/stdx/mutex.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/concurrency/with_lock.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/uuid.h"
 
 #include <cstddef>
@@ -96,7 +97,8 @@ public:
                                               const RecordId& loc,
                                               const RecordData& oldRec,
                                               const char* damageSource,
-                                              const DamageVector& damages) override;
+                                              const DamageVector& damages,
+                                              const SeekableRecordCursor* cursor) override;
 
     void printRecordMetadata(const RecordId& recordId,
                              std::set<Timestamp>* recordTimestamps) const override {}
@@ -143,6 +145,12 @@ public:
 
     long long numRecords() const override {
         return _data->records.size();
+    }
+
+    void setSize(long long numRecords, long long dataSize) override {
+        // We should only be forcibly setting the size in certain situations (like collection
+        // imports) that don't currently make sense for ephemeral test-only collections.
+        MONGO_UNIMPLEMENTED;
     }
 
     void updateStatsAfterRepair(long long numRecords, long long dataSize) override {

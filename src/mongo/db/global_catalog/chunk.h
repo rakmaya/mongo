@@ -35,6 +35,7 @@
 #include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/db/versioning_protocol/chunk_version.h"
 #include "mongo/platform/atomic_word.h"
+#include "mongo/util/modules.h"
 
 #include <string>
 #include <vector>
@@ -49,7 +50,7 @@ class BSONObj;
 /**
  * Represents a cache entry for a single Chunk. Owned by a RoutingTableHistory.
  */
-class ChunkInfo {
+class MONGO_MOD_NEEDS_REPLACEMENT ChunkInfo {
 public:
     explicit ChunkInfo(const ChunkType& from);
 
@@ -110,7 +111,7 @@ public:
     }
 
     /**
-     * Returns a string represenation of the chunk for logging.
+     * Returns a string representation of the chunk for logging.
      */
     std::string toString() const;
 
@@ -128,7 +129,7 @@ public:
     void markAsJumbo();
 
 private:
-    // IMPORTANT: The order of the members here mattters,
+    // IMPORTANT: The order of the members here matters,
     // as it affects the performance of ChunkManager.
     // '_maxKeyString' must remain first member of this class because it is frequently
     // accessed by the ChunkManager.
@@ -147,7 +148,7 @@ private:
     AtomicWord<bool> _jumbo;
 };
 
-class Chunk {
+class MONGO_MOD_NEEDS_REPLACEMENT Chunk {
 public:
     Chunk(ChunkInfo& chunkInfo, const boost::optional<Timestamp>& atClusterTime)
         : _chunkInfo(chunkInfo), _atClusterTime(atClusterTime) {}
@@ -191,7 +192,7 @@ public:
     }
 
     /**
-     * Returns a string represenation of the chunk for logging.
+     * Returns a string representation of the chunk for logging.
      */
     std::string toString() const;
     BSONObj toBSON() const;

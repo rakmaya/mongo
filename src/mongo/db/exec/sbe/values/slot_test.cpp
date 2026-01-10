@@ -29,12 +29,9 @@
 
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
-#include "mongo/bson/util/builder.h"
 #include "mongo/db/exec/sbe/sbe_unittest.h"
-#include "mongo/db/exec/sbe/values/row.h"
 #include "mongo/unittest/unittest.h"
 
-#include <iterator>
 
 namespace mongo::sbe {
 
@@ -113,14 +110,12 @@ public:
         setValue(slot, true, value::makeNewString(longString));
 
         auto p1 = slot.copyOrMoveValue();
-        value::ValueGuard guard1(p1);
-        ASSERT_THAT(p1, ValueEq(expected));
+        ASSERT_THAT(p1.raw(), ValueEq(expected));
         verifyValue(slot, copyValue(expected));
 
         setValue(slot, false, expected);
         auto p2 = slot.copyOrMoveValue();
-        value::ValueGuard guard2(p2);
-        ASSERT_THAT(p2, ValueEq(expected));
+        ASSERT_THAT(p2.raw(), ValueEq(expected));
         verifyValue(slot, copyValue(expected));
     }
 
@@ -191,6 +186,8 @@ class BSONObjValueAccessorTest : public SlotTestBase<value::BSONObjValueAccessor
                                  public mongo::unittest::Test {
 public:
     void testGetOwnedBSONObj() {
+        using testing::Eq;
+        using testing::Ne;
         BSONObjBuilder bob;
         bob.append("a", 1);
         BSONObj obj = bob.obj();

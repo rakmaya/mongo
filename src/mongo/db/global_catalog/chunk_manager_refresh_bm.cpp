@@ -40,9 +40,9 @@
 #include "mongo/db/global_catalog/type_chunk.h"
 #include "mongo/db/global_catalog/type_collection_common_types_gen.h"
 #include "mongo/db/keypattern.h"
-#include "mongo/db/local_catalog/shard_role_catalog/collection_metadata.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/query/collation/collator_interface.h"
+#include "mongo/db/shard_role/shard_catalog/collection_metadata.h"
 #include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/db/versioning_protocol/chunk_version.h"
 #include "mongo/db/versioning_protocol/database_version.h"
@@ -125,8 +125,8 @@ CollectionMetadata makeChunkManagerWithShardSelector(int nShards,
                                            boost::none /* reshardingFields */,
                                            true,
                                            chunks);
-    return CollectionMetadata(
-        ChunkManager(makeStandaloneRoutingTableHistory(std::move(rt)), boost::none), getShardId(0));
+    return CollectionMetadata(CurrentChunkManager(makeStandaloneRoutingTableHistory(std::move(rt))),
+                              getShardId(0));
 }
 
 ShardId pessimalShardSelector(int i, int nShards, int nChunks) {
@@ -157,8 +157,8 @@ MONGO_COMPILER_NOINLINE auto runIncrementalUpdate(const CollectionMetadata& cm,
         true /* allowMigration */,
         false /* unsplittable */,
         newChunks);
-    return CollectionMetadata(
-        ChunkManager(makeStandaloneRoutingTableHistory(std::move(rt)), boost::none), getShardId(0));
+    return CollectionMetadata(CurrentChunkManager(makeStandaloneRoutingTableHistory(std::move(rt))),
+                              getShardId(0));
 }
 
 /*
@@ -315,8 +315,7 @@ auto BM_FullBuildOfChunkManager(benchmark::State& state, ShardSelectorFn selectS
                                                true,
                                                chunks);
         benchmark::DoNotOptimize(CollectionMetadata(
-            ChunkManager(makeStandaloneRoutingTableHistory(std::move(rt)), boost::none),
-            getShardId(0)));
+            CurrentChunkManager(makeStandaloneRoutingTableHistory(std::move(rt))), getShardId(0)));
     }
 }
 

@@ -34,6 +34,7 @@
 #include "mongo/db/storage/wiredtiger/wiredtiger_event_handler.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_recovery_unit.h"
 #include "mongo/db/validate/validate_results.h"
+#include "mongo/util/modules.h"
 
 #include <span>
 
@@ -309,7 +310,7 @@ public:
     };
 
     /**
-     * Calls WT_SESSION::validate() on a side-session to ensure that your current transaction
+     * Calls WT_SESSION::verify() on a side-session to ensure that your current transaction
      * isn't left in an invalid state.
      *
      * If errors is non-NULL, all error messages will be appended to the array.
@@ -404,12 +405,22 @@ public:
     };
 
     /**
+     * Given two configuration strings, concatenates them together with a ','. It's the callers
+     * responsibility to ensure both input configs are valid.
+     * Example:
+     *      - configA = "exclusive=true"
+     *      - configB = "key_format=q"
+     *      - returns "exclusive=true,key_format=q"
+     */
+    static std::string concatConfigs(const std::string& configA, const std::string& configB);
+
+    /**
      * Helper for handling WT eviction events. Returns non-zero to indicate that WT should not take
      * part in optional eviction on this session, and zero otherwise
      */
     static int handleWtEvictionEvent(WT_SESSION* session);
 
-    static long long getCancelledCacheMetric_forTest();
+    MONGO_MOD_PRIVATE static long long getCancelledCacheMetric_forTest();
 
 private:
     /**

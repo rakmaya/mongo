@@ -44,7 +44,7 @@
 #include "mongo/client/global_conn_pool.h"
 #include "mongo/client/replica_set_monitor.h"
 #include "mongo/config.h"  // IWYU pragma: keep
-#include "mongo/db/admission/execution_control_init.h"
+#include "mongo/db/admission/execution_control/execution_control_init.h"
 #include "mongo/db/admission/flow_control.h"
 #include "mongo/db/admission/flow_control_parameters_gen.h"
 #include "mongo/db/audit.h"
@@ -55,8 +55,6 @@
 #include "mongo/db/auth/user_cache_invalidator_job.h"
 #include "mongo/db/change_stream_options_manager.h"
 #include "mongo/db/client.h"
-#include "mongo/db/cluster_parameters/cluster_server_parameter_initializer.h"
-#include "mongo/db/cluster_parameters/cluster_server_parameter_op_observer.h"
 #include "mongo/db/collection_crud/collection_write_path.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/feature_compatibility_version.h"
@@ -74,8 +72,6 @@
 #include "mongo/db/flow_control_ticketholder.h"
 #include "mongo/db/ftdc/ftdc_mongod.h"
 #include "mongo/db/ftdc/util.h"
-#include "mongo/db/global_catalog/catalog_cache/catalog_cache.h"
-#include "mongo/db/global_catalog/catalog_cache/routing_information_cache.h"
 #include "mongo/db/global_catalog/ddl/configsvr_coordinator_service.h"
 #include "mongo/db/global_catalog/ddl/ddl_lock_manager.h"
 #include "mongo/db/global_catalog/ddl/rename_collection_participant_service.h"
@@ -88,27 +84,6 @@
 #include "mongo/db/keys_collection_client_direct.h"
 #include "mongo/db/keys_collection_manager.h"
 #include "mongo/db/keys_collection_manager_gen.h"
-#include "mongo/db/local_catalog/catalog_helper.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_catalog_helper.h"
-#include "mongo/db/local_catalog/collection_impl.h"
-#include "mongo/db/local_catalog/collection_options.h"
-#include "mongo/db/local_catalog/database.h"
-#include "mongo/db/local_catalog/database_holder.h"
-#include "mongo/db/local_catalog/database_holder_impl.h"
-#include "mongo/db/local_catalog/db_raii.h"
-#include "mongo/db/local_catalog/ddl/direct_connection_ddl_hook.h"
-#include "mongo/db/local_catalog/ddl/replica_set_ddl_tracker.h"
-#include "mongo/db/local_catalog/health_log.h"
-#include "mongo/db/local_catalog/health_log_interface.h"
-#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_api/resource_yielders.h"
-#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_state.h"
-#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_state_factory_shard.h"
-#include "mongo/db/local_catalog/shard_role_catalog/database_sharding_state_factory_shard.h"
-#include "mongo/db/local_catalog/shard_role_catalog/shard_filtering_metadata_refresh.h"
 #include "mongo/db/local_executor.h"
 #include "mongo/db/log_process_details.h"
 #include "mongo/db/logical_session_cache_factory_mongod.h"
@@ -141,6 +116,8 @@
 #include "mongo/db/query/search/search_task_executors.h"
 #include "mongo/db/read_write_concern_defaults.h"
 #include "mongo/db/read_write_concern_defaults_cache_lookup_mongod.h"
+#include "mongo/db/repl/dbcheck/health_log.h"
+#include "mongo/db/repl/dbcheck/health_log_interface.h"
 #include "mongo/db/repl/initial_sync/base_cloner.h"
 #include "mongo/db/repl/initial_sync/initial_syncer_factory.h"
 #include "mongo/db/repl/oplog.h"
@@ -158,6 +135,8 @@
 #include "mongo/db/repl/wait_for_majority_service.h"
 #include "mongo/db/replication_state_transition_lock_guard.h"
 #include "mongo/db/request_execution_context.h"
+#include "mongo/db/router_role/routing_cache/catalog_cache.h"
+#include "mongo/db/router_role/routing_cache/routing_information_cache.h"
 #include "mongo/db/rss/replicated_storage_service.h"
 #include "mongo/db/s/migration_blocking_operation/multi_update_coordinator.h"
 #include "mongo/db/s/migration_chunk_cloner_source_op_observer.h"
@@ -173,13 +152,31 @@
 #include "mongo/db/server_lifecycle_monitor.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
-#include "mongo/db/service_entry_point_rs_endpoint.h"
 #include "mongo/db/service_entry_point_shard_role.h"
 #include "mongo/db/session/kill_sessions_local.h"
 #include "mongo/db/session/kill_sessions_remote.h"
 #include "mongo/db/session/logical_session_cache.h"
 #include "mongo/db/session/session_catalog_mongod.h"
 #include "mongo/db/session/session_killer.h"
+#include "mongo/db/shard_role/ddl/direct_connection_ddl_hook.h"
+#include "mongo/db/shard_role/ddl/replica_set_ddl_tracker.h"
+#include "mongo/db/shard_role/lock_manager/d_concurrency.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/resource_yielders.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_helper.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_catalog_helper.h"
+#include "mongo/db/shard_role/shard_catalog/collection_impl.h"
+#include "mongo/db/shard_role/shard_catalog/collection_options.h"
+#include "mongo/db/shard_role/shard_catalog/collection_sharding_state.h"
+#include "mongo/db/shard_role/shard_catalog/collection_sharding_state_factory_shard.h"
+#include "mongo/db/shard_role/shard_catalog/database.h"
+#include "mongo/db/shard_role/shard_catalog/database_holder.h"
+#include "mongo/db/shard_role/shard_catalog/database_holder_impl.h"
+#include "mongo/db/shard_role/shard_catalog/database_sharding_state_factory_shard.h"
+#include "mongo/db/shard_role/shard_catalog/db_raii.h"
+#include "mongo/db/shard_role/shard_catalog/shard_filtering_metadata_refresh.h"
 #include "mongo/db/sharding_environment/config_server_op_observer.h"
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/sharding_environment/shard_server_op_observer.h"
@@ -188,6 +185,7 @@
 #include "mongo/db/sharding_environment/sharding_ready.h"
 #include "mongo/db/startup_recovery.h"
 #include "mongo/db/startup_warnings_mongod.h"
+#include "mongo/db/stats/system_buckets_metrics.h"
 #include "mongo/db/storage/backup_cursor_hooks.h"
 #include "mongo/db/storage/control/storage_control.h"
 #include "mongo/db/storage/disk_space_monitor.h"
@@ -201,16 +199,18 @@
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/system_index.h"
 #include "mongo/db/timeseries/timeseries_op_observer.h"
+#include "mongo/db/topology/cluster_parameters/cluster_server_parameter_initializer.h"
+#include "mongo/db/topology/cluster_parameters/cluster_server_parameter_op_observer.h"
 #include "mongo/db/topology/cluster_role.h"
 #include "mongo/db/topology/periodic_replica_set_configshard_maintenance_mode_checker.h"
 #include "mongo/db/topology/shard_registry.h"
 #include "mongo/db/topology/sharding_state.h"
+#include "mongo/db/topology/user_write_block/user_write_block_mode_op_observer.h"
+#include "mongo/db/topology/vector_clock/vector_clock_metadata_hook.h"
 #include "mongo/db/transaction/session_catalog_mongod_transaction_interface_impl.h"
 #include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/db/transaction/transaction_participant_gen.h"
 #include "mongo/db/ttl/ttl.h"
-#include "mongo/db/user_write_block/user_write_block_mode_op_observer.h"
-#include "mongo/db/vector_clock/vector_clock_metadata_hook.h"
 #include "mongo/db/wire_version.h"
 #include "mongo/executor/network_connection_hook.h"
 #include "mongo/executor/network_interface_factory.h"
@@ -310,6 +310,7 @@ namespace {
 
 MONGO_FAIL_POINT_DEFINE(hangDuringQuiesceMode);
 MONGO_FAIL_POINT_DEFINE(pauseWhileKillingOperationsAtShutdown);
+MONGO_FAIL_POINT_DEFINE(hangBeforeFinishingInitAndListen);
 MONGO_FAIL_POINT_DEFINE(hangBeforeShutdown);
 
 #ifdef _WIN32
@@ -321,43 +322,12 @@ auto& startupInfoSection =
     *ServerStatusSectionBuilder<BSONObjectStatusSection>("startupInfo").forShard().forRouter();
 
 auto makeTransportLayer(ServiceContext* svcCtx) {
-    boost::optional<int> proxyPort;
-
-    // (Ignore FCV check): The proxy port needs to be open before the FCV is set.
-    if (gFeatureFlagMongodProxyProtocolSupport.isEnabledAndIgnoreFCVUnsafe()) {
-        if (serverGlobalParams.proxyPort) {
-            proxyPort = *serverGlobalParams.proxyPort;
-            if (*proxyPort == serverGlobalParams.port) {
-                LOGV2_ERROR(9967800,
-                            "The proxy port must be different from the public listening port.",
-                            "port"_attr = serverGlobalParams.port);
-                quickExit(ExitCode::badOptions);
-            }
-        }
-    }
-
     // Mongod should not bind to any ports in repair mode so only allow egress.
     if (storageGlobalParams.repair) {
         return transport::TransportLayerManagerImpl::makeDefaultEgressTransportLayer();
     }
 
-    bool useEgressGRPC = false;
-    if (globalMongotParams.useGRPC) {
-#ifdef MONGO_CONFIG_GRPC
-        uassert(9715900,
-                "Egress GRPC for search is not enabled",
-                feature_flags::gEgressGrpcForSearch.isEnabled());
-        useEgressGRPC = true;
-#else
-        LOGV2_ERROR(
-            10049101,
-            "useGRPCForSearch is only supported on Linux platforms built with TLS support.");
-        quickExit(ExitCode::badOptions);
-#endif
-    }
-
-    return transport::TransportLayerManagerImpl::createWithConfig(
-        &serverGlobalParams, svcCtx, useEgressGRPC, std::move(proxyPort));
+    return transport::TransportLayerManagerImpl::make(svcCtx, globalMongotParams.useGRPC);
 }
 
 ExitCode initializeTransportLayer(ServiceContext* serviceContext, BSONObjBuilder* timerReport) {
@@ -434,24 +404,28 @@ void initializeCommandHooks(ServiceContext* serviceContext) {
     class MongodCommandInvocationHooks final : public CommandInvocationHooks {
     public:
         void onBeforeRun(OperationContext* opCtx, CommandInvocation* invocation) override {
-            _nextHook.onBeforeRun(opCtx, invocation);
+            _transportHook.onBeforeRun(opCtx, invocation);
+            _systemBucketsHook.onBeforeRun(opCtx, invocation);
         }
 
         void onBeforeAsyncRun(std::shared_ptr<RequestExecutionContext> rec,
                               CommandInvocation* invocation) override {
-            _nextHook.onBeforeAsyncRun(rec, invocation);
+            _transportHook.onBeforeAsyncRun(rec, invocation);
+            _systemBucketsHook.onBeforeAsyncRun(rec, invocation);
         }
 
         void onAfterRun(OperationContext* opCtx,
                         CommandInvocation* invocation,
                         rpc::ReplyBuilderInterface* response) override {
-            _nextHook.onAfterRun(opCtx, invocation, response);
+            _transportHook.onAfterRun(opCtx, invocation, response);
+            _systemBucketsHook.onAfterRun(opCtx, invocation, response);
             _onAfterRunImpl(opCtx);
         }
 
         void onAfterAsyncRun(std::shared_ptr<RequestExecutionContext> rec,
                              CommandInvocation* invocation) override {
-            _nextHook.onAfterAsyncRun(rec, invocation);
+            _transportHook.onAfterAsyncRun(rec, invocation);
+            _systemBucketsHook.onAfterAsyncRun(rec, invocation);
             _onAfterRunImpl(rec->getOpCtx());
         }
 
@@ -461,7 +435,8 @@ void initializeCommandHooks(ServiceContext* serviceContext) {
             MirrorMaestro::onReceiveMirroredRead(opCtx);
         }
 
-        transport::IngressHandshakeMetricsCommandHooks _nextHook{};
+        transport::IngressHandshakeMetricsCommandHooks _transportHook{};
+        SystemBucketsMetricsCommandHooks _systemBucketsHook{};
     };
 
     CommandInvocationHooks::set(serviceContext, std::make_unique<MongodCommandInvocationHooks>());
@@ -558,20 +533,8 @@ ExitCode _initAndListen(ServiceContext* serviceContext) {
 
     ProfileFilterImpl::initializeDefaults(serviceContext);
 
-    {
-        // (Ignore FCV check): The ReplicaSetEndpoint service entry point needs to be set even
-        // before the FCV is fully upgraded.
-        const bool useRSEndpoint =
-            feature_flags::gFeatureFlagReplicaSetEndpoint.isEnabledAndIgnoreFCVUnsafe();
-        auto shardRoleSEP = std::make_unique<ServiceEntryPointShardRole>();
-        auto shardService = serviceContext->getService(ClusterRole::ShardServer);
-        if (useRSEndpoint) {
-            shardService->setServiceEntryPoint(
-                std::make_unique<ServiceEntryPointRSEndpoint>(std::move(shardRoleSEP)));
-        } else {
-            shardService->setServiceEntryPoint(std::move(shardRoleSEP));
-        }
-    }
+    serviceContext->getService(ClusterRole::ShardServer)
+        ->setServiceEntryPoint(std::make_unique<ServiceEntryPointShardRole>());
 
     {
         // Set up the periodic runner for background job execution. This is required to be running
@@ -606,6 +569,13 @@ ExitCode _initAndListen(ServiceContext* serviceContext) {
         ec != ExitCode::clean)
         return ec;
 
+    {
+        SectionScopedTimer scopedTimer(serviceContext->getFastClockSource(),
+                                       TimedSectionId::setUpPostTransportLayer,
+                                       &startupTimeElapsedBuilder);
+        setUpPostTransportLayer(serviceContext);
+    }
+
     auto& rss = rss::ReplicatedStorageService::get(serviceContext);
     auto& serviceLifecycle = rss.getServiceLifecycle();
     serviceLifecycle.initializeFlowControl(serviceContext);
@@ -618,7 +588,7 @@ ExitCode _initAndListen(ServiceContext* serviceContext) {
         repl::InitialSyncerFactory::get(serviceContext)->runCrashRecovery();
     }
 
-    admission::initializeExecutionControl(serviceContext);
+    admission::execution_control::initializeTicketingSystem(serviceContext);
 
     serviceLifecycle.initializeStorageEngineExtensions(serviceContext);
 
@@ -745,7 +715,11 @@ ExitCode _initAndListen(ServiceContext* serviceContext) {
         ClusterServerParameterInitializer::synchronizeAllParametersFromDisk(startupOpCtx.get());
     }
 
-    FeatureCompatibilityVersion::afterStartupActions(startupOpCtx.get());
+    // FCV initialization is delayed on persistence providers where data access is not immediately
+    // available. As such, post startup actions will be performed elsewhere.
+    if (!rss.getPersistenceProvider().shouldDelayDataAccessDuringStartup()) {
+        FeatureCompatibilityVersion::afterStartupActions(startupOpCtx.get());
+    }
 
     if (gFlowControlEnabled.load()) {
         LOGV2(20536, "Flow Control is enabled on this deployment");
@@ -804,8 +778,10 @@ ExitCode _initAndListen(ServiceContext* serviceContext) {
     }
 
     // Start up health log writer thread.
-    HealthLogInterface::set(serviceContext, std::make_unique<HealthLog>());
-    HealthLogInterface::get(startupOpCtx.get())->startup();
+    if (rss.getPersistenceProvider().supportsLocalCollections()) {
+        HealthLogInterface::set(serviceContext, std::make_unique<HealthLog>());
+        HealthLogInterface::get(startupOpCtx.get())->startup();
+    }
 
     {
         SectionScopedTimer scopedTimer(serviceContext->getFastClockSource(),
@@ -1162,6 +1138,33 @@ ExitCode _initAndListen(ServiceContext* serviceContext) {
                                        TimedSectionId::logStartupOptions,
                                        &startupTimeElapsedBuilder);
         audit::logStartupOptions(Client::getCurrent(), serverGlobalParams.parsedOpts);
+    }
+
+    if (MONGO_unlikely(hangBeforeFinishingInitAndListen.shouldFail())) {
+        // If something unexpectedly takes the GlobalLock and doesn't release
+        // it, then we can livelock here because reconstructing prepared
+        // transactions (as a result of replCoord->startup) takes the GlobalLock
+        // and doesn't release it. Other services initialized above may do
+        // something similar, whether now or in the future. Therefore, this
+        // block should be the last block before we reset the startupOpCtx.
+        LOGV2(6295100,
+              "Hanging before finishing initAndListen due to hangBeforeFinishingInitAndListen "
+              "failpoint");
+        // It would be better if we could
+        // hangBeforeFinishingInitAndListen.pauseWhileSet();
+        // and then release the failpoint from elsewhere (like a jstest), but
+        // we can't because the server hasn't started listening yet. Therefore,
+        // we just sleep for a fixed amount of time.
+        sleepsecs(1);
+        // Nothing should be permanently holding the global lock, so it should
+        // be quickly acquired here and released when we exit the block.
+        LOGV2(
+            6295101,
+            "Taking the GlobalWrite lock in initAndListen due to hangBeforeFinishingInitAndListen "
+            "failpoint");
+        Lock::GlobalWrite lk(startupOpCtx.get());
+        LOGV2(6295102,
+              "Finished hanging initAndListen due to hangBeforeFinishingInitAndListen failpoint");
     }
 
     // MessageServer::run will return when exit code closes its socket and we don't need the
@@ -1803,7 +1806,7 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
         ReplicaSetMonitor::shutdown();
     }
 
-    if (ShardingState::get(serviceContext)->enabled()) {
+    if (auto state = ShardingState::get(serviceContext); state != nullptr && state->enabled()) {
         SectionScopedTimer scopedTimer(serviceContext->getFastClockSource(),
                                        TimedSectionId::shutDownTransactionCoord,
                                        &shutdownTimeElapsedBuilder);
@@ -1993,7 +1996,7 @@ int mongod_main(int argc, char* argv[]) {
     // initialize_server_global_state::forkServerOrDie) and before the creation of any other threads
     startSignalProcessingThread();
 
-    uassertStatusOK(otel::metrics::initialize("mongod"));
+    uassertStatusOK(otel::metrics::initialize());
 
     auto* service = [] {
         try {

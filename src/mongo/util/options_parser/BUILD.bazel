@@ -35,16 +35,6 @@ mongo_cc_library(
         "startup_options.cpp",
         "value.cpp",
     ],
-    hdrs = [
-        "constraints.h",
-        "environment.h",
-        "option_description.h",
-        "option_section.h",
-        "options_parser.h",
-        "startup_option_init.h",
-        "startup_options.h",
-        "value.h",
-    ],
     copts = select({
         ":options_parser_needs_no_missing_indentation_flag": [
             "-Wno-misleading-indentation",
@@ -59,10 +49,10 @@ mongo_cc_library(
         "//src/mongo/crypto:sha_block",
         "//src/mongo/util/net:http_client",
         "//src/mongo/util/net:network",
-        "//src/third_party/boost:boost_filesystem",  # TODO(SERVER-93876): Remove.
-        "//src/third_party/boost:boost_iostreams",  # TODO(SERVER-93876): Remove.
-        "//src/third_party/boost:boost_log",  # TODO(SERVER-93876): Remove.
-        "//src/third_party/boost:boost_program_options",  # TODO(SERVER-93876): Remove.
+        "//src/third_party/boost:boost_filesystem",
+        "//src/third_party/boost:boost_iostreams",
+        "//src/third_party/boost:boost_log",
+        "//src/third_party/boost:boost_program_options",
         "//src/third_party/yaml-cpp:yaml",
     ],
 )

@@ -37,13 +37,14 @@
 #include "mongo/client/connection_string.h"
 #include "mongo/db/collection_crud/collection_write_path.h"
 #include "mongo/db/dbdirectclient.h"
+#include "mongo/db/dbhelpers.h"
 #include "mongo/db/global_catalog/type_shard_identity.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/server_options.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
 #include "mongo/db/sharding_environment/sharding_initialization_mongod.h"
 #include "mongo/db/sharding_environment/sharding_mongod_test_fixture.h"
 #include "mongo/db/storage/write_unit_of_work.h"
@@ -122,9 +123,8 @@ TEST_F(ShardingInitializationOpObserverTest, GlobalInitDoesntGetCalledIfWriteAbo
             MODE_IX);
 
         WriteUnitOfWork wuow(operationContext());
-        InsertStatement stmt(shardIdentity.toShardIdentityDocument());
-        ASSERT_OK(
-            collection_internal::insertDocument(operationContext(), *autoColl, stmt, nullptr));
+        ASSERT_OK(Helpers::insert(
+            operationContext(), *autoColl, shardIdentity.toShardIdentityDocument()));
         ASSERT_EQ(0, getInitCallCount());
     }
 

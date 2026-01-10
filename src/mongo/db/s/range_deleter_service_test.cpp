@@ -37,17 +37,17 @@
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/global_catalog/chunk_manager.h"
 #include "mongo/db/global_catalog/type_collection_common_types_gen.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/create_collection.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_catalog/collection_metadata.h"
-#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_runtime.h"
-#include "mongo/db/local_catalog/shard_role_catalog/operation_sharding_state.h"
 #include "mongo/db/persistent_task_store.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/repl/wait_for_majority_service.h"
 #include "mongo/db/s/range_deleter_service_test.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_metadata.h"
+#include "mongo/db/shard_role/shard_catalog/collection_sharding_runtime.h"
+#include "mongo/db/shard_role/shard_catalog/create_collection.h"
+#include "mongo/db/shard_role/shard_catalog/operation_sharding_state.h"
 #include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/db/sharding_environment/sharding_runtime_d_params_gen.h"
 #include "mongo/db/versioning_protocol/chunk_version.h"
@@ -69,6 +69,16 @@
 
 namespace mongo {
 
+namespace {
+constexpr auto kStartingTerm = 0L;
+
+void simulateStepup(OperationContext* opCtx, long long term) {
+    RangeDeleterService::get(opCtx)->onStepUpBegin(opCtx, term);
+    RangeDeleterService::get(opCtx)->onStepUpComplete(opCtx, term);
+    RangeDeleterService::get(opCtx)->getServiceUpFuture().get(opCtx);
+}
+}  // namespace
+
 /**
  *  RangeDeleterServiceTest implementation
  */
@@ -77,9 +87,7 @@ void RangeDeleterServiceTest::setUp() {
     WaitForMajorityService::get(getServiceContext()).startup(getServiceContext());
     opCtx = operationContext();
     RangeDeleterService::get(opCtx)->onStartup(opCtx);
-    RangeDeleterService::get(opCtx)->onStepUpComplete(opCtx, 0L);
-    RangeDeleterService::get(opCtx)->getRangeDeleterServiceInitializationFuture().get(opCtx);
-
+    simulateStepup(opCtx, kStartingTerm);
     createTestCollection(opCtx, nsCollA);
     createTestCollection(opCtx, nsCollB);
 
@@ -121,21 +129,19 @@ void RangeDeleterServiceTest::_setFilteringMetadataByUUID(OperationContext* opCt
                                ChunkRange{BSON(kShardKey << MINKEY), BSON(kShardKey << MAXKEY)},
                                ChunkVersion({epoch, Timestamp(1, 1)}, {1, 0}),
                                ShardId("this"));
-        ChunkManager cm(makeStandaloneRoutingTableHistory(
-                            RoutingTableHistory::makeNew(nss,
-                                                         uuid,
-                                                         kShardKeyPattern,
-                                                         false, /* unsplittable */
-                                                         nullptr,
-                                                         false,
-                                                         epoch,
-                                                         Timestamp(1, 1),
-                                                         boost::none /* timeseriesFields */,
-                                                         boost::none /* reshardingFields */,
-
-                                                         true,
-                                                         {std::move(chunk)})),
-                        boost::none);
+        CurrentChunkManager cm(makeStandaloneRoutingTableHistory(
+            RoutingTableHistory::makeNew(nss,
+                                         uuid,
+                                         kShardKeyPattern,
+                                         false, /* unsplittable */
+                                         nullptr,
+                                         false,
+                                         epoch,
+                                         Timestamp(1, 1),
+                                         boost::none /* timeseriesFields */,
+                                         boost::none /* reshardingFields */,
+                                         true,
+                                         {std::move(chunk)})));
 
         return CollectionMetadata(std::move(cm), ShardId("this"));
     }();
@@ -318,7 +324,7 @@ TEST_F(RangeDeleterServiceTest, NoActionPossibleIfServiceIsDown) {
                                         taskWithOngoingQueries->getTask(),
                                         taskWithOngoingQueries->getOngoingQueriesFuture()),
         DBException,
-        ErrorCodes::NotYetInitialized);
+        ErrorCodes::NotWritablePrimary);
 
     ASSERT_THROWS_CODE(rds->completeTask(taskWithOngoingQueries->getTask().getCollectionUuid(),
                                          taskWithOngoingQueries->getTask().getRange()),
@@ -613,7 +619,9 @@ TEST_F(RangeDeleterServiceTest, RegisterTaskWithDisableResumableRangeDeleterFlag
         registerAndCreatePersistentTask(opCtx,
                                         taskWithOngoingQueries->getTask(),
                                         taskWithOngoingQueries->getOngoingQueriesFuture());
-    ASSERT(!completionFuture.isReady());
+    ASSERT(completionFuture.isReady());
+    ASSERT_THROWS_CODE(
+        completionFuture.get(opCtx), DBException, ErrorCodes::ResumableRangeDeleterDisabled);
     ASSERT_EQ(1, rds->getNumRangeDeletionTasksForCollection(uuidCollA));
 
     auto overlappingRangeFuture = rds->getOverlappingRangeDeletionsFuture(
@@ -686,8 +694,7 @@ TEST_F(RangeDeleterServiceTest, RescheduleRangeDeletionTasksOnStepUp) {
     }
 
     // Trigger step-up
-    rds->onStepUpComplete(opCtx, 0L);
-    rds->getRangeDeleterServiceInitializationFuture().get(opCtx);
+    simulateStepup(opCtx, kStartingTerm + 1);
 
     // Check that all non-pending tasks are being rescheduled
     ASSERT_EQ(nNonPending + nNonPendingAndProcessing,
@@ -871,8 +878,7 @@ TEST_F(RangeDeleterServiceTest, RegisterPendingTaskAndMarkItNonPending) {
     // Register task as pending (will not be processed until someone registers it again as !pending)
     auto completionFuture = rds->registerTask(taskWithOngoingQueries->getTask(),
                                               taskWithOngoingQueries->getOngoingQueriesFuture(),
-                                              false /* from step up*/,
-                                              true /* pending */);
+                                              RangeDeleterService::TaskPending::kPending);
 
     ASSERT(!completionFuture.isReady());
 
@@ -938,4 +944,371 @@ TEST_F(RangeDeleterServiceTest, ProcessingFlagIsSetWhenRangeDeletionExecutionSta
     ASSERT_EQ(0, rds->getNumRangeDeletionTasksForCollection(uuidCollA));
 }
 
+TEST_F(RangeDeleterServiceTest, TermInitializationFutureThrowsWhenServiceDown) {
+    auto rds = RangeDeleterService::get(opCtx);
+    rds->onStepDown();
+
+    ASSERT_THROWS_CODE(
+        rds->getTermInitializationFuture(), DBException, ErrorCodes::NotWritablePrimary);
+}
+
+TEST_F(RangeDeleterServiceTest, ServiceUpFutureThrowsWhenServiceDown) {
+    auto rds = RangeDeleterService::get(opCtx);
+    rds->onStepDown();
+
+    ASSERT_THROWS_CODE(rds->getServiceUpFuture(), DBException, ErrorCodes::NotWritablePrimary);
+}
+
+TEST_F(RangeDeleterServiceTest, ServiceUpFutureFulfilledOnStepdown) {
+    auto rds = RangeDeleterService::get(opCtx);
+    rds->onStepDown();
+    const auto term = kStartingTerm + 1;
+    rds->onStepUpBegin(opCtx, term);
+    rds->registerRecoveryJob(term);
+    rds->onStepUpComplete(opCtx, term);
+
+    auto future = rds->getServiceUpFuture();
+    ASSERT(!future.isReady());
+
+    rds->onStepDown();
+
+    ASSERT_EQ(future.getNoThrow(opCtx).code(), ErrorCodes::PrimarySteppedDown);
+}
+
+TEST_F(RangeDeleterServiceTest, TermInitializationFutureFulfilledOnStepdown) {
+    auto rds = RangeDeleterService::get(opCtx);
+    rds->onStepDown();
+    const auto term = kStartingTerm + 1;
+    rds->onStepUpBegin(opCtx, term);
+
+    auto future = rds->getTermInitializationFuture();
+    ASSERT(!future.isReady());
+
+    rds->onStepDown();
+
+    ASSERT_EQ(future.getNoThrow(opCtx).code(), ErrorCodes::PrimarySteppedDown);
+}
+
+TEST_F(RangeDeleterServiceTest, TermInitializationReadyBeforeServiceUp) {
+    auto rds = RangeDeleterService::get(opCtx);
+    rds->onStepDown();
+    const auto term = kStartingTerm + 1;
+    rds->onStepUpBegin(opCtx, term);
+    rds->registerRecoveryJob(term);
+    rds->onStepUpComplete(opCtx, term);
+
+    auto termInitFuture = rds->getTermInitializationFuture();
+    auto serviceUpFuture = rds->getServiceUpFuture();
+
+    ASSERT_OK(termInitFuture.getNoThrow(opCtx));
+    ASSERT(!serviceUpFuture.isReady());
+
+    rds->notifyRecoveryJobComplete(term);
+
+    ASSERT_OK(serviceUpFuture.getNoThrow(opCtx));
+}
+
+TEST_F(RangeDeleterServiceTest, RegisterTaskSucceedsDuringRecoveryPhase) {
+    auto rds = RangeDeleterService::get(opCtx);
+    rds->onStepDown();
+    const auto term = kStartingTerm + 1;
+    rds->onStepUpBegin(opCtx, term);
+    rds->registerRecoveryJob(term);
+    rds->onStepUpComplete(opCtx, term);
+
+    ASSERT_OK(rds->getTermInitializationFuture().getNoThrow());
+    ASSERT(!rds->getServiceUpFuture().isReady());
+
+    auto task = createRangeDeletionTask(uuidCollA, BSON(kShardKey << 0), BSON(kShardKey << 10));
+    auto ignore = rds->registerTask(
+        task, SemiFuture<void>::makeReady(), RangeDeleterService::TaskPending::kPending);
+
+    rds->notifyRecoveryJobComplete(term);
+    ASSERT_OK(rds->getServiceUpFuture().getNoThrow(opCtx));
+
+    ASSERT_EQ(1, rds->getNumRangeDeletionTasksForCollection(uuidCollA));
+}
+
+TEST_F(RangeDeleterServiceTest, RegisterOverlappingTaskWaitsForOlderTask) {
+    auto rds = RangeDeleterService::get(opCtx);
+
+    // Register task [0, 10) - this will be the "older" task
+    auto task0 = createRangeDeletionTaskWithOngoingQueries(
+        uuidCollA, BSON(kShardKey << 0), BSON(kShardKey << 10));
+    auto completionFuture0 =
+        registerAndCreatePersistentTask(opCtx, task0->getTask(), task0->getOngoingQueriesFuture());
+    ASSERT_FALSE(completionFuture0.isReady());
+    ASSERT_EQ(1, rds->getNumRangeDeletionTasksForCollection(uuidCollA));
+
+    // Register overlapping task [5, 15) - this should be allowed and wait for task0
+    auto task1 = createRangeDeletionTaskWithOngoingQueries(
+        uuidCollA, BSON(kShardKey << 5), BSON(kShardKey << 15));
+    auto completionFuture1 =
+        registerAndCreatePersistentTask(opCtx, task1->getTask(), task1->getOngoingQueriesFuture());
+    ASSERT_FALSE(completionFuture1.isReady());
+    // Both tasks should be registered
+    ASSERT_EQ(2, rds->getNumRangeDeletionTasksForCollection(uuidCollA));
+
+    // Drain ongoing queries for task1 first - it should NOT complete yet because it's waiting
+    // for the older overlapping task0 to complete
+    task1->drainOngoingQueries();
+    ASSERT_FALSE(completionFuture1.isReady());
+
+    // Now drain ongoing queries for task0 - this should allow task0 to complete
+    task0->drainOngoingQueries();
+    completionFuture0.get(opCtx);
+
+    // Now task1 should be able to complete (after task0 finished)
+    completionFuture1.get(opCtx);
+    ASSERT_EQ(0, rds->getNumRangeDeletionTasksForCollection(uuidCollA));
+}
+
+TEST_F(RangeDeleterServiceTest, RegisterOverlappingTasksNoDeadlock) {
+    auto rds = RangeDeleterService::get(opCtx);
+
+    // Register multiple overlapping tasks that could potentially deadlock
+    // Task 0: [0, 20)
+    auto task0 = createRangeDeletionTaskWithOngoingQueries(
+        uuidCollA, BSON(kShardKey << 0), BSON(kShardKey << 20));
+    auto completionFuture0 =
+        registerAndCreatePersistentTask(opCtx, task0->getTask(), task0->getOngoingQueriesFuture());
+
+    // Task 1: [10, 30) - overlaps with task0
+    auto task1 = createRangeDeletionTaskWithOngoingQueries(
+        uuidCollA, BSON(kShardKey << 10), BSON(kShardKey << 30));
+    auto completionFuture1 =
+        registerAndCreatePersistentTask(opCtx, task1->getTask(), task1->getOngoingQueriesFuture());
+
+    // Task 2: [5, 15) - overlaps with both task0 and task1
+    auto task2 = createRangeDeletionTaskWithOngoingQueries(
+        uuidCollA, BSON(kShardKey << 5), BSON(kShardKey << 15));
+    auto completionFuture2 =
+        registerAndCreatePersistentTask(opCtx, task2->getTask(), task2->getOngoingQueriesFuture());
+
+    ASSERT_EQ(3, rds->getNumRangeDeletionTasksForCollection(uuidCollA));
+
+    // Drain all ongoing queries - if there's a deadlock this would hang
+    task0->drainOngoingQueries();
+    task1->drainOngoingQueries();
+    task2->drainOngoingQueries();
+
+    // All tasks should complete without deadlock
+    completionFuture0.get(opCtx);
+    completionFuture1.get(opCtx);
+    completionFuture2.get(opCtx);
+
+    ASSERT_EQ(0, rds->getNumRangeDeletionTasksForCollection(uuidCollA));
+}
+
+TEST_F(RangeDeleterServiceTest, NonOverlappingTasksRunConcurrently) {
+    auto rds = RangeDeleterService::get(opCtx);
+
+    // Register non-overlapping tasks
+    // Task 0: [0, 10)
+    auto task0 = createRangeDeletionTaskWithOngoingQueries(
+        uuidCollA, BSON(kShardKey << 0), BSON(kShardKey << 10));
+    auto completionFuture0 =
+        registerAndCreatePersistentTask(opCtx, task0->getTask(), task0->getOngoingQueriesFuture());
+
+    // Task 1: [20, 30) - does NOT overlap with task0
+    auto task1 = createRangeDeletionTaskWithOngoingQueries(
+        uuidCollA, BSON(kShardKey << 20), BSON(kShardKey << 30));
+    auto completionFuture1 =
+        registerAndCreatePersistentTask(opCtx, task1->getTask(), task1->getOngoingQueriesFuture());
+
+    ASSERT_EQ(2, rds->getNumRangeDeletionTasksForCollection(uuidCollA));
+
+    // Drain task1 first - it should complete independently without waiting for task0
+    task1->drainOngoingQueries();
+    completionFuture1.get(opCtx);
+    ASSERT_EQ(1, rds->getNumRangeDeletionTasksForCollection(uuidCollA));
+
+    // Task0 should still be running
+    ASSERT_FALSE(completionFuture0.isReady());
+
+    // Now drain task0
+    task0->drainOngoingQueries();
+    completionFuture0.get(opCtx);
+    ASSERT_EQ(0, rds->getNumRangeDeletionTasksForCollection(uuidCollA));
+}
+
+TEST_F(RangeDeleterServiceTest, RecoveryWithOverlappingTasksNoDeadlock) {
+    auto rds = RangeDeleterService::get(opCtx);
+
+    // Trigger step-down
+    rds->onStepDown();
+
+    PersistentTaskStore<RangeDeletionTask> store(NamespaceString::kRangeDeletionNamespace);
+
+    // Persist overlapping range deletion tasks to disk
+    // Task 0: [0, 20) with earlier timestamp
+    auto task0 = createRangeDeletionTask(uuidCollA,
+                                         BSON(kShardKey << 0),
+                                         BSON(kShardKey << 20),
+                                         CleanWhenEnum::kNow,
+                                         /*pending=*/false);
+    task0.setTimestamp(Timestamp(100, 1));
+    store.add(opCtx, task0);
+
+    // Task 1: [10, 30) with later timestamp - overlaps with task0
+    auto task1 = createRangeDeletionTask(uuidCollA,
+                                         BSON(kShardKey << 10),
+                                         BSON(kShardKey << 30),
+                                         CleanWhenEnum::kNow,
+                                         /*pending=*/false);
+    task1.setTimestamp(Timestamp(200, 1));
+    store.add(opCtx, task1);
+
+    // Task 2: [5, 15) with latest timestamp - overlaps with both
+    auto task2 = createRangeDeletionTask(uuidCollA,
+                                         BSON(kShardKey << 5),
+                                         BSON(kShardKey << 15),
+                                         CleanWhenEnum::kNow,
+                                         /*pending=*/false);
+    task2.setTimestamp(Timestamp(300, 1));
+    store.add(opCtx, task2);
+
+    // Verify tasks were persisted before step-up.
+    ASSERT_EQ(3, store.count(opCtx, BSONObj{}));
+
+    // Trigger step-up - this should recover all tasks and they should complete without deadlock
+    simulateStepup(opCtx, kStartingTerm + 1);
+
+    // Wait for all tasks to complete - if there's a deadlock this would hang
+    auto overlappingFuture = rds->getOverlappingRangeDeletionsFuture(
+        uuidCollA, ChunkRange(BSON(kShardKey << 0), BSON(kShardKey << 30)));
+    overlappingFuture.get(opCtx);
+
+    // Verify tasks completed (removed from in-memory tracker).
+    ASSERT_EQ(0, rds->getNumRangeDeletionTasksForCollection(uuidCollA));
+}
+
+TEST_F(RangeDeleterServiceTest, OverlappingTasksRegisteredDuringRecoveryWaitForStepUpComplete) {
+    auto rds = RangeDeleterService::get(opCtx);
+
+    // Trigger step-down
+    rds->onStepDown();
+
+    PersistentTaskStore<RangeDeletionTask> store(NamespaceString::kRangeDeletionNamespace);
+
+    // Persist overlapping tasks to disk - they will be registered during recovery
+    auto task0 = createRangeDeletionTask(uuidCollA,
+                                         BSON(kShardKey << 0),
+                                         BSON(kShardKey << 10),
+                                         CleanWhenEnum::kNow,
+                                         /*pending=*/false);
+    task0.setTimestamp(Timestamp(100, 1));
+    store.add(opCtx, task0);
+
+    auto task1 = createRangeDeletionTask(uuidCollA,
+                                         BSON(kShardKey << 5),
+                                         BSON(kShardKey << 15),
+                                         CleanWhenEnum::kNow,
+                                         /*pending=*/false);
+    task1.setTimestamp(Timestamp(200, 1));
+    store.add(opCtx, task1);
+
+    // Verify tasks were persisted before step-up.
+    ASSERT_EQ(2, store.count(opCtx, BSONObj{}));
+
+    // Trigger step-up - both tasks should be recovered and wait for step-up to complete
+    // before checking for overlaps
+    simulateStepup(opCtx, kStartingTerm + 1);
+
+    // Both tasks should complete without deadlock - step-up completion ensures
+    // all recovery tasks are registered before overlap checks begin
+    auto overlappingFuture = rds->getOverlappingRangeDeletionsFuture(
+        uuidCollA, ChunkRange(BSON(kShardKey << 0), BSON(kShardKey << 15)));
+    overlappingFuture.get(opCtx);
+
+    // Verify tasks completed (removed from in-memory tracker).
+    ASSERT_EQ(0, rds->getNumRangeDeletionTasksForCollection(uuidCollA));
+}
+
+TEST_F(RangeDeleterServiceTest, OverlappingTasksWithSameTimestampOneWaitsForOther) {
+    auto rds = RangeDeleterService::get(opCtx);
+
+    // Create two overlapping tasks with the SAME timestamp
+    auto sameTimestamp = Timestamp(100, 1);
+
+    auto rdt0 = createRangeDeletionTask(uuidCollA,
+                                        BSON(kShardKey << 0),
+                                        BSON(kShardKey << 10),
+                                        CleanWhenEnum::kNow,
+                                        /*pending=*/false);
+    rdt0.setTimestamp(sameTimestamp);
+    auto task0 = std::make_shared<RangeDeletionWithOngoingQueries>(rdt0);
+
+    auto rdt1 = createRangeDeletionTask(uuidCollA,
+                                        BSON(kShardKey << 5),
+                                        BSON(kShardKey << 15),
+                                        CleanWhenEnum::kNow,
+                                        /*pending=*/false);
+    rdt1.setTimestamp(sameTimestamp);
+    auto task1 = std::make_shared<RangeDeletionWithOngoingQueries>(rdt1);
+
+    // Register both tasks
+    auto completionFuture0 =
+        registerAndCreatePersistentTask(opCtx, task0->getTask(), task0->getOngoingQueriesFuture());
+    auto completionFuture1 =
+        registerAndCreatePersistentTask(opCtx, task1->getTask(), task1->getOngoingQueriesFuture());
+
+    ASSERT_EQ(2, rds->getNumRangeDeletionTasksForCollection(uuidCollA));
+
+    // When timestamps are equal, the task with smaller UUID goes first (tie-breaker).
+    // Determine which task should go first based on UUID comparison.
+    bool task0GoesFirst = rdt0.getId() < rdt1.getId();
+    auto& firstTask = task0GoesFirst ? task0 : task1;
+    auto& secondTask = task0GoesFirst ? task1 : task0;
+    auto& firstFuture = task0GoesFirst ? completionFuture0 : completionFuture1;
+    auto& secondFuture = task0GoesFirst ? completionFuture1 : completionFuture0;
+
+    // Drain the SECOND task's ongoing queries first.
+    // It should still be blocked waiting for the first task to complete.
+    secondTask->drainOngoingQueries();
+    ASSERT_FALSE(secondFuture.isReady());
+
+    // Now drain the first task's ongoing queries - it should complete.
+    firstTask->drainOngoingQueries();
+    firstFuture.get(opCtx);
+
+    // Now the second task should be unblocked and complete.
+    secondFuture.get(opCtx);
+
+    ASSERT_EQ(0, rds->getNumRangeDeletionTasksForCollection(uuidCollA));
+}
+
+TEST_F(RangeDeleterServiceTest, OverlappingTaskWithNoTimestampGetsCurrentTime) {
+    auto rds = RangeDeleterService::get(opCtx);
+
+    // Register task0 first - it will get an auto-generated timestamp
+    auto task0 = createRangeDeletionTaskWithOngoingQueries(
+        uuidCollA, BSON(kShardKey << 0), BSON(kShardKey << 10));
+    auto completionFuture0 =
+        registerAndCreatePersistentTask(opCtx, task0->getTask(), task0->getOngoingQueriesFuture());
+    ASSERT_FALSE(completionFuture0.isReady());
+
+    // Small delay to ensure task1 gets a later timestamp
+    sleepmillis(10);
+
+    // Register task1 - it should also get an auto-generated timestamp (later than task0)
+    auto task1 = createRangeDeletionTaskWithOngoingQueries(
+        uuidCollA, BSON(kShardKey << 5), BSON(kShardKey << 15));
+    auto completionFuture1 =
+        registerAndCreatePersistentTask(opCtx, task1->getTask(), task1->getOngoingQueriesFuture());
+    ASSERT_FALSE(completionFuture1.isReady());
+
+    ASSERT_EQ(2, rds->getNumRangeDeletionTasksForCollection(uuidCollA));
+
+    // Drain task1 first - it should wait for task0 since task0 is older
+    task1->drainOngoingQueries();
+    ASSERT_FALSE(completionFuture1.isReady());
+
+    // Drain task0 - now both can complete
+    task0->drainOngoingQueries();
+    completionFuture0.get(opCtx);
+    completionFuture1.get(opCtx);
+
+    ASSERT_EQ(0, rds->getNumRangeDeletionTasksForCollection(uuidCollA));
+}
 }  // namespace mongo

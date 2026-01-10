@@ -35,6 +35,7 @@
 #include "mongo/logv2/log_format.h"
 #include "mongo/logv2/plain_formatter.h"
 #include "mongo/platform/atomic_word.h"
+#include "mongo/util/modules.h"
 
 #include <boost/log/core/record_view.hpp>
 #include <boost/log/utility/formatting_ostream_fwd.hpp>
@@ -49,7 +50,7 @@ namespace mongo::logv2 {
  * This class is only expected to be used when the bazel flag `dev_stacktrace` is
  * enabled.
  */
-class DevStacktraceFormatter {
+class MONGO_MOD_NEEDS_REPLACEMENT DevStacktraceFormatter {
 public:
     DevStacktraceFormatter(const AtomicWord<int32_t>* maxAttributeSizeKB,
                            LogTimestampFormat timestampFormat)

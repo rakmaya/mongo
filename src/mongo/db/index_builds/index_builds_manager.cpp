@@ -36,15 +36,15 @@
 #include "mongo/db/curop.h"
 #include "mongo/db/index_builds/index_builds_common.h"
 #include "mongo/db/index_builds/multi_index_block.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_catalog.h"
-#include "mongo/db/local_catalog/index_repair.h"
-#include "mongo/db/local_catalog/lock_manager/exception_util.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
+#include "mongo/db/index_repair.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/shard_role/lock_manager/exception_util.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_catalog.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/record_data.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
@@ -161,10 +161,7 @@ Status IndexBuildsManager::resumeBuildingIndexFromBulkLoadPhase(
 }
 
 StatusWith<std::pair<long long, long long>> IndexBuildsManager::startBuildingIndexForRecovery(
-    OperationContext* opCtx,
-    const CollectionAcquisition& coll,
-    const UUID& buildUUID,
-    RepairData repair) {
+    OperationContext* opCtx, const CollectionAcquisition& coll, const UUID& buildUUID) {
     auto builder = invariant(_getBuilder(buildUUID));
 
     // Iterate all records in the collection. Validate the records and index them
@@ -202,12 +199,6 @@ StatusWith<std::pair<long long, long long>> IndexBuildsManager::startBuildingInd
                 // We retain decimal data when repairing database even if decimal is disabled.
                 auto validStatus = validateBSON(data.data(), data.size());
                 if (!validStatus.isOK()) {
-                    if (repair == RepairData::kNo) {
-                        LOGV2_FATAL(31396,
-                                    "Invalid BSON detected",
-                                    "id"_attr = id,
-                                    "error"_attr = redact(validStatus));
-                    }
                     LOGV2_WARNING(20348,
                                   "Invalid BSON detected; deleting",
                                   "id"_attr = id,
@@ -281,21 +272,15 @@ StatusWith<std::pair<long long, long long>> IndexBuildsManager::startBuildingInd
         NamespaceString::makeLocalCollection("lost_and_found." + coll.uuid().toString());
 
     // Delete duplicate record and insert it into local lost and found.
-    Status status = [&] {
-        if (repair == RepairData::kYes) {
-            return builder->dumpInsertsFromBulk(opCtx, coll, [&](const RecordId& rid) {
-                auto moveStatus =
-                    mongo::index_repair::moveRecordToLostAndFound(opCtx, ns, lostAndFoundNss, rid);
-                if (moveStatus.isOK() && (moveStatus.getValue() > 0)) {
-                    recordsRemoved++;
-                    bytesRemoved += moveStatus.getValue();
-                }
-                return moveStatus.getStatus();
-            });
-        } else {
-            return builder->dumpInsertsFromBulk(opCtx, coll);
+    Status status = builder->dumpInsertsFromBulk(opCtx, coll, [&](const RecordId& rid) {
+        auto moveStatus =
+            mongo::index_repair::moveRecordToLostAndFound(opCtx, ns, lostAndFoundNss, rid);
+        if (moveStatus.isOK() && (moveStatus.getValue() > 0)) {
+            recordsRemoved++;
+            bytesRemoved += moveStatus.getValue();
         }
-    }();
+        return moveStatus.getStatus();
+    });
     if (!status.isOK()) {
         return status;
     }

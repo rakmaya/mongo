@@ -47,6 +47,7 @@
 #include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/stdx/unordered_set.h"
+#include "mongo/util/modules.h"
 
 #include <memory>
 #include <set>
@@ -60,8 +61,10 @@
 
 namespace mongo {
 
+DECLARE_STAGE_PARAMS_DERIVED_DEFAULT(InternalAllCollectionStats);
+
 /**
- * This aggregation stage is the ‘$_internalAllCollectionStats´. It takes no arguments. Its
+ * This aggregation stage is the '$_internalAllCollectionStats´. It takes no arguments. Its
  * response will be a cursor, each document of which represents the collection statistics for a
  * single collection for all the existing collections.
  *
@@ -73,21 +76,21 @@ namespace mongo {
  */
 class DocumentSourceInternalAllCollectionStats final : public DocumentSource {
 public:
-    static constexpr StringData kStageNameInternal = "$_internalAllCollectionStats"_sd;
+    static constexpr StringData kStageName = "$_internalAllCollectionStats"_sd;
 
     DocumentSourceInternalAllCollectionStats(const boost::intrusive_ptr<ExpressionContext>& pExpCtx,
                                              DocumentSourceInternalAllCollectionStatsSpec spec);
 
-    class LiteParsed final : public LiteParsedDocumentSource {
+    class LiteParsed final : public LiteParsedDocumentSourceDefault<LiteParsed> {
     public:
         static std::unique_ptr<LiteParsed> parse(const NamespaceString& nss,
                                                  const BSONElement& spec,
                                                  const LiteParserOptions& options) {
-            return std::make_unique<LiteParsed>(nss.tenantId(), spec.fieldName());
+            return std::make_unique<LiteParsed>(nss.tenantId(), spec);
         }
 
-        explicit LiteParsed(const boost::optional<TenantId>& tenantId, std::string parseTimeName)
-            : LiteParsedDocumentSource(std::move(parseTimeName)),
+        LiteParsed(const boost::optional<TenantId>& tenantId, const BSONElement& spec)
+            : LiteParsedDocumentSourceDefault(spec),
               _privileges({Privilege(ResourcePattern::forClusterResource(tenantId),
                                      ActionType::allCollectionStats)}) {}
 
@@ -102,6 +105,10 @@ public:
 
         bool isInitialSource() const final {
             return true;
+        }
+
+        std::unique_ptr<StageParams> getStageParams() const final {
+            return std::make_unique<InternalAllCollectionStatsStageParams>(_originalBson);
         }
 
     private:
@@ -142,8 +149,8 @@ public:
     static boost::intrusive_ptr<DocumentSource> createFromBsonInternal(
         BSONElement elem, const boost::intrusive_ptr<ExpressionContext>& pExpCtx);
 
-    DocumentSourceContainer::iterator doOptimizeAt(DocumentSourceContainer::iterator itr,
-                                                   DocumentSourceContainer* container) final;
+    DocumentSourceContainer::iterator optimizeAt(DocumentSourceContainer::iterator itr,
+                                                 DocumentSourceContainer* container);
 
     void serializeToArray(std::vector<Value>& array,
                           const SerializationOptions& opts = SerializationOptions{}) const final;

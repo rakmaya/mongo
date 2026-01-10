@@ -343,7 +343,7 @@ functions:
       bucket: mciuploads
       local_file: src/mongo-binaries.tgz.sha256
 
-  "fetch binary zstd shas": &fetch_zstd_binary_shas
+  "fetch binary zstd shas":
     command: s3.get
     display_name: "fetch binary zstd shas"
     params:
@@ -1224,53 +1224,6 @@ functions:
         files:
           - streams_publish_manifest.json
 
-  "generate smoke test tasks":
-    - command: manifest.load
-    - *git_get_shallow_project
-    - *f_expansions_write
-    - *restore_git_history_and_tags
-    - *add_git_tag
-    - *kill_processes
-    - *cleanup_environment
-    - *set_up_venv
-    - *upload_pip_requirements
-
-    - command: subprocess.exec
-      display_name: "smoke tests tasks generate"
-      params:
-        binary: bash
-        args:
-          - "src/evergreen/run_python_script.sh"
-          - "buildscripts/evergreen_gen_smoke_test_tasks.py"
-          - "../expansions.yml"
-          - "--output-file=../smoke_test_tasks.json"
-
-    - command: archive.targz_pack
-      display_name: "targz_pack smoke_test_tasks_config.tgz"
-      params:
-        target: smoke_test_tasks_config.tgz
-        source_dir: "./"
-        include:
-          - "smoke_test_tasks.json"
-
-    - command: s3.put
-      display_name: "upload smoke_test_tasks_config.tgz"
-      params:
-        aws_key: ${aws_key}
-        aws_secret: ${aws_secret}
-        local_file: smoke_test_tasks_config.tgz
-        remote_file: ${project}/${build_variant}/${revision}/smoke_test_tasks/${task_name}-${build_id}.tgz
-        bucket: mciuploads
-        permissions: public-read
-        content_type: application/gzip
-        display_name: Generated Task Config - Execution ${execution}
-
-    - command: generate.tasks
-      display_name: "generate.tasks smoke_test_tasks.json"
-      params:
-        files:
-          - smoke_test_tasks.json
-
   "run powercycle sentinel":
     - command: manifest.load
     - *git_get_shallow_project
@@ -1331,9 +1284,9 @@ functions:
         OTEL_PARENT_ID: ${otel_parent_id}
         OTEL_COLLECTOR_DIR: "../build/OTelTraces/"
 
-  "execute resmoke tests via bazel": &execute_resmoke_tests_via_bazel
+  "execute resmoke tests via bazel sh": &execute_resmoke_tests_via_bazel_sh
     command: subprocess.exec
-    display_name: "execute resmoke tests via bazel"
+    display_name: "execute resmoke tests via bazel sh"
     type: test
     params:
       binary: bash
@@ -1351,6 +1304,30 @@ functions:
         requester: ${requester}
       args:
         - "./src/evergreen/resmoke_tests_execute_bazel.sh"
+
+  "execute resmoke tests via bazel":
+    - *get_version_expansions
+    - *apply_version_expansions
+    - *f_expansions_write
+    - *execute_resmoke_tests_via_bazel_sh
+
+  "download build events json":
+    - command: s3.get
+      display_name: "download build events json"
+      params:
+        aws_key: ${aws_key}
+        aws_secret: ${aws_secret}
+        bucket: mciuploads
+        remote_file: ${project}/${version_id}/${build_variant}/resmoke_tests/build_events.json
+        local_file: "build_events.json"
+
+  "fetch remote test results":
+    - command: subprocess.exec
+      params:
+        binary: bash
+        add_expansions_to_env: true
+        args:
+          - "./src/evergreen/fetch_remote_test_results.sh"
 
   "assume ECR role": &assume_ecr_role
     command: ec2.assume_role
@@ -1412,8 +1389,7 @@ functions:
       include:
         - "*"
 
-  "validate generate tasks config filesize":
-    &validate_generate_tasks_config_filesize
+  "validate generate tasks config": &validate_generate_tasks_config
     command: subprocess.exec
     display_name: "validate generate tasks config filesize"
     type: test
@@ -1421,8 +1397,11 @@ functions:
       binary: bash
       args:
         - "src/evergreen/run_python_script.sh"
-        - "buildscripts/validate_file_size.py"
+        - "buildscripts/validate_task_gen.py"
         - "generate_tasks_config.tgz"
+      env:
+        EVERGREEN_API_USER: ${evergreen_api_user}
+        EVERGREEN_API_KEY: ${evergreen_api_key}
 
   "upload generate tasks config": &upload_generate_tasks_config
     command: s3.put
@@ -1465,7 +1444,7 @@ functions:
     - *configure_evergreen_api_credentials
     - *generate_version_sh
     - *pack_generate_tasks_config
-    - *validate_generate_tasks_config_filesize
+    - *validate_generate_tasks_config
     - *upload_generate_tasks_config
     - *generate_resmoke_tasks_config
 
@@ -1474,7 +1453,7 @@ functions:
     - *configure_evergreen_api_credentials
     - *generate_version_sh
     - *pack_generate_tasks_config
-    - *validate_generate_tasks_config_filesize
+    - *validate_generate_tasks_config
 
   "generate version burn in":
     - *f_expansions_write
@@ -1487,7 +1466,7 @@ functions:
         args:
           - "./src/evergreen/generate_version_burn_in.sh"
     - *pack_generate_tasks_config
-    - *validate_generate_tasks_config_filesize
+    - *validate_generate_tasks_config
     - *upload_burn_in_generate_tasks_config
     - *generate_resmoke_tasks_config
 
@@ -1502,6 +1481,7 @@ functions:
   "generate resmoke tasks":
     - *fetch_artifacts
     - *fetch_artifacts_zstd
+    - *f_expansions_write
     - *extract_artifacts
     - *f_expansions_write
     - *kill_processes
@@ -1851,6 +1831,34 @@ functions:
     - *f_expansions_write
     - *generate_clang_tidy_report_sh
 
+  "generate symbol-check report sh": &generate_symbol_check_report_sh
+    command: subprocess.exec
+    display_name: "generate symbol-check report"
+    type: test
+    params:
+      binary: bash
+      args:
+        - "src/evergreen/run_python_script.sh"
+        - "evergreen/generate_symbol_check_report.py"
+
+  "enable run_for_symbol_check expansions update":
+    &enable_run_for_symbol_check_expansions_update
+    command: expansions.update
+    display_name: "enable bazel test report creation"
+    params:
+      updates:
+        - key: run_for_symbol_check
+          value: "true"
+
+  "enable run_for_symbol_check expansions":
+    - *f_expansions_write
+    - *enable_run_for_symbol_check_expansions_update
+    - *f_expansions_write
+
+  "generate symbol-check report":
+    - *f_expansions_write
+    - *generate_symbol_check_report_sh
+
   "bazel run sh": &bazel_run_sh
     command: subprocess.exec
     display_name: "bazel run sh"
@@ -1945,7 +1953,7 @@ functions:
     - *update_task_timeout
     - *f_expansions_write
     - *sign_macos_dev_binaries
-    - *execute_resmoke_tests_via_bazel
+    - *execute_resmoke_tests_via_bazel_sh
 
   "run generated tests via bazel":
     - *f_expansions_write
@@ -1969,7 +1977,7 @@ functions:
     - *get_version_expansions
     - *apply_version_expansions
     - *f_expansions_write
-    - *execute_resmoke_tests_via_bazel
+    - *execute_resmoke_tests_via_bazel_sh
 
   "generate version expansions": &generate_version_expansions
     command: subprocess.exec
@@ -2930,26 +2938,26 @@ functions:
       args:
         - "./src/evergreen/failed_unittests_gather.sh"
 
-  "tar failed unittests": &tar_failed_unittests
+  "tar failed tests": &tar_failed_tests
     command: archive.targz_pack
     params:
-      target: "mongo-unittests.tgz"
-      source_dir: "src/dist-unittests"
+      target: "mongo-tests.tgz"
+      source_dir: "src/dist-tests"
       include:
         - "**"
 
-  "archive failed unittests": &archive_failed_unittests
+  "archive failed tests": &archive_failed_tests
     command: s3.put
     params:
       aws_key: ${aws_key}
       aws_secret: ${aws_secret}
-      local_file: mongo-unittests.tgz
-      remote_file: ${project}/${build_variant}/${revision}/unittests/mongo-unittests-${build_id}-${task_name}-${execution}.tgz
+      local_file: mongo-tests.tgz
+      remote_file: ${project}/${build_variant}/${revision}/tests/mongo-tests-${build_id}-${task_name}-${execution}.tgz
       bucket: mciuploads
       permissions: ${mciuploads_binary_permissions|public-read}
       visibility: ${mciuploads_binary_visibility|public}
       content_type: application/gzip
-      display_name: Unit tests - Execution ${execution}
+      display_name: Test binaries and libraries - Execution ${execution}
       optional: true
 
   "upload failed unittest repro": &upload_failed_unittest_repro
@@ -2965,11 +2973,42 @@ functions:
       display_name: Command To Run Failed Unit Tests on Workstation
       optional: true
 
-  "save failed unittests":
+  "upload bazel build invocation": &upload_bazel_build_invocation
+    command: s3.put
+    params:
+      aws_key: ${aws_key}
+      aws_secret: ${aws_secret}
+      local_file: src/.bazel_build_invocation
+      remote_file: ${project}/${build_variant}/${revision}/unittests/${build_id}-${task_name}-${execution}/bazel_build_invocation.txt
+      bucket: mciuploads
+      permissions: public-read
+      content_type: text/plain
+      display_name: Build Command
+      optional: true
+
+  "upload engflow link": &upload_engflow_link
+    command: s3.put
+    params:
+      aws_key: ${aws_key}
+      aws_secret: ${aws_secret}
+      local_file: src/.engflow_link
+      remote_file: ${project}/${build_variant}/${revision}/unittests/${build_id}-${task_name}-${execution}/engflow_link.txt
+      bucket: mciuploads
+      permissions: public-read
+      content_type: text/plain
+      display_name: EngFlow Link
+      optional: true
+
+  "attach bazel invocation text":
+    - *f_expansions_write
+    - *upload_bazel_build_invocation
+    - *upload_engflow_link
+
+  "save failed tests":
     - *f_expansions_write
     - *gather_failed_unittests_resmoke
-    - *tar_failed_unittests
-    - *archive_failed_unittests
+    - *tar_failed_tests
+    - *archive_failed_tests
     - *upload_failed_unittest_repro
 
   ### Process & archive artifacts from hung processes ###
@@ -3177,6 +3216,20 @@ functions:
       remote_file: ${project}/${build_variant}/${revision}/datafiles/${task_id}-
       display_name: "Data files "
 
+  "upload bazel test logs":
+    command: s3.put
+    params:
+      aws_key: ${aws_key}
+      aws_secret: ${aws_secret}
+      bucket: mciuploads
+      permissions: private
+      visibility: signed
+      content_type: text/plain
+      local_files_include_filter:
+        - tmp/bazel-testlogs/*.log
+      remote_file: ${project}/${build_variant}/${revision}/${task_id}-
+      display_name: "Bazel test.log:  "
+
   "attach wiki page":
     - *f_expansions_write
     - command: subprocess.exec
@@ -3249,6 +3302,18 @@ functions:
       content_type: text/plain
       display_name: Resmoke.py Invocation for Local Usage
 
+  "attach QueryTester information":
+    - *f_expansions_write
+    - command: attach.artifacts
+      params:
+        exact_file_names: true
+        optional: false
+        files:
+          # Note that due to the way the query_tester jobs are set up,
+          # this file will be taken from the current mongodb:master,
+          # not from your dev branch.
+          - src/src/mongo/db/query/query_tester/evergreen_information.json
+
   "attach bazel invocation":
     command: s3.put
     params:
@@ -3256,7 +3321,7 @@ functions:
       aws_key: ${aws_key}
       aws_secret: ${aws_secret}
       local_file: src/bazel-invocation.txt
-      remote_file: ${project}/${build_variant}/${revision}/bazel-invocation-${task_id}-${execution}.txt
+      remote_file: ${project}/${build_variant}/${revision}/bazel-invocation-${task_name}-${execution}.txt
       bucket: mciuploads
       permissions: public-read
       content_type: text/plain
@@ -3446,10 +3511,36 @@ functions:
         args:
           - "./src/evergreen/container_registry_login.sh"
 
-  "build and push module images": &build_and_push_module_images
+  "build and push module images":
     command: subprocess.exec
     params:
       binary: bash
       add_expansions_to_env: true # needed to get the AWS secrets from ec2.assume_role
       args:
         - "./src/evergreen/build_and_push_module_images.sh"
+
+  "tar tracing data": &tar_tracing_data
+    command: archive.targz_pack
+    params:
+      target: "tracing-data.tgz"
+      source_dir: "${workdir}/build/OTelTraces"
+      include:
+        - "*trace.jsonl"
+
+  "archive tracing data": &archive_tracing_data
+    command: s3.put
+    params:
+      aws_key: ${aws_key}
+      aws_secret: ${aws_secret}
+      local_file: tracing-data.tgz
+      remote_file: ${project}/${build_variant}/${revision}/tracingdata/mongo-tracing-data-${task_id}-${execution}.tgz
+      bucket: mciuploads
+      permissions: private
+      visibility: signed
+      content_type: application/gzip
+      display_name: Tracing Data - Execution ${execution}
+      optional: true
+
+  "save tracing data":
+    - *tar_tracing_data
+    - *archive_tracing_data

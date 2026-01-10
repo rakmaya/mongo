@@ -29,12 +29,11 @@
 
 #include "mongo/db/change_stream_pre_images_truncate_manager.h"
 
-#include "mongo/db/admission/execution_admission_context.h"
+#include "mongo/db/admission/execution_control/execution_admission_context.h"
 #include "mongo/db/change_stream_pre_image_util.h"
 #include "mongo/db/change_stream_pre_images_tenant_truncate_markers.h"
-#include "mongo/db/local_catalog/lock_manager/exception_util.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
-#include "mongo/db/storage/collection_truncate_markers.h"
+#include "mongo/db/shard_role/lock_manager/exception_util.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/logv2/log.h"
 
@@ -162,7 +161,7 @@ std::shared_ptr<PreImagesTenantMarkers> PreImagesTruncateManager::_createAndInst
                 acquireCollection(opCtx,
                                   CollectionAcquisitionRequest(
                                       NamespaceString::kChangeStreamPreImagesNamespace,
-                                      PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                      PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
                                       repl::ReadConcernArgs::get(opCtx),
                                       AcquisitionPrerequisites::kRead),
                                   MODE_IS);

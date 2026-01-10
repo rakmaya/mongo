@@ -214,8 +214,7 @@ bool WindowStage::fetchNextRow() {
         value::MaterializedRow row(rowSize);
         size_t idx = 0;
         for (auto accessor : _inCurrAccessors) {
-            auto [tag, val] = accessor->getCopyOfValue();
-            row.reset(idx++, true, tag, val);
+            row.reset(idx++, accessor->getCopyOfValue());
         }
         _rows.push_back(std::move(row));
         _lastRowId++;
@@ -532,8 +531,7 @@ void WindowStage::setPartition(int id) {
 
         for (size_t exprIdx = 0; exprIdx < windowInitCodes.size(); ++exprIdx) {
             if (windowInitCodes[exprIdx]) {
-                auto [owned, tag, val] = _bytecode.run(windowInitCodes[exprIdx].get());
-                windowAccessors[exprIdx]->reset(owned, tag, val);
+                windowAccessors[exprIdx]->reset(_bytecode.run(windowInitCodes[exprIdx].get()));
             } else {
                 windowAccessors[exprIdx]->reset();
             }
@@ -624,8 +622,8 @@ PlanState WindowStage::getNext() {
                 setCurrAccessors(id);
                 for (size_t exprIdx = 0; exprIdx < windowAddCodes.size(); ++exprIdx) {
                     if (windowAddCodes[exprIdx]) {
-                        auto [owned, tag, val] = _bytecode.run(windowAddCodes[exprIdx].get());
-                        windowAccessors[exprIdx]->reset(owned, tag, val);
+                        windowAccessors[exprIdx]->reset(
+                            _bytecode.run(windowAddCodes[exprIdx].get()));
                     }
                 }
                 idRange.second = id;
@@ -663,9 +661,8 @@ PlanState WindowStage::getNext() {
                     setCurrAccessors(id);
                     for (size_t exprIdx = 0; exprIdx < windowRemoveCodes.size(); ++exprIdx) {
                         if (windowRemoveCodes[exprIdx]) {
-                            auto [owned, tag, val] =
-                                _bytecode.run(windowRemoveCodes[exprIdx].get());
-                            windowAccessors[exprIdx]->reset(owned, tag, val);
+                            windowAccessors[exprIdx]->reset(
+                                _bytecode.run(windowRemoveCodes[exprIdx].get()));
                         }
                     }
                     idRange.first = id + 1;
@@ -743,9 +740,8 @@ void WindowStage::close() {
     _specificStats.peakTrackedMemBytes = _memoryTracker.value().peakTrackedMemoryBytes();
 }
 
-std::vector<DebugPrinter::Block> WindowStage::debugPrint() const {
-    auto ret = PlanStage::debugPrint();
-
+void WindowStage::doDebugPrint(std::vector<DebugPrinter::Block>& ret,
+                               DebugPrintInfo& debugPrintInfo) const {
     ret.emplace_back(DebugPrinter::Block("[`"));
     for (size_t idx = 0; idx < _currSlots.size(); ++idx) {
         if (idx) {
@@ -818,9 +814,58 @@ std::vector<DebugPrinter::Block> WindowStage::debugPrint() const {
     }
 
     DebugPrinter::addNewLine(ret);
-    DebugPrinter::addBlocks(ret, _children[0]->debugPrint());
 
-    return ret;
+    if (debugPrintInfo.printBytecode) {
+        int i = 0;
+        for (const std::unique_ptr<vm::CodeFragment>& code : _windowLowBoundCodes) {
+            std::stringstream title;
+            title << "WINDOW_" << i << "_LOW_BOUND";
+            PlanStage::debugPrintBytecode(ret, code, title.str().c_str());
+            i++;
+        }
+        i = 0;
+        for (const std::unique_ptr<vm::CodeFragment>& code : _windowHighBoundCodes) {
+            std::stringstream title;
+            title << "WINDOW_" << i << "_HIGH_BOUND";
+            PlanStage::debugPrintBytecode(ret, code, title.str().c_str());
+            i++;
+        }
+        i = 0;
+        for (const auto& codes : _windowInitCodes) {
+            int j = 0;
+            for (const std::unique_ptr<vm::CodeFragment>& code : codes) {
+                std::stringstream title;
+                title << "WINDOW_" << i << "_INIT_" << j;
+                PlanStage::debugPrintBytecode(ret, code, title.str().c_str());
+                j++;
+            }
+            i++;
+        }
+        i = 0;
+        for (const auto& codes : _windowAddCodes) {
+            int j = 0;
+            for (const std::unique_ptr<vm::CodeFragment>& code : codes) {
+                std::stringstream title;
+                title << "WINDOW_" << i << "_ADD_" << j;
+                PlanStage::debugPrintBytecode(ret, code, title.str().c_str());
+                j++;
+            }
+            i++;
+        }
+        i = 0;
+        for (const auto& codes : _windowRemoveCodes) {
+            int j = 0;
+            for (const std::unique_ptr<vm::CodeFragment>& code : codes) {
+                std::stringstream title;
+                title << "WINDOW_" << i << "_REMOVE_" << j;
+                PlanStage::debugPrintBytecode(ret, code, title.str().c_str());
+                j++;
+            }
+            i++;
+        }
+    }
+
+    DebugPrinter::addBlocks(ret, _children[0]->debugPrint(debugPrintInfo));
 }
 
 std::unique_ptr<PlanStageStats> WindowStage::getStats(bool includeDebugInfo) const {

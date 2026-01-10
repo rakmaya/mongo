@@ -39,18 +39,19 @@
 #include "mongo/db/global_catalog/ddl/sharding_ddl_coordinator.h"
 #include "mongo/db/global_catalog/ddl/sharding_ddl_coordinator_service.h"
 #include "mongo/db/global_catalog/shard_key_pattern.h"
-#include "mongo/db/local_catalog/shard_role_catalog/participant_block_gen.h"
-#include "mongo/db/local_catalog/shard_role_catalog/shard_filtering_metadata_refresh.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/write_ops/write_ops.h"
 #include "mongo/db/s/config/initial_split_policy.h"
 #include "mongo/db/session/logical_session_id_gen.h"
+#include "mongo/db/shard_role/shard_catalog/participant_block_gen.h"
+#include "mongo/db/shard_role/shard_catalog/shard_filtering_metadata_refresh.h"
 #include "mongo/executor/scoped_task_executor.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/cancellation.h"
 #include "mongo/util/future.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/namespace_string_util.h"
 #include "mongo/util/uuid.h"
 
@@ -70,7 +71,7 @@ namespace create_collection_util {
  * If dataShard is specified, isUnsplittable must be true, because we can only select the shard
  * that will hold the data for unsplittable collections.
  */
-std::unique_ptr<InitialSplitPolicy> createPolicy(
+MONGO_MOD_NEEDS_REPLACEMENT std::unique_ptr<InitialSplitPolicy> createPolicy(
     OperationContext* opCtx,
     const ShardKeyPattern& shardKeyPattern,
     bool presplitHashedZones,
@@ -89,19 +90,20 @@ std::unique_ptr<InitialSplitPolicy> createPolicy(
  * TODO(SERVER-81447): build CreateCommand by simply extracting CreateCollectionRequest
  * from ShardsvrCreateCollectionRequest. Also, see SERVER-65865.
  */
-CreateCommand makeCreateCommand(OperationContext* opCtx,
-                                const NamespaceString& nss,
-                                const ShardsvrCreateCollectionRequest& request);
+MONGO_MOD_NEEDS_REPLACEMENT CreateCommand
+makeCreateCommand(OperationContext* opCtx,
+                  const NamespaceString& nss,
+                  const ShardsvrCreateCollectionRequest& request);
 
 }  // namespace create_collection_util
 
-struct OptionsAndIndexes {
+struct MONGO_MOD_NEEDS_REPLACEMENT OptionsAndIndexes {
     BSONObj options;
     std::vector<BSONObj> indexSpecs;
     BSONObj idIndexSpec;
 };
 
-class CreateCollectionCoordinator
+class MONGO_MOD_NEEDS_REPLACEMENT CreateCollectionCoordinator
     : public RecoverableShardingDDLCoordinator<CreateCollectionCoordinatorDocument,
                                                CreateCollectionCoordinatorPhaseEnum> {
 public:

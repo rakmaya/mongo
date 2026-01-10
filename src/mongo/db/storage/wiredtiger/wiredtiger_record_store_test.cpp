@@ -39,9 +39,9 @@
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/json.h"
 #include "mongo/db/client.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/rss/replicated_storage_service.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/kv/kv_engine.h"
 #include "mongo/db/storage/record_store_test_harness.h"
 #include "mongo/db/storage/recovery_unit.h"
@@ -498,7 +498,7 @@ TEST(WiredTigerRecordStoreTest, RangeTruncateTest) {
 TEST(WiredTigerRecordStoreTest, RangeTruncateSameValueTest) {
     testTruncateRange(100, 3, 3);
 }
-DEATH_TEST(WiredTigerRecordStoreTest,
+DEATH_TEST(WiredTigerRecordStoreTestDeathTest,
            RangeTruncateIncorrectOrderTest,
            "Start position cannot be after end position") {
     testTruncateRange(100, 4, 3);

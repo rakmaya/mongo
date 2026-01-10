@@ -29,9 +29,29 @@
 
 #include "mongo/db/pipeline/optimization/optimize.h"
 
+#include "mongo/db/pipeline/optimization/rule_based_rewriter.h"
+
 namespace mongo::pipeline_optimization {
+namespace rbr = rule_based_rewrites::pipeline;
 
 MONGO_FAIL_POINT_DEFINE(disablePipelineOptimization);
+
+namespace {
+using Tags = rbr::PipelineRewriteContext::Tags;
+
+void applyRuleBasedRewrites(rbr::PipelineRewriteContext rewriteContext,
+                            rule_based_rewrites::TagSet tags) {
+    rbr::PipelineRewriteEngine engine(std::move(rewriteContext),
+                                      internalQueryMaxPipelineRewrites.load());
+
+    try {
+        engine.applyRules(tags);
+    } catch (DBException& ex) {
+        ex.addContext("Failed to optimize pipeline");
+        throw;
+    }
+}
+}  // namespace
 
 /**
  * Modifies the pipeline, optimizing it by combining and swapping stages.
@@ -44,44 +64,25 @@ void optimizePipeline(Pipeline& pipeline) {
     if (MONGO_unlikely(disablePipelineOptimization.shouldFail())) {
         return;
     }
-    optimizeContainer(&pipeline.getSources());
-    optimizeEachStage(&pipeline.getSources());
+    applyRuleBasedRewrites(rbr::PipelineRewriteContext(pipeline), Tags::Reordering);
+    applyRuleBasedRewrites(rbr::PipelineRewriteContext(pipeline), Tags::InPlace);
 }
 
 /**
  * Modifies the container, optimizes each stage individually.
  */
-void optimizeEachStage(DocumentSourceContainer* container) {
-    DocumentSourceContainer optimizedSources;
-    try {
-        // We should have our final number of stages. Optimize each individually.
-        for (auto&& source : *container) {
-            if (auto out = source->optimize()) {
-                optimizedSources.push_back(std::move(out));
-            }
-        }
-        container->swap(optimizedSources);
-    } catch (DBException& ex) {
-        ex.addContext("Failed to optimize pipeline");
-        throw;
-    }
+void optimizeEachStage(ExpressionContext& expCtx, DocumentSourceContainer* container) {
+    applyRuleBasedRewrites(rbr::PipelineRewriteContext(expCtx, *container), Tags::InPlace);
 }
 
 /**
  * Modifies the container, optimizing it by combining, swapping, dropping and/or inserting
  * stages.
  */
-void optimizeContainer(DocumentSourceContainer* container) {
-    DocumentSourceContainer::iterator itr = container->begin();
-    try {
-        while (itr != container->end()) {
-            invariant((*itr).get());
-            itr = (*itr).get()->optimizeAt(itr, container);
-        }
-    } catch (DBException& ex) {
-        ex.addContext("Failed to optimize pipeline");
-        throw;
-    }
+void optimizeContainer(ExpressionContext& expCtx,
+                       DocumentSourceContainer* container,
+                       boost::optional<DocumentSourceContainer::iterator> itr) {
+    applyRuleBasedRewrites(rbr::PipelineRewriteContext(expCtx, *container, itr), Tags::Reordering);
 }
 
 /**
@@ -90,13 +91,14 @@ void optimizeContainer(DocumentSourceContainer* container) {
  * Returns a valid iterator that points to the new "end of the pipeline": i.e., the stage that
  * comes after 'itr' in the newly optimized pipeline.
  */
-DocumentSourceContainer::iterator optimizeEndOfPipeline(DocumentSourceContainer::iterator itr,
+DocumentSourceContainer::iterator optimizeEndOfPipeline(ExpressionContext& expCtx,
+                                                        DocumentSourceContainer::iterator itr,
                                                         DocumentSourceContainer* container) {
     // We must create a new DocumentSourceContainer representing the subsection of the pipeline we
     // wish to optimize, since otherwise calls to optimizeAt() will overrun these limits.
     auto endOfPipeline = DocumentSourceContainer(std::next(itr), container->end());
-    optimizeContainer(&endOfPipeline);
-    optimizeEachStage(&endOfPipeline);
+    optimizeContainer(expCtx, &endOfPipeline);
+    optimizeEachStage(expCtx, &endOfPipeline);
     container->erase(std::next(itr), container->end());
     container->splice(std::next(itr), endOfPipeline);
 

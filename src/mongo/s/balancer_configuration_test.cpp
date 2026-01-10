@@ -40,7 +40,7 @@
 #include "mongo/db/query/query_request_helper.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/sharding_environment/sharding_mongos_test_fixture.h"
-#include "mongo/db/vector_clock/vector_clock.h"
+#include "mongo/db/topology/vector_clock/vector_clock.h"
 #include "mongo/executor/network_test_env.h"
 #include "mongo/executor/remote_command_request.h"
 #include "mongo/idl/server_parameter_test_controller.h"
@@ -742,6 +742,8 @@ TEST_F(BalancerSettingsTestFixture, ActiveWindowAndActiveWindowDOWPrecedence) {
 
 // ===== Feature Flag Disabled Tests =====
 TEST_F(BalancerSettingsTestFixture, BalancingWindowDOWDisabled_IgnoresActiveWindowDOW) {
+    RAIIServerParameterControllerForTest featureFlagController("featureFlagBalancerWindowDOW",
+                                                               false);
     BalancerConfiguration config;
     unittest::LogCaptureGuard logs;
     BalancerSettings settings = assertGet(
@@ -759,6 +761,8 @@ TEST_F(BalancerSettingsTestFixture, BalancingWindowDOWDisabled_IgnoresActiveWind
 
 
 TEST_F(BalancerSettingsTestFixture, BalancingWindowDOWDisabled_FallsBackToActiveWindow) {
+    RAIIServerParameterControllerForTest featureFlagController("featureFlagBalancerWindowDOW",
+                                                               false);
     BalancerConfiguration config;
     unittest::LogCaptureGuard logs;
 

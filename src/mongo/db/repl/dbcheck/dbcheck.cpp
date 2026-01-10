@@ -38,13 +38,6 @@
 #include "mongo/db/exec/collection_scan_common.h"
 #include "mongo/db/exec/matcher/matcher.h"
 #include "mongo/db/index/index_access_method.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/clustered_collection_options_gen.h"
-#include "mongo/db/local_catalog/health_log_interface.h"
-#include "mongo/db/local_catalog/index_catalog.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/compiler/physical_model/index_bounds/index_bounds.h"
 #include "mongo/db/query/internal_plans.h"
@@ -53,9 +46,16 @@
 #include "mongo/db/record_id_helpers.h"
 #include "mongo/db/repl/dbcheck/dbcheck_gen.h"
 #include "mongo/db/repl/dbcheck/dbcheck_idl.h"
+#include "mongo/db/repl/dbcheck/health_log_interface.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/repl_server_parameters_gen.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/clustered_collection_options_gen.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
@@ -363,20 +363,20 @@ DbCheckHasher::DbCheckHasher(
       _deadlineOnSecondary(deadlineOnSecondary) {
 
     // Get the MD5 hasher set up.
-    md5_init_state(&_state);
+    md5_init_state_deprecated(&_state);
 
     auto& collectionPtr = acquisition.collection().getCollectionPtr();
 
     if (!indexName) {
         if (!collectionPtr->isClustered()) {
             // Get the _id index.
-            const IndexDescriptor* desc = collectionPtr->getIndexCatalog()->findIdIndex(opCtx);
-            uassert(ErrorCodes::IndexNotFound, "dbCheck needs _id index", desc);
+            const auto entry = collectionPtr->getIndexCatalog()->findIdIndex(opCtx);
+            uassert(ErrorCodes::IndexNotFound, "dbCheck needs _id index", entry);
 
             // Set up a simple index scan on that.
             _exec = InternalPlanner::indexScan(opCtx,
                                                acquisition.collection(),
-                                               desc,
+                                               entry,
                                                start,
                                                end,
                                                BoundInclusion::kIncludeEndKeyOnly,
@@ -452,10 +452,8 @@ Status DbCheckHasher::hashForExtraIndexKeysCheck(OperationContext* opCtx,
     invariant(_indexName);
     StringData indexName = _indexName.get();
     // We should have already checked for if the index exists at this timestamp.
-    const IndexDescriptor* indexDescriptor =
-        collection->getIndexCatalog()->findIndexByName(opCtx, indexName);
-    const IndexCatalogEntry* indexCatalogEntry =
-        collection->getIndexCatalog()->getEntry(indexDescriptor);
+    const auto indexCatalogEntry = collection->getIndexCatalog()->findIndexByName(opCtx, indexName);
+    const auto indexDescriptor = indexCatalogEntry->descriptor();
     const auto iam = indexCatalogEntry->accessMethod()->asSortedData();
     const auto ordering = iam->getSortedDataInterface()->getOrdering();
     const key_string::Version keyStringVersion =
@@ -512,9 +510,9 @@ Status DbCheckHasher::hashForExtraIndexKeysCheck(OperationContext* opCtx,
 
         _bytesSeen += currKeyStringWithoutRecordId.size();
         _countKeysSeen += 1;
-        md5_append(&_state,
-                   md5Cast(currKeyStringWithoutRecordId.data()),
-                   currKeyStringWithoutRecordId.size());
+        md5_append_deprecated(&_state,
+                              md5Cast(currKeyStringWithoutRecordId.data()),
+                              currKeyStringWithoutRecordId.size());
 
         _lastKeySeen = currKeyStringBson;
 
@@ -879,7 +877,7 @@ Status DbCheckHasher::hashForCollectionCheck(OperationContext* opCtx,
         _countDocsSeen += 1;
         _bytesSeen += currentObj.objsize();
 
-        md5_append(&_state, md5Cast(currentObjData), currentObjSize);
+        md5_append_deprecated(&_state, md5Cast(currentObjData), currentObjSize);
 
         _dataThrottle->awaitIfNeeded(opCtx, record.size());
         if (Date_t::now() > deadlineOnPrimary) {
@@ -915,7 +913,7 @@ Status DbCheckHasher::hashForCollectionCheck(OperationContext* opCtx,
 
 std::string DbCheckHasher::total(void) {
     md5digest digest;
-    md5_finish(&_state, digest);
+    md5_finish_deprecated(&_state, digest);
 
     return digestToString(digest);
 }
@@ -988,7 +986,8 @@ Status dbCheckBatchOnSecondary(OperationContext* opCtx,
     auto msg = "replication consistency check";
 
     // Disable throttling for secondaries.
-    DataThrottle dataThrottle(opCtx, []() { return 0; });
+    DataThrottle dataThrottle(opCtx->fastClockSource().now().toMillisSinceEpoch(),
+                              []() { return 0; });
 
     try {
         const DbCheckAcquisition acquisition(
@@ -1024,17 +1023,17 @@ Status dbCheckBatchOnSecondary(OperationContext* opCtx,
         // TODO SERVER-78399: Clean up this check once feature flag is removed.
         const boost::optional<SecondaryIndexCheckParameters> secondaryIndexCheckParameters =
             entry.getSecondaryIndexCheckParameters();
-        const IndexDescriptor* indexDescriptor = collection->getIndexCatalog()->findIdIndex(opCtx);
+        auto indexEntry = collection->getIndexCatalog()->findIdIndex(opCtx);
         if (secondaryIndexCheckParameters) {
             mongo::DbCheckValidationModeEnum validateMode =
                 secondaryIndexCheckParameters.get().getValidateMode();
             switch (validateMode) {
                 case mongo::DbCheckValidationModeEnum::extraIndexKeysCheck: {
                     StringData indexName = secondaryIndexCheckParameters.get().getSecondaryIndex();
-                    indexDescriptor =
+                    indexEntry =
                         collection.get()->getIndexCatalog()->findIndexByName(opCtx, indexName);
 
-                    if (!indexDescriptor) {
+                    if (!indexEntry) {
                         std::string msg = "cannot find index " + indexName + " for ns " +
                             entry.getNss().toStringForErrorMsg();
                         const auto logEntry =
@@ -1131,6 +1130,8 @@ Status dbCheckBatchOnSecondary(OperationContext* opCtx,
         auto hasherLastKeyChecked = hasher->lastKeySeen();
         auto batchStartForLogging = batchStart;
         auto batchEndForLogging = batchEnd;
+        const auto indexDescriptor = indexEntry ? indexEntry->descriptor() : nullptr;
+
         if (indexDescriptor) {
             // TODO (SERVER-61796): Handle cases where the _id index doesn't exist. We should still
             // log with a rehydrated index key.

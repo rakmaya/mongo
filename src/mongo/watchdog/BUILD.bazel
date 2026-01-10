@@ -14,13 +14,10 @@ mongo_cc_library(
     srcs = [
         "watchdog.cpp",
     ],
-    hdrs = [
-        "watchdog.h",
-    ],
     deps = [
         "//src/mongo/db:server_base",
-        "//src/mongo/db:service_context",  # TODO(SERVER-93876): Remove.
-        "//src/mongo/util/concurrency:spin_lock",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/db:service_context",
+        "//src/mongo/util/concurrency:spin_lock",
     ],
 )
 
@@ -28,9 +25,6 @@ mongo_cc_library(
     name = "watchdog_register",
     srcs = [
         "watchdog_register.cpp",
-    ],
-    hdrs = [
-        "watchdog_register.h",
     ],
     deps = [
         "//src/mongo:base",
@@ -48,16 +42,13 @@ mongo_cc_library(
         "watchdog_mongod.cpp",
         "watchdog_mongod_gen",
     ],
-    hdrs = [
-        "watchdog_mongod.h",
-    ],
     deps = [
         ":watchdog",
         ":watchdog_register",
         "//src/mongo/db:server_base",
-        "//src/mongo/db:service_context",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/db:service_context",
         "//src/mongo/db/commands/server_status:server_status_core",
-        "//src/mongo/db/storage:storage_options",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/db/storage:storage_options",
     ],
 )
 
@@ -66,7 +57,6 @@ mongo_cc_library(
     srcs = [
         "watchdog_mock.cpp",
     ],
-    hdrs = ["watchdog_mock.h"],
     deps = [
         ":watchdog",
         "//src/mongo/db:service_context",
@@ -81,9 +71,9 @@ mongo_cc_unit_test(
     tags = ["mongo_unittest_eighth_group"],
     deps = [
         "watchdog",
-        "//src/mongo/db:service_context_non_d",
         "//src/mongo/db:service_context_test_fixture",
         "//src/mongo/db/auth:authmocks",
+        "//src/mongo/db/shard_role:service_context_non_d",
         "//src/mongo/util:clock_source_mock",
     ],
 )

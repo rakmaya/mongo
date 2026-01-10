@@ -33,7 +33,7 @@
 #include "mongo/db/commands.h"
 #include "mongo/db/generic_argument_util.h"
 #include "mongo/db/global_catalog/ddl/sharded_ddl_commands_gen.h"
-#include "mongo/db/global_catalog/router_role_api/cluster_commands_helpers.h"
+#include "mongo/db/router_role/cluster_commands_helpers.h"
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/executor/remote_command_response.h"
 #include "mongo/rpc/get_status_from_command_result.h"
@@ -99,19 +99,18 @@ public:
         generic_argument_util::setMajorityWriteConcern(shardSvrConvertToCappedCommand,
                                                        &opCtx->getWriteConcern());
 
-        sharding::router::DBPrimaryRouter router(opCtx->getServiceContext(), nss.dbName());
-        router.route(
-            opCtx, getName(), [&](OperationContext* opCtx, const CachedDatabaseInfo& dbInfo) {
-                auto cmdResponse = executeCommandAgainstDatabasePrimaryOnlyAttachingDbVersion(
-                    opCtx,
-                    dbName,
-                    dbInfo,
-                    shardSvrConvertToCappedCommand.toBSON(),
-                    ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-                    Shard::RetryPolicy::kIdempotent);
-                const auto remoteResponse = uassertStatusOK(cmdResponse.swResponse);
-                uassertStatusOK(getStatusFromCommandResult(remoteResponse.data));
-            });
+        sharding::router::DBPrimaryRouter router(opCtx, nss.dbName());
+        router.route(getName(), [&](OperationContext* opCtx, const CachedDatabaseInfo& dbInfo) {
+            auto cmdResponse = executeCommandAgainstDatabasePrimaryOnlyAttachingDbVersion(
+                opCtx,
+                dbName,
+                dbInfo,
+                shardSvrConvertToCappedCommand.toBSON(),
+                ReadPreferenceSetting(ReadPreference::PrimaryOnly),
+                Shard::RetryPolicy::kIdempotent);
+            const auto remoteResponse = uassertStatusOK(cmdResponse.swResponse);
+            uassertStatusOK(getStatusFromCommandResult(remoteResponse.data));
+        });
 
 
         return true;

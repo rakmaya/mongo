@@ -1509,9 +1509,7 @@ TEST_F(IndexBoundsBuilderTest, ExistsTrueSparse) {
                    true,   // sparse
                    false,  // unique
                    IndexEntry::Identifier{"exists_true_sparse"},
-                   nullptr,  // filterExpr
                    BSONObj(),
-                   nullptr,
                    nullptr);
     BSONObj obj = fromjson("{a: {$exists: true}}");
     auto [expr, inputParamIdMap] = parseMatchExpression(obj);
@@ -2000,7 +1998,8 @@ TEST_F(IndexBoundsBuilderTest, TranslateInternalExprGTMaxKeyDoesNotGenerateBound
     assertIET(inputParamIdMap, ietBuilder, elt, testIndex, oil);
 }
 
-DEATH_TEST_F(IndexBoundsBuilderTest,
+using IndexBoundsBuilderTestDeathTest = IndexBoundsBuilderTest;
+DEATH_TEST_F(IndexBoundsBuilderTestDeathTest,
              TranslateInternalExprGTMultikeyPathFails,
              "$expr comparison predicates on multikey paths cannot use an index") {
     BSONObj keyPattern = BSON("a" << 1 << "b" << 1);
@@ -2108,7 +2107,7 @@ TEST_F(IndexBoundsBuilderTest, TranslateInternalExprGTEMaxKeyGeneratesBounds) {
     assertIET(inputParamIdMap, ietBuilder, elt, testIndex, oil);
 }
 
-DEATH_TEST_F(IndexBoundsBuilderTest,
+DEATH_TEST_F(IndexBoundsBuilderTestDeathTest,
              TranslateInternalExprGTEMultikeyPathFails,
              "$expr comparison predicates on multikey paths cannot use an index") {
     BSONObj keyPattern = BSON("a" << 1 << "b" << 1);
@@ -2213,7 +2212,7 @@ TEST_F(IndexBoundsBuilderTest, TranslateInternalExprLTMinKeyDoesNotGenerateBound
     assertIET(inputParamIdMap, ietBuilder, elt, testIndex, oil);
 }
 
-DEATH_TEST_F(IndexBoundsBuilderTest,
+DEATH_TEST_F(IndexBoundsBuilderTestDeathTest,
              TranslateInternalExprLTMultikeyPathFails,
              "$expr comparison predicates on multikey paths cannot use an index") {
     BSONObj keyPattern = BSON("a" << 1 << "b" << 1);
@@ -2321,7 +2320,7 @@ TEST_F(IndexBoundsBuilderTest, TranslateInternalExprLTEMinKeyGeneratesBounds) {
     assertIET(inputParamIdMap, ietBuilder, elt, testIndex, oil);
 }
 
-DEATH_TEST_F(IndexBoundsBuilderTest,
+DEATH_TEST_F(IndexBoundsBuilderTestDeathTest,
              TranslateInternalExprLTEMultikeyPathFails,
              "$expr comparison predicates on multikey paths cannot use an index") {
     BSONObj keyPattern = BSON("a" << 1 << "b" << 1);

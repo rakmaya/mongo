@@ -27,7 +27,7 @@
  *    it in the license file.
  */
 
-#include "mongo/db/deferred_writer.h"
+#include "mongo/db/repl/dbcheck/deferred_writer.h"
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
@@ -36,16 +36,16 @@
 #include "mongo/bson/simple_bsonobj_comparator.h"
 #include "mongo/db/client.h"
 #include "mongo/db/dbdirectclient.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_options.h"
-#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/query/internal_plans.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/plan_yield_policy.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/lock_manager/d_concurrency.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_options.h"
 #include "mongo/dbtests/dbtests.h"  // IWYU pragma: keep
 #include "mongo/platform/atomic_word.h"
 #include "mongo/stdx/thread.h"
@@ -142,7 +142,7 @@ public:
         const auto coll = acquireCollection(
             opCtx,
             CollectionAcquisitionRequest(kTestNamespace,
-                                         PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                         PlacementConcern(boost::none, ShardVersion::UNTRACKED()),
                                          repl::ReadConcernArgs::get(opCtx),
                                          AcquisitionPrerequisites::kRead),
             MODE_IS);

@@ -92,12 +92,13 @@ const StepdownThread = function () {
      *      stack {string}: Only present if ok == 0. Contains the stack at the time of
      *          the error.
      */
-    function _continuousPrimaryStepdownFn(stopCounter, seedNode, options) {
+    async function _continuousPrimaryStepdownFn(stopCounter, seedNode, options) {
         jsTest.log.info("*** Continuous stepdown thread running with seed node " + seedNode);
 
         try {
             // The config primary may unexpectedly step down during startup if under heavy
             // load and too slowly processing heartbeats.
+            const {ReplSetTest} = await import("jstests/libs/replsettest.js");
             const replSet = new ReplSetTest(seedNode);
 
             let primary = replSet.getPrimary();
@@ -109,7 +110,11 @@ const StepdownThread = function () {
                 // stepping down.
                 assert.commandWorkedOrFailedWithCode(
                     primary.adminCommand({replSetStepDown: options.stepdownDurationSecs, force: true}),
-                    [ErrorCodes.NotWritablePrimary, ErrorCodes.ConflictingOperationInProgress],
+                    [
+                        ErrorCodes.NotWritablePrimary,
+                        ErrorCodes.ConflictingOperationInProgress,
+                        ErrorCodes.ExceededTimeLimit,
+                    ],
                 );
 
                 // Wait for primary to get elected and allow the test to make some progress
@@ -362,6 +367,16 @@ function makeShardingTestWithContinuousPrimaryStepdown(stepdownOptions, verbosit
                     rst.test.stopContinuousFailover({waitForPrimary: waitForPrimary});
                 });
             }
+        }
+
+        /**
+         * Overrides stop to ensure continuous failover threads are stopped before shutting down
+         * the cluster.
+         */
+        stop(opts = {}) {
+            const waitForPrimary = opts.waitForPrimary ?? false;
+            this.stopContinuousFailover({waitForPrimary: waitForPrimary});
+            super.stop(opts);
         }
 
         /**

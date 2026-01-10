@@ -31,6 +31,7 @@
 
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonobj.h"
+#include "mongo/db/extension/host/operation_metrics_registry.h"
 #include "mongo/db/flow_control_ticketholder.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
@@ -78,6 +79,10 @@ public:
             add(other);
             return *this;
         }
+
+        // Define move constructor and assignment to avoid add() being invoked when moving.
+        AdditiveMetrics(AdditiveMetrics&&) noexcept = default;
+        AdditiveMetrics& operator=(AdditiveMetrics&&) noexcept = default;
 
         /**
          * Adds all the fields of another AdditiveMetrics object together with the fields of this
@@ -229,6 +234,18 @@ public:
 
         boost::optional<uint64_t> numInterruptChecks;
         boost::optional<Milliseconds> overdueInterruptApproxMax;
+
+        // If query stats are being collected for this operation, stores the execution control
+        // statistics.
+        boost::optional<Microseconds> totalTimeQueuedMicros;
+        boost::optional<uint64_t> totalAdmissions;
+        boost::optional<bool> wasLoadShed;
+        boost::optional<bool> wasDeprioritized;
+
+        // Amount of time spent planning the query. Begins after parsing and ends
+        // after optimizations. This metric is expected to be positive regardless of whether the
+        // plan came from (e.g. multi-planner, cost-based ranker, plan cache).
+        boost::optional<Microseconds> planningTime;
     };
 
     MONGO_MOD_PRIVATE OpDebug() = default;
@@ -240,11 +257,17 @@ public:
      *
      * Generally, the metrics/fields reported here should be a subset of what is reported in
      * append(). The profiler is meant to be more verbose than the slow query log.
+     *
+     * Due to logging implementation, the lifetime of operationDeadline must exceed the lifetime of
+     * pAttrs. Accepting pointer to Date_t instead of reference to avoid compiler extending the
+     * lifetime of temporary objects.
+     * TODO SERVER-114266 - remove this.
      */
     void report(OperationContext* opCtx,
                 const SingleThreadedLockStats* lockStats,
                 const SingleThreadedStorageMetrics& storageMetrics,
                 long long prepareReadConflicts,
+                const Date_t* operationDeadline,
                 logv2::DynamicAttributes* pAttrs) const;
 
     void reportStorageStats(logv2::DynamicAttributes* pAttrs) const;
@@ -296,7 +319,8 @@ public:
     /**
      * Gets the type of the namespace on which the current operation operates.
      */
-    MONGO_MOD_PRIVATE std::string getCollectionType(const NamespaceString& nss) const;
+    MONGO_MOD_PRIVATE std::string getCollectionType(OperationContext* opCtx,
+                                                    const NamespaceString& nss) const;
 
     /**
      * Accumulate resolved views.
@@ -450,9 +474,38 @@ public:
         // actually caring about the metrics for this specific operation. In those cases, we
         // use metricsRequested to indicate we should request metrics from other nodes.
         bool metricsRequested = false;
+
+        // Additive metrics to be accumulated across calls to getMore() and/or transactions.
+        AdditiveMetrics additiveMetrics;
     };
 
-    MONGO_MOD_PRIVATE QueryStatsInfo queryStatsInfo;
+    // Return the QueryStatsInfo for the given operation. By default, return the current operation.
+    MONGO_MOD_PRIVATE QueryStatsInfo& getQueryStatsInfo(size_t opIndex = kCurrentOpIndex) {
+        return _getQueryStatsInfoHelper(this, opIndex);
+    }
+
+    // Return the QueryStatsInfo for the given operation. By default, return the current main
+    // operation. Const version.
+    MONGO_MOD_PRIVATE const QueryStatsInfo& getQueryStatsInfo(
+        size_t opIndex = kCurrentOpIndex) const {
+        return _getQueryStatsInfoHelper(this, opIndex);
+    }
+
+    // Create a new default-constructed QueryStatsInfo for the given opIndex, and return a reference
+    // to it.
+    MONGO_MOD_PRIVATE QueryStatsInfo& setQueryStatsInfoAtOpIndex(size_t opIndex) {
+        uassert(11487700,
+                "cannot create QueryStatsInfo for current operation",
+                opIndex != kCurrentOpIndex);
+
+        ensureQueryStatsInfoForBatchWrites();
+        uassert(11487701,
+                fmt::format("QueryStatsInfo for opIndex {} already exists", opIndex),
+                !_queryStatsInfoForBatchWrites->contains(opIndex));
+
+        auto [it, _] = _queryStatsInfoForBatchWrites->emplace(opIndex, QueryStatsInfo{});
+        return it->second;
+    }
 
     // The query framework that this operation used. Will be unknown for non query operations.
     PlanExecutor::QueryFramework queryFramework{PlanExecutor::QueryFramework::kUnknown};
@@ -478,10 +531,6 @@ public:
 
     // Details of any error (whether from an exception or a command returning failure).
     Status errInfo = Status::OK();
-
-    // Amount of time spent planning the query. Begins after parsing and ends
-    // after optimizations.
-    Microseconds planningTime{0};
 
     // Cost computed by the cost-based optimizer.
     boost::optional<double> estimatedCost;
@@ -533,10 +582,20 @@ public:
     // Used to track the amount of time spent waiting for a response from remote operations.
     boost::optional<Microseconds> remoteOpWaitTime;
 
-    // Stores the current operation's count of these metrics. If they are needed to be accumulated
-    // elsewhere, they should be extracted by another aggregator (like the ClientCursor) to ensure
-    // these only ever reflect just this CurOp's consumption.
-    AdditiveMetrics additiveMetrics;
+    // By default, returns the current operation's additive metrics. If they are needed to be
+    // accumulated elsewhere, they should be extracted by another aggregator (like the ClientCursor)
+    // to ensure these only ever reflect just this CurOp's consumption.
+    //
+    // On the router, we may need to collect metrics for writes dispatched in batches to multiple
+    // shards. For this special case, an opIndex can be provided to aggregate metrics across shards.
+    AdditiveMetrics& getAdditiveMetrics(size_t opIndex = kCurrentOpIndex) {
+        return getQueryStatsInfo(opIndex).additiveMetrics;
+    }
+
+    // Const version of the above method.
+    const AdditiveMetrics& getAdditiveMetrics(size_t opIndex = kCurrentOpIndex) const {
+        return getQueryStatsInfo(opIndex).additiveMetrics;
+    }
 
     // Stores storage statistics.
     std::unique_ptr<StorageStats> storageStats;
@@ -549,6 +608,7 @@ public:
     // Records the WC that was waited on during the operation. (The WC in opCtx can't be used
     // because it's only set while the Command itself executes.)
     boost::optional<WriteConcernOptions> writeConcern;
+    boost::optional<BSONObj> writeConcernError;
 
     // Whether this is an oplog getMore operation for replication oplog fetching.
     bool isReplOplogGetMore{false};
@@ -559,7 +619,60 @@ public:
     std::map<NamespaceString, std::pair<std::vector<NamespaceString>, std::vector<BSONObj>>>
         resolvedViews;
 
+    // Holds which namespaces seen across the operation are known to be timeseries.
+    // TODO SERVER-113634: Add timeseries namespace to all operations that apply,
+    // not just read commands.
+    std::set<NamespaceString> knownTimeseriesNamespaces;
+
+    // Stores metrics handles for extensions to properly manage their lifetimes. The contents of
+    // these stats are opaque to the MongoDB host - this object allows extensions to implement their
+    // own custom aggregation and serialization logic.
+    extension::host::OperationMetricsRegistry extensionMetrics;
+
 private:
+    /**
+     * Accessor helper that avoids having to repeat logic for both const and non-const "this."
+     *
+     * We want this be inlined to ensure the happy path stays fast. Except on the router when
+     * collecting query stats for batched writes, it will always be the case that
+     *     opIndex == kCurrentOpIndex.
+     */
+    template <typename This>
+    static auto _getQueryStatsInfoHelper(This* opDebug, size_t opIndex)
+        -> decltype((opDebug->_queryStatsInfo)) {
+        if (opIndex == opDebug->kCurrentOpIndex) {
+            return opDebug->_queryStatsInfo;
+        }
+
+        opDebug->ensureQueryStatsInfoForBatchWrites();
+        uassert(11487702,
+                fmt::format("expected to find QueryStatsInfo at opIndex {} but did not", opIndex),
+                opDebug->_queryStatsInfoForBatchWrites->contains(opIndex));
+        return opDebug->_queryStatsInfoForBatchWrites->at(opIndex);
+    }
+
+    /**
+     * QueryStatsInfo for operations.
+     *
+     * Most of the time we only care about the current operation. However, when collecting
+     * stats for writes to sharded collections dispatched from the router, we need to be able to
+     * aggregate statistics for potentially more than one statement (since writes are typically
+     * batched). For this case, we want to be able to aggregate metrics received from the shards
+     * before updating the query stats store. This map is keyed on the index of the statements entry
+     * in the original write command.
+     */
+    QueryStatsInfo _queryStatsInfo;
+    mutable std::unique_ptr<absl::flat_hash_map<size_t, QueryStatsInfo>>
+        _queryStatsInfoForBatchWrites = nullptr;
+    static constexpr size_t kCurrentOpIndex = std::numeric_limits<size_t>::max();
+
+    void ensureQueryStatsInfoForBatchWrites() const {
+        if (!_queryStatsInfoForBatchWrites) {
+            _queryStatsInfoForBatchWrites =
+                std::make_unique<absl::flat_hash_map<size_t, QueryStatsInfo>>();
+        }
+    }
+
     // The hash of query_shape::QueryShapeHash.
     boost::optional<query_shape::QueryShapeHash> _queryShapeHash;
 

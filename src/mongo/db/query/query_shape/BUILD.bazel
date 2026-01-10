@@ -23,13 +23,10 @@ mongo_cc_library(
         "query_shape_gen",
         "serialization_options.cpp",
     ],
-    hdrs = [
-        "serialization_options.h",
-    ],
     deps = [
         "//src/mongo:base",
         "//src/mongo/db/exec/document_value",
-        "//src/mongo/db/pipeline:field_path",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/db/pipeline:field_path",
     ],
 )
 
@@ -39,45 +36,22 @@ mongo_cc_library(
         "query_shape.cpp",
         "shape_helpers.cpp",
     ],
-    hdrs = [
-        "agg_cmd_shape.h",
-        "find_cmd_shape.h",
-        "let_shape_component.h",
-        "query_shape.h",
-        "shape_helpers.h",
-        "//src/mongo/db/pipeline:aggregate_command_gen",
-    ],
-    header_deps = [
-        ":query_shape_hash",
-    ],
-    private_hdrs = [
-        "//src/mongo/db/query/compiler/logical_model/projection:projection_ast_util.h",
-        "//src/mongo/db/query:count_request.h",
-    ],
     deps = [
         ":query_shape_common",
         "//src/mongo:base",
-        "//src/mongo/db:server_base",  # TODO(SERVER-93876): Remove.
-        "//src/mongo/db/exec/document_value",  # TODO(SERVER-93876): Remove.
-        "//src/mongo/db/pipeline:field_path",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/db:server_base",
+        "//src/mongo/db/exec/document_value",
+        "//src/mongo/db/pipeline:field_path",
     ],
 )
 
 mongo_cc_library(
     name = "update_cmd_shape",
     srcs = ["update_cmd_shape.cpp"],
-    hdrs = [
-        "let_shape_component.h",
-        "update_cmd_shape.h",
-    ],
-    private_hdrs = [
-        "//src/mongo/db/query/compiler/logical_model/projection:projection_ast_util.h",
-        "//src/mongo/db/query:count_request.h",
-    ],
     deps = [
         ":query_shape_common",
         "//src/mongo:base",
-        "//src/mongo/db/query/write_ops:parsed_update_and_delete",
+        "//src/mongo/db/query/write_ops:canonical_update_and_delete",
     ],
 )
 
@@ -101,9 +75,6 @@ mongo_cc_library(
     name = "query_shape_hash",
     srcs = [
         ":query_shape_hash_gen",
-    ],
-    hdrs = [
-        "query_shape_hash.h",
     ],
     deps = [
         "//src/mongo/crypto:sha256_block",

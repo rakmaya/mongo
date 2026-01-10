@@ -39,13 +39,13 @@
 #include "mongo/db/geo/r2_region_coverer.h"
 #include "mongo/db/geo/shapes.h"
 #include "mongo/db/index/s2_common.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/matcher/expression_geo.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/query/compiler/physical_model/index_bounds/index_bounds.h"
 #include "mongo/db/query/plan_executor.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
 #include "mongo/util/modules.h"
 
 #include <memory>
@@ -83,7 +83,7 @@ public:
                    ExpressionContext* expCtx,
                    WorkingSet* workingSet,
                    CollectionAcquisition collection,
-                   const IndexDescriptor* twoDIndex);
+                   const IndexCatalogEntry* twoDIndex);
 
 protected:
     std::unique_ptr<CoveredInterval> nextInterval(OperationContext* opCtx,
@@ -106,14 +106,14 @@ private:
 
         PlanStage::StageState work(ExpressionContext* expCtx,
                                    WorkingSet* workingSet,
-                                   const IndexDescriptor* twoDIndex,
+                                   const IndexCatalogEntry* twoDIndex,
                                    WorkingSetID* out,
                                    double* estimatedDistance);
 
     private:
         void buildIndexScan(ExpressionContext* expCtx,
                             WorkingSet* workingSet,
-                            const IndexDescriptor* twoDIndex);
+                            const IndexCatalogEntry* twoDIndex);
 
         const CollectionAcquisition* _collection;  // Points to the internal stage _collection.
         PlanStage::Children* _children;    // Points to PlanStage::_children in the NearStage.
@@ -151,7 +151,7 @@ public:
                          ExpressionContext* expCtx,
                          WorkingSet* workingSet,
                          CollectionAcquisition collection,
-                         const IndexDescriptor* s2Index);
+                         const IndexCatalogEntry* s2Index);
 
 protected:
     std::unique_ptr<CoveredInterval> nextInterval(OperationContext* opCtx,
@@ -177,14 +177,14 @@ private:
         // Return IS_EOF is such document exists and set the estimated distance to the nearest doc.
         PlanStage::StageState work(ExpressionContext* expCtx,
                                    WorkingSet* workingSet,
-                                   const IndexDescriptor* s2Index,
+                                   const IndexCatalogEntry* s2Index,
                                    WorkingSetID* out,
                                    double* estimatedDistance);
 
     private:
         void buildIndexScan(ExpressionContext* expCtx,
                             WorkingSet* workingSet,
-                            const IndexDescriptor* s2Index);
+                            const IndexCatalogEntry* s2Index);
 
         const CollectionAcquisition* _collection;  // Points to the internal stage _collection
         PlanStage::Children* _children;    // Points to PlanStage::_children in the NearStage.

@@ -54,10 +54,13 @@
 
 namespace mongo {
 
-REGISTER_INTERNAL_DOCUMENT_SOURCE(_internalChangeStreamUnwindTransaction,
-                                  LiteParsedDocumentSourceChangeStreamInternal::parse,
-                                  DocumentSourceChangeStreamUnwindTransaction::createFromBson,
-                                  true);
+REGISTER_INTERNAL_LITE_PARSED_DOCUMENT_SOURCE(_internalChangeStreamUnwindTransaction,
+                                              ChangeStreamUnwindTransactionLiteParsed::parse);
+
+REGISTER_DOCUMENT_SOURCE_WITH_STAGE_PARAMS_DEFAULT(_internalChangeStreamUnwindTransaction,
+                                                   DocumentSourceChangeStreamUnwindTransaction,
+                                                   ChangeStreamUnwindTransactionStageParams);
+
 ALLOCATE_DOCUMENT_SOURCE_ID(_internalChangeStreamUnwindTransaction,
                             DocumentSourceChangeStreamUnwindTransaction::id)
 
@@ -204,7 +207,7 @@ DocumentSource::GetModPathsReturn DocumentSourceChangeStreamUnwindTransaction::g
     return {DocumentSource::GetModPathsReturn::Type::kAllPaths, OrderedPathSet{}, {}};
 }
 
-DocumentSourceContainer::iterator DocumentSourceChangeStreamUnwindTransaction::doOptimizeAt(
+DocumentSourceContainer::iterator DocumentSourceChangeStreamUnwindTransaction::optimizeAt(
     DocumentSourceContainer::iterator itr, DocumentSourceContainer* container) {
     tassert(5687205, "Iterator mismatch during optimization", *itr == this);
 

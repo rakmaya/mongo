@@ -32,7 +32,6 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
-#include "mongo/bson/timestamp.h"
 #include "mongo/db/pipeline/change_stream_helpers.h"
 #include "mongo/db/pipeline/document_source_change_stream.h"
 #include "mongo/idl/idl_parser.h"
@@ -49,10 +48,13 @@ using boost::intrusive_ptr;
 
 namespace mongo {
 
-REGISTER_INTERNAL_DOCUMENT_SOURCE(_internalChangeStreamCheckResumability,
-                                  LiteParsedDocumentSourceChangeStreamInternal::parse,
-                                  DocumentSourceChangeStreamCheckResumability::createFromBson,
-                                  true);
+REGISTER_INTERNAL_LITE_PARSED_DOCUMENT_SOURCE(_internalChangeStreamCheckResumability,
+                                              ChangeStreamCheckResumabilityLiteParsed::parse);
+
+REGISTER_DOCUMENT_SOURCE_WITH_STAGE_PARAMS_DEFAULT(_internalChangeStreamCheckResumability,
+                                                   DocumentSourceChangeStreamCheckResumability,
+                                                   ChangeStreamCheckResumabilityStageParams);
+
 ALLOCATE_DOCUMENT_SOURCE_ID(_internalChangeStreamCheckResumability,
                             DocumentSourceChangeStreamCheckResumability::id)
 

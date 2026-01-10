@@ -40,6 +40,7 @@
 #include "mongo/db/pipeline/lite_parsed_document_source.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/stdx/unordered_set.h"
+#include "mongo/util/modules.h"
 
 #include <list>
 #include <memory>
@@ -51,6 +52,8 @@
 
 namespace mongo {
 
+DECLARE_STAGE_PARAMS_DERIVED_DEFAULT(ListClusterCatalog);
+
 /**
  * This aggregation stage is the '$listClusterCatalog' stage.
  * Lists any collection in the catalog and their related sharding informations.
@@ -59,16 +62,16 @@ namespace DocumentSourceListClusterCatalog {
 
 static constexpr StringData kStageName = "$listClusterCatalog"_sd;
 
-class LiteParsed final : public LiteParsedDocumentSource {
+class LiteParsed final : public LiteParsedDocumentSourceDefault<LiteParsed> {
 public:
     static std::unique_ptr<LiteParsed> parse(const NamespaceString& nss,
                                              const BSONElement& spec,
                                              const LiteParserOptions& options) {
-        return std::make_unique<LiteParsed>(spec.fieldName(), nss);
+        return std::make_unique<LiteParsed>(spec, nss);
     }
 
-    explicit LiteParsed(std::string parseTimeName, const NamespaceString& nss)
-        : LiteParsedDocumentSource(std::move(parseTimeName)) {
+    LiteParsed(const BSONElement& spec, const NamespaceString& nss)
+        : LiteParsedDocumentSourceDefault(spec) {
 
         if (nss.dbName() != DatabaseName::kAdmin) {
             if (nss.isCollectionlessAggregateNS()) {
@@ -103,6 +106,10 @@ public:
 
     bool generatesOwnDataOnce() const final {
         return true;
+    }
+
+    std::unique_ptr<StageParams> getStageParams() const final {
+        return std::make_unique<ListClusterCatalogStageParams>(_originalBson);
     }
 
     ReadConcernSupportResult supportsReadConcern(repl::ReadConcernLevel level,

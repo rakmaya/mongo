@@ -30,10 +30,11 @@
 #pragma once
 
 #include "mongo/bson/bsonobj.h"
-#include "mongo/db/admission/execution_admission_context.h"
+#include "mongo/db/admission/execution_control/execution_admission_context.h"
 #include "mongo/db/admission/ingress_admission_context.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/util/duration.h"
+#include "mongo/util/modules.h"
 
 namespace mongo {
 /**
@@ -42,7 +43,7 @@ namespace mongo {
  * operations (for transactions) or serialized and outputed to the user. Statistics are outputted
  * in slow query and slow transaction logging.
  */
-class TicketHolderQueueStats {
+class MONGO_MOD_PUBLIC TicketHolderQueueStats {
 public:
     enum class QueueType { Ingress, Execution };
 

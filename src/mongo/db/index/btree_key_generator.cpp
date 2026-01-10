@@ -32,25 +32,21 @@
 #include <boost/container/flat_set.hpp>
 #include <boost/container/vector.hpp>
 #include <boost/dynamic_bitset/dynamic_bitset.hpp>
-#include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
 // IWYU pragma: no_include "ext/alloc_traits.h"
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/dotted_path/dotted_path_support.h"
 #include "mongo/db/field_ref.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
 #include "mongo/db/query/collation/collator_interface.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
 
 #include <algorithm>
 #include <iterator>
-#include <memory>
-#include <ostream>
 #include <string>
 #include <utility>
 
@@ -105,12 +101,12 @@ std::pair<BSONElement, bool> extractNonArrayElementAtPath(const BSONObj& obj, St
 
 BtreeKeyGenerator::BtreeKeyGenerator(std::vector<const char*> fieldNames,
                                      std::vector<BSONElement> fixed,
-                                     bool isSparse,
+                                     bool isSetSparseByUser,
                                      key_string::Version keyStringVersion,
                                      Ordering ordering)
     : _keyStringVersion(keyStringVersion),
       _isIdIndex(fieldNames.size() == 1 && std::string("_id") == fieldNames[0]),
-      _isSparse(isSparse),
+      _isSetSparseByUser(isSetSparseByUser),
       _ordering(ordering),
       _fieldNames(std::move(fieldNames)),
       _nullKeyString(_buildNullKeyString()),
@@ -290,7 +286,7 @@ void BtreeKeyGenerator::getKeys(SharedBufferFragmentBuilder& pooledBufferBuilder
         keys->adopt_sequence(std::move(seq));
     }
 
-    if (keys->empty() && !_isSparse) {
+    if (keys->empty() && !_isSetSparseByUser) {
         keys->insert(_nullKeyString);
     }
 }
@@ -349,7 +345,7 @@ void BtreeKeyGenerator::_getKeysWithoutArray(SharedBufferFragmentBuilder& pooled
         }
     }
 
-    if (_isSparse && numNotFound == _fieldNames.size()) {
+    if (_isSetSparseByUser && numNotFound == _fieldNames.size()) {
         return;
     }
 
@@ -446,7 +442,7 @@ void BtreeKeyGenerator::_getKeysWithArray(std::vector<const char*>* fieldNames,
 
     if (arrElt.eoo()) {
         // No array, so generate a single key.
-        if (_isSparse && numNotFound == fieldNames->size()) {
+        if (_isSetSparseByUser && numNotFound == fieldNames->size()) {
             return;
         }
         key_string::PooledBuilder keyString(pooledBufferBuilder, _keyStringVersion, _ordering);

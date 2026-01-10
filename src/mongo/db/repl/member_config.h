@@ -59,6 +59,7 @@ class MemberConfig : private MemberConfigBase {
 public:
     // Expose certain member functions used externally.
     using MemberConfigBase::getId;
+    using MemberConfigBase::getMaintenancePort;
 
     using MemberConfigBase::kArbiterOnlyFieldName;
     using MemberConfigBase::kBuildIndexesFieldName;
@@ -66,6 +67,7 @@ public:
     using MemberConfigBase::kHorizonsFieldName;
     using MemberConfigBase::kHostFieldName;
     using MemberConfigBase::kIdFieldName;
+    using MemberConfigBase::kMaintenancePortFieldName;
     using MemberConfigBase::kNewlyAddedFieldName;
     using MemberConfigBase::kPriorityFieldName;
     using MemberConfigBase::kSecondaryDelaySecsFieldName;
@@ -102,6 +104,23 @@ public:
      */
     const HostAndPort& getHostAndPort(StringData horizon = SplitHorizon::kDefaultHorizon) const {
         return _splitHorizon.getHostAndPort(horizon);
+    }
+
+    /**
+     * Gets the host and maintenance port if the maintenance port is specified and the host and main
+     * port if not. Always returns the value for the default horizon since this is only intended for
+     * use by internal replication systems.
+     */
+    HostAndPort getHostAndPortMaintenance() const {
+        if (getMaintenancePort()) {
+            return HostAndPort(getHostAndPort().host(), *getMaintenancePort());
+        } else {
+            return getHostAndPort();
+        }
+    }
+
+    bool isUsingMaintenancePort(const HostAndPort& hap) const {
+        return getMaintenancePort() == hap.port();
     }
 
     /**

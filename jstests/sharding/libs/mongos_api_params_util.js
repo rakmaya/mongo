@@ -128,6 +128,7 @@ export let MongosAPIParametersUtil = (function () {
         {commandName: "_mongotConnPoolStats", skip: "internal API"},
         {commandName: "abortMoveCollection", skip: "TODO(SERVER-108802)"},
         {commandName: "abortReshardCollection", skip: "TODO(SERVER-108802)"},
+        {commandName: "abortRewriteCollection", skip: "TODO(SERVER-108802)"},
         {commandName: "abortUnshardCollection", skip: "TODO(SERVER-108802)"},
         {commandName: "analyze", skip: "TODO(SERVER-108802)"},
         {
@@ -1375,6 +1376,16 @@ export let MongosAPIParametersUtil = (function () {
         {commandName: "profile", skip: "not supported in mongos"},
         {commandName: "reapLogicalSessionCacheNow", skip: "is a no-op on mongos"},
         {
+            commandName: "recreateRangeDeletionTasks",
+            run: {
+                inAPIVersion1: false,
+                shardCommandName: "_shardsvrRecreateRangeDeletionTasks",
+                permittedInTxn: false,
+                requiresShardedCollection: true,
+                command: () => ({recreateRangeDeletionTasks: "collection", skipEmptyRanges: true}),
+            },
+        },
+        {
             commandName: "refineCollectionShardKey",
             run: {
                 inAPIVersion1: false,
@@ -1467,6 +1478,21 @@ export let MongosAPIParametersUtil = (function () {
                 requiresCommittedReads: true,
                 runsAgainstAdminDb: true,
                 command: () => ({reshardCollection: "db.collection", key: {_id: 1}}),
+            },
+        },
+        {
+            commandName: "rewriteCollection",
+            run: {
+                inAPIVersion1: false,
+                permittedInTxn: false,
+                shardCommandName: "_shardsvrReshardCollection",
+                requiresShardedCollection: true,
+                // rewriteCollection calls reshardCollection, which internally does atClusterTime reads.
+                requiresCommittedReads: true,
+                runsAgainstAdminDb: true,
+                // Fails due to there being too few documents in the collection to meet the shard key cardinality requirement.
+                expectedFailureCode: 4952606,
+                command: () => ({rewriteCollection: "db.collection"}),
             },
         },
         {
@@ -2088,13 +2114,12 @@ export let MongosAPIParametersUtil = (function () {
             );
 
             const configServerCommandName = runOrExplain.configServerCommandName;
-            const shardCommandName = runOrExplain.shardCommandName;
-
             if (configServerCommandName) {
                 jsTestLog(`Check for ${configServerCommandName} in config server's log`);
                 checkPrimaryLog(configPrimary, configServerCommandName, apiParameters);
             }
 
+            let shardCommandName = runOrExplain.shardCommandName;
             if (shardCommandName) {
                 jsTestLog(`Check for ${shardCommandName} in shard server's log`);
                 checkPrimaryLog(shardPrimary, shardCommandName, apiParameters);

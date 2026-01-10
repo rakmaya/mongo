@@ -37,7 +37,6 @@
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/mutable_bson/document.h"
 #include "mongo/db/exec/mutable_bson/element.h"
-#include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_queue.h"
 #include "mongo/db/pipeline/lite_parsed_pipeline.h"
@@ -47,12 +46,9 @@
 #include "mongo/db/update/document_diff_calculator.h"
 #include "mongo/db/update/object_replace_executor.h"
 #include "mongo/db/update/update_oplog_entry_serialization.h"
-#include "mongo/stdx/unordered_set.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
-#include "mongo/util/string_map.h"
 
-#include <list>
 #include <typeinfo>
 
 #include <boost/optional/optional.hpp>
@@ -89,7 +85,7 @@ PipelineExecutor::PipelineExecutor(const boost::intrusive_ptr<ExpressionContext>
 
     _expCtx->setResolvedNamespaces(resolvedNamespaces);
     _expCtx->startExpressionCounters();
-    _pipeline = Pipeline::parse(pipeline, _expCtx);
+    _pipeline = Pipeline::parseFromLiteParsed(liteParsedPipeline, _expCtx);
     _expCtx->stopExpressionCounters();
 
     // Validate the update pipeline.
@@ -157,6 +153,10 @@ UpdateExecutor::ApplyResult PipelineExecutor::applyUpdate(ApplyParams applyParam
 }
 
 Value PipelineExecutor::serialize() const {
+    return serialize(SerializationOptions{});
+}
+
+Value PipelineExecutor::serialize(const SerializationOptions& opts) const {
     std::vector<Value> valueArray;
     for (const auto& stage : _pipeline->getSources()) {
         // The queue stage we add to adapt the pull-based '_pipeline' to our use case should not
@@ -168,7 +168,7 @@ Value PipelineExecutor::serialize() const {
             continue;
         }
 
-        stage->serializeToArray(valueArray);
+        stage->serializeToArray(valueArray, opts);
     }
 
     return Value(valueArray);

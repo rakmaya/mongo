@@ -39,6 +39,7 @@
 #include "mongo/db/query/compiler/dependency_analysis/dependencies.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/db/sharding_environment/shard_id.h"
+#include "mongo/util/modules.h"
 
 #include <memory>
 #include <set>
@@ -49,13 +50,15 @@
 
 namespace mongo {
 
+DEFINE_LITE_PARSED_STAGE_INTERNAL_DERIVED(ReshardingOwnershipMatch);
+
 /**
  * This is a purpose-built stage to filter out documents which are 'owned' by this shard according
  * to a given shardId and shard key. This stage was created to optimize performance of internal
  * resharding pipelines which need to be able to answer this question very quickly. To do so, it
  * re-uses pieces of sharding infrastructure rather than applying a MatchExpression.
  */
-class DocumentSourceReshardingOwnershipMatch final : public DocumentSource {
+class MONGO_MOD_PUBLIC DocumentSourceReshardingOwnershipMatch final : public DocumentSource {
 public:
     static constexpr StringData kStageName = "$_internalReshardingOwnershipMatch"_sd;
 

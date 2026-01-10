@@ -27,9 +27,6 @@
  *    it in the license file.
  */
 
-#include "mongo/base/error_codes.h"
-#include "mongo/base/status.h"
-#include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
@@ -39,13 +36,7 @@
 #include "mongo/db/change_stream_pre_images_collection_manager.h"
 #include "mongo/db/client.h"
 #include "mongo/db/collection_crud/collection_write_path.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/catalog_test_fixture.h"
-#include "mongo/db/local_catalog/clustered_collection_options_gen.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_catalog.h"
-#include "mongo/db/local_catalog/collection_options.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/dbhelpers.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/op_observer/op_observer_impl.h"
@@ -54,18 +45,22 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/change_stream_expired_pre_image_remover.h"
 #include "mongo/db/pipeline/change_stream_preimage_gen.h"
-#include "mongo/db/record_id.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/server_parameter.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/service_context_test_fixture.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_test_fixture.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/collection_options.h"
 #include "mongo/db/storage/collection_truncate_markers.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/clock_source.h"
 #include "mongo/util/clock_source_mock.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/time_support.h"
@@ -79,7 +74,6 @@
 #include <string>
 #include <vector>
 
-#include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
 
@@ -170,28 +164,18 @@ protected:
                           ->lookupCollectionByNamespace(operationContext(), nss)
                           ->uuid();
 
-        std::vector<ChangeStreamPreImage> preImages;
+        std::vector<BSONObj> preImageDocs;
         for (int64_t i = 0; i < numRecords; i++) {
-            preImages.push_back(
-                generatePreImage(nsUUID, Timestamp{startOperationTime + Milliseconds{i}}));
+            preImageDocs.push_back(
+                generatePreImage(nsUUID, Timestamp{startOperationTime + Milliseconds{i}}).toBSON());
         }
-
-        std::vector<InsertStatement> preImageInsertStatements;
-        std::transform(preImages.begin(),
-                       preImages.end(),
-                       std::back_inserter(preImageInsertStatements),
-                       [](const auto& preImage) { return InsertStatement{preImage.toBSON()}; });
 
         AutoGetCollection preImagesCollectionRaii(opCtx, preImagesCollectionNss, MODE_IX);
         ASSERT(preImagesCollectionRaii);
         WriteUnitOfWork wuow(opCtx);
         auto& changeStreamPreImagesCollection = *preImagesCollectionRaii;
 
-        auto status = collection_internal::insertDocuments(opCtx,
-                                                           changeStreamPreImagesCollection,
-                                                           preImageInsertStatements.begin(),
-                                                           preImageInsertStatements.end(),
-                                                           nullptr);
+        ASSERT_OK(Helpers::insert(opCtx, changeStreamPreImagesCollection, preImageDocs));
         wuow.commit();
     };
 

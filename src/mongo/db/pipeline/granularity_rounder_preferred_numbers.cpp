@@ -33,12 +33,10 @@
 #include "mongo/db/pipeline/granularity_rounder.h"
 #include "mongo/platform/decimal128.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/intrusive_counter.h"
 #include "mongo/util/str.h"
 
 #include <algorithm>
 #include <cmath>
-#include <memory>
 #include <string>
 #include <vector>
 
@@ -153,8 +151,10 @@ REGISTER_GRANULARITY_ROUNDER(E192, [](const boost::intrusive_ptr<ExpressionConte
 GranularityRounderPreferredNumbers::GranularityRounderPreferredNumbers(
     const boost::intrusive_ptr<ExpressionContext>& expCtx, vector<double> baseSeries, string name)
     : GranularityRounder(expCtx), _baseSeries(baseSeries), _name(name) {
-    invariant(_baseSeries.size() > 1);
-    invariant(std::is_sorted(_baseSeries.begin(), _baseSeries.end()));
+    tassert(11282947, "Expecting base series to hold more than 1 value", _baseSeries.size() > 1);
+    tassert(11282946,
+            "Expecting base series to be sorted",
+            std::is_sorted(_baseSeries.begin(), _baseSeries.end()));
 }
 
 intrusive_ptr<GranularityRounder> GranularityRounderPreferredNumbers::create(
@@ -210,8 +210,10 @@ Value GranularityRounderPreferredNumbers::roundUp(Value value) {
 
         // After scaling up or down, 'number' should now fall into the range spanned by
         // decimalSeries[i] * multiplier for all i in decimalSeries.
-        invariant(number.isGreaterEqual(decimalSeries.front().multiply(multiplier)) &&
-                  number.isLess(decimalSeries.back().multiply(multiplier)));
+        tassert(11282945,
+                "After scaling up or down, the number falls out of range of allowed values",
+                number.isGreaterEqual(decimalSeries.front().multiply(multiplier)) &&
+                    number.isLess(decimalSeries.back().multiply(multiplier)));
 
         // Get an iterator pointing to the first element in '_baseSeries' that is greater
         // than'number'.
@@ -245,8 +247,10 @@ Value GranularityRounderPreferredNumbers::roundUp(Value value) {
 
         // After scaling up or down, 'number' should now fall into the range spanned by
         // _baseSeries[i] * multiplier for all i in _baseSeries.
-        invariant(number >= (_baseSeries.front() * multiplier) &&
-                  number < (_baseSeries.back() * multiplier));
+        tassert(11282944,
+                "After scaling up or down, the number falls out of range of allowed values",
+                number >= (_baseSeries.front() * multiplier) &&
+                    number < (_baseSeries.back() * multiplier));
 
         // Get an iterator pointing to the first element in '_baseSeries' that is greater
         // than'number'.
@@ -295,8 +299,10 @@ Value GranularityRounderPreferredNumbers::roundDown(Value value) {
 
         // After scaling up or down, 'number' should now fall into the range spanned by
         // decimalSeries[i] * multiplier for all i in decimalSeries.
-        invariant(number.isGreater(decimalSeries.front().multiply(multiplier)) &&
-                  number.isLessEqual(decimalSeries.back().multiply(multiplier)));
+        tassert(11282943,
+                "After scaling up or down, the number falls out of range of allowed values",
+                number.isGreater(decimalSeries.front().multiply(multiplier)) &&
+                    number.isLessEqual(decimalSeries.back().multiply(multiplier)));
 
         // Get an iterator pointing to the first element in '_baseSeries' that is greater than or
         // equal to 'number'.
@@ -339,8 +345,10 @@ Value GranularityRounderPreferredNumbers::roundDown(Value value) {
 
         // After scaling up or down, 'number' should now fall into the range spanned by
         // _baseSeries[i] * multiplier for all i in _baseSeries.
-        invariant(number > (_baseSeries.front() * multiplier) &&
-                  number <= (_baseSeries.back() * multiplier));
+        tassert(11282942,
+                "After scaling up or down, the number falls out of range of allowed values",
+                number > (_baseSeries.front() * multiplier) &&
+                    number <= (_baseSeries.back() * multiplier));
 
         // Get an iterator pointing to the first element in '_baseSeries' that is greater than or
         // equal to 'number'.

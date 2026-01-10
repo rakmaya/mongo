@@ -843,6 +843,7 @@ class ServerParameter(common.SourceLocation):
         self.description = None  # type: str
         self.cpp_vartype = None  # type: str
         self.cpp_varname = None  # type: str
+        self.mod_visibility = None  # type: str
         self.cpp_class = None  # type: ServerParameterClass
         self.condition = None  # type: Condition
         self.deprecated_name = []  # type: List[str]
@@ -869,13 +870,13 @@ class FeatureFlag(common.SourceLocation):
         self.name = None  # type: str
         self.description = None  # type: str
         self.cpp_varname = None  # type: str
+        self.mod_visibility = None  # type: str
         self.default = None  # type: Expression
         self.version = None  # type: str
         self.fcv_gated = None  # type: Expression
         self.enable_on_transitional_fcv_UNSAFE = None  # type: bool
         self.incremental_rollout_phase = None  # type: Optional[str]
-        # TODO(SERVER-102615): Remove this parameter once it's not needed anymore
-        self.fcv_context_unaware = None  # type: bool
+        self.check_against_fcv = None  # type: Optional[str]
 
         super(FeatureFlag, self).__init__(file_name, line, column)
 
@@ -924,12 +925,14 @@ class ConfigOption(common.SourceLocation):
         self.arg_vartype = None  # type: str
         self.cpp_vartype = None  # type: str
         self.cpp_varname = None  # type: str
+        self.mod_visibility = None  # type: str
         self.condition = None  # type: Condition
 
         self.conflicts = []  # type: List[str]
         self.requires = []  # type: List[str]
         self.hidden = False  # type: bool
         self.redact = False  # type: bool
+        self.ignoreIfDuplicate = False  # type: bool
         self.default = None  # type: Expression
         self.implicit = None  # type: Expression
         self.source = []  # type: List[str]

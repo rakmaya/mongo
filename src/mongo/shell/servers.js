@@ -693,19 +693,6 @@ MongoRunner.mongodOptions = function (opts = {}) {
 
     opts.pathOpts = Object.merge(opts.pathOpts, {dbpath: opts.dbpath});
 
-    opts.setParameter ||= {};
-    if (jsTestOptions().enableTestCommands && typeof opts.setParameter !== "string") {
-        if (
-            jsTestOptions().setParameters &&
-            jsTestOptions().setParameters.disableTransitionFromLatestToLastContinuous
-        ) {
-            opts.setParameter["disableTransitionFromLatestToLastContinuous"] =
-                jsTestOptions().setParameters.disableTransitionFromLatestToLastContinuous;
-        } else {
-            opts.setParameter["disableTransitionFromLatestToLastContinuous"] = false;
-        }
-    }
-
     if (jsTestOptions().mongodTlsCertificateKeyFile && !opts.tlsCertificateKeyFile) {
         opts.tlsCertificateKeyFile = jsTestOptions().mongodTlsCertificateKeyFile;
     }
@@ -720,9 +707,9 @@ MongoRunner.mongodOptions = function (opts = {}) {
     _removeSetParameterIfBeforeVersion(opts, "enableReconfigRollbackCommittedWritesCheck", "5.0.0");
     _removeSetParameterIfBeforeVersion(opts, "allowMultipleArbiters", "5.3.0");
     _removeSetParameterIfBeforeVersion(opts, "internalQueryDisableExclusionProjectionFastPath", "6.2.0");
-    _removeSetParameterIfBeforeVersion(opts, "disableTransitionFromLatestToLastContinuous", "7.0.0");
     _removeSetParameterIfBeforeVersion(opts, "defaultConfigCommandTimeoutMS", "7.3.0");
     _removeSetParameterIfBeforeVersion(opts, "enableAutoCompaction", "7.3.0");
+    _removeSetParameterIfBeforeVersion(opts, "opentelemetryTraceDirectory", "8.3.0");
 
     if (!opts.logFile && opts.useLogFiles) {
         opts.logFile = opts.dbpath + "/mongod.log";
@@ -869,6 +856,7 @@ MongoRunner.mongosOptions = function (opts) {
     _removeSetParameterIfBeforeVersion(opts, "mongosShutdownTimeoutMillisForSignaledShutdown", "4.5.0", true);
     _removeSetParameterIfBeforeVersion(opts, "failpoint.skipClusterParameterRefresh", "7.1.0", true);
     _removeSetParameterIfBeforeVersion(opts, "defaultConfigCommandTimeoutMS", "7.3.0", true);
+    _removeSetParameterIfBeforeVersion(opts, "opentelemetryTraceDirectory", "8.3.0", true);
 
     return opts;
 };
@@ -959,6 +947,10 @@ MongoRunner.runMongod = function (opts) {
     mongod.name = mongod.hostNoPort + ":" + mongod.commandLine.port;
     mongod.host = mongod.hostNoPort + ":" + connectPort;
     mongod.port = parseInt(connectPort);
+    if (mongod.commandLine.maintenancePort > 0) {
+        mongod.maintenancePort = mongod.commandLine.maintenancePort;
+        mongod.maintenanceHost = mongod.hostNoPort + ":" + mongod.maintenancePort;
+    }
     mongod.runId = runId || ObjectId();
     mongod.dbpath = fullOptions.dbpath;
     mongod.savedOptions = MongoRunner.savedOptions[mongod.runId];
@@ -1003,6 +995,10 @@ MongoRunner.runMongos = function (opts) {
     mongos.name = MongoRunner.getMongosName(mongos.commandLine.port, useHostName);
     mongos.host = MongoRunner.getMongosName(connectPort, useHostName);
     mongos.port = parseInt(connectPort);
+    if (mongos.commandLine.maintenancePort > 0) {
+        mongos.maintenancePort = mongos.commandLine.maintenancePort;
+        mongos.maintenanceHost = MongoRunner.getMongosName(mongos.maintenancePort, useHostName);
+    }
     mongos.runId = runId || ObjectId();
     mongos.savedOptions = MongoRunner.savedOptions[mongos.runId];
     mongos.fullOptions = fullOptions;

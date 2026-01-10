@@ -38,6 +38,7 @@
 #include "mongo/db/storage/damage_vector.h"
 #include "mongo/db/storage/record_data.h"
 #include "mongo/db/storage/record_store.h"
+#include "mongo/util/modules.h"
 
 #include <cstdint>
 #include <memory>
@@ -94,7 +95,8 @@ public:
                                              const RecordId&,
                                              const RecordData&,
                                              const char* damageSource,
-                                             const DamageVector&) final;
+                                             const DamageVector&,
+                                             const SeekableRecordCursor* cursor) final;
 
     std::unique_ptr<SeekableRecordCursor> getCursor(OperationContext*,
                                                     RecoveryUnit&,
@@ -137,7 +139,8 @@ private:
                                                       const RecordId& loc,
                                                       const RecordData& oldRec,
                                                       const char* damageSource,
-                                                      const DamageVector& damages) = 0;
+                                                      const DamageVector& damages,
+                                                      const SeekableRecordCursor* cursor) = 0;
 
     virtual Status _truncate(OperationContext*, RecoveryUnit&) = 0;
 

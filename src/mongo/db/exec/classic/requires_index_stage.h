@@ -32,10 +32,11 @@
 #include "mongo/db/exec/classic/requires_collection_stage.h"
 #include "mongo/db/exec/classic/working_set.h"
 #include "mongo/db/index/index_access_method.h"
-#include "mongo/db/local_catalog/index_catalog_entry.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/query/plan_executor.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog_entry.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
+#include "mongo/util/modules.h"
 
 #include <string>
 
@@ -56,7 +57,7 @@ public:
     RequiresIndexStage(const char* stageType,
                        ExpressionContext* expCtx,
                        CollectionAcquisition collection,
-                       const IndexDescriptor* indexDescriptor,
+                       const IndexCatalogEntry* indexEntry,
                        WorkingSet* workingSet);
 
     ~RequiresIndexStage() override = default;
@@ -80,6 +81,10 @@ protected:
         return _entry ? _entry->descriptor() : nullptr;
     }
 
+    const IndexCatalogEntry* indexEntry() const {
+        return _entry;
+    }
+
     const SortedDataIndexAccessMethod* indexAccessMethod() const {
         return _entry ? _entry->accessMethod()->asSortedData() : nullptr;
     }
@@ -89,12 +94,12 @@ protected:
     }
 
 private:
-    const std::string _indexIdent;
-    const std::string _indexName;
-
     // Set to nullptr during a yield. During a restore, we do an index catalog lookup using the
     // index ident to determine whether the index still exists and reset the entry pointer.
     const IndexCatalogEntry* _entry;
+
+    const std::string _indexIdent;
+    const std::string _indexName;
 
     // An identifier for the index required by this stage. Any working set member allocated to
     // represent an index key from this index must include this id.

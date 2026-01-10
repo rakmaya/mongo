@@ -71,6 +71,9 @@
 
 namespace mongo {
 
+DEFINE_LITE_PARSED_STAGE_DEFAULT_DERIVED(SetWindowFields);
+DEFINE_LITE_PARSED_STAGE_DEFAULT_DERIVED(InternalSetWindowFields);
+
 /**
  * $setWindowFields is an alias: it desugars to some combination of projection, sorting,
  * and $_internalSetWindowFields.
@@ -169,15 +172,15 @@ public:
         }
     }
 
-    DocumentSourceContainer::iterator doOptimizeAt(DocumentSourceContainer::iterator itr,
-                                                   DocumentSourceContainer* container) final;
+    DocumentSourceContainer::iterator optimizeAt(DocumentSourceContainer::iterator itr,
+                                                 DocumentSourceContainer* container);
 
     boost::optional<DistributedPlanLogic> distributedPlanLogic() override {
         // Force to run on the merging half for now.
         return DistributedPlanLogic{nullptr, this, boost::none};
     }
 
-    boost::intrusive_ptr<DocumentSource> optimize() final;
+    boost::intrusive_ptr<DocumentSource> optimize();
 
     Value serialize(const SerializationOptions& opts = SerializationOptions{}) const final;
 

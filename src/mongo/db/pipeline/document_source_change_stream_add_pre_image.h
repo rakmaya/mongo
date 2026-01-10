@@ -43,6 +43,7 @@
 #include "mongo/db/query/compiler/dependency_analysis/dependencies.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
 
 #include <set>
 #include <string>
@@ -52,6 +53,10 @@
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
+
+DECLARE_STAGE_PARAMS_DERIVED_DEFAULT(ChangeStreamAddPreImage);
+using ChangeStreamAddPreImageLiteParsed =
+    DocumentSourceChangeStreamLiteParsedInternal<ChangeStreamAddPreImageStageParams>;
 
 /**
  * Part of the change stream API machinery used to look up the pre-image of a document.
@@ -80,8 +85,10 @@ public:
                                           FullDocumentBeforeChangeModeEnum mode)
         : DocumentSourceInternalChangeStreamStage(kStageName, expCtx),
           _fullDocumentBeforeChangeMode(mode) {
-        // This stage should never be created with FullDocumentBeforeChangeMode::kOff.
-        invariant(_fullDocumentBeforeChangeMode != FullDocumentBeforeChangeModeEnum::kOff);
+        tassert(11294809,
+                "ChangeStreamAddPreImage stage should never be created with "
+                "FullDocumentBeforeChangeMode::kOff.",
+                _fullDocumentBeforeChangeMode != FullDocumentBeforeChangeModeEnum::kOff);
     }
 
     /**
@@ -95,7 +102,9 @@ public:
     }
 
     StageConstraints constraints(PipelineSplitState pipeState) const final {
-        invariant(pipeState != PipelineSplitState::kSplitForShards);
+        tassert(11294808,
+                "Expecting pipeline to be either unsplit or split for merging",
+                pipeState != PipelineSplitState::kSplitForShards);
         StageConstraints constraints(StreamType::kStreaming,
                                      PositionRequirement::kNone,
                                      HostTypeRequirement::kAnyShard,

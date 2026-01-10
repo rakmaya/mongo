@@ -31,24 +31,19 @@
 
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/db/local_catalog/index_catalog_entry.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog_entry.h"
 #include "mongo/db/storage/key_string/key_string.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/sorted_data_interface.h"
 #include "mongo/db/storage/temporary_record_store.h"
 #include "mongo/platform/atomic_word.h"
+#include "mongo/util/modules.h"
 
-#include <cstdint>
 #include <memory>
 #include <string>
-#include <vector>
 
 namespace mongo {
-
-class IndexCatalogEntry;
-
 /**
  * Records keys that have violated duplicate key constraints on unique indexes. The keys are backed
  * by a temporary table that is created and destroyed by this tracker.

@@ -59,6 +59,7 @@ executor:
     mongos_options:
       set_parameters:
         enableTestCommands: 1
+    num_mongos: 2
     num_rs_nodes_per_shard: 3
     num_shards: 2
     old_bin_version: last_lts
@@ -116,7 +117,6 @@ selector:
     - jstests/core/**/currentop.js
     - jstests/core/**/fsync.js
     - jstests/core/**/indexes_multiple_commands.js
-    - jstests/core/**/create_indexes.js
     - jstests/core/**/objid5.js
     - jstests/core/**/coveredIndex1.js
     - jstests/core/**/sortc.js

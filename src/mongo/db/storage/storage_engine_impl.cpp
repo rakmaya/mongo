@@ -33,13 +33,13 @@
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
-#include "mongo/db/admission/execution_admission_context.h"
+#include "mongo/db/admission/execution_control/execution_admission_context.h"
 #include "mongo/db/client.h"
 #include "mongo/db/index/multikey_paths.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/rss/replicated_storage_service.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/backup_cursor_hooks.h"
 #include "mongo/db/storage/deferred_drop_record_store.h"
 #include "mongo/db/storage/disk_space_monitor.h"
@@ -168,15 +168,18 @@ StorageEngineImpl::StorageEngineImpl(OperationContext* opCtx,
 
 void StorageEngineImpl::loadMDBCatalog(OperationContext* opCtx,
                                        LastShutdownState lastShutdownState) {
-    bool catalogExists =
-        _engine->hasIdent(*shard_role_details::getRecoveryUnit(opCtx), ident::kMbdCatalog);
+    LOGV2(11503101, "Loading MDB catalog");
+    dassert(!_catalog);
+    dassert(!_catalogRecordStore);
+
+    auto& ru = *shard_role_details::getRecoveryUnit(opCtx);
+    bool catalogExists = _engine->hasIdent(ru, ident::kMdbCatalog);
     if (_options.forRepair && catalogExists) {
         auto repairObserver = StorageRepairObserver::get(getGlobalServiceContext());
         invariant(repairObserver->isIncomplete());
 
         LOGV2(22246, "Repairing catalog metadata");
-        Status status =
-            _engine->repairIdent(*shard_role_details::getRecoveryUnit(opCtx), ident::kMbdCatalog);
+        Status status = _engine->repairIdent(ru, ident::kMdbCatalog);
 
         if (status.code() == ErrorCodes::DataModifiedByRepair) {
             LOGV2_WARNING(22264, "Catalog data modified by repair", "error"_attr = status);
@@ -194,8 +197,9 @@ void StorageEngineImpl::loadMDBCatalog(OperationContext* opCtx,
         WriteUnitOfWork uow(opCtx);
 
         auto& provider = rss::ReplicatedStorageService::get(opCtx).getPersistenceProvider();
+        LOGV2(11503104, "Creating MDB catalog as it did not already exist");
         auto status = _engine->createRecordStore(
-            provider, kCatalogInfoNamespace, ident::kMbdCatalog, catalogRecordStoreOpts);
+            provider, ru, kCatalogInfoNamespace, ident::kMdbCatalog, catalogRecordStoreOpts);
 
         // BadValue is usually caused by invalid configuration string.
         // We still fassert() but without a stack trace.
@@ -208,7 +212,7 @@ void StorageEngineImpl::loadMDBCatalog(OperationContext* opCtx,
 
     _catalogRecordStore = _engine->getRecordStore(opCtx,
                                                   kCatalogInfoNamespace,
-                                                  ident::kMbdCatalog,
+                                                  ident::kMdbCatalog,
                                                   catalogRecordStoreOpts,
                                                   boost::none /* uuid */);
 
@@ -410,6 +414,9 @@ void StorageEngineImpl::loadMDBCatalog(OperationContext* opCtx,
 
 void StorageEngineImpl::closeMDBCatalog(OperationContext* opCtx) {
     dassert(shard_role_details::getLocker(opCtx)->isLocked());
+    dassert(_catalog);
+    dassert(_catalogRecordStore);
+
     if (shouldLog(::mongo::logv2::LogComponent::kStorageRecovery, kCatalogLogLevel)) {
         LOGV2_FOR_RECOVERY(4615632, kCatalogLogLevel.toInt(), "closeMDBCatalog:");
         _dumpCatalog(opCtx);
@@ -436,8 +443,11 @@ Status StorageEngineImpl::_recoverOrphanedCollection(OperationContext* opCtx,
     const auto recordStoreOptions =
         _catalog->getParsedRecordStoreOptions(opCtx, catalogId, collectionName);
     auto& provider = rss::ReplicatedStorageService::get(opCtx).getPersistenceProvider();
-    Status status = _engine->recoverOrphanedIdent(
-        provider, collectionName, collectionIdent, recordStoreOptions);
+    Status status = _engine->recoverOrphanedIdent(provider,
+                                                  *shard_role_details::getRecoveryUnit(opCtx),
+                                                  collectionName,
+                                                  collectionIdent,
+                                                  recordStoreOptions);
 
     bool dataModified = status.code() == ErrorCodes::DataModifiedByRepair;
     if (!status.isOK() && !dataModified) {
@@ -607,6 +617,26 @@ Timestamp StorageEngineImpl::getBackupCheckpointTimestamp() {
     return _engine->getBackupCheckpointTimestamp();
 }
 
+
+BSONObj StorageEngineImpl::getStatus(OperationContext* opCtx) const {
+    const auto oldestRequiredTimestampForCrashRecovery = getOplogNeededForCrashRecovery();
+    const auto backupCursorHooks = BackupCursorHooks::get(opCtx->getServiceContext());
+
+    BSONObjBuilder bob;
+    bob.append("name", storageGlobalParams.engine);
+    bob.append("supportsCommittedReads", true);
+    bob.append("oldestRequiredTimestampForCrashRecovery",
+               oldestRequiredTimestampForCrashRecovery.value_or(Timestamp()));
+    bob.append("dropPendingIdents", static_cast<long long>(getNumDropPendingIdents()));
+    bob.append("dropSpillTableRetries", _spillTableDropRetries.load());
+    bob.append("supportsSnapshotReadConcern", supportsReadConcernSnapshot());
+    bob.append("readOnly", !opCtx->getServiceContext()->userWritesAllowed());
+    bob.append("persistent", !isEphemeral());
+    bob.append("backupCursorOpen", backupCursorHooks->isBackupCursorOpen());
+
+    return bob.obj();
+}
+
 Status StorageEngineImpl::disableIncrementalBackup() {
     LOGV2(9538600, "Disabling incremental backup");
     return _engine->disableIncrementalBackup();
@@ -688,9 +718,10 @@ void StorageEngineImpl::dropSpillTable(RecoveryUnit& ru, StringData ident) {
             uassertStatusOK(status);
         }
 
+        _spillTableDropRetries.fetchAndAddRelaxed(1);
         logAndBackoff(10327300,
                       logv2::LogComponent::kStorage,
-                      logv2::LogSeverity::Log(),
+                      logv2::LogSeverity::Debug(1),
                       retries,
                       "Failed to drop spill table, retrying",
                       "error"_attr = status);
@@ -703,8 +734,41 @@ std::unique_ptr<TemporaryRecordStore> StorageEngineImpl::makeTemporaryRecordStor
             "Cannot use a non-internal ident to create a temporary RecordStore instance",
             ident::isInternalIdent(ident));
 
-    std::unique_ptr<RecordStore> rs = _engine->makeTemporaryRecordStore(
-        *shard_role_details::getRecoveryUnit(opCtx), ident, keyFormat);
+    auto& ru = *shard_role_details::getRecoveryUnit(opCtx);
+    auto createTemporary = [&] {
+        return _engine->makeTemporaryRecordStore(ru, ident, keyFormat);
+    };
+    std::unique_ptr<RecordStore> rs;
+    try {
+        rs = createTemporary();
+    } catch (const ExceptionFor<ErrorCodes::ObjectAlreadyExists>&) {
+        // ObjectAlreadyExists can happen if a table is created while a checkpoint is in progress,
+        // as DDL operations being non-transactional means that the table *might* be included in the
+        // checkpoint despite not existing at the checkpoint's timestamp. Temporary idents are not
+        // represented in the catalog, so if we collide we can just drop the on-disk table.
+
+        // TODO (SERVER-114575): A layered drop can report success while not dropping the table. If
+        // so, we can re-use the ident if it is empty, which should always be the case. When layered
+        // table drops are supported, dropIdent's effect should always be consistent with its
+        // return status and a collision on re-creating an ident should be an error.
+        uassertStatusOK(_engine->dropIdent(ru, ident, false /* identHasSizeInfo */));
+
+        try {
+            rs = createTemporary();
+        } catch (const ExceptionFor<ErrorCodes::ObjectAlreadyExists>&) {
+            auto existing = _engine->getTemporaryRecordStore(ru, ident, keyFormat);
+            auto cursor = existing->getCursor(opCtx, ru);
+            invariant(!cursor->next());
+
+            LOGV2_DEBUG(11440001,
+                        1,
+                        "Temporary ident already exists on disk after drop attempt; reusing "
+                        "existing ident",
+                        "ident"_attr = ident);
+            rs = std::move(existing);
+        }
+    }
+
     LOGV2_DEBUG(22258, 1, "Created temporary record store", "ident"_attr = rs->getIdent());
     return std::make_unique<DeferredDropRecordStore>(std::move(rs), this);
 }
@@ -760,10 +824,6 @@ void StorageEngineImpl::setInitialDataTimestamp(Timestamp initialDataTimestamp) 
 
 Timestamp StorageEngineImpl::getInitialDataTimestamp() const {
     return _engine->getInitialDataTimestamp();
-}
-
-void StorageEngineImpl::setOldestTimestampFromStable() {
-    _engine->setOldestTimestampFromStable();
 }
 
 void StorageEngineImpl::setOldestTimestamp(Timestamp newOldestTimestamp, bool force) {
@@ -1002,6 +1062,9 @@ void StorageEngineImpl::TimestampMonitor::_startup() {
             } catch (const ExceptionFor<ErrorCodes::InterruptedDueToReplStateChange>&) {
                 LOGV2(6183601,
                       "Timestamp monitor got interrupted due to repl state change, retrying");
+                return;
+            } catch (const ExceptionFor<ErrorCodes::InterruptedDueToOverload>&) {
+                LOGV2(6183602, "Timestamp monitor got interrupted due to overload, retrying");
                 return;
             } catch (const ExceptionFor<ErrorCodes::InterruptedAtShutdown>& ex) {
                 if (_shuttingDown) {

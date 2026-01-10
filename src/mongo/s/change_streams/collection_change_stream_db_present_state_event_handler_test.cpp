@@ -38,9 +38,7 @@
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/unittest/death_test.h"
 #include "mongo/unittest/unittest.h"
-#include "mongo/util/assert_util.h"
 
-#include <boost/optional.hpp>
 
 namespace mongo {
 namespace {
@@ -88,7 +86,9 @@ private:
     std::unique_ptr<ChangeStreamReaderContextMock> _readerCtx;
 };
 
-DEATH_TEST_REGEX_F(CollectionDbPresentStateEventHandlerFixture,
+using CollectionDbPresentStateEventHandlerFixtureDeathTest =
+    CollectionDbPresentStateEventHandlerFixture;
+DEATH_TEST_REGEX_F(CollectionDbPresentStateEventHandlerFixtureDeathTest,
                    Given_DatabaseCreatedControlEvent_When_HandleEventIsCalled_Then_Throws,
                    "Tripwire assertion.*IllegalOperation") {
     handler().handleEvent(opCtx(), DatabaseCreatedControlEvent{}, ctx(), readerCtx());
@@ -136,7 +136,7 @@ TEST_F(
 }
 
 DEATH_TEST_REGEX_F(
-    CollectionDbPresentStateEventHandlerFixture,
+    CollectionDbPresentStateEventHandlerFixtureDeathTest,
     Given_MoveChunkControlEventAllChunksMigratedAndCursorNotOpened_When_HandleEventIsCalled_Then_Throws,
     "Tripwire assertion.*10917003") {
     Timestamp clusterTime(102, 3);
@@ -167,7 +167,7 @@ TEST_F(
 }
 
 DEATH_TEST_REGEX_F(
-    CollectionDbPresentStateEventHandlerFixture,
+    CollectionDbPresentStateEventHandlerFixtureDeathTest,
     Given_MovePrimaryControlEventWithPlacementInFuture_When_HandleEventIsCalled_Then_Throws,
     "Tripwire assertion.*10917001") {
     Timestamp clusterTime(101, 0);
@@ -208,6 +208,37 @@ TEST_F(CollectionDbPresentStateEventHandlerFixture,
     ASSERT_EQ(readerCtx().closeCursorsOnDataShardsCalls.size(), 1);
     ASSERT_EQ(readerCtx().closeCursorsOnDataShardsCalls[0].shardSet,
               stdx::unordered_set<ShardId>{shardA});
+}
+
+TEST_F(
+    CollectionDbPresentStateEventHandlerFixture,
+    Given_NamespacePlacementChangedControlEventWithPlacementNotAvailable_When_HandleEventIsCalled_Then_ReturnSwitchToV1) {
+    Timestamp clusterTime(20, 1);
+    NamespacePlacementChangedControlEvent event{clusterTime};
+
+    std::vector<HistoricalPlacementFetcherMock::Response> responses{
+        {clusterTime, HistoricalPlacement({}, HistoricalPlacementStatus::NotAvailable)}};
+    fetcher().bufferResponses(responses);
+
+    auto result = handler().handleEvent(opCtx(), event, ctx(), readerCtx());
+    ASSERT_EQ(result, ShardTargeterDecision::kSwitchToV1);
+    ASSERT_TRUE(readerCtx().closeCursorsOnDataShardsCalls.empty());
+    ASSERT_TRUE(readerCtx().openCursorsOnDataShardsCalls.empty());
+    ASSERT_TRUE(ctx().setHandlerCalls.empty());
+}
+
+DEATH_TEST_REGEX_F(
+    CollectionDbPresentStateEventHandlerFixtureDeathTest,
+    Given_NamespacePlacementChangedControlEventWithPlacementInFuture_When_HandleEventIsCalled_Then_Throws,
+    "Tripwire assertion.*10917001") {
+    Timestamp clusterTime(101, 0);
+    NamespacePlacementChangedControlEvent event{clusterTime};
+
+    std::vector<HistoricalPlacementFetcherMock::Response> responses{
+        {clusterTime, HistoricalPlacement({}, HistoricalPlacementStatus::FutureClusterTime)}};
+    fetcher().bufferResponses(responses);
+
+    handler().handleEvent(opCtx(), event, ctx(), readerCtx());
 }
 
 TEST_F(
@@ -264,7 +295,7 @@ TEST_F(
         ctx().lastSetEventHandler()));
 }
 
-DEATH_TEST_REGEX_F(CollectionDbPresentStateEventHandlerFixture,
+DEATH_TEST_REGEX_F(CollectionDbPresentStateEventHandlerFixtureDeathTest,
                    When_HandleEventInDegradedModeIsCalled_Then_AlwaysThrows,
                    "Tripwire assertion.*10917000") {
     handler().handleEventInDegradedMode(opCtx(), MovePrimaryControlEvent{}, ctx(), readerCtx());

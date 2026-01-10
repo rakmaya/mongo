@@ -36,6 +36,7 @@
 #include "mongo/db/global_catalog/type_chunk.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/query/compiler/optimizer/index_bounds_builder/index_bounds_builder.h"
+#include "mongo/db/shard_role/shard_catalog/operation_sharding_state.h"
 #include "mongo/db/versioning_protocol/shard_version_factory.h"
 #include "mongo/unittest/unittest.h"
 
@@ -96,10 +97,10 @@ public:
             CollectionAcquisitionRequest::fromOpCtx(opCtx, ns, AcquisitionPrerequisites::kRead),
             MODE_IS);
         const CollectionPtr& collPtr = coll.getCollectionPtr();
-        const auto& idxDesc = getIndexDescriptor(collPtr, "some_index");
+        const auto& idxEntry = getIndexEntry(collPtr, "some_index");
 
         // Set-up DistinctParams for a full distinct scan on the first field in the index.
-        DistinctParams params{opCtx, collPtr, &idxDesc};
+        DistinctParams params{opCtx, collPtr, &idxEntry};
         params.scanDirection = testParams.scanDirection;
         params.fieldNo = testParams.fieldNo;
         params.bounds = std::move(testParams.bounds);

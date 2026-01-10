@@ -29,8 +29,8 @@
 
 #include "mongo/db/storage/collection_truncate_markers.h"
 
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/collection_truncate_markers_parameters_gen.h"
 #include "mongo/db/storage/record_data.h"
 #include "mongo/db/storage/recovery_unit.h"
@@ -85,6 +85,45 @@ CollectionTruncateMarkers::peekOldestMarkerIfNeeded(OperationContext* opCtx) con
     }
 
     return _markers.front();
+}
+
+boost::optional<CollectionTruncateMarkers::Marker> CollectionTruncateMarkers::newestExpiredRecord(
+    OperationContext* opCtx,
+    RecordStore& recordStore,
+    const RecordId& mayTruncateUpTo,
+    Date_t expiryTime) {
+    // reverse cursor so that non-exact matches will give the next older entry, not the next newer
+    auto recoveryUnit = shard_role_details::getRecoveryUnit(opCtx);
+    auto cursor = recordStore.getCursor(opCtx, *recoveryUnit, /* forward */ false);
+    auto newest = cursor->next();
+    RecordId newestUnpinnedId;
+    if (!mayTruncateUpTo.isNull()) {
+        auto newestUnpinned =
+            cursor->seek(mayTruncateUpTo, SeekableRecordCursor::BoundInclusion::kInclude);
+        if (newestUnpinned) {
+            newestUnpinnedId = newestUnpinned->id;
+        }
+    }
+    // it's OK to round off expiry time to the nearest second.
+    RecordId seekTo(durationCount<Seconds>(expiryTime.toDurationSinceEpoch()), /* low */ 0);
+    if (!mayTruncateUpTo.isNull() && seekTo > mayTruncateUpTo) {
+        seekTo = mayTruncateUpTo;
+    }
+    auto record = cursor->seek(seekTo, SeekableRecordCursor::BoundInclusion::kInclude);
+    if (!record) {
+        return {};
+    }
+    // for behavioral compatibility with ASC, don't entirely empty the oplog
+    // or remove the last unpinned entry (defined there to *include* the mayTruncateUpTo point)
+    if (record->id == newest->id || record->id == newestUnpinnedId) {
+        // reverse cursor, so one older
+        record = cursor->next();
+        if (!record) {
+            return {};
+        }
+    }
+    // byte and record increments are only advisory even when there's a size storer to look at them.
+    return Marker(/*.records =*/0, /*.bytes =*/0, record->id, expiryTime);
 }
 
 void CollectionTruncateMarkers::popOldestMarker() {
@@ -351,12 +390,10 @@ CollectionTruncateMarkers::InitialSetOfMarkers CollectionTruncateMarkers::create
 
     for (int i = 0; i < numSamples; ++i) {
         auto nextRandom = collectionIterator.getNextRandom();
-        const auto [rId, doc] = *nextRandom;
-        auto samplingLogIntervalSeconds = gCollectionSamplingLogIntervalSeconds.load();
         if (!nextRandom) {
-            // This shouldn't really happen unless the size storer values are far off from reality.
-            // The collection is probably empty, but fall back to scanning the collection just in
-            // case.
+            // getNextRandom() returns nullopt on an empty collection, so either the size storer was
+            // wrong or something modified the collection concurrently (which we do in tests). The
+            // collection is probably empty, but fall back to scanning the collection just in case.
             LOGV2(7393206,
                   "Failed to get enough random samples, falling back to scanning the collection",
                   "uuid"_attr = collectionIterator.getRecordStore()->uuid());
@@ -367,6 +404,8 @@ CollectionTruncateMarkers::InitialSetOfMarkers CollectionTruncateMarkers::create
                 estimatedBytesPerMarker,
                 std::move(getRecordIdAndWallTime));
         }
+        const auto [rId, doc] = *nextRandom;
+        auto samplingLogIntervalSeconds = gCollectionSamplingLogIntervalSeconds.load();
 
         collectionEstimates.emplace_back(
             getRecordIdAndWallTime(Record{rId, RecordData{doc.objdata(), doc.objsize()}}));

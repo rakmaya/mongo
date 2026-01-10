@@ -40,20 +40,23 @@
 
 namespace mongo {
 
+DECLARE_STAGE_PARAMS_DERIVED_DEFAULT(Bucket);
+
 /**
  * The $bucket stage is an alias for a $group stage followed by a $sort stage.
  */
 class DocumentSourceBucket final {
 public:
-    class LiteParsed final : public LiteParsedDocumentSource {
+    static constexpr StringData kStageName = "$bucket"_sd;
+
+    class LiteParsed final : public LiteParsedDocumentSourceDefault<LiteParsed> {
     public:
         static std::unique_ptr<LiteParsed> parse(const NamespaceString& nss,
                                                  const BSONElement& spec,
                                                  const LiteParserOptions& options) {
-            return std::make_unique<LiteParsed>(spec.fieldName());
+            return std::make_unique<LiteParsed>(spec);
         }
-        explicit LiteParsed(std::string parseTimeName)
-            : LiteParsedDocumentSource(std::move(parseTimeName)) {}
+        explicit LiteParsed(const BSONElement& spec) : LiteParsedDocumentSourceDefault(spec) {}
 
         stdx::unordered_set<NamespaceString> getInvolvedNamespaces() const final {
             return {};
@@ -66,6 +69,10 @@ public:
 
         bool requiresAuthzChecks() const override {
             return false;
+        }
+
+        std::unique_ptr<StageParams> getStageParams() const final {
+            return std::make_unique<BucketStageParams>(_originalBson);
         }
 
         /**

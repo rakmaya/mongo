@@ -38,7 +38,6 @@
 #include "mongo/db/pipeline/change_stream_helpers.h"
 #include "mongo/db/pipeline/change_stream_reader_builder.h"
 #include "mongo/db/pipeline/change_stream_rewrite_helpers.h"
-#include "mongo/db/pipeline/data_to_shards_allocation_query_service.h"
 #include "mongo/db/pipeline/document_source_change_stream.h"
 #include "mongo/db/pipeline/document_source_change_stream_gen.h"
 #include "mongo/db/pipeline/expression_context.h"
@@ -438,15 +437,6 @@ std::unique_ptr<MatchExpression> buildInternalOpFilter(
     //   - shardCollection: A shardCollection operation has completed.
     std::vector<StringData> internalOpTypes = {
         "reshardBegin"_sd, "reshardDoneCatchUp"_sd, "shardCollection"_sd};
-
-    // Noop change events that are only applicable when merging results on router:
-    //   - migrateChunkToNewShard: A chunk migrated to a shard that didn't have any chunks.
-    // Do not emit 'migrateChunkToNewShard' event for change streams version 2, as it is not needed
-    // for handling topology changes.
-    // TODO: SERVER-111727 Stop emitting migrateChunkToNewShard change event.
-    if (!expCtx->isChangeStreamV2() && (expCtx->getInRouter() || expCtx->getNeedsMerge())) {
-        internalOpTypes.push_back("migrateChunkToNewShard"_sd);
-    }
 
     // Only return the 'migrateLastChunkFromShard' event and the 'reshardBlockingWrites' event if
     // 'showSystemEvents' is set.

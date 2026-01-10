@@ -128,3 +128,8 @@ its `TypeBits` if any and can be used for passing around values.
 representation, from lower memory addresses to higher addresses, is the same as the defined ordering
 for that type. For example, ASCII strings are binary comparable, but double precision floating point
 numbers and little-endian integers are not.
+
+[`BSONObj::woCompare`]: https://github.com/mongodb/mongo/blob/v4.4/src/mongo/bson/bsonobj.h#L460
+[`BSONElement::compareElements`]: https://github.com/mongodb/mongo/blob/v4.4/src/mongo/bson/bsonelement.cpp#L285
+[`Ordering`]: https://github.com/mongodb/mongo/blob/v4.4/src/mongo/bson/ordering.h
+[initial sync]: /src/mongo/db/repl/README.md#initial-sync

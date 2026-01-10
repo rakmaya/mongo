@@ -234,6 +234,6 @@ fc.assert(
         seed: 413,
         // The search space for this PBT is small because express path covers a narrow range of
         // queries. 300 runs should be enough.
-        numRuns: 300,
+        numRuns: 150,
     },
 );

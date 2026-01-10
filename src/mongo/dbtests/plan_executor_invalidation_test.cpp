@@ -32,7 +32,6 @@
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/client.h"
@@ -41,7 +40,7 @@
 #include "mongo/db/exec/classic/plan_stage.h"
 #include "mongo/db/exec/classic/working_set.h"
 #include "mongo/db/exec/collection_scan_common.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
+#include "mongo/db/index_builds/index_build_test_helpers.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/expression_context.h"
@@ -54,19 +53,17 @@
 #include "mongo/db/query/plan_yield_policy.h"
 #include "mongo/db/query/query_planner_params.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/dbtests/dbtests.h"  // IWYU pragma: keep
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/intrusive_counter.h"
 
 #include <memory>
 #include <string>
 #include <utility>
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
@@ -214,8 +211,7 @@ public:
         AlternativeClientRegion acr(newClient);
         auto opCtx2 = cc().makeOperationContext();
 
-        auto coll = acquireColl(opCtx2.get(), MODE_X);
-        Status res = dbtests::createIndex(opCtx2.get(), ns, keys, unique);
+        Status res = mongo::createIndex(opCtx2.get(), ns, keys, unique);
         return res;
     }
 
@@ -223,7 +219,7 @@ public:
         return acquireCollection(
             opCtx,
             CollectionAcquisitionRequest(nss,
-                                         PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                         PlacementConcern(boost::none, ShardVersion::UNTRACKED()),
                                          repl::ReadConcernArgs::get(opCtx),
                                          AcquisitionPrerequisites::kWrite),
             mode);

@@ -48,11 +48,6 @@
 #include "mongo/db/database_name.h"
 #include "mongo/db/feature_flag.h"
 #include "mongo/db/fle_crud.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/db_raii.h"
-#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_state.h"
-#include "mongo/db/local_catalog/shard_role_catalog/scoped_collection_metadata.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/aggregation_request_helper.h"
@@ -70,18 +65,26 @@
 #include "mongo/db/query/plan_explainer.h"
 #include "mongo/db/query/plan_summary_stats.h"
 #include "mongo/db/query/query_settings/query_settings_gen.h"
+#include "mongo/db/query/query_shape/count_cmd_shape.h"
+#include "mongo/db/query/query_shape/query_shape_hash.h"
+#include "mongo/db/query/query_shape/shape_helpers.h"
 #include "mongo/db/query/query_stats/count_key.h"
 #include "mongo/db/query/query_stats/query_stats.h"
 #include "mongo/db/query/shard_key_diagnostic_printer.h"
 #include "mongo/db/query/timeseries/timeseries_translation.h"
 #include "mongo/db/query/view_response_formatter.h"
-#include "mongo/db/raw_data_operation.h"
 #include "mongo/db/read_concern_support_result.h"
 #include "mongo/db/repl/read_concern_level.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/s/query_analysis_writer.h"
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_sharding_state.h"
+#include "mongo/db/shard_role/shard_catalog/db_raii.h"
+#include "mongo/db/shard_role/shard_catalog/raw_data_operation.h"
+#include "mongo/db/shard_role/shard_catalog/scoped_collection_metadata.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/db/timeseries/timeseries_request_util.h"
 #include "mongo/db/version_context.h"
@@ -366,7 +369,7 @@ public:
                 parsed_find_command::parseFromCount(expCtx, request(), *extensionsCallback, ns));
 
             registerRequestForQueryStats(
-                opCtx, expCtx, curOp, *collOrViewAcquisition, request(), *parsedFind);
+                opCtx, expCtx, curOp, *collOrViewAcquisition, request(), *parsedFind, ns);
 
             if (collOrViewAcquisition) {
                 if (collOrViewAcquisition->isView() ||
@@ -436,10 +439,11 @@ public:
             // Store profiling data if profiling is enabled.
             collectProfilingDataIfNeeded(curOp, *exec);
 
-            collectQueryStatsMongod(opCtx, expCtx, std::move(curOp->debug().queryStatsInfo.key));
+            collectQueryStatsMongod(
+                opCtx, expCtx, std::move(curOp->debug().getQueryStatsInfo().key));
 
             CountCommandReply reply = buildCountReply(countResult);
-            if (curOp->debug().queryStatsInfo.metricsRequested) {
+            if (curOp->debug().getQueryStatsInfo().metricsRequested) {
                 reply.setMetrics(curOp->debug().getCursorMetrics().toBSON());
             }
             return reply;
@@ -506,24 +510,34 @@ public:
                                           CurOp* curOp,
                                           const CollectionOrViewAcquisition& collectionOrView,
                                           const CountCommandRequest& req,
-                                          const ParsedFindCommand& parsedFind) {
+                                          const ParsedFindCommand& parsedFind,
+                                          const NamespaceString& ns) {
+            // Compute QueryShapeHash and record it in CurOp.
+            query_shape::DeferredQueryShape deferredShape{[&]() {
+                return shape_helpers::tryMakeShape<query_shape::CountCmdShape>(
+                    parsedFind, req.getLimit().has_value(), req.getSkip().has_value());
+            }};
+            boost::optional<query_shape::QueryShapeHash> queryShapeHash =
+                CurOp::get(opCtx)->debug().ensureQueryShapeHash(opCtx, [&]() {
+                    return shape_helpers::computeQueryShapeHash(expCtx, deferredShape, ns);
+                });
+
             if (feature_flags::gFeatureFlagQueryStatsCountDistinct
                     .isEnabledUseLastLTSFCVWhenUninitialized(
                         VersionContext::getDecoration(opCtx),
                         serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
                 query_stats::registerRequest(opCtx, _ns, [&]() {
+                    uassertStatusOKWithContext(deferredShape->getStatus(),
+                                               "Failed to compute query shape");
                     return std::make_unique<query_stats::CountKey>(
                         expCtx,
-                        parsedFind,
-                        req.getLimit().has_value(),
-                        req.getSkip().has_value(),
-                        req.getReadConcern(),
-                        req.getMaxTimeMS().has_value(),
+                        req,
+                        std::move(deferredShape->getValue()),
                         collectionOrView.getCollectionType());
                 });
 
                 if (req.getIncludeQueryStatsMetrics()) {
-                    curOp->debug().queryStatsInfo.metricsRequested = true;
+                    curOp->debug().getQueryStatsInfo().metricsRequested = true;
                 }
             }
         }
@@ -591,7 +605,7 @@ public:
                              ExplainOptions::Verbosity verbosity,
                              rpc::ReplyBuilderInterface* replyBuilder) {
             auto curOp = CurOp::get(opCtx);
-            curOp->debug().queryStatsInfo.disableForSubqueryExecution = true;
+            curOp->debug().getQueryStatsInfo().disableForSubqueryExecution = true;
             const auto vts = auth::ValidatedTenancyScope::get(opCtx);
             auto viewAggRequest =
                 query_request_conversion::asAggregateCommandRequest(req, true /* hasExplain */);

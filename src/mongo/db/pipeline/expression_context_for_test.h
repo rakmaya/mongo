@@ -29,6 +29,7 @@
 
 #pragma once
 
+#include "mongo/db/feature_flag.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/process_interface/stub_mongo_process_interface.h"
@@ -37,6 +38,7 @@
 #include "mongo/db/query/query_test_service_context.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/version_context.h"
+#include "mongo/util/modules.h"
 
 #include <boost/optional.hpp>
 
@@ -48,7 +50,7 @@ namespace mongo {
  * the resolved namespaces to be provided on construction and does not allow them to be subsequently
  * mutated.
  */
-class ExpressionContextForTest : public ExpressionContext {
+class MONGO_MOD_NEEDS_REPLACEMENT ExpressionContextForTest : public ExpressionContext {
 public:
     static constexpr TimeZoneDatabase* kNullTimeZoneDatabase = nullptr;
 
@@ -74,6 +76,7 @@ public:
             serverGlobalParams.featureCompatibility.acquireFCVSnapshot().getVersion())
         : ExpressionContext(ExpressionContextParams{
               .vCtx = VersionContext(fcv),
+              .ifrContext = std::make_shared<IncrementalFeatureRolloutContext>(),
               .ns = nss,
               .originalNs = nss,
               .runtimeConstants = LegacyRuntimeConstants(Date_t::now(), Timestamp(1, 0))}) {
@@ -127,6 +130,7 @@ public:
         : ExpressionContext(ExpressionContextParams{
               .opCtx = opCtx,
               .vCtx = VersionContext(fcv),
+              .ifrContext = std::make_shared<IncrementalFeatureRolloutContext>(),
               .ns = nss,
               .originalNs = nss,
               .runtimeConstants = LegacyRuntimeConstants(Date_t::now(), Timestamp(1, 0))}),
@@ -149,6 +153,7 @@ public:
         : ExpressionContext(ExpressionContextParams{
               .opCtx = opCtx,
               .vCtx = VersionContext(fcv),
+              .ifrContext = std::make_shared<IncrementalFeatureRolloutContext>(),
               .ns = nss,
               .originalNs = nss,
               .serializationContext = sc,
@@ -171,6 +176,7 @@ public:
         : ExpressionContext(ExpressionContextParams{
               .opCtx = opCtx,
               .vCtx = VersionContext(fcv),
+              .ifrContext = std::make_shared<IncrementalFeatureRolloutContext>(),
               .ns = request.getNamespace(),
               .originalNs = request.getNamespace(),
               .serializationContext = request.getSerializationContext(),
@@ -216,6 +222,7 @@ public:
         : ExpressionContext(ExpressionContextParams{
               .opCtx = opCtx,
               .vCtx = VersionContext(fcv),
+              .ifrContext = std::make_shared<IncrementalFeatureRolloutContext>(),
               .collator = std::move(collator),
               .ns = nss,
               .originalNs = nss,

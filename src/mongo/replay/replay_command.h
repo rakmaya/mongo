@@ -34,6 +34,7 @@
 #include "mongo/db/traffic_recorder.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/stdx/chrono.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/time_support.h"
 
 #include <chrono>
@@ -92,6 +93,6 @@ private:
     TrafficReaderPacket _packet;
 };
 
-std::pair<Microseconds, int64_t> extractOffsetAndSessionFromCommand(const ReplayCommand& command);
+std::pair<Microseconds, uint64_t> extractOffsetAndSessionFromCommand(const ReplayCommand& command);
 
 }  // namespace mongo

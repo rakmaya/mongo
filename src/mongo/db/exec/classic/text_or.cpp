@@ -35,13 +35,13 @@
 #include "mongo/db/exec/classic/working_set.h"
 #include "mongo/db/exec/classic/working_set_common.h"
 #include "mongo/db/exec/document_value/document_metadata_fields.h"
-#include "mongo/db/local_catalog/collection.h"
 #include "mongo/db/memory_tracking/operation_memory_usage_tracker.h"
 #include "mongo/db/query/plan_executor_impl.h"
 #include "mongo/db/query/query_feature_flags_gen.h"
 #include "mongo/db/query/stage_memory_limit_knobs/knobs.h"
 #include "mongo/db/query/util/spill_util.h"
 #include "mongo/db/record_id.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
 #include "mongo/db/sorter/sorter_template_defs.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/util/assert_util.h"
@@ -187,7 +187,9 @@ PlanStage::StageState TextOrStage::readFromChildren(WorkingSetID* out) {
         _internalState = State::kDone;
         return PlanStage::IS_EOF;
     }
-    invariant(_currentChild < _children.size());
+    tassert(11051619,
+            "currentChild points past the last child in array",
+            _currentChild < _children.size());
 
     // Either retry the last WSM we worked on or get a new one from our current child.
     WorkingSetID id;
@@ -252,7 +254,9 @@ PlanStage::StageState TextOrStage::returnResultsInMemory(WorkingSetID* out) {
 
     // Ignore non-matched documents.
     if (textRecordData.score == kRejectedDocumentScore) {
-        invariant(textRecordData.wsid == WorkingSet::INVALID_ID);
+        tassert(11051618,
+                "Expecting text record with rejected document score to store no Working Set Id",
+                textRecordData.wsid == WorkingSet::INVALID_ID);
         return PlanStage::NEED_TIME;
     }
 
@@ -274,7 +278,7 @@ PlanStage::StageState TextOrStage::returnResultsSpilled(WorkingSetID* out) {
     double score = textRecordData.score;
     bool skip = score == kRejectedDocumentScore;
 
-    while (_sorterIterator->more() && _sorterIterator->current() == recordId) {
+    while (_sorterIterator->more() && _sorterIterator->peek() == recordId) {
         double currentScore = _sorterIterator->next().second.score;
         score += currentScore;
         skip |= currentScore == kRejectedDocumentScore;
@@ -292,8 +296,11 @@ PlanStage::StageState TextOrStage::returnResultsSpilled(WorkingSetID* out) {
 
 PlanStage::StageState TextOrStage::addTerm(WorkingSetID wsid, WorkingSetID* out) {
     WorkingSetMember* wsm = _ws->get(wsid);
-    invariant(wsm->getState() == WorkingSetMember::RID_AND_IDX);
-    invariant(1 == wsm->keyData.size());
+    tassert(11051617,
+            "Expecting working set member to store data from 1 or more indices",
+            wsm->getState() == WorkingSetMember::RID_AND_IDX);
+    tassert(
+        11051616, "Expecting working set member to have 1 IndexKeyDatum", 1 == wsm->keyData.size());
     const IndexKeyDatum newKeyData = wsm->keyData.back();  // copy to keep it around.
 
     auto [it, inserted] = _scores.try_emplace(wsm->recordId, TextRecordData{});
@@ -305,14 +312,16 @@ PlanStage::StageState TextOrStage::addTerm(WorkingSetID wsid, WorkingSetID* out)
 
     if (textRecordData->score == kRejectedDocumentScore) {
         // We have already rejected this document for not matching the filter.
-        invariant(WorkingSet::INVALID_ID == textRecordData->wsid);
+        tassert(11051615,
+                "Expecting text record with rejected document score to store no Working Set Id",
+                WorkingSet::INVALID_ID == textRecordData->wsid);
         _ws->free(wsid);
         return NEED_TIME;
     }
 
     if (WorkingSet::INVALID_ID == textRecordData->wsid) {
         // We haven't seen this RecordId before.
-        invariant(textRecordData->score == 0);
+        tassert(11051614, "Expecting text record to have no score", textRecordData->score == 0);
 
         if (!Filter::passes(newKeyData.keyData, newKeyData.indexKeyPattern, _filter)) {
             _ws->free(wsid);
@@ -447,13 +456,18 @@ void TextOrStage::initSorter() {
     // batch to the _sorter.
     static constexpr size_t kMaxMemoryUsageForSorter = std::numeric_limits<size_t>::max();
 
-    _sorterStats = std::make_unique<SorterFileStats>(nullptr /*sorterTracker*/);
+    _sorterStats = std::make_unique<SorterFileStats>(/*sorterTracker=*/nullptr);
+    auto opts =
+        SortOptions{}.MaxMemoryUsageBytes(kMaxMemoryUsageForSorter).TempDir(expCtx()->getTempDir());
+    std::function<int(const RecordId&, const RecordId&)> comparator =
+        [](const RecordId& lhs, const RecordId& rhs) -> int {
+        return lhs.compare(rhs);
+    };
     _sorter = Sorter<RecordId, TextRecordDataForSorter>::make(
-        SortOptions{}
-            .FileStats(_sorterStats.get())
-            .MaxMemoryUsageBytes(kMaxMemoryUsageForSorter)
-            .TempDir(expCtx()->getTempDir()),
-        [](const RecordId& lhs, const RecordId& rhs) { return lhs.compare(rhs); });
+        opts,
+        comparator,
+        std::make_shared<FileBasedSorterSpiller<RecordId, TextRecordDataForSorter>>(
+            *opts.tempDir, _sorterStats.get()));
 }
 
 }  // namespace mongo

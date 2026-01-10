@@ -54,6 +54,7 @@ let testCases = [
         opType: WriteWithoutShardKeyTestUtil.OperationType.updateOne,
     },
     {
+        // TODO SERVER-114994 findAndModify support for UWE.
         logMessage: "Running WouldChangeOwningShard findAndModify without shard key",
         docsToInsert: docsToInsert,
         cmdObj: {

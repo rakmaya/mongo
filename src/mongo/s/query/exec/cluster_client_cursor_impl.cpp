@@ -33,8 +33,6 @@
 #include "mongo/bson/simple_bsonobj_comparator.h"
 #include "mongo/db/commands/server_status/server_status_metric.h"
 #include "mongo/db/curop.h"
-#include "mongo/db/memory_tracking/operation_memory_usage_tracker.h"
-#include "mongo/db/query/query_shape/query_shape.h"
 #include "mongo/db/query/query_stats/query_stats.h"
 #include "mongo/db/query/tailable_mode_gen.h"
 #include "mongo/db/service_context.h"
@@ -50,7 +48,6 @@
 #include <memory>
 #include <utility>
 
-#include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
@@ -94,9 +91,9 @@ ClusterClientCursorImpl::ClusterClientCursorImpl(OperationContext* opCtx,
       _planCacheShapeHash(CurOp::get(opCtx)->debug().planCacheShapeHash),
       _queryShapeHash(CurOp::get(opCtx)->debug().getQueryShapeHash()),
       _shouldOmitDiagnosticInformation(CurOp::get(opCtx)->getShouldOmitDiagnosticInformation()),
-      _queryStatsKeyHash(CurOp::get(opCtx)->debug().queryStatsInfo.keyHash),
-      _queryStatsKey(std::move(CurOp::get(opCtx)->debug().queryStatsInfo.key)),
-      _queryStatsWillNeverExhaust(CurOp::get(opCtx)->debug().queryStatsInfo.willNeverExhaust),
+      _queryStatsKeyHash(CurOp::get(opCtx)->debug().getQueryStatsInfo().keyHash),
+      _queryStatsKey(std::move(CurOp::get(opCtx)->debug().getQueryStatsInfo().key)),
+      _queryStatsWillNeverExhaust(CurOp::get(opCtx)->debug().getQueryStatsInfo().willNeverExhaust),
       _isChangeStreamQuery(CurOp::get(opCtx)->debug().isChangeStreamQuery) {
     dassert(!_params.compareWholeSortKeyOnRouter ||
             SimpleBSONObjComparator::kInstance.evaluate(
@@ -117,9 +114,9 @@ ClusterClientCursorImpl::ClusterClientCursorImpl(OperationContext* opCtx,
       _planCacheShapeHash(CurOp::get(opCtx)->debug().planCacheShapeHash),
       _queryShapeHash(CurOp::get(opCtx)->debug().getQueryShapeHash()),
       _shouldOmitDiagnosticInformation(CurOp::get(opCtx)->getShouldOmitDiagnosticInformation()),
-      _queryStatsKeyHash(CurOp::get(opCtx)->debug().queryStatsInfo.keyHash),
-      _queryStatsKey(std::move(CurOp::get(opCtx)->debug().queryStatsInfo.key)),
-      _queryStatsWillNeverExhaust(CurOp::get(opCtx)->debug().queryStatsInfo.willNeverExhaust),
+      _queryStatsKeyHash(CurOp::get(opCtx)->debug().getQueryStatsInfo().keyHash),
+      _queryStatsKey(std::move(CurOp::get(opCtx)->debug().getQueryStatsInfo().key)),
+      _queryStatsWillNeverExhaust(CurOp::get(opCtx)->debug().getQueryStatsInfo().willNeverExhaust),
       _isChangeStreamQuery(CurOp::get(opCtx)->debug().isChangeStreamQuery) {
     dassert(!_params.compareWholeSortKeyOnRouter ||
             SimpleBSONObjComparator::kInstance.evaluate(

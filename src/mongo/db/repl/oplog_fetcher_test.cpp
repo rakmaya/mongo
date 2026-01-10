@@ -55,7 +55,7 @@
 #include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/db/signed_logical_time.h"
 #include "mongo/db/time_proof_service.h"
-#include "mongo/db/vector_clock/vector_clock.h"
+#include "mongo/db/topology/vector_clock/vector_clock.h"
 #include "mongo/dbtests/mock/mock_dbclient_connection.h"
 #include "mongo/dbtests/mock/mock_remote_db_server.h"
 #include "mongo/executor/task_executor_test_fixture.h"
@@ -452,7 +452,7 @@ void OplogFetcherTest::setUp() {
 
     // Always enable oplogFetcherUsesExhaust at the beginning of each unittest in case some
     // unittests disable it in the test.
-    oplogFetcherUsesExhaust = true;
+    oplogFetcherUsesExhaust.store(true);
 }
 
 std::unique_ptr<OplogFetcher> OplogFetcherTest::makeOplogFetcher() {
@@ -1594,7 +1594,7 @@ TEST_F(OplogFetcherTest, OplogFetcherWorksWithoutExhaust) {
 
     ShutdownState shutdownState;
 
-    oplogFetcherUsesExhaust = false;
+    oplogFetcherUsesExhaust.store(false);
 
     // Create an oplog fetcher with one retry.
     auto oplogFetcher = getOplogFetcherAfterConnectionCreated(std::ref(shutdownState), 1);
@@ -2709,7 +2709,8 @@ TEST_F(OplogFetcherTest, CheckFindCommandIncludesRequestResumeTokenWhenRequested
     oplogFetcher->join();
 }
 
-DEATH_TEST_REGEX_F(OplogFetcherTest,
+using OplogFetcherTestDeathTest = OplogFetcherTest;
+DEATH_TEST_REGEX_F(OplogFetcherTestDeathTest,
                    BSONObjectTooLargeShutsDownOplogFetcher,
                    "Fatal assertion.*9995200") {
     // Test that if find command succeeds, and second batch fails

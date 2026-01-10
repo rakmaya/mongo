@@ -44,10 +44,14 @@
 
 namespace mongo {
 
-REGISTER_DOCUMENT_SOURCE(planCacheStats,
-                         DocumentSourcePlanCacheStats::LiteParsed::parse,
-                         DocumentSourcePlanCacheStats::createFromBson,
-                         AllowedWithApiStrict::kNeverInVersion1);
+REGISTER_LITE_PARSED_DOCUMENT_SOURCE(planCacheStats,
+                                     DocumentSourcePlanCacheStats::LiteParsed::parse,
+                                     AllowedWithApiStrict::kNeverInVersion1);
+
+REGISTER_DOCUMENT_SOURCE_WITH_STAGE_PARAMS_DEFAULT(planCacheStats,
+                                                   DocumentSourcePlanCacheStats,
+                                                   PlanCacheStatsStageParams);
+
 ALLOCATE_DOCUMENT_SOURCE_ID(planCacheStats, DocumentSourcePlanCacheStats::id)
 
 boost::intrusive_ptr<DocumentSource> DocumentSourcePlanCacheStats::createFromBson(
@@ -102,7 +106,7 @@ void DocumentSourcePlanCacheStats::serializeToArray(std::vector<Value>& array,
     }
 }
 
-DocumentSourceContainer::iterator DocumentSourcePlanCacheStats::doOptimizeAt(
+DocumentSourceContainer::iterator DocumentSourcePlanCacheStats::optimizeAt(
     DocumentSourceContainer::iterator itr, DocumentSourceContainer* container) {
     auto itrToNext = std::next(itr);
     if (itrToNext == container->end()) {

@@ -62,6 +62,7 @@
 #include "mongo/util/duration.h"
 #include "mongo/util/future.h"
 #include "mongo/util/future_util.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/out_of_line_executor.h"
 #include "mongo/util/time_support.h"
@@ -83,7 +84,8 @@
  * arguments. Each function returns a future containing the response to the command, parsed into the
  * response-type provided. See the function comments below for details.
  */
-namespace mongo::async_rpc {
+namespace mongo {
+namespace MONGO_MOD_PUBLIC async_rpc {
 using executor::TaskExecutor;
 
 /**
@@ -99,13 +101,14 @@ struct AsyncRPCResponse {
 };
 
 /**
- * 'void'.
  * The response type used by `sendCommand(...)` functions if the return type of the command is
+ * 'void'.
  */
 template <>
 struct AsyncRPCResponse<void> {
     HostAndPort targetUsed;
     Microseconds elapsed;
+    GenericReplyFields genericReplyFields;
 };
 
 template <typename CommandType>
@@ -151,7 +154,7 @@ struct AsyncRPCInternalResponse {
  * async_rpc::sendCommand free-function/public API below instead, which contains
  * additional functionality and type checking.
  */
-class AsyncRPCRunner {
+class MONGO_MOD_USE_REPLACEMENT(async_rpc::sendCommand()) AsyncRPCRunner {
 public:
     virtual ~AsyncRPCRunner() = default;
     virtual ExecutorFuture<AsyncRPCInternalResponse> _sendCommand(
@@ -200,20 +203,6 @@ inline Status makeErrorIfNeeded(TaskExecutor::ResponseStatus r) {
     return {AsyncRPCErrorInfo(r), "Remote command execution failed"};
 }
 
-/**
- * Adaptor that allows a RetryPolicy to be used with AsyncTry::withBackoffBetweenIterations.
- */
-struct RetryDelayAsBackoff {
-    RetryDelayAsBackoff(mongo::RetryStrategy* strategy) : _strategy{strategy} {}
-    Milliseconds nextSleep() const {
-        // TODO(SERVER-108329): Only record the backoff after the wait for the backoff is done.
-        auto delay = _strategy->getNextRetryDelay();
-        _strategy->recordBackoff(delay);
-        return delay;
-    }
-    mongo::RetryStrategy* _strategy;
-};
-
 class ProxyingExecutor : public OutOfLineExecutor,
                          public std::enable_shared_from_this<ProxyingExecutor> {
 public:
@@ -247,8 +236,9 @@ ExecutorFuture<AsyncRPCResponse<typename CommandType::Reply>> sendCommandWithRun
     std::unique_ptr<Targeter> targeter,
     BSONObj cmdBSON) {
     using ReplyType = AsyncRPCResponse<typename CommandType::Reply>;
+    using ResultType = RetryStrategy::Result<detail::AsyncRPCInternalResponse>;
     auto proxyExec = std::make_shared<ProxyingExecutor>(options->exec, options->baton);
-    auto tryBody = [=, targeter = std::move(targeter)] {
+    auto tryBody = [=, targeter = std::move(targeter)](const TargetingMetadata& metadata) {
         // Execute the command after extracting the db name and bson from the CommandType.
         // Wrapping this function allows us to separate the CommandType parsing logic from the
         // implementation details of executing the remote command asynchronously.
@@ -256,55 +246,64 @@ ExecutorFuture<AsyncRPCResponse<typename CommandType::Reply>> sendCommandWithRun
                                     options->token,
                                     opCtx,
                                     targeter.get(),
-                                    options->retryStrategy->getTargetingMetadata(),
+                                    metadata,
                                     options->cmd.getDbName(),
                                     cmdBSON,
                                     options->cmd.getGenericArguments().getClientOperationKey());
     };
-    auto resFuture =
-        AsyncTry<decltype(tryBody)>(std::move(tryBody))
-            .until([options](StatusWith<detail::AsyncRPCInternalResponse> swResponse) {
-                if (options->token.isCanceled()) {
-                    return true;
-                }
-                auto s = swResponse.getStatus();
-                if (s.isOK()) {
-                    auto successResponse = swResponse.getValue();
-                    options->retryStrategy->recordSuccess(successResponse.targetUsed);
-                    return true;
-                }
-                if (s.code() != ErrorCodes::RemoteCommandExecutionError) {
-                    return true;
-                }
 
-                auto extraInfo = s.extraInfo<AsyncRPCErrorInfo>();
-                auto target = extraInfo->getTargetAttempted();
-                bool shouldRetry = false;
+    auto resultStatusFromRemote =
+        [token = options->token](StatusWith<detail::AsyncRPCInternalResponse> swResponse) {
+            if (token.isCanceled()) {
+                return RetryStrategy::ResultStatus{
+                    Status{ErrorCodes::CallbackCanceled, "AsyncRPC send command retry cancelled"}};
+            }
 
-                if (extraInfo->isLocal()) {
-                    shouldRetry = options->retryStrategy->recordFailureAndEvaluateShouldRetry(
-                        extraInfo->asLocal(), target, {});
-                } else if (extraInfo->isRemote()) {
-                    auto errorLabels =
-                        executor::extractErrorLabels(extraInfo->asRemote().getResponseObj());
-                    shouldRetry = options->retryStrategy->recordFailureAndEvaluateShouldRetry(
-                        extraInfo->asRemote().getRemoteCommandResult(), target, errorLabels);
-                }
+            if (swResponse.isOK()) {
+                return RetryStrategy::ResultStatus::makeOKResult(swResponse.getValue().targetUsed);
+            }
 
-                return !shouldRetry;
-            })
-            // TODO(SERVER-108329): Use withRetryStrategy instead of manually using a retry
-            // strategy inside until.
-            .withBackoffBetweenIterations(RetryDelayAsBackoff(options->retryStrategy.get()))
-            .on(proxyExec, CancellationToken::uncancelable());
+            auto s = swResponse.getStatus();
+            if (s.code() != ErrorCodes::RemoteCommandExecutionError) {
+                return RetryStrategy::ResultStatus{s};
+            }
+
+            auto extraInfo = s.extraInfo<AsyncRPCErrorInfo>();
+            auto target = extraInfo->getTargetAttempted();
+
+            if (extraInfo->isLocal()) {
+                return RetryStrategy::ResultStatus{extraInfo->asLocal()};
+            }
+
+            auto errorLabels = executor::extractErrorLabels(extraInfo->asRemote().getResponseObj());
+
+            if (auto remoteStatus = extraInfo->asRemote().getRemoteCommandResult();
+                remoteStatus.isOK()) {
+                return RetryStrategy::ResultStatus::makeOKResult(target);
+            } else {
+                return RetryStrategy::ResultStatus{
+                    remoteStatus,
+                    std::move(errorLabels),
+                    target,
+                };
+            }
+        };
+
+    auto resFuture = AsyncTry{std::move(tryBody)}
+                         .withRetryStrategy(options->retryStrategy, resultStatusFromRemote)
+                         .on(proxyExec, CancellationToken::uncancelable());
 
     return std::move(resFuture)
         .then([](detail::AsyncRPCInternalResponse r) -> ReplyType {
-            auto res = CommandType::Reply::parseSharingOwnership(
-                r.response, IDLParserContext("AsyncRPCRunner"));
             auto genericReplyFields = GenericReplyFields::parseSharingOwnership(
                 r.response, IDLParserContext("AsyncRPCRunner"));
-            return {res, r.targetUsed, r.elapsed, std::move(genericReplyFields)};
+            if constexpr (std::is_void_v<typename CommandType::Reply>) {
+                return {r.targetUsed, r.elapsed, std::move(genericReplyFields)};
+            } else {
+                auto res = CommandType::Reply::parseSharingOwnership(
+                    r.response, IDLParserContext("AsyncRPCRunner"));
+                return {res, r.targetUsed, r.elapsed, std::move(genericReplyFields)};
+            }
         })
         .unsafeToInlineFuture()
         .onError(
@@ -452,4 +451,5 @@ ExecutorFuture<AsyncRPCResponse<typename CommandType::Reply>> sendCommand(
     return sendCommand(options, opCtx, cstr);
 }
 
-}  // namespace mongo::async_rpc
+}  // namespace MONGO_MOD_PUBLIC async_rpc
+}  // namespace mongo

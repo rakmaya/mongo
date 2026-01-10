@@ -64,6 +64,8 @@
 
 namespace mongo {
 
+DECLARE_STAGE_PARAMS_DERIVED_DEFAULT(ListCachedAndActiveUsers);
+
 /*
  * This implements an aggregation document source that lists the active/cached users in the
  * authorization manager. It is intended for diagnostic and reporting purposes.
@@ -72,16 +74,16 @@ class DocumentSourceListCachedAndActiveUsers final {
 public:
     static constexpr StringData kStageName = "$listCachedAndActiveUsers"_sd;
 
-    class LiteParsed final : public LiteParsedDocumentSource {
+    class LiteParsed final : public LiteParsedDocumentSourceDefault<LiteParsed> {
     public:
         static std::unique_ptr<LiteParsed> parse(const NamespaceString& nss,
                                                  const BSONElement& spec,
                                                  const LiteParserOptions& options) {
-            return std::make_unique<LiteParsed>(spec.fieldName(), nss.tenantId());
+            return std::make_unique<LiteParsed>(spec, nss.tenantId());
         }
 
-        explicit LiteParsed(std::string parseTimeName, const boost::optional<TenantId>& tenantId)
-            : LiteParsedDocumentSource(std::move(parseTimeName)),
+        LiteParsed(const BSONElement& spec, const boost::optional<TenantId>& tenantId)
+            : LiteParsedDocumentSourceDefault(spec),
               _requiredPrivilege(Privilege(ResourcePattern::forAnyNormalResource(tenantId),
                                            ActionType::listCachedAndActiveUsers)) {}
 
@@ -96,6 +98,10 @@ public:
 
         bool isInitialSource() const final {
             return true;
+        }
+
+        std::unique_ptr<StageParams> getStageParams() const final {
+            return std::make_unique<ListCachedAndActiveUsersStageParams>(_originalBson);
         }
 
         ReadConcernSupportResult supportsReadConcern(repl::ReadConcernLevel level,

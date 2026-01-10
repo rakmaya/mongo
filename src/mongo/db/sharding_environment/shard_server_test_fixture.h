@@ -30,14 +30,15 @@
 #pragma once
 
 #include "mongo/client/remote_command_targeter_mock.h"
-#include "mongo/db/global_catalog/catalog_cache/catalog_cache.h"
-#include "mongo/db/global_catalog/catalog_cache/catalog_cache_mock.h"
-#include "mongo/db/global_catalog/catalog_cache/config_server_catalog_cache_loader_mock.h"
-#include "mongo/db/global_catalog/catalog_cache/shard_server_catalog_cache_loader.h"
-#include "mongo/db/global_catalog/catalog_cache/shard_server_catalog_cache_loader_mock.h"
 #include "mongo/db/global_catalog/sharding_catalog_client.h"
+#include "mongo/db/router_role/routing_cache/catalog_cache.h"
+#include "mongo/db/router_role/routing_cache/catalog_cache_mock.h"
+#include "mongo/db/router_role/routing_cache/config_server_catalog_cache_loader_mock.h"
+#include "mongo/db/router_role/routing_cache/shard_server_catalog_cache_loader.h"
+#include "mongo/db/router_role/routing_cache/shard_server_catalog_cache_loader_mock.h"
 #include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/db/sharding_environment/sharding_mongod_test_fixture.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/net/hostandport.h"
 
 #include <memory>
@@ -49,7 +50,7 @@ namespace mongo {
  * Test fixture for shard components, as opposed to config or mongos components. Provides a mock
  * network via ShardingMongoDTestFixture.
  */
-class ShardServerTestFixture : public ShardingMongoDTestFixture {
+class MONGO_MOD_OPEN ShardServerTestFixture : public ShardingMongoDTestFixture {
 protected:
     ShardServerTestFixture(Options options = {}, bool setUpMajorityReads = true);
     ~ShardServerTestFixture() override;
@@ -96,7 +97,7 @@ protected:
     std::unique_ptr<CatalogCache> _catalogCache;
 };
 
-class ShardServerTestFixtureWithCatalogCacheMock : public ShardServerTestFixture {
+class MONGO_MOD_OPEN ShardServerTestFixtureWithCatalogCacheMock : public ShardServerTestFixture {
 public:
     ShardServerTestFixtureWithCatalogCacheMock() : ShardServerTestFixture() {}
     ShardServerTestFixtureWithCatalogCacheMock(Options options)
@@ -108,7 +109,8 @@ protected:
     std::shared_ptr<ShardServerCatalogCacheLoaderMock> getCatalogCacheLoaderMock();
 };
 
-class ShardServerTestFixtureWithCatalogCacheLoaderMock : public ShardServerTestFixture {
+class MONGO_MOD_OPEN ShardServerTestFixtureWithCatalogCacheLoaderMock
+    : public ShardServerTestFixture {
 protected:
     void setUp() override;
     CatalogCacheMock* getCatalogCacheMock();

@@ -32,7 +32,6 @@
 #include "mongo/db/exec/agg/document_source_to_stage_registry.h"
 #include "mongo/db/exec/agg/stage.h"
 #include "mongo/db/pipeline/document_source.h"
-#include "mongo/db/pipeline/document_source_limit.h"
 #include "mongo/db/pipeline/document_source_test_optimizations.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/pipeline/pipeline.h"
@@ -98,8 +97,7 @@ ALLOCATE_DOCUMENT_SOURCE_ID(documentSourceMock2, DocumentSourceMock2::id);
 
 boost::intrusive_ptr<exec::agg::Stage> documentSourceMock2ToThrowsStageMappingFn(
     const boost::intrusive_ptr<DocumentSource>& ds) {
-    throw ExceptionFor<ErrorCodes::InternalError>(
-        Status(ErrorCodes::InternalError, "Mocked error"));
+    uasserted(ErrorCodes::InternalError, "Mocked error");
 }
 
 REGISTER_AGG_STAGE_MAPPING(ThrowsStage,

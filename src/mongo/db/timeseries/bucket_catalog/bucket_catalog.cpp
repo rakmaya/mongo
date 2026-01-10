@@ -55,10 +55,6 @@
 
 #include <absl/container/node_hash_map.h>
 #include <absl/meta/type_traits.h>
-#include <boost/container/small_vector.hpp>
-#include <boost/container/vector.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
@@ -180,18 +176,6 @@ BucketCatalog::BucketCatalog(size_t numberOfStripes, std::function<uint64_t()> m
             getTrackingContext(trackingContexts, TrackingScope::kMiscellaneous), trackingContexts);
     });
 }
-
-BatchedInsertContext::BatchedInsertContext(
-    BucketKey& bucketKey,
-    StripeNumber stripeNumber,
-    const TimeseriesOptions& options,
-    ExecutionStatsController& stats,
-    std::vector<BatchedInsertTuple>& measurementsTimesAndIndices)
-    : key(std::move(bucketKey)),
-      stripeNumber(stripeNumber),
-      options(options),
-      stats(stats),
-      measurementsTimesAndIndices(measurementsTimesAndIndices) {};
 
 uint64_t getMemoryUsage(const BucketCatalog& catalog) {
 #ifndef MONGO_CONFIG_DEBUG_BUILD

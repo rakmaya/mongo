@@ -86,13 +86,22 @@ class PageType(enum.Enum):
     '''
     WT_PAGE_INVALID = 0
     WT_PAGE_BLOCK_MANAGER = 1
-    WT_PAGE_COL_FIX = 2
     WT_PAGE_COL_INT = 3
     WT_PAGE_COL_VAR = 4
     WT_PAGE_OVFL = 5
     WT_PAGE_ROW_INT = 6
     WT_PAGE_ROW_LEAF = 7
 
+class PageFlags(enum.IntFlag):
+    '''
+    Page flags from btmem.h.
+    '''
+    WT_PAGE_COMPRESSED = 0x01
+    WT_PAGE_EMPTY_V_ALL = 0x02
+    WT_PAGE_EMPTY_V_NONE = 0x04
+    WT_PAGE_ENCRYPTED = 0x08
+    WT_PAGE_UNUSED = 0x10
+    WT_PAGE_FT_UPDATE = 0x20
 
 class PageHeader(object):
     '''
@@ -103,17 +112,9 @@ class PageHeader(object):
     memsize: int
     entries: int # Or: overflow data length
     type: PageType
-    flags: int
+    flags: PageFlags
     unused: int
     version: int
-
-    # Flags
-    WT_PAGE_COMPRESSED: typing.Final[int] = 0x01
-    WT_PAGE_EMPTY_V_ALL: typing.Final[int] = 0x02
-    WT_PAGE_EMPTY_V_NONE: typing.Final[int] = 0x04
-    WT_PAGE_ENCRYPTED: typing.Final[int] = 0x08
-    WT_PAGE_UNUSED: typing.Final[int] = 0x10
-    WT_PAGE_FT_UPDATE: typing.Final[int] = 0x20
 
     def __init__(self) -> None:
         '''
@@ -140,14 +141,33 @@ class PageHeader(object):
         h.mem_size = b.read_uint32()
         h.entries = b.read_uint32()
         h.type = PageType(b.read_uint8())
-        h.flags = b.read_uint8()
+        h.flags = PageFlags(b.read_uint8())
         h.unused = b.read_uint8()
         h.version = b.read_uint8()
         return h
 
+    def __str__(self):
+        header_string = (
+            f"Page Header:\n"
+            f"  recno: {str(self.recno)}\n"
+            f"  writegen: {str(self.write_gen)}\n"
+            f"  memsize: {str(self.mem_size)}\n"
+            f"  ncells (overflow len): {str(self.entries)}\n"
+            f"  page type: {str(self.type.value)} ({self.type.name})\n"
+            f"  page flags: {str(self.flags)}\n"
+            f"  version: {str(self.version)}"
+        )
+        
+        return header_string
 #
 # Block
 #
+
+class BlockFlags(enum.IntFlag):
+    '''
+    Block flags from block.h
+    '''
+    WT_BLOCK_DATA_CKSUM = 0x1
 
 class BlockHeader(object):
     '''
@@ -155,13 +175,8 @@ class BlockHeader(object):
     '''
     disk_size: int
     checksum: int
-    flags: int
+    flags: BlockFlags
     unused: int
-
-    # Flags
-    WT_BLOCK_DATA_CKSUM: typing.Final[int] = 0x1
-    WT_BLOCK_DISAGG_ENCRYPTED: typing.Final[int] = 0x2  # disagg only
-    WT_BLOCK_DISAGG_COMPRESSED: typing.Final[int] = 0x4 # disagg only
 
     def __init__(self) -> None:
         '''
@@ -173,32 +188,98 @@ class BlockHeader(object):
         self.unused = 0
 
     @staticmethod
-    def parse(b: binary_data.BinaryFile, disagg = False) -> 'BlockHeader':
+    def parse(b: binary_data.BinaryFile) -> 'BlockHeader':
         '''
         Parse a block header.
         '''
         # WT_BLOCK_HEADER in block.h (12 bytes)
         h = BlockHeader()
-        if disagg:
-            # Disagg sets additional fields.  If they are examined
-            # by non-disagg code, an exception will be thrown (by design).
-            h.disagg_magic = b.read_uint8()
-            h.disagg_version = b.read_uint8()
-            h.disagg_compatible_version = b.read_uint8()
-            h.disagg_header_size = b.read_uint8()
-            h.checksum = b.read_uint32()
-            h.disagg_previous_checksum = b.read_uint32()
-            h.disagg_reconciliation_id = b.read_uint8()
-            h.flags = b.read_uint8()
-            h.unused = int.from_bytes(b.read(2), byteorder='little')
-        else:
-            h.disk_size = b.read_uint32()
-            h.checksum = b.read_uint32()
-            h.flags = b.read_uint8()
-            h.unused = int.from_bytes(b.read(3), byteorder='little')
+        h.disk_size = b.read_uint32()
+        h.checksum = b.read_uint32()
+        h.flags = BlockFlags(b.read_uint8())
+        h.unused = int.from_bytes(b.read(3), byteorder='little')
         return h
+    
+    def __str__(self):
+        header_string = (
+            f"Block Header:\n"
+            f"  disk_size: {str(self.disk_size)}"
+            f"  checksum: {str(self.checksum)}"
+            f"  flags: {str(self.flags)}"
+        )
+        return header_string
 
+class BlockDisaggFlags(enum.IntFlag):
+    '''
+    Disagg block flags from block.h
+    '''
+    WT_BLOCK_DISAGG_DATA_CKSUM = 0x1
+    WT_BLOCK_DISAGG_ENCRYPTED = 0x2
+    WT_BLOCK_DISAGG_COMPRESSED = 0x4
 
+class BlockDisaggHeader(object):
+    '''
+    A block header (WT_BLOCK_DISAGG_HEADER). Disagg uses additional header fields in the block 
+    header in comparison to standard WiredTiger blocks. This class should only be used for disagg 
+    blocks.
+    '''
+    magic: int
+    version: int
+    compatible_version: int
+    header_size: int
+    checksum: int
+    previous_checksum: int
+    flags: BlockDisaggFlags
+    unused: int
+
+    # Block types (magic byte)
+    WT_BLOCK_DISAGG_MAGIC_BASE: typing.Final[int] = 0xdb
+    WT_BLOCK_DISAGG_MAGIC_DELTA: typing.Final[int] = 0xdd
+
+    def __init__(self) -> None:
+        '''
+        Initialize the instance with default values.
+        '''
+        self.magic = 0
+        self.version = 0
+        self.compatible_version = 0
+        self.header_size = 0
+        self.checksum = 0
+        self.previous_checksum = 0
+        self.flags = 0
+        self.unused = 0
+
+    @staticmethod
+    def parse(b: binary_data.BinaryFile, disagg = False) -> 'BlockDisaggHeader':
+        '''
+        Parse a block header.
+        '''
+        # WT_BLOCK_DISAGG_HEADER in block.h (16 bytes)
+        h = BlockDisaggHeader()
+        h.magic = b.read_uint8()
+        h.version = b.read_uint8()
+        h.compatible_version = b.read_uint8()
+        h.header_size = b.read_uint8()
+        h.checksum = b.read_uint32()
+        h.previous_checksum = b.read_uint32()
+        h.flags = BlockDisaggFlags(b.read_uint8())
+        h.unused = int.from_bytes(b.read(2), byteorder='little')
+        return h
+    
+    def __str__(self):
+        header_string = (
+            f"Block Disagg Header:\n"
+            f"  magic: {hex(self.magic)} ({'delta' if self.magic == self.WT_BLOCK_DISAGG_MAGIC_DELTA else 'full image'})\n"
+            f"  version: {str(self.version)}\n"
+            f"  compatible_version: {str(self.compatible_version)}\n"
+            f"  header_size: {str(self.header_size)}\n"
+            f"  checksum: {str(self.checksum)}\n"
+            f"  previous_checksum: {str(self.previous_checksum)}\n"
+            f"  flags: {str(self.flags)}"
+        )
+        
+        return header_string
+    
 #
 # Cell
 #
@@ -342,6 +423,9 @@ class Cell(object):
         if self.extra_descriptor & 0x80:
             raise ValueError('Junk in extra descriptor: ' + hex(self.extra_descriptor))
 
+    def has_timestamps(self) -> bool:
+        return self.extra_descriptor != 0
+    
     @staticmethod
     def parse(b: binary_data.BinaryFile, ignore_unsupported: bool = False) -> 'Cell':
         '''
@@ -433,4 +517,107 @@ class Cell(object):
         Check if this cell belongs to a prepared transaction.
         '''
         return self.extra_descriptor & Cell.WT_CELL_PREPARE != 0
+    
+    def descriptor_string(self) -> str:
+        desc_str = f'desc: 0x{self.descriptor:x} '
+        if self.extra_descriptor != 0:
+            desc_str += f'extra: 0x{self.extra_descriptor:x} '
+            # process_timestamps(p, cell, pagestats)
+        if self.run_length is not None:
+            desc_str += f'runlength/addr: {binary_data.d_and_h(self.run_length)} '
+        
+        return desc_str
+    
+    def type_string(self) -> str:
+        type_str = '? unknown type'
+        if self.is_address:
+            type_str = 'addr (leaf no-overflow) '
+        elif self.is_key:
+            type_str = 'key '
+        elif self.is_value:
+            type_str = 'val '
+        elif self.is_unsupported and self.cell_type != None:
+            type_str = f'celltype = {self.cell_type.value}, cellname = {self.cell_type.name} not implemented'
+            
+        if self.is_overflow:
+            type_str = f'overflow {type_str}'
+        if self.is_short:
+            type_str = f'short {type_str}'
+        if self.prefix is not None:
+            type_str += f'prefix={hex(self.prefix)}'
+        if not self.is_unsupported:
+            type_str += f'{len(self.data)} bytes'
+        
+        return type_str
+    
+    def is_valid_type(self) -> bool:
+        if self.is_address or self.is_key or self.is_value or self.is_unsupported:
+            return True
+        return False
+        
 
+class DisaggAddrFlags(enum.IntFlag):
+    '''
+    Flags for address cookies in disaggregated storage from block.h.
+    '''
+    WT_BLOCK_DISAGG_ADDR_FLAG_DELTA = 0x1
+class DisaggAddr(object):
+    '''
+    A disaggregated storage address cookie (WT_BLOCK_DISAGG_ADDRESS_COOKIE).
+    '''
+    version: int
+    min_version: int
+    page_id: int
+    flags: DisaggAddrFlags
+    lsn: int
+    base_lsn: int
+    size: int
+    checksum: int
+    
+    def __init__(self) -> None:
+        self.version = 0
+        self.min_version = 0
+        self.page_id = 0
+        self.flags = 0
+        self.lsn = 0
+        self.base_lsn = 0
+        self.size = 0
+        self.checksum = 0
+        
+    @staticmethod
+    def parse(b: bytes) -> 'DisaggAddr':
+        '''
+        Parse a packed address cookie.
+        '''
+        addr = DisaggAddr()
+        
+        # The first byte contains the version and min_version packed into 4b chunks.
+        # See block_disagg_addr.c and int4bitpack_inline.h for implementation details.
+        version_array = binary_data.unpack_4b_array((b[:1]), 2)
+        addr.version = version_array[0]
+        addr.min_version = version_array[1]
+        
+        b = b[1:]
+        
+        addr.page_id, b = binary_data.unpack_int(b)
+        flags, b = binary_data.unpack_int(b)
+        addr.flags = DisaggAddrFlags(flags)
+        addr.lsn, b = binary_data.unpack_int(b)
+        addr.base_lsn, b = binary_data.unpack_int(b)
+        addr.size, b = binary_data.unpack_int(b)
+        addr.checksum = int.from_bytes(b, 'little')
+        
+        return addr
+    
+    def __str__(self):
+        addr_string = (
+            f"Disagg Page Address:\n"
+            f"  version: {str(self.version)}"
+            f"  min_version: {str(self.min_version)}"
+            f"  page_id: {str(self.page_id)}\n"
+            f"  flags: {str(self.flags)}\n"
+            f"  lsn: {str(self.lsn)}\n"
+            f"  size: {str(self.size)}\n"
+            f"  checksum: {hex(self.checksum)}\n"
+        )
+        return addr_string

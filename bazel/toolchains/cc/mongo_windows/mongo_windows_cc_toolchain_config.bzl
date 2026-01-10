@@ -815,6 +815,13 @@ def _impl(ctx):
                                 # consistently. Suppress the warning.
                                 "/wd4251",
 
+                                # C4146: unary minus operator applied to unsigned type, result still
+                                # unsigned. Unsigned negation is well defined as performing the exact
+                                # same bitwise operation as on signed types, with the advantage of not
+                                # being UB for any value, including INT_MIN which negates to itself due
+                                # to overflow.
+                                "/wd4146",
+
                                 # some warnings we should treat as errors:
                                 # c4013
                                 #  'function' undefined; assuming extern returning int
@@ -1063,6 +1070,7 @@ def _impl(ctx):
 
         external_include_paths_feature = feature(
             name = "external_include_paths",
+            enabled = True,
             flag_sets = [
                 flag_set(
                     actions = [
@@ -1078,7 +1086,10 @@ def _impl(ctx):
                     ],
                     flag_groups = [
                         flag_group(
-                            flags = ["/external:I%{external_include_paths}"],
+                            flags = [
+                                "/external:I%{external_include_paths}",
+                                "/external:W0",
+                            ],
                             iterate_over = "external_include_paths",
                             expand_if_available = "external_include_paths",
                         ),
@@ -1386,6 +1397,225 @@ def _impl(ctx):
             ],
         )
 
+        warnings_as_errors_feature = feature(
+            name = "warnings_as_errors",
+            enabled = ctx.attr.warnings_as_errors_enabled,
+            flag_sets = [
+                flag_set(
+                    actions = all_compile_actions,
+                    flag_groups = [flag_group(flags = [
+                        "/WX",
+                    ])],
+                ),
+            ],
+        )
+
+        # https://learn.microsoft.com/en-us/cpp/build/reference/md-mt-ld-use-run-time-library?view=msvc-170
+        #   /MD defines _MT and _DLL and links in MSVCRT.lib into each .obj file
+        #   /MDd defines _DEBUG, _MT, and _DLL and link MSVCRTD.lib into each .obj file
+        multithreaded_feature = feature(
+            name = "multithreaded",
+            enabled = not ctx.attr.dbg,
+            flag_sets = [
+                flag_set(
+                    actions = all_compile_actions,
+                    flag_groups = [flag_group(flags = [
+                        "/MD",
+                    ])],
+                ),
+            ],
+        )
+
+        single_threaded_feature = feature(
+            name = "single_threaded",
+            enabled = ctx.attr.dbg,
+            flag_sets = [
+                flag_set(
+                    actions = all_compile_actions,
+                    flag_groups = [flag_group(flags = [
+                        "/MDd",
+                    ])],
+                ),
+            ],
+        )
+
+        # /DEBUG will tell the linker to create a .pdb file which WinDbg and
+        # Visual Studio will use to resolve symbols if you want to debug a
+        # release-mode image.
+        #
+        # Note that this means we can't do parallel links in the build.
+        #
+        # Also note that this has nothing to do with _DEBUG or optimization.
+
+        # If the user set a /DEBUG flag explicitly, don't add another. Otherwise
+        # use the standard /DEBUG flag, since we always want PDBs.
+        debug_symbols_feature = feature(
+            name = "debug_symbols",
+            enabled = ctx.attr.debug_symbols,
+            flag_sets = [
+                flag_set(
+                    actions = all_compile_actions,
+                    flag_groups = [
+                        flag_group(
+                            flags = ["/Z7"],
+                        ),
+                    ],
+                ),
+                flag_set(
+                    actions = all_link_actions,
+                    flag_groups = [
+                        flag_group(
+                            flags = ["/DEBUG"],
+                        ),
+                    ],
+                ),
+            ],
+        )
+
+        # /O1 optimize for size
+        # /O2 optimize for speed (as opposed to size)
+        # /Oy- disable frame pointer optimization (overrides /O2, only affects 32-bit)
+        # /Zo enables optimizations with modifications to make debugging easier
+        opt_debug_feature = feature(
+            name = "opt_debug",
+            enabled = ctx.attr.opt_debug,
+            flag_sets = [
+                flag_set(
+                    actions = all_compile_actions,
+                    flag_groups = [flag_group(flags = [
+                        "/Ox",
+                        "/Zo",
+                        "/Oy-",
+                    ])],
+                ),
+            ],
+        )
+
+        opt_off_feature = feature(
+            name = "opt_off",
+            enabled = ctx.attr.opt_off,
+            flag_sets = [
+                flag_set(
+                    actions = all_compile_actions,
+                    flag_groups = [flag_group(flags = [
+                        "/Od",
+                    ])],
+                ),
+            ],
+        )
+
+        opt_on_feature = feature(
+            name = "opt_on",
+            enabled = ctx.attr.opt_on,
+            flag_sets = [
+                flag_set(
+                    actions = all_compile_actions,
+                    flag_groups = [flag_group(flags = [
+                        "/O2",
+                        "/Oy-",
+                    ])],
+                ),
+            ],
+        )
+
+        opt_size_feature = feature(
+            name = "opt_size",
+            enabled = ctx.attr.opt_size,
+            flag_sets = [
+                flag_set(
+                    actions = all_compile_actions,
+                    flag_groups = [flag_group(flags = [
+                        "/Os",
+                        "/Oy-",
+                    ])],
+                ),
+            ],
+        )
+
+        # Enable Stack Frame Run-Time Error Checking; Reports when a variable is used
+        # without having been initialized (implies /Od: no optimizations)
+        stack_frame_error_checking_feature = feature(
+            name = "stack_frame_error_checking",
+            enabled = ctx.attr.opt_off and ctx.attr.dbg,
+            flag_sets = [
+                flag_set(
+                    actions = all_compile_actions,
+                    flag_groups = [
+                        flag_group(
+                            flags = ["/RTC1"],
+                        ),
+                    ],
+                ),
+            ],
+        )
+
+        # Windows non optimized builds will cause the PDB to blow up in size, this
+        # allows a larger PDB. The flag is undocumented at the time of writing but the
+        # microsoft thread which brought about its creation can be found here:
+        # https://developercommunity.visualstudio.com/t/pdb-limit-of-4-gib-is-likely-to-be-a-problem-in-a/904784
+        #
+        # Without this flag MSVC will report a red herring error message, about disk
+        # space or invalid path.
+        pdb_page_size_feature = feature(
+            name = "pdb_page_size",
+            enabled = ctx.attr.opt_off,
+            flag_sets = [
+                flag_set(
+                    actions = all_link_actions,
+                    flag_groups = [
+                        flag_group(
+                            flags = ["/pdbpagesize:16384"],
+                        ),
+                    ],
+                ),
+            ],
+        )
+
+        # Disable incremental link - avoid the level of indirection for function calls
+        incremental_feature = feature(
+            name = "incremental",
+            enabled = not ctx.attr.opt_off,
+            flag_sets = [
+                flag_set(
+                    actions = all_link_actions,
+                    flag_groups = [
+                        flag_group(
+                            flags = ["/INCREMENTAL:NO"],
+                        ),
+                    ],
+                ),
+            ],
+        )
+
+        sasl_include_feature = feature(
+            name = "sasl_include",
+            enabled = True,
+            flag_sets = [
+                flag_set(
+                    actions = all_compile_actions,
+                    flag_groups = [
+                        flag_group(
+                            flags = ["-Iexternal/windows_sasl/include"],
+                        ),
+                    ],
+                ),
+            ],
+        )
+
+        mongo_defines_feature = feature(
+            name = "mongo_defines",
+            enabled = True,
+            flag_sets = [
+                flag_set(
+                    actions = all_compile_actions,
+                    flag_groups = [flag_group(
+                        flags =
+                            ["/D" + define for define in ctx.attr.global_defines],
+                    )],
+                ),
+            ],
+        )
+
         features = [
             no_legacy_features_feature,
             nologo_feature,
@@ -1440,6 +1670,19 @@ def _impl(ctx):
             symbol_check_feature,
             mongodb_boost_all_no_lib_link_feature,
             win_level_3_warning_feature,
+            warnings_as_errors_feature,
+            multithreaded_feature,
+            single_threaded_feature,
+            debug_symbols_feature,
+            opt_debug_feature,
+            opt_off_feature,
+            opt_on_feature,
+            opt_size_feature,
+            stack_frame_error_checking_feature,
+            pdb_page_size_feature,
+            incremental_feature,
+            sasl_include_feature,
+            mongo_defines_feature,
         ]
     else:
         targets_windows_feature = feature(
@@ -1769,6 +2012,14 @@ mongo_windows_cc_toolchain_config = rule(
         "toolchain_identifier": attr.string(),
         "windows_version_minimal": attr.label(default = "//bazel/config:win_min_version"),
         "smaller_binary": attr.bool(default = False),
+        "warnings_as_errors_enabled": attr.bool(default = True, mandatory = False),
+        "opt_debug": attr.bool(default = False),
+        "opt_off": attr.bool(default = False),
+        "opt_on": attr.bool(default = False),
+        "opt_size": attr.bool(default = False),
+        "dbg": attr.bool(default = False),
+        "debug_symbols": attr.bool(default = False),
+        "global_defines": attr.string_list(mandatory = False),
     },
     provides = [CcToolchainConfigInfo],
 )

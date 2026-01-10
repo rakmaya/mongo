@@ -38,15 +38,20 @@ VirtualScanStage::VirtualScanStage(PlanNodeId planNodeId,
                                    value::TypeTags arrTag,
                                    value::Value arrVal,
                                    PlanYieldPolicy* yieldPolicy,
-                                   bool participateInTrialRunTracking)
+                                   bool participateInTrialRunTracking,
+                                   bool owned /*=true*/)
     : PlanStage("virtualscan"_sd, yieldPolicy, planNodeId, participateInTrialRunTracking),
       _outField(out),
       _arrTag(arrTag),
-      _arrVal(arrVal) {
+      _arrVal(arrVal),
+      _owned(owned) {
     tassert(11094700, "expect arr parameter to be an array", value::isArray(arrTag));
 }
 
 VirtualScanStage::~VirtualScanStage() {
+    if (!_owned) {
+        return;
+    }
     value::releaseValue(_arrTag, _arrVal);
     for (; _releaseIndex < _values.size(); ++_releaseIndex) {
         auto [tagElem, valueElem] = _values.at(_releaseIndex);
@@ -136,7 +141,8 @@ const SpecificStats* VirtualScanStage::getSpecificStats() const {
     return nullptr;
 }
 
-std::vector<DebugPrinter::Block> VirtualScanStage::debugPrint() const {
+void VirtualScanStage::doDebugPrint(std::vector<DebugPrinter::Block>& ret,
+                                    DebugPrintInfo& debugPrintInfo) const {
     auto debugPrintValue = [](value::TypeTags tag, value::Value val) {
         std::stringstream ss;
         value::ValuePrinters::make(
@@ -148,15 +154,11 @@ std::vector<DebugPrinter::Block> VirtualScanStage::debugPrint() const {
         return blocks;
     };
 
-    std::vector<DebugPrinter::Block> ret = PlanStage::debugPrint();
-
     DebugPrinter::addIdentifier(ret, _outField);
 
     ret.emplace_back("{`");
     DebugPrinter::addBlocks(ret, debugPrintValue(_arrTag, _arrVal));
     ret.emplace_back("`}");
-
-    return ret;
 }
 
 size_t VirtualScanStage::estimateCompileTimeSize() const {

@@ -22,6 +22,7 @@ import {
     prepareShardedCollection,
     setUpShardedCluster,
     tearDownShardedCluster,
+    testDB,
 } from "jstests/core/timeseries/libs/timeseries_writes_util.js";
 import {withTxnAndAutoRetryOnMongos} from "jstests/libs/auto_retry_transaction_in_sharding.js";
 import {getRawOperationSpec, getTimeseriesCollForRawOps} from "jstests/libs/raw_operation_utils.js";
@@ -37,6 +38,7 @@ const testBucketDelete = function (queryField) {
 
     const orgBucketDocs = getTimeseriesCollForRawOps(coll.getDB(), coll).find().rawData().toArray();
     const bucketDocIdx = Random.randInt(orgBucketDocs.length);
+    // TODO SERVER-114994 findAndModify support in UWE.
     const res = assert.commandWorked(
         getTimeseriesCollForRawOps(coll.getDB(), coll).runCommand({
             findAndModify: getTimeseriesCollForRawOps(coll.getDB(), coll).getName(),
@@ -111,6 +113,7 @@ const testBucketMetaUpdateToOwningShardChange = function (queryField) {
     assert.eq(orgBucketDocs.length, newBucketDocs.length, `Wrong number of buckets left: ${tojson(newBucketDocs)}`);
     assert(!newBucketDocs.find((e) => e === orgBucketDocs[bucketDocIdx]), tojson(newBucketDocs));
 };
+
 testBucketMetaUpdateToOwningShardChange("_id");
 testBucketMetaUpdateToOwningShardChange("meta");
 

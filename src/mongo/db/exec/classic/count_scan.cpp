@@ -29,7 +29,6 @@
 
 #include "mongo/db/exec/classic/count_scan.h"
 
-#include <boost/container/small_vector.hpp>
 // IWYU pragma: no_include "boost/intrusive/detail/iterator.hpp"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -59,7 +58,9 @@ namespace {
  *         { 'a' : 'foo' }, { 'b' : 'bar' }
  */
 BSONObj replaceBSONFieldNames(const BSONObj& replace, const BSONObj& fieldNames) {
-    invariant(replace.nFields() == fieldNames.nFields());
+    tassert(11051650,
+            "Expecting the same number of keys in 'replace' and 'fieldNames' documents",
+            replace.nFields() == fieldNames.nFields());
 
     BSONObjBuilder bob;
     auto iter = fieldNames.begin();
@@ -89,10 +90,10 @@ CountScan::CountScan(ExpressionContext* expCtx,
                      CollectionAcquisition collection,
                      CountScanParams params,
                      WorkingSet* workingSet)
-    : RequiresIndexStage(kStageType, expCtx, collection, params.indexDescriptor, workingSet),
+    : RequiresIndexStage(kStageType, expCtx, collection, params.indexEntry, workingSet),
       _workingSet(workingSet),
       _keyPattern(std::move(params.keyPattern)),
-      _shouldDedup(params.isMultiKey || isCompoundWildcardIndex(params.indexDescriptor)),
+      _shouldDedup(params.isMultiKey || isCompoundWildcardIndex(params.indexEntry->descriptor())),
       _startKey(std::move(params.startKey)),
       _startKeyInclusive(params.startKeyInclusive),
       _endKey(std::move(params.endKey)),
@@ -101,11 +102,12 @@ CountScan::CountScan(ExpressionContext* expCtx,
     _specificStats.keyPattern = _keyPattern;
     _specificStats.isMultiKey = params.isMultiKey;
     _specificStats.multiKeyPaths = params.multikeyPaths;
-    _specificStats.isUnique = params.indexDescriptor->unique();
-    _specificStats.isSparse = params.indexDescriptor->isSparse();
-    _specificStats.isPartial = params.indexDescriptor->isPartial();
-    _specificStats.indexVersion = static_cast<int>(params.indexDescriptor->version());
-    _specificStats.collation = params.indexDescriptor->infoObj()
+    _specificStats.isUnique = indexDescriptor()->unique();
+    _specificStats.isSetSparseByUser = indexDescriptor()->isSetSparseByUser();
+    _specificStats.isPartial = indexDescriptor()->isPartial();
+    _specificStats.indexVersion = static_cast<int>(indexDescriptor()->version());
+    _specificStats.collation = indexDescriptor()
+                                   ->infoObj()
                                    .getObjectField(IndexDescriptor::kCollationFieldName)
                                    .getOwned();
 

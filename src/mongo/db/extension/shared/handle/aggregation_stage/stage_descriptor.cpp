@@ -32,8 +32,8 @@
 
 namespace mongo::extension {
 
-AggStageParseNodeHandle AggStageDescriptorHandle::parse(BSONObj stageBson) const {
-    ::MongoExtensionAggStageParseNode* parseNodePtr;
+AggStageParseNodeHandle AggStageDescriptorAPI::parse(BSONObj stageBson) const {
+    ::MongoExtensionAggStageParseNode* parseNodePtr{nullptr};
     // The API's contract mandates that parseNodePtr will only be allocated if status is OK.
     invokeCAndConvertStatusToException(
         [&]() { return vtable().parse(get(), objAsByteView(stageBson), &parseNodePtr); });

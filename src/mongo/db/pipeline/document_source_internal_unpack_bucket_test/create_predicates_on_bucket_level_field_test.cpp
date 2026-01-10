@@ -46,6 +46,7 @@
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/optimization/optimize.h"
 #include "mongo/db/pipeline/pipeline.h"
+#include "mongo/db/pipeline/pipeline_factory.h"
 #include "mongo/db/query/explain_options.h"
 #include "mongo/db/query/timeseries/bucket_spec.h"
 #include "mongo/db/query/util/make_data_structure.h"
@@ -67,11 +68,12 @@ using InternalUnpackBucketPredicateMappingOptimizationTest = AggregationContextF
 
 TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
        OptimizeMapsGTPredicatesOnControlField) {
-    auto pipeline =
-        Pipeline::parse(makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
-                                            "'time', bucketMaxSpanSeconds: 3600}}"),
-                                   fromjson("{$match: {a: {$gt: 1}}}")),
-                        getExpCtx());
+    auto pipeline = pipeline_factory::makePipeline(
+        makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
+                            "'time', bucketMaxSpanSeconds: 3600}}"),
+                   fromjson("{$match: {a: {$gt: 1}}}")),
+        getExpCtx(),
+        pipeline_factory::kOptionsMinimal);
     const auto& container = pipeline->getSources();
 
     ASSERT_EQ(pipeline->size(), 2U);
@@ -89,11 +91,12 @@ TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
 
 TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
        OptimizeMapsGTEPredicatesOnControlField) {
-    auto pipeline =
-        Pipeline::parse(makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
-                                            "'time', bucketMaxSpanSeconds: 3600}}"),
-                                   fromjson("{$match: {a: {$gte: 1}}}")),
-                        getExpCtx());
+    auto pipeline = pipeline_factory::makePipeline(
+        makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
+                            "'time', bucketMaxSpanSeconds: 3600}}"),
+                   fromjson("{$match: {a: {$gte: 1}}}")),
+        getExpCtx(),
+        pipeline_factory::kOptionsMinimal);
     const auto& container = pipeline->getSources();
 
     ASSERT_EQ(pipeline->size(), 2U);
@@ -111,11 +114,12 @@ TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
 
 TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
        OptimizeMapsLTPredicatesOnControlField) {
-    auto pipeline =
-        Pipeline::parse(makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
-                                            "'time', bucketMaxSpanSeconds: 3600}}"),
-                                   fromjson("{$match: {a: {$lt: 1}}}")),
-                        getExpCtx());
+    auto pipeline = pipeline_factory::makePipeline(
+        makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
+                            "'time', bucketMaxSpanSeconds: 3600}}"),
+                   fromjson("{$match: {a: {$lt: 1}}}")),
+        getExpCtx(),
+        pipeline_factory::kOptionsMinimal);
     const auto& container = pipeline->getSources();
 
     ASSERT_EQ(pipeline->size(), 2U);
@@ -133,11 +137,12 @@ TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
 
 TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
        OptimizeMapsLTEPredicatesOnControlField) {
-    auto pipeline =
-        Pipeline::parse(makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
-                                            "'time', bucketMaxSpanSeconds: 3600}}"),
-                                   fromjson("{$match: {a: {$lte: 1}}}")),
-                        getExpCtx());
+    auto pipeline = pipeline_factory::makePipeline(
+        makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
+                            "'time', bucketMaxSpanSeconds: 3600}}"),
+                   fromjson("{$match: {a: {$lte: 1}}}")),
+        getExpCtx(),
+        pipeline_factory::kOptionsMinimal);
     const auto& container = pipeline->getSources();
 
     ASSERT_EQ(pipeline->size(), 2U);
@@ -155,11 +160,12 @@ TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
 
 TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
        OptimizeMapsEQPredicatesOnControlField) {
-    auto pipeline =
-        Pipeline::parse(makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
-                                            "'time', bucketMaxSpanSeconds: 3600}}"),
-                                   fromjson("{$match: {a: {$eq: 1}}}")),
-                        getExpCtx());
+    auto pipeline = pipeline_factory::makePipeline(
+        makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
+                            "'time', bucketMaxSpanSeconds: 3600}}"),
+                   fromjson("{$match: {a: {$eq: 1}}}")),
+        getExpCtx(),
+        pipeline_factory::kOptionsMinimal);
     const auto& container = pipeline->getSources();
 
     ASSERT_EQ(pipeline->size(), 2U);
@@ -178,11 +184,12 @@ TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
 
 TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
        OptimizeMapsINPredicatesOnControlField) {
-    auto pipeline =
-        Pipeline::parse(makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
-                                            "'time', bucketMaxSpanSeconds: 3600}}"),
-                                   fromjson("{$match: {a: {$in: [1, 2]}}}")),
-                        getExpCtx());
+    auto pipeline = pipeline_factory::makePipeline(
+        makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
+                            "'time', bucketMaxSpanSeconds: 3600}}"),
+                   fromjson("{$match: {a: {$in: [1, 2]}}}")),
+        getExpCtx(),
+        pipeline_factory::kOptionsMinimal);
     const auto& container = pipeline->getSources();
 
     ASSERT_EQ(pipeline->size(), 2U);
@@ -221,17 +228,19 @@ TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
 
 TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
        OptimizeMapsAggGTPredicatesOnControlField) {
-    auto pipeline =
-        Pipeline::parse(makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
-                                            "'time', bucketMaxSpanSeconds: 3600}}"),
-                                   fromjson("{$match: {$expr: {$gt: [\"$a\", 1]}}}")),
-                        getExpCtx());
+    auto pipeline = pipeline_factory::makePipeline(
+        makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
+                            "'time', bucketMaxSpanSeconds: 3600}}"),
+                   fromjson("{$match: {$expr: {$gt: [\"$a\", 1]}}}")),
+        getExpCtx(),
+        pipeline_factory::kOptionsMinimal);
     auto& container = pipeline->getSources();
 
     // $_internalUnpackBucket's doOptimizeAt optimizes the end of the pipeline before attempting to
     // perform predicate mapping. We will mimic this behavior here to take advantage of the
     // existing $expr rewrite optimizations.
-    pipeline_optimization::optimizeEndOfPipeline(container.begin(), &container);
+    pipeline_optimization::optimizeEndOfPipeline(
+        *pipeline->getContext(), container.begin(), &container);
 
     ASSERT_EQ(pipeline->size(), 2U);
 
@@ -248,17 +257,19 @@ TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
 
 TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
        OptimizeMapsAggGTEPredicatesOnControlField) {
-    auto pipeline =
-        Pipeline::parse(makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
-                                            "'time', bucketMaxSpanSeconds: 3600}}"),
-                                   fromjson("{$match: {$expr: {$gte: [\"$a\", 1]}}}")),
-                        getExpCtx());
+    auto pipeline = pipeline_factory::makePipeline(
+        makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
+                            "'time', bucketMaxSpanSeconds: 3600}}"),
+                   fromjson("{$match: {$expr: {$gte: [\"$a\", 1]}}}")),
+        getExpCtx(),
+        pipeline_factory::kOptionsMinimal);
     auto& container = pipeline->getSources();
 
     // $_internalUnpackBucket's doOptimizeAt optimizes the end of the pipeline before attempting to
     // perform predicate mapping. We will mimic this behavior here to take advantage of the
     // existing $expr rewrite optimizations.
-    pipeline_optimization::optimizeEndOfPipeline(container.begin(), &container);
+    pipeline_optimization::optimizeEndOfPipeline(
+        *pipeline->getContext(), container.begin(), &container);
 
     ASSERT_EQ(pipeline->size(), 2U);
 
@@ -275,17 +286,19 @@ TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
 
 TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
        OptimizeMapsAggLTPredicatesOnControlField) {
-    auto pipeline =
-        Pipeline::parse(makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
-                                            "'time', bucketMaxSpanSeconds: 3600}}"),
-                                   fromjson("{$match: {$expr: {$lt: [\"$a\", 1]}}}")),
-                        getExpCtx());
+    auto pipeline = pipeline_factory::makePipeline(
+        makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
+                            "'time', bucketMaxSpanSeconds: 3600}}"),
+                   fromjson("{$match: {$expr: {$lt: [\"$a\", 1]}}}")),
+        getExpCtx(),
+        pipeline_factory::kOptionsMinimal);
     auto& container = pipeline->getSources();
 
     // $_internalUnpackBucket's doOptimizeAt optimizes the end of the pipeline before attempting to
     // perform predicate mapping. We will mimic this behavior here to take advantage of the
     // existing $expr rewrite optimizations.
-    pipeline_optimization::optimizeEndOfPipeline(container.begin(), &container);
+    pipeline_optimization::optimizeEndOfPipeline(
+        *pipeline->getContext(), container.begin(), &container);
 
     ASSERT_EQ(pipeline->size(), 2U);
 
@@ -299,17 +312,19 @@ TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
 
 TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
        OptimizeMapsAggLTEPredicatesOnControlField) {
-    auto pipeline =
-        Pipeline::parse(makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
-                                            "'time', bucketMaxSpanSeconds: 3600}}"),
-                                   fromjson("{$match: {$expr: {$lte: [\"$a\", 1]}}}")),
-                        getExpCtx());
+    auto pipeline = pipeline_factory::makePipeline(
+        makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
+                            "'time', bucketMaxSpanSeconds: 3600}}"),
+                   fromjson("{$match: {$expr: {$lte: [\"$a\", 1]}}}")),
+        getExpCtx(),
+        pipeline_factory::kOptionsMinimal);
     auto& container = pipeline->getSources();
 
     // $_internalUnpackBucket's doOptimizeAt optimizes the end of the pipeline before attempting to
     // perform predicate mapping. We will mimic this behavior here to take advantage of the
     // existing $expr rewrite optimizations.
-    pipeline_optimization::optimizeEndOfPipeline(container.begin(), &container);
+    pipeline_optimization::optimizeEndOfPipeline(
+        *pipeline->getContext(), container.begin(), &container);
 
     ASSERT_EQ(pipeline->size(), 2U);
 
@@ -323,17 +338,19 @@ TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
 
 TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
        OptimizeMapsAggEQPredicatesOnControlField) {
-    auto pipeline =
-        Pipeline::parse(makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
-                                            "'time', bucketMaxSpanSeconds: 3600}}"),
-                                   fromjson("{$match: {$expr: {$eq: [\"$a\", 1]}}}")),
-                        getExpCtx());
+    auto pipeline = pipeline_factory::makePipeline(
+        makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
+                            "'time', bucketMaxSpanSeconds: 3600}}"),
+                   fromjson("{$match: {$expr: {$eq: [\"$a\", 1]}}}")),
+        getExpCtx(),
+        pipeline_factory::kOptionsMinimal);
     auto& container = pipeline->getSources();
 
     // $_internalUnpackBucket's doOptimizeAt optimizes the end of the pipeline before attempting to
     // perform predicate mapping. We will mimic this behavior here to take advantage of the
     // existing $expr rewrite optimizations.
-    pipeline_optimization::optimizeEndOfPipeline(container.begin(), &container);
+    pipeline_optimization::optimizeEndOfPipeline(
+        *pipeline->getContext(), container.begin(), &container);
 
     ASSERT_EQ(pipeline->size(), 2U);
 
@@ -351,11 +368,12 @@ TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
 
 TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
        OptimizeMapsAndWithPushableChildrenOnControlField) {
-    auto pipeline =
-        Pipeline::parse(makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
-                                            "'time', bucketMaxSpanSeconds: 3600}}"),
-                                   fromjson("{$match: {$and: [{b: {$gt: 1}}, {a: {$lt: 5}}]}}")),
-                        getExpCtx());
+    auto pipeline = pipeline_factory::makePipeline(
+        makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
+                            "'time', bucketMaxSpanSeconds: 3600}}"),
+                   fromjson("{$match: {$and: [{b: {$gt: 1}}, {a: {$lt: 5}}]}}")),
+        getExpCtx(),
+        pipeline_factory::kOptionsMinimal);
     auto& container = pipeline->getSources();
 
     ASSERT_EQ(pipeline->size(), 2U);
@@ -376,11 +394,12 @@ TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
 
 TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
        OptimizeDoesNotMapAndWithUnpushableChildrenOnControlField) {
-    auto pipeline =
-        Pipeline::parse(makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
-                                            "'time', bucketMaxSpanSeconds: 3600}}"),
-                                   fromjson("{$match: {$and: [{b: {$ne: 1}}, {a: {$ne: 5}}]}}")),
-                        getExpCtx());
+    auto pipeline = pipeline_factory::makePipeline(
+        makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
+                            "'time', bucketMaxSpanSeconds: 3600}}"),
+                   fromjson("{$match: {$and: [{b: {$ne: 1}}, {a: {$ne: 5}}]}}")),
+        getExpCtx(),
+        pipeline_factory::kOptionsMinimal);
     auto& container = pipeline->getSources();
 
     ASSERT_EQ(pipeline->size(), 2U);
@@ -395,11 +414,12 @@ TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
 
 TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
        OptimizeMapsAndWithPushableAndUnpushableChildrenOnControlField) {
-    auto pipeline =
-        Pipeline::parse(makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
-                                            "'time', bucketMaxSpanSeconds: 3600}}"),
-                                   fromjson("{$match: {$and: [{b: {$gt: 1}}, {a: {$ne: 5}}]}}")),
-                        getExpCtx());
+    auto pipeline = pipeline_factory::makePipeline(
+        makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
+                            "'time', bucketMaxSpanSeconds: 3600}}"),
+                   fromjson("{$match: {$and: [{b: {$gt: 1}}, {a: {$ne: 5}}]}}")),
+        getExpCtx(),
+        pipeline_factory::kOptionsMinimal);
     auto& container = pipeline->getSources();
 
     ASSERT_EQ(pipeline->size(), 2U);
@@ -421,12 +441,13 @@ TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
 
 TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
        OptimizeMapsNestedAndWithPushableChildrenOnControlField) {
-    auto pipeline = Pipeline::parse(
+    auto pipeline = pipeline_factory::makePipeline(
         makeVector(
             fromjson("{$_internalUnpackBucket: {exclude: [], timeField: 'time', "
                      "bucketMaxSpanSeconds: 3600}}"),
             fromjson("{$match: {$and: [{b: {$gte: 2}}, {$and: [{b: {$gt: 1}}, {a: {$lt: 5}}]}]}}")),
-        getExpCtx());
+        getExpCtx(),
+        pipeline_factory::kOptionsMinimal);
     auto& container = pipeline->getSources();
 
     ASSERT_EQ(pipeline->size(), 2U);
@@ -450,11 +471,12 @@ TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
 
 TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
        OptimizeMapsOrWithPushableChildrenOnControlField) {
-    auto pipeline =
-        Pipeline::parse(makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
-                                            "'time', bucketMaxSpanSeconds: 3600}}"),
-                                   fromjson("{$match: {$or: [{b: {$gt: 1}}, {a: {$lt: 5}}]}}")),
-                        getExpCtx());
+    auto pipeline = pipeline_factory::makePipeline(
+        makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
+                            "'time', bucketMaxSpanSeconds: 3600}}"),
+                   fromjson("{$match: {$or: [{b: {$gt: 1}}, {a: {$lt: 5}}]}}")),
+        getExpCtx(),
+        pipeline_factory::kOptionsMinimal);
     auto& container = pipeline->getSources();
 
     ASSERT_EQ(pipeline->size(), 2U);
@@ -486,11 +508,12 @@ TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
 
 TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
        OptimizeDoesNotMapOrWithUnpushableChildrenOnControlField) {
-    auto pipeline =
-        Pipeline::parse(makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
-                                            "'time', bucketMaxSpanSeconds: 3600}}"),
-                                   fromjson("{$match: {$or: [{b: {$ne: 1}}, {a: {$ne: 5}}]}}")),
-                        getExpCtx());
+    auto pipeline = pipeline_factory::makePipeline(
+        makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
+                            "'time', bucketMaxSpanSeconds: 3600}}"),
+                   fromjson("{$match: {$or: [{b: {$ne: 1}}, {a: {$ne: 5}}]}}")),
+        getExpCtx(),
+        pipeline_factory::kOptionsMinimal);
     auto& container = pipeline->getSources();
 
     ASSERT_EQ(pipeline->size(), 2U);
@@ -505,11 +528,12 @@ TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
 
 TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
        OptimizeDoesNotMapOrWithPushableAndUnpushableChildrenOnControlField) {
-    auto pipeline =
-        Pipeline::parse(makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
-                                            "'time', bucketMaxSpanSeconds: 3600}}"),
-                                   fromjson("{$match: {$or: [{b: {$gt: 1}}, {a: {$ne: 5}}]}}")),
-                        getExpCtx());
+    auto pipeline = pipeline_factory::makePipeline(
+        makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
+                            "'time', bucketMaxSpanSeconds: 3600}}"),
+                   fromjson("{$match: {$or: [{b: {$gt: 1}}, {a: {$ne: 5}}]}}")),
+        getExpCtx(),
+        pipeline_factory::kOptionsMinimal);
     auto& container = pipeline->getSources();
 
     ASSERT_EQ(pipeline->size(), 2U);
@@ -527,12 +551,13 @@ TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
 
 TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
        OptimizeMapsNestedOrWithPushableChildrenOnControlField) {
-    auto pipeline = Pipeline::parse(
+    auto pipeline = pipeline_factory::makePipeline(
         makeVector(
             fromjson("{$_internalUnpackBucket: {exclude: [], timeField: 'time', "
                      "bucketMaxSpanSeconds: 3600}}"),
             fromjson("{$match: {$or: [{b: {$gte: 2}}, {$or: [{b: {$gt: 1}}, {a: {$lt: 5}}]}]}}")),
-        getExpCtx());
+        getExpCtx(),
+        pipeline_factory::kOptionsMinimal);
     auto& container = pipeline->getSources();
 
     ASSERT_EQ(pipeline->size(), 2U);
@@ -575,7 +600,8 @@ TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
     auto unpackBucketObj = fromjson(
         "{$_internalUnpackBucket: {exclude: [], timeField: 'time', bucketMaxSpanSeconds: 3600}}");
     auto matchObj = fromjson("{$match: {$and: [{b: {$gt: 1}}, {a: {$ne: 5}}]}}");
-    auto pipeline = Pipeline::parse(makeVector(unpackBucketObj, matchObj), getExpCtx());
+    auto pipeline = pipeline_factory::makePipeline(
+        makeVector(unpackBucketObj, matchObj), getExpCtx(), pipeline_factory::kOptionsMinimal);
     ASSERT_EQ(pipeline->size(), 2U);
 
     pipeline_optimization::optimizePipeline(*pipeline);
@@ -603,7 +629,8 @@ TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
         "{$_internalUnpackBucket: {exclude: [], timeField: 'time', bucketMaxSpanSeconds: 3600}}");
     auto matchObj =
         fromjson("{$match: {$and: [{b: {$gte: 2}}, {$and: [{c: {$gt: 1}}, {a: {$lt: 5}}]}]}}");
-    auto pipeline = Pipeline::parse(makeVector(unpackBucketObj, matchObj), getExpCtx());
+    auto pipeline = pipeline_factory::makePipeline(
+        makeVector(unpackBucketObj, matchObj), getExpCtx(), pipeline_factory::kOptionsMinimal);
     ASSERT_EQ(pipeline->size(), 2U);
 
     pipeline_optimization::optimizePipeline(*pipeline);
@@ -632,11 +659,12 @@ TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
 
 TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
        OptimizeDoesNotMapPredicatesOnTypeObject) {
-    auto pipeline =
-        Pipeline::parse(makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
-                                            "'time', bucketMaxSpanSeconds: 3600}}"),
-                                   fromjson("{$match: {a: {$gt: {b: 5}}}}")),
-                        getExpCtx());
+    auto pipeline = pipeline_factory::makePipeline(
+        makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
+                            "'time', bucketMaxSpanSeconds: 3600}}"),
+                   fromjson("{$match: {a: {$gt: {b: 5}}}}")),
+        getExpCtx(),
+        pipeline_factory::kOptionsMinimal);
     auto& container = pipeline->getSources();
 
     ASSERT_EQ(pipeline->size(), 2U);
@@ -651,11 +679,12 @@ TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
 
 TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
        OptimizeDoesNotMapPredicatesOnTypeArray) {
-    auto pipeline =
-        Pipeline::parse(makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
-                                            "'time', bucketMaxSpanSeconds: 3600}}"),
-                                   fromjson("{$match: {a: {$gt: [5]}}}")),
-                        getExpCtx());
+    auto pipeline = pipeline_factory::makePipeline(
+        makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
+                            "'time', bucketMaxSpanSeconds: 3600}}"),
+                   fromjson("{$match: {a: {$gt: [5]}}}")),
+        getExpCtx(),
+        pipeline_factory::kOptionsMinimal);
     auto& container = pipeline->getSources();
 
     ASSERT_EQ(pipeline->size(), 2U);
@@ -670,11 +699,12 @@ TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
 
 TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
        OptimizeDoesNotMapPredicatesOnTypeNull) {
-    auto pipeline =
-        Pipeline::parse(makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
-                                            "'time', bucketMaxSpanSeconds: 3600}}"),
-                                   fromjson("{$match: {a: {$gt: null}}}")),
-                        getExpCtx());
+    auto pipeline = pipeline_factory::makePipeline(
+        makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
+                            "'time', bucketMaxSpanSeconds: 3600}}"),
+                   fromjson("{$match: {a: {$gt: null}}}")),
+        getExpCtx(),
+        pipeline_factory::kOptionsMinimal);
     auto& container = pipeline->getSources();
 
     ASSERT_EQ(pipeline->size(), 2U);
@@ -689,11 +719,12 @@ TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
 
 TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
        OptimizeDoesNotMapMetaPredicatesOnControlField) {
-    auto pipeline = Pipeline::parse(
+    auto pipeline = pipeline_factory::makePipeline(
         makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: 'time', metaField: "
                             "'myMeta', bucketMaxSpanSeconds: 3600}}"),
                    fromjson("{$match: {myMeta: {$gt: 5}}}")),
-        getExpCtx());
+        getExpCtx(),
+        pipeline_factory::kOptionsMinimal);
     auto& container = pipeline->getSources();
 
     ASSERT_EQ(pipeline->size(), 2U);
@@ -709,11 +740,12 @@ TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
 
 TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
        OptimizeDoesNotMapMetaPredicatesWithNestedFieldsOnControlField) {
-    auto pipeline = Pipeline::parse(
+    auto pipeline = pipeline_factory::makePipeline(
         makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: 'time', metaField: "
                             "'myMeta', bucketMaxSpanSeconds: 3600}}"),
                    fromjson("{$match: {'myMeta.foo': {$gt: 5}}}")),
-        getExpCtx());
+        getExpCtx(),
+        pipeline_factory::kOptionsMinimal);
     auto& container = pipeline->getSources();
 
     ASSERT_EQ(pipeline->size(), 2U);
@@ -729,11 +761,12 @@ TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
 
 TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
        OptimizeDoesNotMapNestedMetaPredicatesOnControlField) {
-    auto pipeline = Pipeline::parse(
+    auto pipeline = pipeline_factory::makePipeline(
         makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: 'time', metaField: "
                             "'myMeta', bucketMaxSpanSeconds: 3600}}"),
                    fromjson("{$match: {$and: [{a: {$gt: 1}}, {myMeta: {$eq: 5}}]}}")),
-        getExpCtx());
+        getExpCtx(),
+        pipeline_factory::kOptionsMinimal);
     auto& container = pipeline->getSources();
 
     ASSERT_EQ(pipeline->size(), 2U);
@@ -758,14 +791,15 @@ TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
 
 TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
        OptimizeDoesNotMapPredicatesOnComputedMetaField) {
-    auto pipeline = Pipeline::parse(
+    auto pipeline = pipeline_factory::makePipeline(
         makeVector(
             fromjson("{$_internalUnpackBucket: {exclude: [], timeField: 'time', metaField: "
                      "'myMeta', computedMetaProjFields: ['myMeta'], bucketMaxSpanSeconds: 3600}}"),
             fromjson("{$project: {computedMeta: {$concat: ['Computed: ', '$myMeta']}, time: "
                      "1, meta: 1}}"),
             fromjson("{$match: {myMeta: {$eq: 'value'}}}")),
-        getExpCtx());
+        getExpCtx(),
+        pipeline_factory::kOptionsMinimal);
     auto& container = pipeline->getSources();
 
     ASSERT_EQ(pipeline->size(), 3U);
@@ -780,11 +814,12 @@ TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
 
 TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
        OptimizeDoesNotMapPredicatesOnExcludedMetaField) {
-    auto pipeline = Pipeline::parse(
+    auto pipeline = pipeline_factory::makePipeline(
         makeVector(fromjson("{$_internalUnpackBucket: {exclude: ['myMeta'], timeField: 'time', "
                             "metaField: 'myMeta', bucketMaxSpanSeconds: 3600}}"),
                    fromjson("{$match: {myMeta: {$eq: 'value'}}}")),
-        getExpCtx());
+        getExpCtx(),
+        pipeline_factory::kOptionsMinimal);
     auto& container = pipeline->getSources();
 
     ASSERT_EQ(pipeline->size(), 2U);
@@ -800,13 +835,14 @@ TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
 TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest, OptimizeMapsAndWithOneChild) {
     // Validate that $and will get optimized out and predicates are populated correctly when we
     // have an $and with one child expression.
-    auto pipeline = Pipeline::parse(
+    auto pipeline = pipeline_factory::makePipeline(
         makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
                             "'time', metaField: 'myMeta', bucketMaxSpanSeconds: 3600}}"),
                    fromjson("{$match: {$and: ["
                             "{myMeta: {$gte: 1}}"
                             "]}}")),
-        getExpCtx());
+        getExpCtx(),
+        pipeline_factory::kOptionsMinimal);
     auto& container = pipeline->getSources();
 
     ASSERT_EQ(container.size(), 2U);
@@ -822,13 +858,14 @@ TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest, OptimizeMapsAndWith
 TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest, OptimizeMapsOrWithOneChild) {
     // Validate that $or will get optimized out and predicates are populated correctly when we have
     // an $or with one child expression.
-    auto pipeline = Pipeline::parse(
+    auto pipeline = pipeline_factory::makePipeline(
         makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
                             "'time', metaField: 'myMeta', bucketMaxSpanSeconds: 3600}}"),
                    fromjson("{$match: {$or: ["
                             "{myMeta: {$gte: 1}}"
                             "]}}")),
-        getExpCtx());
+        getExpCtx(),
+        pipeline_factory::kOptionsMinimal);
     auto& container = pipeline->getSources();
 
     ASSERT_EQ(container.size(), 2U);
@@ -850,23 +887,30 @@ TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest, OptimizeMapsTimePre
         auto aggTimePred =
             BSON("$match" << BSON("$expr" << BSON("$lt" << BSON_ARRAY("$time" << date))));
         auto pipelines = {
-            Pipeline::parse(makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
-                                                "'time', bucketMaxSpanSeconds: 3600}}"),
-                                       timePred),
-                            getExpCtx()),
-            Pipeline::parse(makeVector(fromjson("{$_unpackBucket: {timeField: 'time'}}"), timePred),
-                            getExpCtx()),
-            Pipeline::parse(makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
-                                                "'time', bucketMaxSpanSeconds: 3600}}"),
-                                       aggTimePred),
-                            getExpCtx())};
+            pipeline_factory::makePipeline(
+                makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
+                                    "'time', bucketMaxSpanSeconds: 3600}}"),
+                           timePred),
+                getExpCtx(),
+                pipeline_factory::kOptionsMinimal),
+            pipeline_factory::makePipeline(
+                makeVector(fromjson("{$_unpackBucket: {timeField: 'time'}}"), timePred),
+                getExpCtx(),
+                pipeline_factory::kOptionsMinimal),
+            pipeline_factory::makePipeline(
+                makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
+                                    "'time', bucketMaxSpanSeconds: 3600}}"),
+                           aggTimePred),
+                getExpCtx(),
+                pipeline_factory::kOptionsMinimal)};
         for (auto& pipeline : pipelines) {
             auto& container = pipeline->getSources();
 
             // $_internalUnpackBucket's doOptimizeAt optimizes the end of the pipeline before
             // attempting to perform predicate mapping. We will mimic this behavior here to take
             // advantage of the existing $expr rewrite optimizations.
-            pipeline_optimization::optimizeEndOfPipeline(container.begin(), &container);
+            pipeline_optimization::optimizeEndOfPipeline(
+                *pipeline->getContext(), container.begin(), &container);
 
             ASSERT_EQ(pipeline->size(), 2U);
 
@@ -911,23 +955,30 @@ TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest, OptimizeMapsTimePre
         auto aggTimePred =
             BSON("$match" << BSON("$expr" << BSON("$lte" << BSON_ARRAY("$time" << date))));
         auto pipelines = {
-            Pipeline::parse(makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
-                                                "'time', bucketMaxSpanSeconds: 3600}}"),
-                                       timePred),
-                            getExpCtx()),
-            Pipeline::parse(makeVector(fromjson("{$_unpackBucket: {timeField: 'time'}}"), timePred),
-                            getExpCtx()),
-            Pipeline::parse(makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
-                                                "'time', bucketMaxSpanSeconds: 3600}}"),
-                                       aggTimePred),
-                            getExpCtx())};
+            pipeline_factory::makePipeline(
+                makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
+                                    "'time', bucketMaxSpanSeconds: 3600}}"),
+                           timePred),
+                getExpCtx(),
+                pipeline_factory::kOptionsMinimal),
+            pipeline_factory::makePipeline(
+                makeVector(fromjson("{$_unpackBucket: {timeField: 'time'}}"), timePred),
+                getExpCtx(),
+                pipeline_factory::kOptionsMinimal),
+            pipeline_factory::makePipeline(
+                makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
+                                    "'time', bucketMaxSpanSeconds: 3600}}"),
+                           aggTimePred),
+                getExpCtx(),
+                pipeline_factory::kOptionsMinimal)};
         for (auto& pipeline : pipelines) {
             auto& container = pipeline->getSources();
 
             // $_internalUnpackBucket's doOptimizeAt optimizes the end of the pipeline before
             // attempting to perform predicate mapping. We will mimic this behavior here to take
             // advantage of the existing $expr rewrite optimizations.
-            pipeline_optimization::optimizeEndOfPipeline(container.begin(), &container);
+            pipeline_optimization::optimizeEndOfPipeline(
+                *pipeline->getContext(), container.begin(), &container);
 
             ASSERT_EQ(pipeline->size(), 2U);
 
@@ -964,23 +1015,30 @@ TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest, OptimizeMapsTimePre
         auto aggTimePred =
             BSON("$match" << BSON("$expr" << BSON("$eq" << BSON_ARRAY("$time" << date))));
         auto pipelines = {
-            Pipeline::parse(makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
-                                                "'time', bucketMaxSpanSeconds: 3600}}"),
-                                       timePred),
-                            getExpCtx()),
-            Pipeline::parse(makeVector(fromjson("{$_unpackBucket: {timeField: 'time'}}"), timePred),
-                            getExpCtx()),
-            Pipeline::parse(makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
-                                                "'time', bucketMaxSpanSeconds: 3600}}"),
-                                       aggTimePred),
-                            getExpCtx())};
+            pipeline_factory::makePipeline(
+                makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
+                                    "'time', bucketMaxSpanSeconds: 3600}}"),
+                           timePred),
+                getExpCtx(),
+                pipeline_factory::kOptionsMinimal),
+            pipeline_factory::makePipeline(
+                makeVector(fromjson("{$_unpackBucket: {timeField: 'time'}}"), timePred),
+                getExpCtx(),
+                pipeline_factory::kOptionsMinimal),
+            pipeline_factory::makePipeline(
+                makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
+                                    "'time', bucketMaxSpanSeconds: 3600}}"),
+                           aggTimePred),
+                getExpCtx(),
+                pipeline_factory::kOptionsMinimal)};
         for (auto& pipeline : pipelines) {
             auto& container = pipeline->getSources();
 
             // $_internalUnpackBucket's doOptimizeAt optimizes the end of the pipeline before
             // attempting to perform predicate mapping. We will mimic this behavior here to take
             // advantage of the existing $expr rewrite optimizations.
-            pipeline_optimization::optimizeEndOfPipeline(container.begin(), &container);
+            pipeline_optimization::optimizeEndOfPipeline(
+                *pipeline->getContext(), container.begin(), &container);
 
             ASSERT_EQ(pipeline->size(), 2U);
 
@@ -1029,23 +1087,30 @@ TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest, OptimizeMapsTimePre
         auto aggTimePred =
             BSON("$match" << BSON("$expr" << BSON("$gt" << BSON_ARRAY("$time" << date))));
         auto pipelines = {
-            Pipeline::parse(makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
-                                                "'time', bucketMaxSpanSeconds: 3600}}"),
-                                       timePred),
-                            getExpCtx()),
-            Pipeline::parse(makeVector(fromjson("{$_unpackBucket: {timeField: 'time'}}"), timePred),
-                            getExpCtx()),
-            Pipeline::parse(makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
-                                                "'time', bucketMaxSpanSeconds: 3600}}"),
-                                       aggTimePred),
-                            getExpCtx())};
+            pipeline_factory::makePipeline(
+                makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
+                                    "'time', bucketMaxSpanSeconds: 3600}}"),
+                           timePred),
+                getExpCtx(),
+                pipeline_factory::kOptionsMinimal),
+            pipeline_factory::makePipeline(
+                makeVector(fromjson("{$_unpackBucket: {timeField: 'time'}}"), timePred),
+                getExpCtx(),
+                pipeline_factory::kOptionsMinimal),
+            pipeline_factory::makePipeline(
+                makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
+                                    "'time', bucketMaxSpanSeconds: 3600}}"),
+                           aggTimePred),
+                getExpCtx(),
+                pipeline_factory::kOptionsMinimal)};
         for (auto& pipeline : pipelines) {
             auto& container = pipeline->getSources();
 
             // $_internalUnpackBucket's doOptimizeAt optimizes the end of the pipeline before
             // attempting to perform predicate mapping. We will mimic this behavior here to take
             // advantage of the existing $expr rewrite optimizations.
-            pipeline_optimization::optimizeEndOfPipeline(container.begin(), &container);
+            pipeline_optimization::optimizeEndOfPipeline(
+                *pipeline->getContext(), container.begin(), &container);
 
             ASSERT_EQ(pipeline->size(), 2U);
 
@@ -1082,23 +1147,30 @@ TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest, OptimizeMapsTimePre
         auto aggTimePred =
             BSON("$match" << BSON("$expr" << BSON("$gte" << BSON_ARRAY("$time" << date))));
         auto pipelines = {
-            Pipeline::parse(makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
-                                                "'time', bucketMaxSpanSeconds: 3600}}"),
-                                       timePred),
-                            getExpCtx()),
-            Pipeline::parse(makeVector(fromjson("{$_unpackBucket: {timeField: 'time'}}"), timePred),
-                            getExpCtx()),
-            Pipeline::parse(makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
-                                                "'time', bucketMaxSpanSeconds: 3600}}"),
-                                       aggTimePred),
-                            getExpCtx())};
+            pipeline_factory::makePipeline(
+                makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
+                                    "'time', bucketMaxSpanSeconds: 3600}}"),
+                           timePred),
+                getExpCtx(),
+                pipeline_factory::kOptionsMinimal),
+            pipeline_factory::makePipeline(
+                makeVector(fromjson("{$_unpackBucket: {timeField: 'time'}}"), timePred),
+                getExpCtx(),
+                pipeline_factory::kOptionsMinimal),
+            pipeline_factory::makePipeline(
+                makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
+                                    "'time', bucketMaxSpanSeconds: 3600}}"),
+                           aggTimePred),
+                getExpCtx(),
+                pipeline_factory::kOptionsMinimal)};
         for (auto& pipeline : pipelines) {
             auto& container = pipeline->getSources();
 
             // $_internalUnpackBucket's doOptimizeAt optimizes the end of the pipeline before
             // attempting to perform predicate mapping. We will mimic this behavior here to take
             // advantage of the existing $expr rewrite optimizations.
-            pipeline_optimization::optimizeEndOfPipeline(container.begin(), &container);
+            pipeline_optimization::optimizeEndOfPipeline(
+                *pipeline->getContext(), container.begin(), &container);
 
             ASSERT_EQ(pipeline->size(), 2U);
 
@@ -1137,12 +1209,16 @@ TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
     {
         auto timePred = BSON("$match" << BSON("time" << BSON("$lt" << 1)));
         auto pipelines = {
-            Pipeline::parse(makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
-                                                "'time', bucketMaxSpanSeconds: 3600}}"),
-                                       timePred),
-                            getExpCtx()),
-            Pipeline::parse(makeVector(fromjson("{$_unpackBucket: {timeField: 'time'}}"), timePred),
-                            getExpCtx())};
+            pipeline_factory::makePipeline(
+                makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
+                                    "'time', bucketMaxSpanSeconds: 3600}}"),
+                           timePred),
+                getExpCtx(),
+                pipeline_factory::kOptionsMinimal),
+            pipeline_factory::makePipeline(
+                makeVector(fromjson("{$_unpackBucket: {timeField: 'time'}}"), timePred),
+                getExpCtx(),
+                pipeline_factory::kOptionsMinimal)};
         for (auto& pipeline : pipelines) {
             auto& container = pipeline->getSources();
 
@@ -1160,12 +1236,16 @@ TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
     {
         auto timePred = BSON("$match" << BSON("time" << BSON("$lte" << 1)));
         auto pipelines = {
-            Pipeline::parse(makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
-                                                "'time', bucketMaxSpanSeconds: 3600}}"),
-                                       timePred),
-                            getExpCtx()),
-            Pipeline::parse(makeVector(fromjson("{$_unpackBucket: {timeField: 'time'}}"), timePred),
-                            getExpCtx())};
+            pipeline_factory::makePipeline(
+                makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
+                                    "'time', bucketMaxSpanSeconds: 3600}}"),
+                           timePred),
+                getExpCtx(),
+                pipeline_factory::kOptionsMinimal),
+            pipeline_factory::makePipeline(
+                makeVector(fromjson("{$_unpackBucket: {timeField: 'time'}}"), timePred),
+                getExpCtx(),
+                pipeline_factory::kOptionsMinimal)};
         for (auto& pipeline : pipelines) {
             auto& container = pipeline->getSources();
 
@@ -1182,12 +1262,16 @@ TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
     {
         auto timePred = BSON("$match" << BSON("time" << BSON("$eq" << 1)));
         auto pipelines = {
-            Pipeline::parse(makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
-                                                "'time', bucketMaxSpanSeconds: 3600}}"),
-                                       timePred),
-                            getExpCtx()),
-            Pipeline::parse(makeVector(fromjson("{$_unpackBucket: {timeField: 'time'}}"), timePred),
-                            getExpCtx())};
+            pipeline_factory::makePipeline(
+                makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
+                                    "'time', bucketMaxSpanSeconds: 3600}}"),
+                           timePred),
+                getExpCtx(),
+                pipeline_factory::kOptionsMinimal),
+            pipeline_factory::makePipeline(
+                makeVector(fromjson("{$_unpackBucket: {timeField: 'time'}}"), timePred),
+                getExpCtx(),
+                pipeline_factory::kOptionsMinimal)};
         for (auto& pipeline : pipelines) {
             auto& container = pipeline->getSources();
 
@@ -1205,12 +1289,16 @@ TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
         auto timePred = BSON("$match" << BSON("time" << BSON("$gt" << 1)));
         auto pipelines = {
 
-            Pipeline::parse(makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
-                                                "'time', bucketMaxSpanSeconds: 3600}}"),
-                                       timePred),
-                            getExpCtx()),
-            Pipeline::parse(makeVector(fromjson("{$_unpackBucket: {timeField: 'time'}}"), timePred),
-                            getExpCtx())};
+            pipeline_factory::makePipeline(
+                makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
+                                    "'time', bucketMaxSpanSeconds: 3600}}"),
+                           timePred),
+                getExpCtx(),
+                pipeline_factory::kOptionsMinimal),
+            pipeline_factory::makePipeline(
+                makeVector(fromjson("{$_unpackBucket: {timeField: 'time'}}"), timePred),
+                getExpCtx(),
+                pipeline_factory::kOptionsMinimal)};
         for (auto& pipeline : pipelines) {
             auto& container = pipeline->getSources();
 
@@ -1228,12 +1316,16 @@ TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
     {
         auto timePred = BSON("$match" << BSON("time" << BSON("$gte" << 1)));
         auto pipelines = {
-            Pipeline::parse(makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
-                                                "'time', bucketMaxSpanSeconds: 3600}}"),
-                                       timePred),
-                            getExpCtx()),
-            Pipeline::parse(makeVector(fromjson("{$_unpackBucket: {timeField: 'time'}}"), timePred),
-                            getExpCtx())};
+            pipeline_factory::makePipeline(
+                makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
+                                    "'time', bucketMaxSpanSeconds: 3600}}"),
+                           timePred),
+                getExpCtx(),
+                pipeline_factory::kOptionsMinimal),
+            pipeline_factory::makePipeline(
+                makeVector(fromjson("{$_unpackBucket: {timeField: 'time'}}"), timePred),
+                getExpCtx(),
+                pipeline_factory::kOptionsMinimal)};
         for (auto& pipeline : pipelines) {
             auto& container = pipeline->getSources();
 
@@ -1251,12 +1343,13 @@ TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
 
 TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
        OptimizeMapsGeoWithinPredicatesUsingInternalBucketGeoWithin) {
-    auto pipeline = Pipeline::parse(
+    auto pipeline = pipeline_factory::makePipeline(
         makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
                             "'time', bucketMaxSpanSeconds: 3600}}"),
                    fromjson("{$match: {loc: {$geoWithin: {$geometry: {type: \"Polygon\", "
                             "coordinates: [ [ [ 0, 0 ], [ 3, 6 ], [ 6, 1 ], [ 0, 0 ] ] ]}}}}}")),
-        getExpCtx());
+        getExpCtx(),
+        pipeline_factory::kOptionsMinimal);
     auto& container = pipeline->getSources();
 
     ASSERT_EQ(container.size(), 2U);
@@ -1282,12 +1375,13 @@ TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
     // bucket boundary.
     {
         auto timePred = BSON("$match" << BSON("time" << BSON("$gte" << roundedTime)));
-        auto pipeline =
-            Pipeline::parse(makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
-                                                "'time', bucketMaxSpanSeconds: 3600, "
-                                                "fixedBuckets: true }}"),
-                                       timePred),
-                            getExpCtx());
+        auto pipeline = pipeline_factory::makePipeline(
+            makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
+                                "'time', bucketMaxSpanSeconds: 3600, "
+                                "fixedBuckets: true }}"),
+                       timePred),
+            getExpCtx(),
+            pipeline_factory::kOptionsMinimal);
         auto& container = pipeline->getSources();
 
         ASSERT_EQ(container.size(), 2U);
@@ -1302,12 +1396,13 @@ TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
     // the bucket boundary.
     {
         auto timePred = BSON("$match" << BSON("time" << BSON("$gte" << date)));
-        auto pipeline =
-            Pipeline::parse(makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
-                                                "'time', bucketMaxSpanSeconds: 3600, "
-                                                "fixedBuckets: true }}"),
-                                       timePred),
-                            getExpCtx());
+        auto pipeline = pipeline_factory::makePipeline(
+            makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
+                                "'time', bucketMaxSpanSeconds: 3600, "
+                                "fixedBuckets: true }}"),
+                       timePred),
+            getExpCtx(),
+            pipeline_factory::kOptionsMinimal);
         auto& container = pipeline->getSources();
 
         ASSERT_EQ(container.size(), 2U);
@@ -1322,12 +1417,13 @@ TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
     {
         auto minDate = Date_t::min() + Days(100);  // date before 1970.
         auto timePred = BSON("$match" << BSON("time" << BSON("$gte" << minDate)));
-        auto pipeline =
-            Pipeline::parse(makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
-                                                "'time', bucketMaxSpanSeconds: 3600, "
-                                                "fixedBuckets: true }}"),
-                                       timePred),
-                            getExpCtx());
+        auto pipeline = pipeline_factory::makePipeline(
+            makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
+                                "'time', bucketMaxSpanSeconds: 3600, "
+                                "fixedBuckets: true }}"),
+                       timePred),
+            getExpCtx(),
+            pipeline_factory::kOptionsMinimal);
         auto& container = pipeline->getSources();
 
         ASSERT_EQ(container.size(), 2U);
@@ -1341,12 +1437,13 @@ TEST_F(InternalUnpackBucketPredicateMappingOptimizationTest,
     // if the bucket boundaries align.
     {
         auto timePred = BSON("$match" << BSON("time" << BSON("$gte" << roundedTime)));
-        auto pipeline =
-            Pipeline::parse(makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
-                                                "'time', bucketMaxSpanSeconds: 3600, "
-                                                "fixedBuckets: false }}"),
-                                       timePred),
-                            getExpCtx());
+        auto pipeline = pipeline_factory::makePipeline(
+            makeVector(fromjson("{$_internalUnpackBucket: {exclude: [], timeField: "
+                                "'time', bucketMaxSpanSeconds: 3600, "
+                                "fixedBuckets: false }}"),
+                       timePred),
+            getExpCtx(),
+            pipeline_factory::kOptionsMinimal);
         auto& container = pipeline->getSources();
 
         ASSERT_EQ(container.size(), 2U);

@@ -31,15 +31,14 @@
 
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/exec/document_value/document.h"
-#include "mongo/db/local_catalog/shard_role_api/resource_yielders.h"
 #include "mongo/db/pipeline/lite_parsed_document_source.h"
 #include "mongo/db/pipeline/process_interface/mongo_process_interface.h"
+#include "mongo/db/shard_role/resource_yielders.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/util/assert_util.h"
 
 #include <utility>
 
-#include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
@@ -48,10 +47,12 @@
 
 namespace mongo {
 
-REGISTER_INTERNAL_DOCUMENT_SOURCE(mergeCursors,
-                                  LiteParsedDocumentSourceInternal::parse,
-                                  DocumentSourceMergeCursors::createFromBson,
-                                  true);
+REGISTER_INTERNAL_LITE_PARSED_DOCUMENT_SOURCE(mergeCursors, MergeCursorsLiteParsed::parse);
+
+REGISTER_DOCUMENT_SOURCE_WITH_STAGE_PARAMS_DEFAULT(mergeCursors,
+                                                   DocumentSourceMergeCursors,
+                                                   MergeCursorsStageParams);
+
 ALLOCATE_DOCUMENT_SOURCE_ID(mergeCursors, DocumentSourceMergeCursors::id)
 
 constexpr StringData DocumentSourceMergeCursors::kStageName;

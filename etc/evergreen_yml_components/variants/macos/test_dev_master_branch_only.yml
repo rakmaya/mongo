@@ -12,7 +12,7 @@ buildvariants:
       - macos-14-arm64
     expansions:
       compile_variant: *enterprise-macos-arm64
-      test_flags: --excludeWithAnyTags=incompatible_with_macos,requires_gcm
+      test_flags: --excludeWithAnyTags=incompatible_with_macos,requires_gcm,slow_on_macos
       resmoke_jobs_max: 6
     tasks:
       - name: compile_test_serial_TG
@@ -20,7 +20,7 @@ buildvariants:
       - name: run_bazel_compiledb
       - name: run_unit_tests_8_way_split_TG
       - name: audit
-      - name: auth_audit_gen
+      - name: auth_audit
       - name: fle
       - name: fle2
       - name: .jscore .common !.decimal !.sharding

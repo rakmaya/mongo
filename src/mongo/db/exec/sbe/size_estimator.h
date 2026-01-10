@@ -46,15 +46,14 @@
 #include "mongo/bson/util/builder.h"
 #include "mongo/db/exec/plan_stats.h"
 #include "mongo/db/exec/sbe/expressions/expression.h"
-#include "mongo/db/exec/sbe/stages/plan_stats.h"
 #include "mongo/db/exec/sbe/stages/stages.h"
 #include "mongo/db/exec/sbe/stages/window.h"
 #include "mongo/db/exec/sbe/values/row.h"
-#include "mongo/db/exec/sbe/values/slot.h"
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/db/query/compiler/physical_model/index_bounds/index_bounds.h"
 #include "mongo/db/query/compiler/physical_model/interval/interval.h"
 #include "mongo/db/storage/index_entry_comparison.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/string_listset.h"
 
 /**
@@ -233,6 +232,16 @@ size_t estimate(const BasicBufBuilder<BufferAllocator>& ba) {
 inline size_t estimate(const value::MaterializedRow& row) {
     size_t size = 0;
     for (size_t idx = 0; idx < row.size(); ++idx) {
+        auto [tag, val] = row.getViewOfValue(idx);
+        size += estimate(tag, val);
+    }
+    return size;
+}
+
+template <size_t N>
+inline size_t estimate(const value::FixedSizeRow<N>& row) {
+    size_t size = 0;
+    for (size_t idx = 0; idx < N; ++idx) {
         auto [tag, val] = row.getViewOfValue(idx);
         size += estimate(tag, val);
     }

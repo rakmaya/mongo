@@ -32,14 +32,15 @@
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/index_catalog_entry.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/record_id.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog_entry.h"
 #include "mongo/db/storage/record_data.h"
 #include "mongo/db/validate/index_consistency.h"
 #include "mongo/db/validate/validate_results.h"
 #include "mongo/db/validate/validate_state.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/progress_meter.h"
 
 #include <array>
@@ -85,13 +86,14 @@ public:
      * Validates the record data and traverses through its key set to keep track of the
      * index consistency.
      */
-    virtual Status validateRecord(OperationContext* opCtx,
-                                  const RecordId& recordId,
-                                  const RecordData& record,
-                                  long long* nNonCompliantDocuments,
-                                  size_t* dataSize,
-                                  ValidateResults* results,
-                                  ValidationVersion validationVersion = currentValidationVersion);
+    Status validateRecord(OperationContext* opCtx,
+                          const RecordId& recordId,
+                          const RecordData& record,
+                          long long& nNonCompliantDocuments,
+                          long long& nInvalidDocuments,
+                          size_t* dataSize,
+                          ValidateResults* results,
+                          ValidationVersion validationVersion = currentValidationVersion);
     /**
      * Traverses the record store to retrieve every record and go through its document key
      * set to keep track of the index consistency during a validation.
@@ -100,7 +102,7 @@ public:
                              ValidateResults* results,
                              ValidationVersion validationVersion);
     /**
-     * Computes the hash of the collection's local catalog entry and sets it in 'results'.
+     * Computes the hash of the collection's local catalog idents and sets it in 'results'.
      **/
     void computeMetadataHash(OperationContext* opCtx,
                              const CollectionPtr& coll,

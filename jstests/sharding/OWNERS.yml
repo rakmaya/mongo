@@ -37,6 +37,9 @@ filters:
   - "*retryable_write*":
     approvers:
       - 10gen/server-transactions
+  - "*rewrite_collection*":
+    approvers:
+      - 10gen/server-cluster-scalability
   - "*transaction*":
     approvers:
       - 10gen/server-transactions
@@ -49,7 +52,7 @@ filters:
   - "*zone*":
     approvers:
       - 10gen/server-cluster-scalability
-  - "addShard*":
+  - "add_shard_*":
     approvers:
       - 10gen/server-catalog-and-routing-routing-and-topology
   - "custom_write_concern.js":
@@ -67,7 +70,7 @@ filters:
   - "check_metadata*":
     approvers:
       - 10gen/server-catalog-and-routing-ddl
-  - "direct_shard*":
+  - "*direct_shard*":
     approvers:
       - 10gen/server-catalog-and-routing-shard-catalog
   - "start_shard_draining*":
@@ -83,9 +86,6 @@ filters:
     approvers:
       - 10gen/server-catalog-and-routing-routing-and-topology
   - "stop_shard_draining_test.js":
-    approvers:
-      - 10gen/server-catalog-and-routing-routing-and-topology
-  - "remove_shard_interoperability_tests.js":
     approvers:
       - 10gen/server-catalog-and-routing-routing-and-topology
   - "commit_shard_removal_test.js":
@@ -115,6 +115,9 @@ filters:
   - "database_versioning_all_commands.js":
     approvers:
       - 10gen/server-catalog-and-routing
+  - "mongos_exhausts_stale_config_retries.js":
+    approvers:
+      - 10gen/server-catalog-and-routing
   - "read_write_concern_defaults_application.js":
     approvers:
       - 10gen/server-catalog-and-routing
@@ -127,9 +130,21 @@ filters:
   - "startup_with_all_configs_down.js":
     approvers:
       - 10gen/server-catalog-and-routing-routing-and-topology
-  - "addshard*.js":
+  - "safe_secondary_reads_causal_consistency.js":
+    approvers:
+      - 10gen/server-cluster-scalability
+  - "remove_shard_*.js":
     approvers:
       - 10gen/server-catalog-and-routing-routing-and-topology
-  - "safe_secondary_reads_causal_consistency.js":
+  - "reporting_compound_wildcard_index_prefixed_by_shard_key.js":
+    approvers:
+      - 10gen/server-catalog-and-routing-ddl
+  - "index_commands_shard_targeting.js":
+    approvers:
+      - 10gen/server-catalog-and-routing-ddl
+  - "shard_identity_rollback.js":
+    approvers:
+      - 10gen/server-catalog-and-routing
+  - "index_not_cloned_on_non_owner_shards.js":
     approvers:
       - 10gen/server-cluster-scalability

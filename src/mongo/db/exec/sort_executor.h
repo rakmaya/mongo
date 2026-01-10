@@ -34,10 +34,10 @@
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/exec/plan_stats.h"
-#include "mongo/db/exec/sort_key_comparator.h"
 #include "mongo/db/query/compiler/logical_model/sort_pattern/sort_pattern.h"
 #include "mongo/db/sorter/sorter.h"
 #include "mongo/db/sorter/sorter_stats.h"
+#include "mongo/util/modules.h"
 
 #include <cstdint>
 #include <memory>
@@ -55,21 +55,13 @@ namespace mongo {
  * The template parameter is the type of data being sorted. In DocumentSource execution, we sort
  * Document objects directly, but in the PlanStage layer we may sort WorkingSetMembers. The type of
  * the sort key, on the other hand, is always Value.
+ *
+ * TODO SERVER-112777: Remove 'atlas_streams' dependency on this class.
  */
 template <typename T>
-class SortExecutor {
+class MONGO_MOD_NEEDS_REPLACEMENT SortExecutor {
 public:
     using DocumentSorter = Sorter<Value, T>;
-    class Comparator {
-    public:
-        Comparator(const SortPattern& sortPattern) : _sortKeyComparator(sortPattern) {}
-        int operator()(const Value& lhs, const Value& rhs) const {
-            return _sortKeyComparator(lhs, rhs);
-        }
-
-    private:
-        SortKeyComparator _sortKeyComparator;
-    };
 
     /**
      * If the passed in limit is 0, this is treated as no limit.
@@ -277,16 +269,17 @@ private:
         opts.MaxMemoryUsageBytes(_stats.maxMemoryUsageBytes);
         if (_diskUseAllowed) {
             opts.TempDir(_tempDir);
-            opts.FileStats(_sorterFileStats.get());
         }
 
         return opts;
     }
 
+    std::unique_ptr<DocumentSorter> makeSorter();
+
     void ensureSorter() {
         // This conditional should only pass if no documents were added to the sorter.
         if (!_sorter) {
-            _sorter = DocumentSorter::make(makeSortOptions(), Comparator(_sortPattern));
+            _sorter = makeSorter();
         }
     }
 

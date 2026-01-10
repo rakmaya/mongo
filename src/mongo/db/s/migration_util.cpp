@@ -48,13 +48,6 @@
 #include "mongo/db/global_catalog/ddl/sharding_util.h"
 #include "mongo/db/global_catalog/sharding_catalog_client.h"
 #include "mongo/db/global_catalog/type_chunk.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
-#include "mongo/db/local_catalog/lock_manager/exception_util.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
-#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_runtime.h"
-#include "mongo/db/local_catalog/shard_role_catalog/shard_filtering_metadata_refresh.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/query/write_ops/write_ops_gen.h"
@@ -67,12 +60,19 @@
 #include "mongo/db/s/migration_coordinator.h"
 #include "mongo/db/s/migration_destination_manager.h"
 #include "mongo/db/s/migration_source_manager.h"
+#include "mongo/db/shard_role/lock_manager/d_concurrency.h"
+#include "mongo/db/shard_role/lock_manager/exception_util.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/collection_sharding_runtime.h"
+#include "mongo/db/shard_role/shard_catalog/shard_filtering_metadata_refresh.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/sharding_environment/client/shard.h"
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/sharding_environment/sharding_statistics.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/topology/shard_registry.h"
-#include "mongo/db/vector_clock/vector_clock_mutable.h"
+#include "mongo/db/topology/vector_clock/vector_clock_mutable.h"
 #include "mongo/db/versioning_protocol/chunk_version.h"
 #include "mongo/executor/network_interface_factory.h"
 #include "mongo/executor/thread_pool_task_executor.h"
@@ -353,46 +353,62 @@ void advanceTransactionOnRecipient(OperationContext* opCtx,
     }
 }
 
-void resumeMigrationCoordinationsOnStepUp(OperationContext* opCtx) {
-    LOGV2_DEBUG(4798510, 2, "Starting migration coordinator step-up recovery");
+void resumeMigrationCoordinationsOnStepUp(OperationContext* opCtx, long long term) {
+    LOGV2_DEBUG(4798510, 2, "Starting migration coordinator step-up recovery", "term"_attr = term);
 
-    unsigned long long unfinishedMigrationsCount = 0;
+    const auto& executor = Grid::get(opCtx)->getExecutorPool()->getFixedExecutor();
+    std::vector<ExecutorFuture<void>> recoveryFutures;
 
     PersistentTaskStore<MigrationCoordinatorDocument> store(
         NamespaceString::kMigrationCoordinatorsNamespace);
-    store.forEach(opCtx,
-                  BSONObj{},
-                  [&opCtx, &unfinishedMigrationsCount](const MigrationCoordinatorDocument& doc) {
-                      unfinishedMigrationsCount++;
-                      LOGV2_DEBUG(4798511,
-                                  3,
-                                  "Found unfinished migration on step-up",
-                                  "migrationCoordinatorDoc"_attr = redact(doc.toBSON()),
-                                  "unfinishedMigrationsCount"_attr = unfinishedMigrationsCount);
+    store.forEach(
+        opCtx,
+        BSONObj{},
+        [opCtx, term, &executor, &recoveryFutures](const MigrationCoordinatorDocument& doc) {
+            LOGV2_DEBUG(4798511,
+                        3,
+                        "Found unfinished migration on step-up",
+                        "term"_attr = term,
+                        "migrationCoordinatorDoc"_attr = redact(doc.toBSON()),
+                        "unfinishedMigrationsCount"_attr = recoveryFutures.size() + 1);
 
-                      const auto& nss = doc.getNss();
+            const auto& nss = doc.getNss();
 
-                      {
-                          AutoGetCollection autoColl(opCtx, nss, MODE_IX);
-                          CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(
-                              opCtx, nss)
-                              ->clearFilteringMetadata(opCtx);
-                      }
+            {
+                AutoGetCollection autoColl(opCtx, nss, MODE_IX);
+                CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(opCtx, nss)
+                    ->clearFilteringMetadata(opCtx);
+            }
 
-                      asyncRecoverMigrationUntilSuccessOrStepDown(opCtx, nss)
-                          .thenRunOn(Grid::get(opCtx)->getExecutorPool()->getFixedExecutor())
-                          .getAsync([](auto) {});
+            recoveryFutures.emplace_back(
+                asyncRecoverMigrationUntilSuccessOrStepDown(opCtx, nss).thenRunOn(executor));
 
-                      return true;
-                  });
+            return true;
+        });
 
     ShardingStatistics::get(opCtx).unfinishedMigrationFromPreviousPrimary.store(
-        unfinishedMigrationsCount);
+        recoveryFutures.size());
 
     LOGV2_DEBUG(4798513,
                 2,
-                "Finished migration coordinator step-up recovery",
-                "unfinishedMigrationsCount"_attr = unfinishedMigrationsCount);
+                "Finished scheduling migration coordinator step-up recovery tasks",
+                "term"_attr = term,
+                "unfinishedMigrationsCount"_attr = recoveryFutures.size());
+
+    [&executor, futures = std::move(recoveryFutures)]() mutable {
+        if (futures.empty()) {
+            return ExecutorFuture{executor};
+        }
+        return whenAll(std::move(futures)).ignoreValue().thenRunOn(executor);
+    }()
+        .onCompletion([term](const auto&) {
+            RangeDeleterService::get(getGlobalServiceContext())->notifyRecoveryJobComplete(term);
+            LOGV2_DEBUG(11420100,
+                        2,
+                        "Finished all migration coordinator step-up recovery tasks",
+                        "term"_attr = term);
+        })
+        .getAsync([](const auto&) {});
 }
 
 ExecutorFuture<void> launchReleaseCriticalSectionOnRecipientFuture(

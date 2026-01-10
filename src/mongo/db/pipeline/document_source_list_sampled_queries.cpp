@@ -39,10 +39,14 @@
 namespace mongo {
 namespace analyze_shard_key {
 
-REGISTER_DOCUMENT_SOURCE(listSampledQueries,
-                         DocumentSourceListSampledQueries::LiteParsed::parse,
-                         DocumentSourceListSampledQueries::createFromBson,
-                         AllowedWithApiStrict::kNeverInVersion1);
+REGISTER_LITE_PARSED_DOCUMENT_SOURCE(listSampledQueries,
+                                     DocumentSourceListSampledQueries::LiteParsed::parse,
+                                     AllowedWithApiStrict::kNeverInVersion1);
+
+REGISTER_DOCUMENT_SOURCE_WITH_STAGE_PARAMS_DEFAULT(listSampledQueries,
+                                                   DocumentSourceListSampledQueries,
+                                                   ListSampledQueriesStageParams);
+
 ALLOCATE_DOCUMENT_SOURCE_ID(listSampledQueries, DocumentSourceListSampledQueries::id)
 
 boost::intrusive_ptr<DocumentSource> DocumentSourceListSampledQueries::createFromBson(
@@ -106,7 +110,7 @@ DocumentSourceListSampledQueries::LiteParsed::parse(const NamespaceString& nss,
     if (spec.getNamespace()) {
         uassertStatusOK(validateNamespace(*spec.getNamespace()));
     }
-    return std::make_unique<LiteParsed>(specElem.fieldName(), nss, std::move(spec));
+    return std::make_unique<LiteParsed>(specElem, nss, std::move(spec));
 }
 
 }  // namespace analyze_shard_key

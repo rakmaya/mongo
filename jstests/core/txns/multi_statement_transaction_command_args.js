@@ -4,6 +4,8 @@
  * @tags: [
  *  uses_transactions,
  *  uses_snapshot_read_concern,
+ *  # TODO(SERVER-113808): Check txn errors on replicaset running as --shardsvr
+ *  transitioning_replicaset_incompatible,
  * ]
  */
 

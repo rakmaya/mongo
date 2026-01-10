@@ -29,6 +29,10 @@
 
 #pragma once
 
+#include "mongo/util/modules.h"
+
+#include <cstddef>  // size_t
+
 namespace mongo {
 
 /**

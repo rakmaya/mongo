@@ -27,18 +27,13 @@
  *    it in the license file.
  */
 
-
 #include "mongo/db/pipeline/document_source_cursor.h"
 
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/exec/document_value/document.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/db_raii.h"
-#include "mongo/db/pipeline/initialize_auto_get_helper.h"
 #include "mongo/db/query/collection_index_usage_tracker_decoration.h"
 #include "mongo/db/query/explain.h"
 #include "mongo/db/query/explain_options.h"
-#include "mongo/db/query/find_common.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/serialization_context.h"
@@ -90,11 +85,13 @@ Value DocumentSourceCursor::serialize(const SerializationOptions& opts) const {
         &explainStatsBuilder);
 
     BSONObj explainStats = explainStatsBuilder.obj();
-    invariant(explainStats["queryPlanner"]);
+    tassert(11294806, "Missing queryPlanner field in explain stats", explainStats["queryPlanner"]);
     out["queryPlanner"] = Value(explainStats["queryPlanner"]);
 
     if (opts.verbosity.value() >= ExplainOptions::Verbosity::kExecStats) {
-        invariant(explainStats["executionStats"]);
+        tassert(11294805,
+                "Missing executionStats field in explain stats",
+                explainStats["executionStats"]);
         out["executionStats"] = Value(explainStats["executionStats"]);
     }
 

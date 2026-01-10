@@ -8,6 +8,8 @@
  *   does_not_support_stepdowns,
  *   no_selinux,
  *   simulate_atlas_proxy_incompatible,
+ *   # TODO(SERVER-113800): Enable setClusterParameters with replicaset started with --shardsvr
+ *   transitioning_replicaset_incompatible,
  * ]
  */
 import {EncryptedClient, kSafeContentField} from "jstests/fle2/libs/encrypted_client_util.js";

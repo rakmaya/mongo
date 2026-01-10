@@ -28,14 +28,15 @@
  */
 #pragma once
 
-#include "mongo/db/local_catalog/shard_role_catalog/scoped_collection_metadata.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/compiler/metadata/index_entry.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/query_planner_params.h"
+#include "mongo/db/query/write_ops/canonical_update.h"
 #include "mongo/db/query/write_ops/parsed_delete.h"
-#include "mongo/db/query/write_ops/parsed_update.h"
 #include "mongo/db/session/logical_session_id.h"
+#include "mongo/db/shard_role/shard_catalog/scoped_collection_metadata.h"
+#include "mongo/util/modules.h"
 
 #include <boost/optional/optional.hpp>
 
@@ -78,7 +79,7 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> makeExpressExecutorForFindB
 std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> makeExpressExecutorForUpdate(
     OperationContext* opCtx,
     CollectionAcquisition collection,
-    ParsedUpdate* parsedUpdate,
+    CanonicalUpdate* canonicalUpdate,
     bool returnOwnedBson);
 
 std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> makeExpressExecutorForDelete(

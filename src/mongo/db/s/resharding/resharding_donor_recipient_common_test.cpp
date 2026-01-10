@@ -42,10 +42,6 @@
 #include "mongo/db/global_catalog/type_collection.h"
 #include "mongo/db/global_catalog/type_collection_common_types_gen.h"
 #include "mongo/db/keypattern.h"
-#include "mongo/db/local_catalog/drop_database.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_runtime.h"
-#include "mongo/db/local_catalog/shard_role_catalog/operation_sharding_state.h"
 #include "mongo/db/persistent_task_store.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/repl/member_state.h"
@@ -57,6 +53,10 @@
 #include "mongo/db/s/resharding/resharding_donor_service.h"
 #include "mongo/db/s/resharding/resharding_recipient_service.h"
 #include "mongo/db/s/resharding/resharding_util.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/collection_sharding_runtime.h"
+#include "mongo/db/shard_role/shard_catalog/drop_database.h"
+#include "mongo/db/shard_role/shard_catalog/operation_sharding_state.h"
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/db/sharding_environment/shard_server_test_fixture.h"
@@ -165,20 +165,19 @@ protected:
         auto range = ChunkRange(BSON(shardKey << MINKEY), BSON(shardKey << MAXKEY));
         auto chunk = ChunkType(
             uuid, range, ChunkVersion({epoch, timestamp}, {1, 0}), shardThatChunkExistsOn);
-        ChunkManager cm(makeStandaloneRoutingTableHistory(
-                            RoutingTableHistory::makeNew(nss,
-                                                         uuid,
-                                                         shardKeyPattern,
-                                                         false, /* unsplittable */
-                                                         nullptr,
-                                                         false,
-                                                         epoch,
-                                                         timestamp,
-                                                         boost::none /* timeseriesFields */,
-                                                         boost::none /* reshardingFields */,
-                                                         true,
-                                                         {std::move(chunk)})),
-                        boost::none);
+        CurrentChunkManager cm(makeStandaloneRoutingTableHistory(
+            RoutingTableHistory::makeNew(nss,
+                                         uuid,
+                                         shardKeyPattern,
+                                         false, /* unsplittable */
+                                         nullptr,
+                                         false,
+                                         epoch,
+                                         timestamp,
+                                         boost::none /* timeseriesFields */,
+                                         boost::none /* reshardingFields */,
+                                         true,
+                                         {std::move(chunk)})));
         auto dbVersion = DatabaseVersion(uuid, timestamp);
         getCatalogCacheMock()->setDatabaseReturnValue(
             nss.dbName(),
@@ -283,6 +282,11 @@ protected:
             donorDoc);
         ASSERT(donorDoc.getMutableState().getState() == DonorStateEnum::kPreparingToDonate);
         ASSERT(donorDoc.getMutableState().getMinFetchTimestamp() == boost::none);
+        if (reshardingFields.getTelemetryContext()) {
+            ASSERT_TRUE(donorDoc.getMutableState().getTelemetryContext().has_value());
+            ASSERT_BSONOBJ_EQ(*donorDoc.getMutableState().getTelemetryContext(),
+                              *reshardingFields.getTelemetryContext());
+        }
     }
 
     void assertRecipientDocMatchesReshardingFields(
@@ -300,6 +304,12 @@ protected:
         ASSERT(recipientDoc.getMutableState().getState() ==
                RecipientStateEnum::kAwaitingFetchTimestamp);
         ASSERT(!recipientDoc.getCloneTimestamp());
+
+        if (reshardingFields.getTelemetryContext()) {
+            ASSERT_TRUE(recipientDoc.getMutableState().getTelemetryContext().has_value());
+            ASSERT_BSONOBJ_EQ(*recipientDoc.getMutableState().getTelemetryContext(),
+                              *reshardingFields.getTelemetryContext());
+        }
 
         const auto donorShards = reshardingFields.getRecipientFields()->getDonorShards();
         std::map<ShardId, DonorShardFetchTimestamp> donorShardMap;

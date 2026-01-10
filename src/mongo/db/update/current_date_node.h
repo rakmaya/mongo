@@ -41,6 +41,7 @@
 #include "mongo/db/update/modifier_node.h"
 #include "mongo/db/update/update_node.h"
 #include "mongo/db/update/update_node_visitor.h"
+#include "mongo/util/modules.h"
 
 #include <memory>
 
@@ -81,7 +82,7 @@ private:
         return "$currentDate";
     }
 
-    BSONObj operatorValue() const final;
+    BSONObj operatorValue(const SerializationOptions& opts) const final;
 
     // If true, the current date should be expressed as a Date. If false, a Timestamp.
     bool _typeIsDate;

@@ -61,14 +61,15 @@ auto cloneEachOne(std::list<boost::intrusive_ptr<DocumentSource>> stages, const 
 }
 }  // namespace
 
-REGISTER_DOCUMENT_SOURCE_CONDITIONALLY(searchMeta,
-                                       LiteParsedSearchStage::parse,
-                                       DocumentSourceSearchMeta::createFromBson,
-                                       AllowedWithApiStrict::kNeverInVersion1,
-                                       AllowedWithClientType::kAny,
-                                       nullptr,  // featureFlag
-                                       true);
-ALLOCATE_DOCUMENT_SOURCE_ID(searchMeta, DocumentSourceSearchMeta::id)
+REGISTER_LITE_PARSED_DOCUMENT_SOURCE(searchMeta,
+                                     SearchMetaLiteParsed::parse,
+                                     AllowedWithApiStrict::kNeverInVersion1);
+
+REGISTER_DOCUMENT_SOURCE_WITH_STAGE_PARAMS_DEFAULT(searchMeta,
+                                                   DocumentSourceSearchMeta,
+                                                   SearchMetaStageParams);
+
+ALLOCATE_DOCUMENT_SOURCE_ID(searchMeta, DocumentSourceSearchMeta::id);
 
 boost::optional<DocumentSource::DistributedPlanLogic>
 DocumentSourceSearchMeta::distributedPlanLogic() {
@@ -123,10 +124,6 @@ InternalSearchMongotRemoteSpec prepareInternalSearchMetaMongotSpec(
         // return the mongot query itself parsed into IDL.
         return internalSpec;
     }
-
-    uassert(6600901,
-            "Running $searchMeta command in non-allowed context (update pipeline)",
-            !expCtx->getIsParsingPipelineUpdate());
 
     // If 'searchReturnEofImmediately' is set, we return this stage as is because we don't expect to
     // return any results. More precisely, we wish to avoid calling 'planShardedSearch' when no

@@ -49,19 +49,13 @@
 #include "mongo/client/fetcher.h"
 #include "mongo/client/read_preference.h"
 #include "mongo/client/read_preference_gen.h"
-#include "mongo/db/admission/execution_admission_context.h"
+#include "mongo/db/admission/execution_control/execution_admission_context.h"
 #include "mongo/db/audit.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands/feature_compatibility_version.h"
 #include "mongo/db/commands/server_status/server_status_metric.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/index_builds/commit_quorum_options.h"
-#include "mongo/db/local_catalog/collection_catalog.h"
-#include "mongo/db/local_catalog/local_oplog_info.h"
-#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/lock_manager/lock_stats.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/logical_time.h"
 #include "mongo/db/mongod_options_storage_gen.h"
 #include "mongo/db/read_write_concern_defaults.h"
@@ -74,6 +68,7 @@
 #include "mongo/db/repl/initial_sync/initial_syncer_factory.h"
 #include "mongo/db/repl/isself.h"
 #include "mongo/db/repl/last_vote.h"
+#include "mongo/db/repl/local_oplog_info.h"
 #include "mongo/db/repl/member_config_gen.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/read_concern_args.h"
@@ -95,14 +90,19 @@
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/repl/transaction_oplog_application.h"
 #include "mongo/db/repl/update_position_args.h"
-#include "mongo/db/replica_set_endpoint_sharding_state.h"
 #include "mongo/db/replication_state_transition_lock_guard.h"
+#include "mongo/db/rss/replicated_storage_service.h"
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/session/internal_session_pool.h"
 #include "mongo/db/session/kill_sessions.h"
 #include "mongo/db/session/kill_sessions_local.h"
 #include "mongo/db/session/session_catalog.h"
+#include "mongo/db/shard_role/lock_manager/d_concurrency.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/lock_manager/lock_stats.h"
+#include "mongo/db/shard_role/shard_catalog/collection_catalog.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/shutdown_in_progress_quiesce_info.h"
 #include "mongo/db/storage/control/journal_flusher.h"
 #include "mongo/db/storage/record_store.h"
@@ -1771,22 +1771,10 @@ OpTime ReplicationCoordinatorImpl::getMyLastDurableOpTime() const {
 
 Status ReplicationCoordinatorImpl::_validateReadConcern(OperationContext* opCtx,
                                                         const ReadConcernArgs& readConcern) {
-    if (readConcern.getArgsAfterClusterTime() &&
-        readConcern.getLevel() != ReadConcernLevel::kMajorityReadConcern &&
-        readConcern.getLevel() != ReadConcernLevel::kLocalReadConcern &&
-        readConcern.getLevel() != ReadConcernLevel::kSnapshotReadConcern) {
-        return {
-            ErrorCodes::BadValue,
-            "Only readConcern level 'majority', 'local', or 'snapshot' is allowed when specifying "
-            "afterClusterTime"};
+    auto status = readConcern.validate();
+    if (!status.isOK()) {
+        return status;
     }
-
-    if (readConcern.getArgsAtClusterTime() &&
-        readConcern.getLevel() != ReadConcernLevel::kSnapshotReadConcern) {
-        return {ErrorCodes::BadValue,
-                "readConcern level 'snapshot' is required when specifying atClusterTime"};
-    }
-
 
     if (readConcern.getLevel() == ReadConcernLevel::kSnapshotReadConcern &&
         !_externalState->isReadConcernSnapshotSupportedByStorageEngine(opCtx)) {
@@ -2007,28 +1995,8 @@ Status ReplicationCoordinatorImpl::waitUntilMajorityOpTime(mongo::OperationConte
 Status ReplicationCoordinatorImpl::_waitUntilClusterTimeForRead(OperationContext* opCtx,
                                                                 const ReadConcernArgs& readConcern,
                                                                 boost::optional<Date_t> deadline) {
-    invariant(readConcern.getArgsAfterClusterTime() || readConcern.getArgsAtClusterTime());
-    invariant(!readConcern.getArgsAfterClusterTime() || !readConcern.getArgsAtClusterTime());
-    auto clusterTime = readConcern.getArgsAfterClusterTime()
-        ? *readConcern.getArgsAfterClusterTime()
-        : *readConcern.getArgsAtClusterTime();
-    invariant(clusterTime != LogicalTime::kUninitialized);
-
-    // convert clusterTime to opTime so it can be used by the _lastAppliedOpTimeWaiterList for wait
-    // on readConcern level local.
-    auto targetOpTime = OpTime(clusterTime.asTimestamp(), OpTime::kUninitializedTerm);
-    invariant(!readConcern.getArgsOpTime());
-
-    // We don't set isMajorityCommittedRead for transactions because snapshots are always
-    // speculative; we wait for majority when the transaction commits.
-    //
-    // Majority and snapshot reads outside of transactions should non-speculatively wait for the
-    // majority committed snapshot.
-    const bool isMajorityCommittedRead = !opCtx->inMultiDocumentTransaction() &&
-        (readConcern.getLevel() == ReadConcernLevel::kMajorityReadConcern ||
-         readConcern.getLevel() == ReadConcernLevel::kSnapshotReadConcern);
-
-    if (isMajorityCommittedRead) {
+    const auto targetOpTime = readConcern.getTargetOpTime();
+    if (readConcern.isMajorityCommittedRead(opCtx->inMultiDocumentTransaction())) {
         return waitUntilMajorityOpTime(opCtx, targetOpTime, deadline);
     } else {
         return _waitUntilOpTime(opCtx, targetOpTime, deadline);
@@ -2038,11 +2006,8 @@ Status ReplicationCoordinatorImpl::_waitUntilClusterTimeForRead(OperationContext
 // TODO: remove when SERVER-29729 is done
 Status ReplicationCoordinatorImpl::_waitUntilOpTimeForReadDeprecated(
     OperationContext* opCtx, const ReadConcernArgs& readConcern) {
-    const bool isMajorityCommittedRead =
-        readConcern.getLevel() == ReadConcernLevel::kMajorityReadConcern;
-
-    const auto targetOpTime = readConcern.getArgsOpTime().value_or(OpTime());
-    if (isMajorityCommittedRead) {
+    const auto targetOpTime = readConcern.getTargetOpTime();
+    if (readConcern.isMajorityCommittedRead(opCtx->inMultiDocumentTransaction())) {
         return waitUntilMajorityOpTime(opCtx, targetOpTime);
     } else {
         return _waitUntilOpTime(opCtx, targetOpTime);
@@ -2180,6 +2145,8 @@ bool ReplicationCoordinatorImpl::isCommitQuorumSatisfied(
 bool ReplicationCoordinatorImpl::_haveNumNodesSatisfiedCommitQuorum(
     WithLock lk, int numNodes, const std::vector<mongo::HostAndPort>& members) const {
     for (auto&& member : members) {
+        // Use lenient version of findMemberByHostAndPort since a node can still be part of a quorum
+        // via its main port (not just its maintenance port).
         auto memberConfig = _rsConfig.unsafePeek().findMemberByHostAndPort(member);
         // We do not count arbiters and members that aren't part of replica set config,
         // towards the commit quorum.
@@ -2202,6 +2169,8 @@ bool ReplicationCoordinatorImpl::_haveTaggedNodesSatisfiedCommitQuorum(
     ReplSetTagMatch matcher(tagPattern);
 
     for (auto&& member : members) {
+        // Use lenient version of findMemberByHostAndPort since a node can still be part of a quorum
+        // via its main port (not just its maintenance port).
         auto memberConfig = _rsConfig.unsafePeek().findMemberByHostAndPort(member);
         // We do not count arbiters and members that aren't part of replica set config,
         // towards the commit quorum.
@@ -2826,10 +2795,14 @@ void ReplicationCoordinatorImpl::_performElectionHandoff() {
         return;
     }
 
-    auto target = _rsConfig.unsafePeek().getMemberAt(candidateIndex).getHostAndPort();
+    const auto& targetConfig = _rsConfig.unsafePeek().getMemberAt(candidateIndex);
+    auto target = targetConfig.getHostAndPortMaintenance();
     executor::RemoteCommandRequest request(
         target, DatabaseName::kAdmin, BSON("replSetStepUp" << 1 << "skipDryRun" << true), nullptr);
-    LOGV2(21347, "Handing off election", "target"_attr = target);
+    LOGV2(21347,
+          "Handing off election",
+          "target"_attr = target,
+          "usingMaintenancePort"_attr = targetConfig.isUsingMaintenancePort(target));
 
     auto callbackHandleSW = _replExecutor->scheduleRemoteCommand(
         request, [target](const executor::TaskExecutor::RemoteCommandCallbackArgs& callbackData) {
@@ -3101,6 +3074,14 @@ HostAndPort ReplicationCoordinatorImpl::getMyHostAndPort() const {
     return _rsConfig.unsafePeek().getMemberAt(_selfIndex).getHostAndPort();
 }
 
+boost::optional<int> ReplicationCoordinatorImpl::getMyMaintenancePort() const {
+    stdx::unique_lock lk(_mutex);
+    if (_selfIndex == -1) {
+        return boost::none;
+    }
+    return _rsConfig.unsafePeek().getMemberAt(_selfIndex).getMaintenancePort();
+}
+
 int ReplicationCoordinatorImpl::_getMyId(WithLock lk) const {
     const MemberConfig& self = _rsConfig.unsafePeek().getMemberAt(_selfIndex);
     return self.getId().getData();
@@ -3192,6 +3173,10 @@ void ReplicationCoordinatorImpl::appendSecondaryInfoData(BSONObjBuilder* result)
     _topCoord->fillMemberData(result);
 }
 
+ThreadPool* ReplicationCoordinatorImpl::getDbWorkThreadPool() const noexcept {
+    return _externalState->getDbWorkThreadPool();
+}
+
 ReplSetConfig ReplicationCoordinatorImpl::getConfig() const {
     return _getReplSetConfig();
 }
@@ -3212,6 +3197,9 @@ ConfigVersionAndTerm ReplicationCoordinatorImpl::getConfigVersionAndTerm() const
     return _getReplSetConfig().getConfigVersionAndTerm();
 }
 
+// This is only used by the index build coordinator and is deprecated so we do not support strict
+// and lenient versions. We only include the lenient version since index builds do not use the
+// maintenance port.
 boost::optional<MemberConfig> ReplicationCoordinatorImpl::findConfigMemberByHostAndPort_deprecated(
     const HostAndPort& hap) const {
     const MemberConfig* result = _getReplSetConfig().findMemberByHostAndPort(hap);
@@ -3742,8 +3730,9 @@ Status ReplicationCoordinatorImpl::_doReplSetReconfig(OperationContext* opCtx,
     // as we are not allowed to have the same HostAndPort in the config twice. Matching HostandPort
     // implies matching isSelf, and it is actually preferrable to avoid checking the latter as it is
     // susceptible to transient DNS errors.
-    auto quickIndex =
-        _selfIndex >= 0 ? findOwnHostInConfigQuick(newConfig, getMyHostAndPort()) : -1;
+    auto quickIndex = _selfIndex >= 0
+        ? findOwnHostInConfigQuick(newConfig, getMyHostAndPort(), getMyMaintenancePort())
+        : -1;
     if (quickIndex >= 0) {
         if (!force) {
             auto electableStatus = checkElectable(newConfig, quickIndex);
@@ -4223,8 +4212,11 @@ Status ReplicationCoordinatorImpl::_runReplSetInitiate(const BSONObj& configObj,
 
     lk.unlock();
 
+    const auto minumumRequiredFCV =
+        rss::ReplicatedStorageService::get(opCtx).getPersistenceProvider().getMinimumRequiredFCV();
+
     // Initiate FCV in local storage. This will propagate to other nodes via initial sync.
-    FeatureCompatibilityVersion::setIfCleanStartup(opCtx, _storage);
+    FeatureCompatibilityVersion::setIfCleanStartup(opCtx, _storage, minumumRequiredFCV);
 
     ReplSetConfig newConfig;
     try {
@@ -4255,8 +4247,7 @@ Status ReplicationCoordinatorImpl::_runReplSetInitiate(const BSONObj& configObj,
                           << ", command line set name: " << _settings.ourSetName());
     }
 
-    StatusWith<int> myIndex =
-        validateConfigForInitiate(_externalState.get(), newConfig, opCtx->getServiceContext());
+    StatusWith<int> myIndex = validateConfigForInitiate(_externalState.get(), newConfig, opCtx);
     if (!myIndex.isOK()) {
         LOGV2_ERROR(21425,
                     "replSetInitiate error while validating config",
@@ -4647,19 +4638,13 @@ ReplicationCoordinatorImpl::_setCurrentRSConfig(WithLock lk,
     LOGV2(21392, "New replica set config in use", "config"_attr = _rsConfig.unsafePeek().toBSON());
     _selfIndex = myIndex;
     if (_selfIndex >= 0) {
+        const auto& selfMember = _rsConfig.unsafePeek().getMemberAt(_selfIndex);
         LOGV2(21393,
               "Found self in config",
-              "hostAndPort"_attr = _rsConfig.unsafePeek().getMemberAt(_selfIndex).getHostAndPort());
+              "hostAndPort"_attr = selfMember.getHostAndPort(),
+              "maintenancePort"_attr = selfMember.getMaintenancePort());
     } else {
         LOGV2(21394, "This node is not a member of the config");
-    }
-    if (replica_set_endpoint::isFeatureFlagEnabledIgnoreFCV() &&
-        serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
-        // The feature flag check here needs to ignore the FCV since the
-        // ReplicaSetEndpointShardingState needs to be maintained even before the FCV is fully
-        // upgraded.
-        replica_set_endpoint::ReplicaSetEndpointShardingState::get(opCtx)->setIsReplicaSetMember(
-            _selfIndex >= 0);
     }
 
     // Wake up writeConcern waiters that are no longer satisfiable due to the rsConfig change.
@@ -4864,7 +4849,7 @@ ReadPreference ReplicationCoordinatorImpl::_getSyncSourceReadPreference(WithLock
         enableOverrideClusterChainingSetting.load()) {
         // No update to read preference necessary.
 
-    } else if (!memberState.primary()) {
+    } else if (!memberState.primary() && _selfIndex >= 0) {
         // SERVER-105416: If we are the only electable node, then we need to be able to sync from
         // secondaries.
         // Otherwise, if we are not the primary and chaining is disabled in the config (without
@@ -4897,7 +4882,8 @@ HostAndPort ReplicationCoordinatorImpl::chooseNewSyncSource(const OpTime& lastOp
     // If read preference is SecondaryOnly, we should never choose the primary. If the sync source
     // was forced through unsupportedSyncSource, we may sync from any node, so skip this check.
     invariant(readPreference != ReadPreference::SecondaryOnly || !primary ||
-              primary->getHostAndPort() != newSyncSource || !repl::unsupportedSyncSource.empty());
+              primary->getHostAndPortMaintenance() != newSyncSource ||
+              !repl::unsupportedSyncSource.empty());
 
     // If we lost our sync source, schedule new heartbeats immediately to update our knowledge
     // of other members's state, allowing us to make informed sync source decisions.
@@ -5138,10 +5124,23 @@ void ReplicationCoordinatorImpl::_setStableTimestampForStorage(WithLock lk) {
     if (_updateCommittedSnapshot(lk, stableOpTime)) {
         // Update the stable timestamp for the storage engine.
         _storage->setStableTimestamp(getServiceContext(), stableOpTime.getTimestamp(), force);
+
+        // Update our understanding of the oldest available snapshot timestamp.
+        setOldestTimestampMetric(_storage->getOldestTimestamp(getServiceContext()));
     }
 }
 
 void ReplicationCoordinatorImpl::finishRecoveryIfEligible(OperationContext* opCtx) {
+    // It doesn't make sense to become a secondary before _initAndListen
+    // finishes. Perhaps more importantly, we need to take the Global lock
+    // several times in _initAndListen, and we don't want to reacquire (and not
+    // yield) the Global lock below if we race with taking the Global lock in
+    // _initAndListen.
+    LOGV2(
+        6295104,
+        "Starting ReplicationCoordinatorImpl::finishRecoveryIfEligible after startup completes...");
+    opCtx->getServiceContext()->waitForStartupComplete();
+    LOGV2(6295105, "Starting ReplicationCoordinatorImpl::finishRecoveryIfEligible");
     if (MONGO_unlikely(hangBeforeFinishRecovery.shouldFail())) {
         hangBeforeFinishRecovery.pauseWhileSet(opCtx);
     }
@@ -5345,8 +5344,12 @@ void ReplicationCoordinatorImpl::prepareReplMetadata(const GenericArguments& gen
         invariantStatusOK(oplogQueryMetadata->writeToMetadata(builder));
 }
 
-void ReplicationCoordinatorImpl::setOldestTimestamp(const Timestamp& timestamp) {
+void ReplicationCoordinatorImpl::setOldestTimestampMetric(const Timestamp& timestamp) {
     oldestTimestampMetric = timestamp;
+}
+
+void ReplicationCoordinatorImpl::setOldestTimestamp(const Timestamp& timestamp) {
+    setOldestTimestampMetric(timestamp);
     return ReplicationCoordinator::setOldestTimestamp(timestamp);
 }
 

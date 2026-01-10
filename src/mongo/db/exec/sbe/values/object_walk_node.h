@@ -30,10 +30,11 @@
 #pragma once
 
 #include "mongo/db/exec/sbe/values/block_interface.h"
-#include "mongo/db/exec/sbe/values/bson.h"
-#include "mongo/db/exec/sbe/values/cell_interface.h"
+#include "mongo/db/exec/sbe/values/path_request.h"
+#include "mongo/db/exec/sbe/values/slot.h"
 #include "mongo/db/exec/sbe/values/util.h"
 #include "mongo/db/exec/sbe/values/value.h"
+#include "mongo/util/modules.h"
 
 namespace mongo::sbe::value {
 
@@ -171,6 +172,13 @@ struct ObjectWalkNode {
              FilterPositionInfoRecorder* filterRecorder,
              ProjectionRecorder* outProjBlockRecorder,
              size_t pathIdx = 0);
+
+    void addAccessorAtPath(value::SlotAccessor* inputAccessor,
+                           const Path& path,
+                           size_t pathIdx = 0);
+
+    // Non-null if and only if this node has a source slot.
+    value::SlotAccessor* inputAccessor = nullptr;
 };
 
 template <class ProjectionRecorder>
@@ -213,6 +221,32 @@ void ObjectWalkNode<ProjectionRecorder>::add(const Path& path,
     }
 }
 
+template <class ProjectionRecorder>
+void ObjectWalkNode<ProjectionRecorder>::addAccessorAtPath(value::SlotAccessor* outInputAccessor,
+                                                           const Path& path,
+                                                           size_t pathIdx /*= 0*/) {
+    if (pathIdx == 0) {
+        // Check some invariants about the path.
+        tassert(11163706, "Cannot be given empty path", !path.empty());
+        tassert(11163707, "Path must end with Id", holds_alternative<Id>(path.back()));
+    }
+
+    if (holds_alternative<Get>(path[pathIdx])) {
+        auto& get = std::get<Get>(path[pathIdx]);
+        if (auto it = getChildren.find(get.field); it != getChildren.end()) {
+            it->second->addAccessorAtPath(outInputAccessor, path, pathIdx + 1);
+        }
+    } else if (holds_alternative<Traverse>(path[pathIdx])) {
+        tassert(11163703, "expected nonzero pathIdx", pathIdx != 0);
+        if (traverseChild) {
+            traverseChild->addAccessorAtPath(outInputAccessor, path, pathIdx + 1);
+        }
+    } else if (holds_alternative<Id>(path[pathIdx])) {
+        tassert(11163702, "Id must be at end of path", pathIdx == path.size() - 1);
+        inputAccessor = outInputAccessor;
+    }
+}
+
 template <class ProjectionRecorder, class Cb>
 requires std::invocable<Cb&, ObjectWalkNode<ProjectionRecorder>*, TypeTags, Value, const char*>
 void walkField(ObjectWalkNode<ProjectionRecorder>* node,
@@ -223,27 +257,42 @@ void walkField(ObjectWalkNode<ProjectionRecorder>* node,
 
 template <class ProjectionRecorder, class Cb>
 requires std::invocable<Cb&, ObjectWalkNode<ProjectionRecorder>*, TypeTags, Value, const char*>
-void walkObj(ObjectWalkNode<ProjectionRecorder>* node,
-             value::TypeTags inputTag,
-             value::Value inputVal,
-             const char* bsonPtr,
-             const Cb& cb) {
+void walkBsonObj(ObjectWalkNode<ProjectionRecorder>* node,
+                 value::Value inputVal,
+                 const char* bsonPtr,
+                 const Cb& cb) {
     size_t numChildrenWalked = 0;
-    auto callback = [&](StringData currFieldName,
-                        value::TypeTags tag,
-                        value::Value val,
-                        const char* cur) -> bool {
-        if (numChildrenWalked >= node->getChildren.size()) {
-            // Early exit because we've walked every child for this node.
-            return true;
-        }
-        if (auto it = node->getChildren.find(currFieldName); it != node->getChildren.end()) {
-            walkField<ProjectionRecorder, Cb>(it->second.get(), tag, val, cur, cb);
+    auto bson = value::getRawPointerView(inputVal);
+    const auto end = bson::bsonEnd(bson);
+
+    // Skip document length.
+    const char* be = bson + 4;
+    while (numChildrenWalked < node->getChildren.size() && be != end - 1) {
+        auto fieldName = bson::fieldNameAndLength(be);
+        if (auto it = node->getChildren.find(fieldName); it != node->getChildren.end()) {
+            auto [eltTag, eltVal] = bson::convertFrom<true>(be, end, fieldName.size());
+            walkField<ProjectionRecorder>(it->second.get(), eltTag, eltVal, be, cb);
             numChildrenWalked++;
         }
-        return false;
-    };
-    value::objectForEach(inputTag, inputVal, callback);
+        be = bson::advance(be, fieldName.size());
+    }
+}
+
+template <class ProjectionRecorder, class Cb>
+void walkObject(ObjectWalkNode<ProjectionRecorder>* node, value::Value inputVal, const Cb& cb) {
+    size_t numChildrenWalked = 0;
+    auto obj = getObjectView(inputVal);
+
+    size_t i = 0;
+    while (numChildrenWalked < node->getChildren.size() && i < obj->size()) {
+        if (auto it = node->getChildren.find(obj->field(i)); it != node->getChildren.end()) {
+            auto [eltTag, eltVal] = obj->getAt(i);
+            walkField<ProjectionRecorder>(
+                it->second.get(), eltTag, eltVal, nullptr /*bsonPtr*/, cb);
+            numChildrenWalked++;
+        }
+        i++;
+    }
 }
 
 template <class ProjectionRecorder, class Cb>
@@ -253,13 +302,12 @@ void walkField(ObjectWalkNode<ProjectionRecorder>* node,
                Value eltVal,
                const char* bsonPtr,
                const Cb& cb) {
-    if (value::isObject(eltTag)) {
-        walkObj<ProjectionRecorder, Cb>(node, eltTag, eltVal, bsonPtr, cb);
-        if (node->traverseChild) {
-            walkField<ProjectionRecorder, Cb>(
-                node->traverseChild.get(), eltTag, eltVal, bsonPtr, cb);
-        }
-    } else if (value::isArray(eltTag)) {
+    if (value::TypeTags::bsonObject == eltTag) {
+        walkBsonObj<ProjectionRecorder, Cb>(node, eltVal, bsonPtr, cb);
+    } else if (value::TypeTags::Object == eltTag) {
+        walkObject<ProjectionRecorder, Cb>(node, eltVal, cb);
+    }
+    if (value::isArray(eltTag)) {
         if (node->traverseChild) {
             // The projection traversal semantics are "special" in that the leaf must know
             // when there is an array higher up in the tree.
@@ -288,7 +336,7 @@ void walkField(ObjectWalkNode<ProjectionRecorder>* node,
             }
         }
     } else if (node->traverseChild) {
-        // We didn't see an array, so we apply the node below the traverse to this scalar.
+        // We didn't see an array, so we apply the node below the traverse.
         walkField<ProjectionRecorder>(node->traverseChild.get(), eltTag, eltVal, bsonPtr, cb);
     }
     // Some callbacks use the raw bson pointer, not just the tag and value.

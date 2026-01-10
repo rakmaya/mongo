@@ -55,6 +55,7 @@ export const commandsAddedToMongodSinceLastLTS = [
     "_shardsvrRenameIndexMetadata",
     "getTrafficRecordingStatus",
     "_shardsvrReshardRecipientClone",
+    "_shardsvrReshardRecipientCriticalSectionStarted",
     "_shardsvrResolveView",
     "_configsvrStartShardDraining",
     "_shardsvrDropIndexesParticipant",
@@ -63,4 +64,6 @@ export const commandsAddedToMongodSinceLastLTS = [
     "_shardsvrMergeChunks",
     "_configsvrCommitShardRemoval",
     "testCommandFeatureFlaggedOnLatestFCV83",
+    "_shardsvrRecreateRangeDeletionTasks",
+    "_shardsvrRecreateRangeDeletionTasksParticipant",
 ];

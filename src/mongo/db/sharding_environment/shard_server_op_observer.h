@@ -30,8 +30,6 @@
 #pragma once
 
 #include "mongo/bson/bsonobj.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_options.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/op_observer/op_observer_noop.h"
@@ -39,6 +37,9 @@
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/session/logical_session_id.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_options.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/uuid.h"
 
 #include <cstdint>
@@ -53,7 +54,7 @@ namespace mongo {
  * OpObserver which is installed on the op observers chain when the server is running as a shard
  * server (--shardsvr).
  */
-class ShardServerOpObserver final : public OpObserverNoop {
+class MONGO_MOD_NEEDS_REPLACEMENT ShardServerOpObserver final : public OpObserverNoop {
     ShardServerOpObserver(const ShardServerOpObserver&) = delete;
     ShardServerOpObserver& operator=(const ShardServerOpObserver&) = delete;
 

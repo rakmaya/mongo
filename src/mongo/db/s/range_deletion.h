@@ -32,6 +32,7 @@
 #include "mongo/db/global_catalog/type_chunk_range.h"
 #include "mongo/db/s/range_deletion_task_gen.h"
 #include "mongo/util/future.h"
+#include "mongo/util/modules.h"
 
 namespace mongo {
 
@@ -49,6 +50,8 @@ public:
 
     const ChunkRange& getRange() const;
 
+    const Timestamp& getRegistrationTime() const;
+
     SharedSemiFuture<void> getPendingFuture();
 
     void clearPending();
@@ -60,6 +63,7 @@ public:
 private:
     UUID _taskId;
     ChunkRange _range;
+    Timestamp _registrationTime;
 
     // Marked ready once the range deletion has been fully processed
     SharedPromise<void> _completionPromise;

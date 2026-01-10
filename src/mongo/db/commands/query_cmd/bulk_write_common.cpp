@@ -45,8 +45,8 @@
 #include "mongo/db/query/write_ops/delete_request_gen.h"
 #include "mongo/db/query/write_ops/update_request.h"
 #include "mongo/db/query/write_ops/write_ops.h"
-#include "mongo/db/raw_data_operation.h"
 #include "mongo/db/repl/oplog.h"
+#include "mongo/db/shard_role/shard_catalog/raw_data_operation.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
@@ -206,46 +206,6 @@ write_ops::UpdateOpEntry makeUpdateOpEntryFromUpdateOp(const BulkWriteUpdateOp* 
     update.setAllowShardKeyUpdatesWithoutFullShardKeyInQuery(
         op->getAllowShardKeyUpdatesWithoutFullShardKeyInQuery());
     return update;
-}
-
-BulkWriteUpdateOp toBulkWriteUpdate(const write_ops::UpdateOpEntry& op) {
-    // TODO SERVER-107545: Move this check to parse time and potentially convert this to a tassert.
-    uassert(ErrorCodes::FailedToParse,
-            "Cannot specify sort with multi=true",
-            !op.getSort() || !op.getMulti());
-
-    BulkWriteUpdateOp update;
-
-    // Set 'nsInfoIdx' to 0, as there is only one namespace in a regular update.
-    update.setNsInfoIdx(0);
-    update.setFilter(op.getQ());
-    update.setMulti(op.getMulti());
-    update.setConstants(op.getC());
-    update.setUpdateMods(op.getU());
-    update.setSort(op.getSort());
-    update.setHint(op.getHint());
-    update.setCollation(op.getCollation());
-    update.setArrayFilters(op.getArrayFilters());
-    update.setUpsert(op.getUpsert());
-    update.setUpsertSupplied(op.getUpsertSupplied());
-    update.setSampleId(op.getSampleId());
-    update.setAllowShardKeyUpdatesWithoutFullShardKeyInQuery(
-        op.getAllowShardKeyUpdatesWithoutFullShardKeyInQuery());
-    return update;
-}
-
-BulkWriteDeleteOp toBulkWriteDelete(const write_ops::DeleteOpEntry& op) {
-    BulkWriteDeleteOp deleteOp;
-
-    // Set 'nsInfoIdx' to 0, as there is only one namespace in a regular delete.
-    deleteOp.setNsInfoIdx(0);
-    if (op.getCollation()) {
-        deleteOp.setCollation(op.getCollation());
-    }
-    deleteOp.setHint(op.getHint());
-    deleteOp.setMulti(op.getMulti());
-    deleteOp.setFilter(op.getQ());
-    return deleteOp;
 }
 
 UpdateRequest makeUpdateRequestFromUpdateOp(OperationContext* opCtx,

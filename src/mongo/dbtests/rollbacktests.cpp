@@ -33,27 +33,27 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/client.h"
-#include "mongo/db/collection_crud/collection_write_path.h"
 #include "mongo/db/curop.h"
+#include "mongo/db/dbhelpers.h"
 #include "mongo/db/index/index_access_method.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_catalog.h"
-#include "mongo/db/local_catalog/collection_options.h"
-#include "mongo/db/local_catalog/database.h"
-#include "mongo/db/local_catalog/database_holder.h"
-#include "mongo/db/local_catalog/db_raii.h"
-#include "mongo/db/local_catalog/drop_collection.h"
-#include "mongo/db/local_catalog/index_catalog.h"
-#include "mongo/db/local_catalog/index_catalog_entry.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
-#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/rename_collection.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/lock_manager/d_concurrency.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/collection_options.h"
+#include "mongo/db/shard_role/shard_catalog/database.h"
+#include "mongo/db/shard_role/shard_catalog/database_holder.h"
+#include "mongo/db/shard_role/shard_catalog/db_raii.h"
+#include "mongo/db/shard_role/shard_catalog/drop_collection.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog_entry.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
+#include "mongo/db/shard_role/shard_catalog/rename_collection.h"
 #include "mongo/db/storage/key_string/key_string.h"
 #include "mongo/db/storage/record_data.h"
 #include "mongo/db/storage/record_store.h"
@@ -134,13 +134,8 @@ Status truncateCollection(OperationContext* opCtx, const NamespaceString& nss) {
 
 void insertRecord(OperationContext* opCtx, const NamespaceString& nss, const BSONObj& data) {
     auto coll = CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, nss);
-    OpDebug* const nullOpDebug = nullptr;
     // TODO(SERVER-103411): Investigate usage validity of CollectionPtr::CollectionPtr_UNSAFE
-    ASSERT_OK(collection_internal::insertDocument(opCtx,
-                                                  CollectionPtr::CollectionPtr_UNSAFE(coll),
-                                                  InsertStatement(data),
-                                                  nullOpDebug,
-                                                  false));
+    ASSERT_OK(Helpers::insert(opCtx, CollectionPtr::CollectionPtr_UNSAFE(coll), data));
 }
 
 void assertOnlyRecord(OperationContext* opCtx, const NamespaceString& nss, const BSONObj& data) {
@@ -181,10 +176,10 @@ size_t getNumIndexEntries(OperationContext* opCtx,
 
     auto coll = CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, nss);
     const IndexCatalog* catalog = coll->getIndexCatalog();
-    auto desc = catalog->findIndexByName(opCtx, idxName, IndexCatalog::InclusionPolicy::kReady);
+    auto entry = catalog->findIndexByName(opCtx, idxName, IndexCatalog::InclusionPolicy::kReady);
 
-    if (desc) {
-        auto iam = catalog->getEntry(desc)->accessMethod()->asSortedData();
+    if (entry) {
+        auto iam = entry->accessMethod()->asSortedData();
         auto& ru = *shard_role_details::getRecoveryUnit(opCtx);
         auto cursor = iam->newCursor(opCtx, ru);
         for (auto kv = cursor->next(ru); kv; kv = cursor->next(ru)) {

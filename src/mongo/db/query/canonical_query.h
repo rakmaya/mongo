@@ -46,6 +46,7 @@
 #include "mongo/db/query/parsed_find_command.h"
 #include "mongo/db/query/query_request_helper.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
 
 #include <memory>
 #include <string>
@@ -60,7 +61,7 @@ namespace mongo {
 
 class OperationContext;
 
-struct CanonicalQueryParams {
+struct MONGO_MOD_NEEDS_REPLACEMENT CanonicalQueryParams {
     boost::intrusive_ptr<ExpressionContext> expCtx;
     std::variant<std::unique_ptr<ParsedFindCommand>, ParsedFindCommandParams> parsedFind;
     std::vector<boost::intrusive_ptr<DocumentSource>> pipeline = {};
@@ -68,7 +69,7 @@ struct CanonicalQueryParams {
     bool isSearchQuery = false;
 };
 
-class CanonicalQuery {
+class MONGO_MOD_NEEDS_REPLACEMENT CanonicalQuery {
 public:
     // A type that encodes the notion of query shape suitable for use with the plan cache. Encodes
     // the query's match, projection, sort, etc. potentially with some constants removed or replaced
@@ -110,7 +111,9 @@ public:
     static Status isValidNormalized(const MatchExpression* root);
 
     const NamespaceString& nss() const {
-        invariant(_findCommand->getNamespaceOrUUID().isNamespaceString());
+        tassert(11320903,
+                "cannot call nss() on a UUID NamespaceStringOrUUID",
+                _findCommand->getNamespaceOrUUID().isNamespaceString());
         return _findCommand->getNamespaceOrUUID().nss();
     }
 
@@ -224,7 +227,7 @@ public:
     }
 
     boost::optional<ExplainOptions::Verbosity> getExplain() const {
-        invariant(_expCtx);
+        tassert(11320904, "_expCtx must not be null", _expCtx);
         return _expCtx->getExplain();
     }
 

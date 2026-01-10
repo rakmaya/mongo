@@ -28,14 +28,14 @@
  */
 #include "mongo/db/change_stream_pre_images_tenant_truncate_markers.h"
 
-#include "mongo/db/admission/execution_admission_context.h"
+#include "mongo/db/admission/execution_control/execution_admission_context.h"
 #include "mongo/db/change_stream_pre_image_util.h"
 #include "mongo/db/change_stream_pre_images_truncate_markers_per_nsUUID.h"
 #include "mongo/db/collection_crud/collection_write_path.h"
-#include "mongo/db/local_catalog/lock_manager/exception_util.h"
-#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/internal_plans.h"
+#include "mongo/db/shard_role/lock_manager/exception_util.h"
+#include "mongo/db/shard_role/shard_role.h"
 #include "mongo/db/storage/collection_truncate_markers.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/util/concurrent_shared_values_map.h"
@@ -53,7 +53,7 @@ auto acquirePreImagesCollectionForRead(OperationContext* opCtx, const UUID& uuid
         opCtx,
         CollectionAcquisitionRequest(
             NamespaceStringOrUUID{NamespaceString::kChangeStreamPreImagesNamespace.dbName(), uuid},
-            PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+            PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
             repl::ReadConcernArgs::get(opCtx),
             AcquisitionPrerequisites::kRead),
         MODE_IS);
@@ -63,7 +63,7 @@ auto acquirePreImagesCollectionForWrite(OperationContext* opCtx, const UUID& uui
         opCtx,
         CollectionAcquisitionRequest(
             NamespaceStringOrUUID{NamespaceString::kChangeStreamPreImagesNamespace.dbName(), uuid},
-            PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+            PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
             repl::ReadConcernArgs::get(opCtx),
             AcquisitionPrerequisites::kUnreplicatedWrite),
         MODE_IX);

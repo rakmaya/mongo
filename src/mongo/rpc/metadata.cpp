@@ -42,10 +42,10 @@
 #include "mongo/db/dbmessage.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/util/deferred.h"
-#include "mongo/db/raw_data_operation.h"
+#include "mongo/db/shard_role/shard_catalog/raw_data_operation.h"
 #include "mongo/db/tenant_id.h"
-#include "mongo/db/user_write_block/write_block_bypass.h"
-#include "mongo/db/vector_clock/vector_clock.h"
+#include "mongo/db/topology/user_write_block/write_block_bypass.h"
+#include "mongo/db/topology/vector_clock/vector_clock.h"
 #include "mongo/rpc/metadata/audit_metadata.h"
 #include "mongo/rpc/metadata/audit_user_attrs.h"
 #include "mongo/rpc/metadata/client_metadata.h"
@@ -118,7 +118,17 @@ void readPrivilegedRequestMetadata(OperationContext* opCtx, const GenericArgumen
             !requestArgs.getVersionContext() || hasInternalAuthorization());
     if (requestArgs.getVersionContext()) {
         ClientLock lg(opCtx->getClient());
-        VersionContext::setFromMetadata(lg, opCtx, *requestArgs.getVersionContext());
+        // Enable a versionContext we received through a network request to transitively propagate
+        // to other shards as part of network commands. This is safe because the original operation
+        // that enabled propagation must be durable, subject to draining by setFCV, and retry until
+        // all cluster-wide work it dispatches is done. So if _this_ operation starts propagating
+        // versionContext in a sub-command and is then killed (ostensibly leaving a versionContext
+        // in-flight that setFCV won't wait for), the draining by cluster-wide setFCV still waits
+        // for the original operation, which has to keep retrying until it completes all work.
+        // Once the work is done, any replayed commands become a no-op (or e.g. rejected via replay
+        // protection), so they do no harm even if they are admitted with an stale versionContext.
+        VersionContext::setFromMetadata(
+            lg, opCtx, requestArgs.getVersionContext()->withPropagationAcrossShards_UNSAFE());
     }
 }
 }  // namespace
@@ -131,16 +141,6 @@ void readRequestMetadata(OperationContext* opCtx,
 
     if (auto& rp = requestArgs.getReadPreference()) {
         ReadPreferenceSetting::get(opCtx) = *rp;
-    }
-
-    if (opCtx->routedByReplicaSetEndpoint()) {
-        ReadPreferenceSetting::get(opCtx).isPretargeted = true;
-    } else if (ReadPreferenceSetting::get(opCtx).isPretargeted) {
-        // '$_isPretargeted' is used exclusively by the replica set endpoint to mark commands
-        // that it forces to go through the router as needing to target the local mongod.
-        // Given that this request has been marked as pre-targeted, it must have originated from
-        // a request routed by the replica set endpoint. Mark the opCtx with this info.
-        opCtx->setRoutedByReplicaSetEndpoint(true);
     }
 
     setAuditMetadata(opCtx, requestArgs.getDollarAudit(), clientSessionGuard);

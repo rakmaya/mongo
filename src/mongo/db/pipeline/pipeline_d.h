@@ -35,9 +35,7 @@
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/exec/agg/exec_pipeline.h"
 #include "mongo/db/exec/document_value/document_metadata_fields.h"
-#include "mongo/db/exec/exec_shard_filter_policy.h"
 #include "mongo/db/exec/timeseries/bucket_unpacker.h"
-#include "mongo/db/local_catalog/collection.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/pipeline/document_source_cursor.h"
@@ -56,6 +54,7 @@
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/query_planner.h"
 #include "mongo/db/query/query_planner_params.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
 #include "mongo/util/modules.h"
 
 #include <functional>
@@ -130,8 +129,7 @@ public:
         const MultipleCollectionAccessor& collections,
         const NamespaceString& nss,
         const AggregateCommandRequest* aggRequest,
-        Pipeline* pipeline,
-        ExecShardFilterPolicy shardFilterPolicy = AutomaticShardFiltering{});
+        Pipeline* pipeline);
 
     /**
      * Completes creation of the $cursor stage using the given callback pair obtained by calling
@@ -163,8 +161,7 @@ public:
         const NamespaceString& nss,
         const AggregateCommandRequest* aggRequest,
         Pipeline* pipeline,
-        const boost::intrusive_ptr<CatalogResourceHandle>& catalogResourceHandle,
-        ExecShardFilterPolicy shardFilterPolicy = AutomaticShardFiltering{});
+        const boost::intrusive_ptr<CatalogResourceHandle>& catalogResourceHandle);
 
     static Timestamp getLatestOplogTimestamp(const exec::agg::Pipeline* pipeline);
 
@@ -189,8 +186,7 @@ private:
         const MultipleCollectionAccessor& collections,
         const NamespaceString& nss,
         const AggregateCommandRequest* aggRequest,
-        Pipeline* pipeline,
-        ExecShardFilterPolicy shardFilterPolicy = AutomaticShardFiltering{});
+        Pipeline* pipeline);
 
     /**
      * Helper to perform bounded sort optimization rewrites on time-series collections. The rewrite

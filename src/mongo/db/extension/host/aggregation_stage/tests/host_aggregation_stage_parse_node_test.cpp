@@ -52,7 +52,7 @@ public:
         MONGO_UNIMPLEMENTED;
     }
 
-    std::vector<sdk::VariantNode> expand() const override {
+    std::vector<VariantNodeHandle> expand() const override {
         MONGO_UNIMPLEMENTED;
     }
 
@@ -60,24 +60,13 @@ public:
         MONGO_UNIMPLEMENTED;
     }
 
+    std::unique_ptr<sdk::AggStageParseNode> clone() const override {
+        return std::make_unique<NoOpExtensionParseNode>();
+    }
+
     static inline std::unique_ptr<sdk::AggStageParseNode> make() {
         return std::make_unique<NoOpExtensionParseNode>();
     }
-};
-
-class HostParseNodeVTableTest : public unittest::Test {
-public:
-    // This special handle class is only used within this fixture so that we can unit test the
-    // assertVTableConstraints functionality of the handle.
-    class TestHostParseNodeVTableHandle : public AggStageParseNodeHandle {
-    public:
-        TestHostParseNodeVTableHandle(absl::Nonnull<::MongoExtensionAggStageParseNode*> parseNode)
-            : AggStageParseNodeHandle(parseNode) {};
-
-        void assertVTableConstraints(const VTable_t& vtable) {
-            _assertVTableConstraints(vtable);
-        }
-    };
 };
 
 TEST(HostParseNodeTest, GetSpec) {
@@ -109,68 +98,150 @@ TEST(HostParseNodeTest, IsNotHostAllocated) {
     ASSERT_FALSE(host::HostAggStageParseNode::isHostAllocated(*handle.get()));
 }
 
-DEATH_TEST_F(HostParseNodeVTableTest, InvalidParseNodeVTableFailsGetName, "11217600") {
+DEATH_TEST(HostParseNodeVTableTestDeathTest, InvalidParseNodeVTableFailsGetName, "11217600") {
     auto noOpParseNode = std::make_unique<host::HostAggStageParseNode>(NoOpHostParseNode::make({}));
-    auto handle = TestHostParseNodeVTableHandle{noOpParseNode.release()};
+    auto handle = AggStageParseNodeHandle{noOpParseNode.release()};
 
-    auto vtable = handle.vtable();
+    auto vtable = handle->vtable();
     vtable.get_name = nullptr;
-    handle.assertVTableConstraints(vtable);
+    AggStageParseNodeAPI::assertVTableConstraints(vtable);
 };
 
-DEATH_TEST_F(HostParseNodeVTableTest, InvalidParseNodeVTableFailsGetQueryShape, "10977600") {
+DEATH_TEST(HostParseNodeVTableTestDeathTest, InvalidParseNodeVTableFailsGetQueryShape, "10977600") {
     auto noOpParseNode = new host::HostAggStageParseNode(NoOpHostParseNode::make({}));
-    auto handle = TestHostParseNodeVTableHandle{noOpParseNode};
+    auto handle = AggStageParseNodeHandle{noOpParseNode};
 
-    auto vtable = handle.vtable();
+    auto vtable = handle->vtable();
     vtable.get_query_shape = nullptr;
-    handle.assertVTableConstraints(vtable);
+    AggStageParseNodeAPI::assertVTableConstraints(vtable);
 };
 
-DEATH_TEST_F(HostParseNodeVTableTest, InvalidParseNodeVTableFailsGetExpandedSize, "11113800") {
+DEATH_TEST(HostParseNodeVTableTestDeathTest,
+           InvalidParseNodeVTableFailsGetExpandedSize,
+           "11113800") {
     auto noOpParseNode = new host::HostAggStageParseNode(NoOpHostParseNode::make({}));
-    auto handle = TestHostParseNodeVTableHandle{noOpParseNode};
+    auto handle = AggStageParseNodeHandle{noOpParseNode};
 
-    auto vtable = handle.vtable();
+    auto vtable = handle->vtable();
     vtable.get_expanded_size = nullptr;
-    handle.assertVTableConstraints(vtable);
+    AggStageParseNodeAPI::assertVTableConstraints(vtable);
 };
 
-DEATH_TEST_F(HostParseNodeVTableTest, InvalidParseNodeVTableFailsExpand, "10977601") {
+DEATH_TEST(HostParseNodeVTableTestDeathTest, InvalidParseNodeVTableFailsExpand, "10977601") {
     auto noOpParseNode = new host::HostAggStageParseNode(NoOpHostParseNode::make({}));
-    auto handle = TestHostParseNodeVTableHandle{noOpParseNode};
+    auto handle = AggStageParseNodeHandle{noOpParseNode};
 
-    auto vtable = handle.vtable();
+    auto vtable = handle->vtable();
     vtable.expand = nullptr;
-    handle.assertVTableConstraints(vtable);
+    AggStageParseNodeAPI::assertVTableConstraints(vtable);
 };
 
-DEATH_TEST(HostParseNodeTest, HostGetQueryShapeUnimplemented, "10977800") {
+DEATH_TEST(HostParseNodeTestDeathTest, HostGetQueryShapeUnimplemented, "10977800") {
     auto noOpParseNode = new host::HostAggStageParseNode(NoOpHostParseNode::make({}));
     auto handle = AggStageParseNodeHandle{noOpParseNode};
 
     ::MongoExtensionByteBuf* shape = {};
-    handle.vtable().get_query_shape(noOpParseNode, nullptr, &shape);
+    handle->vtable().get_query_shape(noOpParseNode, nullptr, &shape);
 }
 
-DEATH_TEST(HostParseNodeTest, HostGetExpandedSizeUnimplemented, "11113803") {
+DEATH_TEST(HostParseNodeTestDeathTest, HostGetExpandedSizeUnimplemented, "11113803") {
     auto noOpParseNode = new host::HostAggStageParseNode(NoOpHostParseNode::make({}));
     auto handle = AggStageParseNodeHandle{noOpParseNode};
 
-    ASSERT_EQ(handle.vtable().get_expanded_size(noOpParseNode), 0);
+    ASSERT_EQ(handle->vtable().get_expanded_size(noOpParseNode), 0);
 
     // get_expanded_size cannot tassert because the return type is size_t, but the host
     // implementation of get_expanded_size still correctly fails because this expand call checks
     // that the return value of get_expanded_size is > 0.
-    [[maybe_unused]] auto expanded = handle.expand();
+    [[maybe_unused]] auto expanded = handle->expand();
 }
 
-DEATH_TEST(HostParseNodeTest, HostExpandUnimplemented, "10977801") {
+DEATH_TEST(HostParseNodeTestDeathTest, HostExpandUnimplemented, "10977801") {
     auto noOpParseNode = new host::HostAggStageParseNode(NoOpHostParseNode::make({}));
     auto handle = AggStageParseNodeHandle{noOpParseNode};
 
     ::MongoExtensionExpandedArray expanded = {};
-    handle.vtable().expand(noOpParseNode, &expanded);
+    handle->vtable().expand(noOpParseNode, &expanded);
 }
+
+TEST(HostParseNodeCloneTest, CloneHostAllocatedParseNodePreservesSpec) {
+    auto spec = BSON("$match" << BSON("x" << 1));
+
+    auto parseNode = new host::HostAggStageParseNode(NoOpHostParseNode::make(spec));
+    auto handle = AggStageParseNodeHandle{parseNode};
+
+    // Clone the parse node.
+    auto clonedHandle = handle->clone();
+
+    // Verify the clone has the same spec and name.
+    ASSERT_TRUE(host::HostAggStageParseNode::isHostAllocated(*clonedHandle.get()));
+    ASSERT_TRUE(static_cast<host::HostAggStageParseNode*>(clonedHandle.get())
+                    ->getBsonSpec()
+                    .binaryEqual(spec));
+    ASSERT_EQ(handle->getName(), clonedHandle->getName());
+}
+
+TEST(HostParseNodeCloneTest, CloneHostAllocatedParseNodeIsIndependent) {
+    auto spec = BSON("$skip" << 5);
+
+    auto parseNode = new host::HostAggStageParseNode(NoOpHostParseNode::make(spec));
+    auto handle = AggStageParseNodeHandle{parseNode};
+
+    // Clone the parse node.
+    auto clonedHandle = handle->clone();
+
+    // Verify they are different objects (different pointers).
+    ASSERT_NE(handle.get(), clonedHandle.get());
+
+    // Both should be valid handles.
+    ASSERT_TRUE(handle.isValid());
+    ASSERT_TRUE(clonedHandle.isValid());
+}
+
+TEST(HostParseNodeCloneTest, ClonedParseNodeSurvivesOriginalDestruction) {
+    auto spec = BSON("$project" << BSON("_id" << 0));
+    AggStageParseNodeHandle clonedHandle{nullptr};
+
+    {
+        auto parseNode = new host::HostAggStageParseNode(NoOpHostParseNode::make(spec));
+        auto handle = AggStageParseNodeHandle{parseNode};
+
+        // Clone before original goes out of scope.
+        clonedHandle = handle->clone();
+    }
+
+    // Cloned handle should still be valid and contain the correct spec.
+    ASSERT_TRUE(clonedHandle.isValid());
+    ASSERT_TRUE(host::HostAggStageParseNode::isHostAllocated(*clonedHandle.get()));
+    ASSERT_TRUE(static_cast<host::HostAggStageParseNode*>(clonedHandle.get())
+                    ->getBsonSpec()
+                    .binaryEqual(spec));
+}
+
+TEST(HostParseNodeCloneTest, MultipleCloneAreIndependent) {
+    auto spec = BSON("$match" << BSON("x" << 1));
+
+    auto parseNode = new host::HostAggStageParseNode(NoOpHostParseNode::make(spec));
+    auto handle = AggStageParseNodeHandle{parseNode};
+
+    // Create multiple clones.
+    auto clone1 = handle->clone();
+    auto clone2 = handle->clone();
+    auto clone3 = clone1->clone();
+
+    // All four should be different objects.
+    ASSERT_NE(handle.get(), clone1.get());
+    ASSERT_NE(handle.get(), clone2.get());
+    ASSERT_NE(handle.get(), clone3.get());
+    ASSERT_NE(clone1.get(), clone2.get());
+    ASSERT_NE(clone1.get(), clone3.get());
+    ASSERT_NE(clone2.get(), clone3.get());
+
+    // All should have same name.
+    ASSERT_EQ(handle->getName(), clone1->getName());
+    ASSERT_EQ(handle->getName(), clone2->getName());
+    ASSERT_EQ(handle->getName(), clone3->getName());
+}
+
 }  // namespace
 }  // namespace mongo::extension

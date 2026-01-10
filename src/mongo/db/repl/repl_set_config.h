@@ -343,6 +343,13 @@ public:
     };
 
     /**
+     * Returns a count of members with a maintenance port specified in this ReplSetConfig.
+     */
+    int getCountOfMembersWithMaintenancePort() const {
+        return _maintenancePortCount;
+    };
+
+    /**
      * Access a MemberConfig element by index.
      */
     const MemberConfig& getMemberAt(size_t i) const;
@@ -356,14 +363,24 @@ public:
     /**
      * Returns a pointer to the MemberConfig corresponding to the member with the given
      * HostAndPort in the config, or NULL if there is no member with that address.
+     *
+     * If `strict` is true then will only return a matching index if `hap` matches
+     * getHostAndPortMaintenance() for a member in the configuration. If this parameter is false,
+     * then will return a matching index if `hap` matches either getHostAndPortMaintenance or
+     * getHostAndPort for a member.
      */
-    const MemberConfig* findMemberByHostAndPort(const HostAndPort& hap) const;
+    const MemberConfig* findMemberByHostAndPort(const HostAndPort& hap, bool strict = false) const;
 
     /**
      * Returns a MemberConfig index position corresponding to the member with the given
      * HostAndPort in the config, or -1 if there is no member with that address.
+     *
+     * If `strict` is true then will only return a matching index if `hap` matches
+     * getHostAndPortMaintenance() for a member in the configuration. If this parameter is false,
+     * then will return a matching index if `hap` matches either getHostAndPortMaintenance or
+     * getHostAndPort for a member.
      */
-    int findMemberIndexByHostAndPort(const HostAndPort& hap) const;
+    int findMemberIndexByHostAndPort(const HostAndPort& hap, bool strict = false) const;
 
     /**
      * Gets the default write concern for the replica set described by this configuration.
@@ -617,6 +634,7 @@ private:
     int _writeMajority = 0;
     int _totalVotingMembers = 0;
     int _votingMemberCount = 0;
+    int _maintenancePortCount = 0;
     ReplSetTagConfig _tagConfig;
     StringMap<ReplSetTagPattern> _customWriteConcernModes;
     ConnectionString _connectionString;

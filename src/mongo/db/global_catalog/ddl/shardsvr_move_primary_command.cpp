@@ -36,7 +36,6 @@
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/feature_compatibility_version.h"
 #include "mongo/db/database_name.h"
-#include "mongo/db/global_catalog/catalog_cache/catalog_cache.h"
 #include "mongo/db/global_catalog/ddl/move_primary_coordinator.h"
 #include "mongo/db/global_catalog/ddl/move_primary_coordinator_document_gen.h"
 #include "mongo/db/global_catalog/ddl/move_primary_gen.h"
@@ -45,6 +44,7 @@
 #include "mongo/db/global_catalog/ddl/sharding_ddl_util.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/router_role/routing_cache/catalog_cache.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/sharding_environment/client/shard.h"
 #include "mongo/db/sharding_environment/grid.h"
@@ -100,9 +100,8 @@ public:
                 FixedFCVRegion fcvRegion(opCtx);
 
                 // The Operation FCV is currently propagated only for DDL operations,
-                // which cannot be nested. Therefore, the VersionContext shouldn't have
-                // been initialized yet.
-                invariant(!VersionContext::getDecoration(opCtx).isInitialized());
+                // which cannot be nested. Therefore, the VersionContext shouldn't have an OFCV yet.
+                invariant(!VersionContext::getDecoration(opCtx).hasOperationFCV());
                 const auto authoritativeMetadataAccessLevel =
                     sharding_ddl_util::getGrantedAuthoritativeMetadataAccessLevel(
                         VersionContext::getDecoration(opCtx), fcvRegion->acquireFCVSnapshot());

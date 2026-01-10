@@ -41,22 +41,22 @@
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/index_builds/commit_quorum_options.h"
 #include "mongo/db/index_builds/index_build_entry_gen.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_catalog.h"
-#include "mongo/db/local_catalog/collection_options.h"
-#include "mongo/db/local_catalog/database.h"
-#include "mongo/db/local_catalog/local_oplog_info.h"
-#include "mongo/db/local_catalog/lock_manager/exception_util.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/record_id.h"
+#include "mongo/db/repl/local_oplog_info.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/session/logical_session_id.h"
+#include "mongo/db/shard_role/lock_manager/exception_util.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/collection_options.h"
+#include "mongo/db/shard_role/shard_catalog/database.h"
+#include "mongo/db/shard_role/shard_role.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/storage/write_unit_of_work.h"
@@ -97,7 +97,7 @@ Status upsert(OperationContext* opCtx, const IndexBuildEntry& indexBuildEntry) {
                 acquireCollection(opCtx,
                                   CollectionAcquisitionRequest(
                                       NamespaceString::kIndexBuildEntryNamespace,
-                                      PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                      PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
                                       repl::ReadConcernArgs::get(opCtx),
                                       AcquisitionPrerequisites::kWrite),
                                   MODE_IX);
@@ -159,7 +159,7 @@ Status upsert(OperationContext* opCtx, const BSONObj& filter, const BSONObj& upd
                 acquireCollection(opCtx,
                                   CollectionAcquisitionRequest(
                                       NamespaceString::kIndexBuildEntryNamespace,
-                                      PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                      PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
                                       repl::ReadConcernArgs::get(opCtx),
                                       AcquisitionPrerequisites::kWrite),
                                   MODE_IX);
@@ -193,7 +193,7 @@ Status update(OperationContext* opCtx, const BSONObj& filter, const BSONObj& upd
                 acquireCollection(opCtx,
                                   CollectionAcquisitionRequest(
                                       NamespaceString::kIndexBuildEntryNamespace,
-                                      PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                      PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
                                       repl::ReadConcernArgs::get(opCtx),
                                       AcquisitionPrerequisites::kWrite),
                                   MODE_IX);
@@ -239,9 +239,7 @@ void ensureIndexBuildEntriesNamespaceExists(OperationContext* opCtx) {
                 AutoGetCollection autoColl(
                     opCtx, NamespaceString::kIndexBuildEntryNamespace, LockMode::MODE_IX);
                 CollectionOptions defaultCollectionOptions;
-                // TODO(SERVER-103400): Investigate usage validity of
-                // CollectionPtr::CollectionPtr_UNSAFE
-                CollectionPtr collection = CollectionPtr::CollectionPtr_UNSAFE(db->createCollection(
+                CollectionPtr collection(db->createCollection(
                     opCtx, NamespaceString::kIndexBuildEntryNamespace, defaultCollectionOptions));
 
                 // Ensure the collection exists.
@@ -279,7 +277,7 @@ Status addIndexBuildEntry(OperationContext* opCtx, const IndexBuildEntry& indexB
                 acquireCollection(opCtx,
                                   CollectionAcquisitionRequest(
                                       NamespaceString::kIndexBuildEntryNamespace,
-                                      PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                      PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
                                       repl::ReadConcernArgs::get(opCtx),
                                       AcquisitionPrerequisites::kWrite),
                                   MODE_IX);
@@ -357,7 +355,7 @@ StatusWith<IndexBuildEntry> getIndexBuildEntry(OperationContext* opCtx, UUID ind
     const auto indexBuildsCollection = acquireCollection(
         opCtx,
         CollectionAcquisitionRequest(NamespaceString::kIndexBuildEntryNamespace,
-                                     PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                     PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
                                      repl::ReadConcernArgs::get(opCtx),
                                      AcquisitionPrerequisites::kRead),
         MODE_IS);
@@ -409,7 +407,7 @@ StatusWith<CommitQuorumOptions> getCommitQuorum(OperationContext* opCtx, UUID in
     if (fcvSnapshot.isVersionInitialized() &&
         feature_flags::gFeatureFlagPrimaryDrivenIndexBuilds.isEnabled(
             VersionContext::getDecoration(opCtx), fcvSnapshot)) {
-        return CommitQuorumOptions(CommitQuorumOptions::kDisabled);
+        return CommitQuorumOptions(CommitQuorumOptions::kPrimarySelfVote);
     }
     StatusWith<IndexBuildEntry> status = getIndexBuildEntry(opCtx, indexBuildUUID);
     if (!status.isOK()) {

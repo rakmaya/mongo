@@ -38,6 +38,7 @@
 #include "mongo/rpc/metadata/audit_metadata.h"
 #include "mongo/s/write_ops/batched_command_request.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
 
 #include <utility>
 
@@ -61,9 +62,11 @@ namespace mongo::exec::agg {
  * Two other virtual methods exist which a subclass may override: 'initialize()' and 'finalize()',
  * which are called before the first element is read from the input source, and after the last one
  * has been read, respectively.
+ *
+ * TODO SERVER-112777: Remove 'atlas_streams' dependency on 'BatchObject'.
  */
 template <typename B>
-class WriterStage : public Stage {
+class MONGO_MOD_NEEDS_REPLACEMENT WriterStage : public Stage {
 
 public:
     using BatchObject = B;
@@ -138,7 +141,7 @@ protected:
                 bufferedBytes += objSize;
                 if (!batch.empty() &&
                     (bufferedBytes > maxBatchSizeBytes ||
-                     batch.size() >= write_ops::kMaxWriteBatchSize)) {
+                     batch.size() >= write_ops::kMaxWriteBatchSize || shouldFlush(batch.size()))) {
                     flush(std::move(batchWrite), std::move(batch));
                     batch.clear();
                     batchWrite = makeBatchedWriteRequest();
@@ -214,6 +217,10 @@ protected:
      * object size.
      */
     virtual std::pair<B, int> makeBatchObject(Document doc) const = 0;
+
+    virtual bool shouldFlush(size_t currentBatchSize) const {
+        return false;
+    }
 
     /**
      * A subclass may override this method to enable a fail point right after a next input element

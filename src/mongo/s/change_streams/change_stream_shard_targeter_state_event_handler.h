@@ -33,6 +33,7 @@
 #include "mongo/db/pipeline/change_stream_shard_targeter.h"
 #include "mongo/db/pipeline/historical_placement_fetcher.h"
 #include "mongo/s/change_streams/control_events.h"
+#include "mongo/util/modules.h"
 
 namespace mongo {
 
@@ -92,5 +93,10 @@ public:
         const ControlEvent& event,
         ChangeStreamShardTargeterStateEventHandlingContext& context,
         ChangeStreamReaderContext& readerContext) = 0;
+
+    /**
+     * Returns the name of the event handler.
+     */
+    virtual std::string toString() const = 0;
 };
 }  // namespace mongo

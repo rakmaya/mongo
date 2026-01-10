@@ -27,7 +27,7 @@
  *    it in the license file.
  */
 
-#include "document_source_query_settings.h"
+#include "mongo/db/pipeline/document_source_query_settings.h"
 
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/exec/document_value/document.h"
@@ -46,10 +46,14 @@ namespace mongo {
 
 using namespace query_settings;
 
-REGISTER_DOCUMENT_SOURCE(querySettings,
-                         DocumentSourceQuerySettings::LiteParsed::parse,
-                         DocumentSourceQuerySettings::createFromBson,
-                         AllowedWithApiStrict::kNeverInVersion1);
+REGISTER_LITE_PARSED_DOCUMENT_SOURCE(querySettings,
+                                     DocumentSourceQuerySettings::LiteParsed::parse,
+                                     AllowedWithApiStrict::kNeverInVersion1);
+
+REGISTER_DOCUMENT_SOURCE_WITH_STAGE_PARAMS_DEFAULT(querySettings,
+                                                   DocumentSourceQuerySettings,
+                                                   QuerySettingsStageParams);
+
 ALLOCATE_DOCUMENT_SOURCE_ID(querySettings, DocumentSourceQuerySettings::id)
 
 DocumentSourceQuerySettings::DocumentSourceQuerySettings(

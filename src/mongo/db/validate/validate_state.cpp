@@ -33,14 +33,14 @@
 #include "mongo/base/error_codes.h"
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/index_names.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_catalog.h"
-#include "mongo/db/local_catalog/index_catalog.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/intent_registry.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/storage_engine.h"
@@ -65,17 +65,33 @@
 
 namespace mongo {
 
+namespace {
+/*
+ * Oplog Batch Applier takes this lock in exclusive mode when applying the
+ * batch. Foreground validation waits on this lock to begin validation.
+ * We must synchronise these operations as foreground validation involves opening a snapshot of the
+ * most recent data and during oplog application, CRUD operations on the document are performed in a
+ * transaction separate from the fast count updates. This could potentially lead to validation
+ * opening a snapshot between these two transactions and result in an incorrectly reported fast
+ * count discrepancy.
+ */
+ResourceMutex validateLock("validateLock");
+}  // namespace
+
 MONGO_FAIL_POINT_DEFINE(hangDuringValidationInitialization);
 
 namespace CollectionValidation {
+
+Lock::ExclusiveLock obtainExclusiveValidationLock(OperationContext* opCtx) {
+    return Lock::ExclusiveLock(opCtx, validateLock);
+}
 
 ValidateState::ValidateState(OperationContext* opCtx,
                              const NamespaceString& nss,
                              ValidationOptions options)
     : ValidationOptions(std::move(options)),
-      _validateLock(isBackground()
-                        ? boost::none
-                        : boost::optional<Lock::SharedLock>{obtainSharedValidationLock(opCtx)}),
+      _validateLock(isBackground() ? boost::none
+                                   : boost::optional<Lock::SharedLock>{{opCtx, validateLock}}),
       _globalLock(opCtx,
                   isBackground() ? MODE_IS : MODE_IX,
                   {false,
@@ -85,7 +101,8 @@ ValidateState::ValidateState(OperationContext* opCtx,
                        ? rss::consensus::IntentRegistry::Intent::LocalWrite
                        : rss::consensus::IntentRegistry::Intent::Read}),
       _nss(nss),
-      _dataThrottle(opCtx, [&]() { return gMaxValidateMBperSec.load(); }) {
+      _dataThrottle(opCtx->fastClockSource().now().toMillisSinceEpoch(),
+                    [&]() { return gMaxValidateMBperSec.load(); }) {
 
     // RepairMode is incompatible with the ValidateModes kBackground and
     // kForegroundFullEnforceFastCount.
@@ -157,19 +174,9 @@ void ValidateState::yieldCursors(OperationContext* opCtx) {
 }
 
 Status ValidateState::initializeCollection(OperationContext* opCtx) {
-    if (isBackground()) {
-        // Background validation reads data from the last stable checkpoint.
-        _validateTs =
-            opCtx->getServiceContext()->getStorageEngine()->getLastStableRecoveryTimestamp();
-        if (!_validateTs) {
-            return Status(
-                ErrorCodes::NamespaceNotFound,
-                fmt::format("Cannot run background validation on collection {} because there "
-                            "is no checkpoint yet",
-                            _nss.toStringForErrorMsg()));
-        }
+    if (getReadTimestamp()) {
         shard_role_details::getRecoveryUnit(opCtx)->setTimestampReadSource(
-            RecoveryUnit::ReadSource::kProvided, *_validateTs);
+            RecoveryUnit::ReadSource::kProvided, *getReadTimestamp());
 
         invariant(!shard_role_details::getRecoveryUnit(opCtx)->isActive());
     }
@@ -246,7 +253,7 @@ void ValidateState::initializeCursors(OperationContext* opCtx) {
         auto indexCursor =
             std::make_unique<SortedDataInterfaceThrottleCursor>(opCtx, iam, &_dataThrottle);
         _indexCursors.emplace(desc->indexName(), std::move(indexCursor));
-        _indexIdents.push_back(desc->getEntry()->getIdent());
+        _indexIdents.push_back(entry->getIdent());
     }
 
     // Because SeekableRecordCursors don't have a method to reset to the start, we save and then
@@ -258,27 +265,6 @@ void ValidateState::initializeCursors(OperationContext* opCtx) {
     // (RecordId()), which will halt iteration at the initialization step.
     auto record = _traverseRecordStoreCursor->next(opCtx);
     _firstRecordId = record ? std::move(record->id) : RecordId();
-}
-
-namespace {
-/*
- * Oplog Batch Applier takes this lock in exclusive mode when applying the
- * batch. Foreground validation waits on this lock to begin validation.
- * We must synchronise these operations as foreground validation involves opening a snapshot of the
- * most recent data and during oplog application, CRUD operations on the document are performed in a
- * transaction separate from the fast count updates. This could potentially lead to validation
- * opening a snapshot between these two transactions and result in an incorrectly reported fast
- * count discrepancy.
- */
-Lock::ResourceMutex validateLock("validateLock");
-}  // namespace
-
-Lock::ExclusiveLock ValidateState::obtainExclusiveValidationLock(OperationContext* opCtx) {
-    return Lock::ExclusiveLock(opCtx, validateLock);
-}
-
-Lock::SharedLock ValidateState::obtainSharedValidationLock(OperationContext* opCtx) {
-    return Lock::SharedLock(opCtx, validateLock);
 }
 
 }  // namespace CollectionValidation

@@ -27,9 +27,9 @@ assert.commandWorked(st.s.adminCommand({moveChunk: ns, find: {_id: 0}, to: st.sh
 let fp = configureFailPoint(recipientPrimary, "alwaysThrowStaleConfigInfo");
 
 // Test various read and write commands that are sent with shard versions and thus can return
-// StaleConfig. Batch writes, i.e. insert/update/delete, return batch responses with ok:1 and
+// StaleConfig. Batch writes, i.e. insert/update/delete return batch responses with ok:1 and
 // NoProgressMade write errors when retries are exhausted, so they are excluded.
-const kCommands = [
+let kCommands = [
     {aggregate: collName, pipeline: [], cursor: {}},
     {count: collName},
     {distinct: collName, query: {}, key: "_id"},

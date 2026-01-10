@@ -37,13 +37,14 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/simple_bsonobj_comparator.h"
 #include "mongo/db/query/util/deferred.h"
+#include "mongo/util/modules.h"
 
 #include <string>
 #include <utility>
 
 #include <boost/optional/optional.hpp>
 
-namespace mongo {
+namespace MONGO_MOD_PUBLIC mongo {
 
 class Client;
 class OperationContext;
@@ -236,7 +237,7 @@ public:
      * This function is only valid to invoke if you are on the Client's thread. This function takes
      * the Client lock.
      */
-    static void setFromMetadata(Client* client, BSONElement& elem, bool isInternalClient);
+    static void setFromMetadata(Client* client, const BSONElement& elem, bool isInternalClient);
 
     /**
      * Set the ClientMetadata for the OperationContext by reading it from the given BSONObj.
@@ -377,4 +378,4 @@ private:
     Deferred<size_t (*)(const BSONObj&)> _hashWithoutMongos{simpleHash};
 };
 
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUBLIC mongo

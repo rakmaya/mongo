@@ -65,3 +65,33 @@ idl_generator(
         "//src/mongo/idl:generic_argument_gen",
     ],
 )
+
+mongo_cc_library(
+    name = "remove_shard_exception",
+    srcs = [
+        "remove_shard_exception.cpp",
+        ":remove_shard_draining_progress_gen",
+    ],
+    deps = [
+        "//src/mongo/db:server_base",
+    ],
+)
+
+idl_generator(
+    name = "transition_from_dedicated_config_server_gen",
+    src = "transition_from_dedicated_config_server.idl",
+    deps = [
+        "//src/mongo/db:basic_types_gen",
+        "//src/mongo/idl:generic_argument_gen",
+    ],
+)
+
+idl_generator(
+    name = "transition_to_dedicated_config_server_gen",
+    src = "transition_to_dedicated_config_server.idl",
+    deps = [
+        "//src/mongo/db:basic_types_gen",
+        "//src/mongo/db/topology:remove_shard_gen",
+        "//src/mongo/idl:generic_argument_gen",
+    ],
+)

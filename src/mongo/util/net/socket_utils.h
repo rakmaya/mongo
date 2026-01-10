@@ -32,10 +32,11 @@
 #include "mongo/base/string_data.h"
 #include "mongo/logv2/log_severity.h"
 #include "mongo/util/duration.h"
+#include "mongo/util/modules.h"
 
 #include <string>
 
-namespace mongo {
+namespace MONGO_MOD_PUBLIC mongo {
 
 inline constexpr Seconds kMaxKeepIdleSecs{300};
 inline constexpr Seconds kMaxKeepIntvlSecs{1};
@@ -47,6 +48,15 @@ void setSocketKeepAliveParams(int sock,
                               Seconds maxKeepIntvlSecs = kMaxKeepIntvlSecs);
 
 std::string makeUnixSockPath(int port, StringData label = "");
+
+/**
+ * Extracts the port number from the specified unix domain socket path name, under the assumption
+ * that the path was produced by a call to makeUnixSockPath, which takes a port number as an
+ * argument.
+ * Returns -1 if an error occurs.
+ * Note that this function assumes that the port passed to makeUnixSockPath was not negative.
+ */
+int parsePortFromUnixSockPath(StringData path);
 
 inline bool isUnixDomainSocket(StringData hostname) {
     return hostname.find('/') != std::string::npos;
@@ -81,4 +91,4 @@ std::string prettyHostNameAndPort(int port);
  */
 std::string prettyHostName(int port);
 
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUBLIC mongo

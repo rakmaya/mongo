@@ -35,10 +35,6 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/exec/sbe/expressions/runtime_environment.h"
 #include "mongo/db/index/index_access_method.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/index_catalog.h"
-#include "mongo/db/local_catalog/index_catalog_entry.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/matcher/expression_leaf.h"
 #include "mongo/db/query/algebra/polyvalue.h"
@@ -52,6 +48,10 @@
 #include "mongo/db/query/stage_builder/sbe/builder.h"
 #include "mongo/db/query/stage_builder/sbe/gen_filter.h"
 #include "mongo/db/query/stage_builder/sbe/sbexpr_helpers.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog_entry.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
 #include "mongo/db/storage/sorted_data_interface.h"
 #include "mongo/logv2/log.h"
 #include "mongo/platform/atomic_word.h"
@@ -860,15 +860,14 @@ std::pair<SbStage, PlanStageSlots> generateIndexScanImpl(StageBuilderState& stat
 
     const auto& keyPattern = ixn->index.keyPattern;
     auto indexName = ixn->index.identifier.catalogName;
-    auto descriptor = collection->getIndexCatalog()->findIndexByName(state.opCtx, indexName);
+    auto entry = collection->getIndexCatalog()->findIndexByName(state.opCtx, indexName);
     tassert(5483200,
             str::stream() << "failed to find index in catalog named: "
                           << ixn->index.identifier.catalogName,
-            descriptor);
+            entry);
 
     // Find the IndexAccessMethod which corresponds to the 'indexName'.
-    auto accessMethod =
-        collection->getIndexCatalog()->getEntry(descriptor)->accessMethod()->asSortedData();
+    auto accessMethod = entry->accessMethod()->asSortedData();
     auto intervals =
         makeIntervalsFromIndexBounds(ixn->bounds,
                                      ixn->direction == 1,
@@ -1023,14 +1022,14 @@ std::pair<SbStage, PlanStageSlots> generateIndexScanWithDynamicBoundsImpl(
     const auto& keyPattern = ixn->index.keyPattern;
     const bool forward = ixn->direction == 1;
     auto indexName = ixn->index.identifier.catalogName;
-    auto descriptor = collection->getIndexCatalog()->findIndexByName(state.opCtx, indexName);
+    auto entry = collection->getIndexCatalog()->findIndexByName(state.opCtx, indexName);
     tassert(6335101,
             str::stream() << "failed to find index in catalog named: "
                           << ixn->index.identifier.catalogName,
-            descriptor);
+            entry);
 
     // Find the IndexAccessMethod which corresponds to the 'indexName'.
-    auto accessMethod = descriptor->getEntry()->accessMethod()->asSortedData();
+    auto accessMethod = entry->accessMethod()->asSortedData();
 
     SbStage stage;
     ParameterizedIndexScanSlots parameterizedScanSlots;

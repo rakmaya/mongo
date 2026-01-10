@@ -105,12 +105,29 @@ if __name__ == "__main__":
 
     add_evergreen_build_info(resmoke_args)
 
-    if os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR"):
-        undeclared_output_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR")
-        resmoke_args.append(f"--dbpathPrefix={os.path.join(undeclared_output_dir,'data')}")
-        resmoke_args.append(f"--taskWorkDir={undeclared_output_dir}")
-        resmoke_args.append(f"--reportFile={os.path.join(undeclared_output_dir,'report.json')}")
-        os.chdir(undeclared_output_dir)
+    if os.environ.get("DEPS_PATH"):
+        # Modify DEPS_PATH to use os.pathsep, rather than ':'
+        os.environ["PATH"] += os.pathsep + os.pathsep.join(
+            [
+                os.path.dirname(os.path.abspath(path))
+                for path in os.environ.get("DEPS_PATH").split(":")
+            ]
+        )
+
+    undeclared_output_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR")
+    resmoke_args.append(f"--taskWorkDir={undeclared_output_dir}")
+    resmoke_args.append(f"--reportFile={os.path.join(undeclared_output_dir,'report.json')}")
+    os.chdir(undeclared_output_dir)
+
+    # Locally, it is nice for the data directory to preserved in the test output. However, we
+    # don't want to save it in CI since we explicitly archive the data directory for failed
+    # tests already. It will add to the output tree size in remote execution which is wasteful.
+    dbpath = (
+        os.environ.get("TEST_TMPDIR")
+        if "--log=evg" in resmoke_args
+        else os.path.join(undeclared_output_dir, "data")
+    )
+    resmoke_args.append(f"--dbpathPrefix={dbpath}")
 
     if os.environ.get("TEST_SHARD_INDEX") and os.environ.get("TEST_TOTAL_SHARDS"):
         shard_count = os.environ.get("TEST_TOTAL_SHARDS")
@@ -123,6 +140,9 @@ if __name__ == "__main__":
 
         report = f"report_shard_{shard_index}_of_{shard_count}.json"
     else:
+        resmoke_args.append("--shardIndex=0")
+        resmoke_args.append("--shardCount=1")
+
         report = "report.json"
     resmoke_args.append(f"--reportFile={os.path.join(undeclared_output_dir, report)}")
 

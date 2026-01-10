@@ -38,8 +38,6 @@
 #include "mongo/db/curop.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/feature_flag.h"
-#include "mongo/db/local_catalog/collection_operation_source.h"
-#include "mongo/db/local_catalog/document_validation.h"
 #include "mongo/db/profile_settings.h"
 #include "mongo/db/query/write_ops/delete_request_gen.h"
 #include "mongo/db/query/write_ops/update_request.h"
@@ -49,6 +47,8 @@
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/server_options.h"
+#include "mongo/db/shard_role/shard_catalog/collection_operation_source.h"
+#include "mongo/db/shard_role/shard_catalog/document_validation.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/storage/kv/kv_engine.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
@@ -160,6 +160,9 @@ void assertTimeseriesBucketsCollection(const Collection* bucketsColl) {
             bucketsColl->getTimeseriesOptions());
 }
 
+/**
+ * Prepares the final write batches needed for performing the writes to storage.
+ */
 std::vector<std::reference_wrapper<std::shared_ptr<timeseries::bucket_catalog::WriteBatch>>>
 determineBatchesToCommit(bucket_catalog::TimeseriesWriteBatches& batches) {
     stdx::unordered_set<bucket_catalog::WriteBatch*> processedBatches;
@@ -179,18 +182,6 @@ determineBatchesToCommit(bucket_catalog::TimeseriesWriteBatches& batches) {
     });
 
     return batchesToCommit;
-}
-
-void getOpTimeAndElectionId(OperationContext* opCtx,
-                            boost::optional<repl::OpTime>* opTime,
-                            boost::optional<OID>* electionId) {
-    auto* replCoord = repl::ReplicationCoordinator::get(opCtx->getServiceContext());
-    const auto isReplSet = replCoord->getSettings().isReplSet();
-
-    *opTime = isReplSet
-        ? boost::make_optional(repl::ReplClientInfo::forClient(opCtx->getClient()).getLastOp())
-        : boost::none;
-    *electionId = isReplSet ? boost::make_optional(replCoord->getElectionId()) : boost::none;
 }
 
 void performAtomicWrites(

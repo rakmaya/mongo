@@ -37,7 +37,7 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/crypto/fle_field_schema_gen.h"
-#include "mongo/db/admission/execution_admission_context.h"
+#include "mongo/db/admission/execution_control/execution_admission_context.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/query_cmd/update_metrics.h"
@@ -46,9 +46,6 @@
 #include "mongo/db/exec/mutable_bson/document.h"
 #include "mongo/db/exec/mutable_bson/element.h"
 #include "mongo/db/fle_crud.h"
-#include "mongo/db/local_catalog/collection_operation_source.h"
-#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/local_executor.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/not_primary_error_tracker.h"
@@ -58,21 +55,24 @@
 #include "mongo/db/query/explain_options.h"
 #include "mongo/db/query/plan_yield_policy.h"
 #include "mongo/db/query/query_settings/query_settings_gen.h"
+#include "mongo/db/query/write_ops/canonical_update.h"
 #include "mongo/db/query/write_ops/delete_request_gen.h"
 #include "mongo/db/query/write_ops/parsed_delete.h"
-#include "mongo/db/query/write_ops/parsed_update.h"
 #include "mongo/db/query/write_ops/single_write_result_gen.h"
 #include "mongo/db/query/write_ops/update_request.h"
 #include "mongo/db/query/write_ops/write_ops.h"
 #include "mongo/db/query/write_ops/write_ops_exec.h"
 #include "mongo/db/query/write_ops/write_ops_gen.h"
 #include "mongo/db/query/write_ops/write_ops_parsers.h"
-#include "mongo/db/raw_data_operation.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/shard_catalog/collection_operation_source.h"
+#include "mongo/db/shard_role/shard_catalog/raw_data_operation.h"
+#include "mongo/db/shard_role/shard_role.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/timeseries/collection_pre_conditions_util.h"
 #include "mongo/db/timeseries/timeseries_index_schema_conversion_functions.h"
@@ -507,10 +507,6 @@ public:
 
             long long nModified = 0;
 
-            // Tracks the upserted information. The memory of this variable gets moved in the
-            // 'postProcessHandler' and should not be accessed afterwards.
-            std::vector<write_ops::Upserted> upsertedInfoVec;
-
             write_ops_exec::WriteResult reply;
             // For retryable updates on time-series collections, we needs to run them in
             // transactions to ensure the multiple writes are replicated atomically.
@@ -541,11 +537,23 @@ public:
                 reply = write_ops_exec::performUpdates(opCtx, request(), preConditions, source);
             }
 
+            // Tracks the upserted information. The memory of this variable gets moved in the
+            // 'postProcessHandler' and should not be accessed afterwards.
+            std::vector<write_ops::Upserted> upsertedInfoVec;
+
+            // This is populated by 'singleWriteHandler' and moved into the update reply in
+            // 'postProcessHandler'.
+            std::vector<write_ops::QueryStatsMetrics> queryStatsMetricsVec;
+
             // Handler to process each 'SingleWriteResult'.
             auto singleWriteHandler = [&](const SingleWriteResult& opResult, int index) {
                 nModified += opResult.getNModified();
                 if (auto idElement = opResult.getUpsertedId().firstElement())
                     upsertedInfoVec.emplace_back(write_ops::Upserted(index, idElement));
+                if (auto queryStatsMetrics = opResult.getQueryStatsMetrics()) {
+                    queryStatsMetricsVec.emplace_back(queryStatsMetrics->getOriginalOpIndex(),
+                                                      queryStatsMetrics->getMetrics());
+                }
             };
 
             // Handler to do the post-processing.
@@ -553,6 +561,9 @@ public:
                 updateReply.setNModified(nModified);
                 if (!upsertedInfoVec.empty())
                     updateReply.setUpserted(std::move(upsertedInfoVec));
+                if (!queryStatsMetricsVec.empty()) {
+                    updateReply.setQueryStatsMetrics(std::move(queryStatsMetricsVec));
+                }
             };
 
             populateReply(opCtx,
@@ -628,6 +639,7 @@ public:
 
             write_ops_exec::explainUpdate(opCtx,
                                           updateRequest,
+                                          &request(),
                                           isTimeseriesLogicalRequest,
                                           request().getSerializationContext(),
                                           _commandObj,

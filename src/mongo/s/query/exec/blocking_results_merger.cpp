@@ -35,7 +35,6 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/scopeguard.h"
 
-#include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
 
 namespace mongo {
@@ -199,7 +198,7 @@ StatusWith<executor::TaskExecutor::EventHandle> BlockingResultsMerger::getNextEv
         }
 
         // Return the leftover event and clear '_leftoverEventFromLastTimeout'.
-        auto event = _leftoverEventFromLastTimeout;
+        auto event = std::move(_leftoverEventFromLastTimeout);
         _leftoverEventFromLastTimeout = executor::TaskExecutor::EventHandle();
         return event;
     }

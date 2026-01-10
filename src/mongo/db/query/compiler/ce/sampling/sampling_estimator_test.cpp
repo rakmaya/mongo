@@ -73,6 +73,7 @@ TEST_F(SamplingEstimatorTest, RandomSamplingProcess) {
 
     SamplingEstimatorForTesting samplingEstimator(operationContext(),
                                                   colls,
+                                                  kTestNss,
                                                   PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
                                                   kSampleSize,
                                                   SamplingEstimatorImpl::SamplingStyle::kRandom,
@@ -93,6 +94,7 @@ TEST_F(SamplingEstimatorTest, RandomSamplingProcessWithProjection) {
 
     SamplingEstimatorForTesting samplingEstimator(operationContext(),
                                                   colls,
+                                                  kTestNss,
                                                   PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
                                                   kSampleSize,
                                                   SamplingEstimatorImpl::SamplingStyle::kRandom,
@@ -123,6 +125,7 @@ TEST_F(SamplingEstimatorTest, ChunkSamplingProcess) {
         const size_t kChunkSize = sampleSize / chunkNum;
         SamplingEstimatorForTesting samplingEstimator(optCtx,
                                                       colls,
+                                                      kTestNss,
                                                       PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
                                                       sampleSize,
                                                       SamplingEstimatorImpl::SamplingStyle::kChunk,
@@ -176,6 +179,7 @@ TEST_F(SamplingEstimatorTest, ChunkSamplingProcessWithProjection) {
         const size_t kChunkSize = sampleSize / chunkNum;
         SamplingEstimatorForTesting samplingEstimator(optCtx,
                                                       colls,
+                                                      kTestNss,
                                                       PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
                                                       sampleSize,
                                                       SamplingEstimatorImpl::SamplingStyle::kChunk,
@@ -235,6 +239,7 @@ TEST_F(SamplingEstimatorTest, FullCollScanSamplingProcess) {
     const int collectionSize = 50;
     SamplingEstimatorForTesting samplingEstimator(operationContext(),
                                                   colls,
+                                                  kTestNss,
                                                   PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
                                                   sampleSize,
                                                   SamplingEstimatorImpl::SamplingStyle::kRandom,
@@ -260,6 +265,7 @@ TEST_F(SamplingEstimatorTest, FullCollScanSamplingProcessWithProjection) {
     const int collectionSize = 50;
     SamplingEstimatorForTesting samplingEstimator(operationContext(),
                                                   colls,
+                                                  kTestNss,
                                                   PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
                                                   sampleSize,
                                                   SamplingEstimatorImpl::SamplingStyle::kRandom,
@@ -290,6 +296,7 @@ TEST_F(SamplingEstimatorTest, ProjectAllFieldsRandomSampling) {
     const auto topLevelSampleFieldNames = StringSet{"_id", "a", "b", "nil", "arr", "obj"};
     SamplingEstimatorForTesting samplingEstimator(operationContext(),
                                                   colls,
+                                                  kTestNss,
                                                   PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
                                                   kSampleSize,
                                                   SamplingEstimatorImpl::SamplingStyle::kRandom,
@@ -320,6 +327,7 @@ TEST_F(SamplingEstimatorTest, ProjectOneFieldRandomSampling) {
 
     SamplingEstimatorForTesting samplingEstimator(operationContext(),
                                                   colls,
+                                                  kTestNss,
                                                   PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
                                                   kSampleSize,
                                                   SamplingEstimatorImpl::SamplingStyle::kRandom,
@@ -346,6 +354,7 @@ TEST_F(SamplingEstimatorTest, NoProjectionRandomSampling) {
 
     SamplingEstimatorForTesting samplingEstimator(operationContext(),
                                                   colls,
+                                                  kTestNss,
                                                   PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
                                                   kSampleSize,
                                                   SamplingEstimatorImpl::SamplingStyle::kRandom,
@@ -375,6 +384,7 @@ TEST_F(SamplingEstimatorTest, ProjectNonExistentFieldRandomSampling) {
     // Project field "c" which does not exist on any documents in the collection.
     SamplingEstimatorForTesting samplingEstimator(operationContext(),
                                                   colls,
+                                                  kTestNss,
                                                   PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
                                                   kSampleSize,
                                                   SamplingEstimatorImpl::SamplingStyle::kRandom,
@@ -402,6 +412,7 @@ TEST_F(SamplingEstimatorTest, DrawANewSample) {
     SamplingEstimatorForTesting samplingEstimator(
         operationContext(),
         colls,
+        kTestNss,
         PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
         kSampleSize,
         SamplingEstimatorForTesting::SamplingStyle::kRandom,
@@ -447,6 +458,7 @@ TEST_F(SamplingEstimatorTest, EstimateCardinality) {
     SamplingEstimatorForTesting samplingEstimator(
         operationContext(),
         colls,
+        kTestNss,
         PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
         sampleSize,
         SamplingEstimatorForTesting::SamplingStyle::kRandom,
@@ -501,6 +513,7 @@ TEST_F(SamplingEstimatorTest, EstimateCardinalityWithProjection) {
     SamplingEstimatorForTesting samplingEstimator(
         operationContext(),
         colls,
+        kTestNss,
         PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
         sampleSize,
         SamplingEstimatorForTesting::SamplingStyle::kRandom,
@@ -511,6 +524,7 @@ TEST_F(SamplingEstimatorTest, EstimateCardinalityWithProjection) {
     SamplingEstimatorForTesting samplingEstimatorWithProjection(
         operationContext(),
         colls,
+        kTestNss,
         PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
         sampleSize,
         SamplingEstimatorForTesting::SamplingStyle::kRandom,
@@ -580,6 +594,7 @@ TEST_F(SamplingEstimatorTest, EstimateCardinalityLogicalExpressions) {
     SamplingEstimatorForTesting samplingEstimator(
         operationContext(),
         colls,
+        kTestNss,
         PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
         sampleSize,
         SamplingEstimatorForTesting::SamplingStyle::kRandom,
@@ -660,6 +675,7 @@ TEST_F(SamplingEstimatorTest, EstimateCardinalityMultipleExpressions) {
     SamplingEstimatorForTesting samplingEstimator(
         operationContext(),
         colls,
+        kTestNss,
         PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
         sampleSize,
         SamplingEstimatorForTesting::SamplingStyle::kRandom,
@@ -711,6 +727,7 @@ TEST_F(SamplingEstimatorTest, EstimateCardinalityExistsWithProjection) {
     SamplingEstimatorForTesting samplingEstimator(
         operationContext(),
         colls,
+        kTestNss,
         PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
         sampleSize,
         SamplingEstimatorForTesting::SamplingStyle::kRandom,
@@ -720,6 +737,7 @@ TEST_F(SamplingEstimatorTest, EstimateCardinalityExistsWithProjection) {
     SamplingEstimatorForTesting samplingEstimatorWithProjection(
         operationContext(),
         colls,
+        kTestNss,
         PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
         sampleSize,
         SamplingEstimatorForTesting::SamplingStyle::kRandom,
@@ -749,6 +767,7 @@ TEST_F(SamplingEstimatorTest, EstimateCardinalityByIndexBounds) {
     SamplingEstimatorForTesting samplingEstimator(
         operationContext(),
         colls,
+        kTestNss,
         PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
         sampleSize,
         SamplingEstimatorForTesting::SamplingStyle::kRandom,
@@ -837,6 +856,7 @@ TEST_F(SamplingEstimatorTest, EstimateIndexKeysScanned) {
     SamplingEstimatorForTesting samplingEstimator(
         operationContext(),
         colls,
+        kTestNss,
         PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
         sampleSize,
         SamplingEstimatorForTesting::SamplingStyle::kRandom,
@@ -878,6 +898,77 @@ TEST_F(SamplingEstimatorTest, EstimateIndexKeysScanned) {
     samplingEstimator.assertEstimateInConfidenceInterval(estimates[1], 3 * 0.2 * card);
 }
 
+TEST_F(SamplingEstimatorTest, NumberKeysMatch) {
+    const auto document = BSON("a" << 0 << "b" << 1);
+    // Single field index
+    ASSERT_EQUALS(numberKeysMatch(makePointIntervalBounds(0, "a"), document), 1);
+    ASSERT_EQUALS(numberKeysMatch(makePointIntervalBounds(1, "a"), document), 0);
+    // Compound index
+    IndexBounds bounds;
+    bounds.fields = {OrderedIntervalList("a"), OrderedIntervalList("b")};
+    bounds.fields[0].intervals = {IndexBoundsBuilder::makeRangeInterval(
+        BSON("" << 0 << "" << 0), BoundInclusion::kIncludeBothStartAndEndKeys)};
+    bounds.fields[1].intervals = {IndexBoundsBuilder::makeRangeInterval(
+        BSON("" << 1 << "" << 1), BoundInclusion::kIncludeBothStartAndEndKeys)};
+    // Match case
+    ASSERT_EQUALS(numberKeysMatch(bounds, document), 1);
+    // Mismatch case
+    bounds.fields[0].intervals = {IndexBoundsBuilder::makeRangeInterval(
+        BSON("" << 1 << "" << 1), BoundInclusion::kIncludeBothStartAndEndKeys)};
+    ASSERT_EQUALS(numberKeysMatch(bounds, document), 0);
+}
+
+TEST_F(SamplingEstimatorTest, NumberKeysMatchMultiKey) {
+    // Just numbers
+    {
+        const auto document = BSON("a" << BSON_ARRAY(0 << 1 << 0));
+        // Ignores duplicate elements
+        ASSERT_EQUALS(numberKeysMatch(makePointIntervalBounds(0, "a"), document), 1);
+        // 1 is in the list, so must find it
+        ASSERT_EQUALS(numberKeysMatch(makePointIntervalBounds(1, "a"), document), 1);
+        // Both 0 and 1 are in the list
+        IndexBounds bounds = makeRangeIntervalBounds(
+            BSON("" << 0 << "" << 1), BoundInclusion::kIncludeBothStartAndEndKeys, "a");
+        ASSERT_EQUALS(numberKeysMatch(bounds, document), 2);
+        // Same interval returns only one when skipDuplicateMatches is given
+        ASSERT_EQUALS(numberKeysMatch(bounds, document, true), 1);
+        // 2 is not in the list
+        bounds = makePointIntervalBounds(2, "a");
+        ASSERT_EQUALS(numberKeysMatch(bounds, document), 0);
+        // skipDuplicateMatches does not change the behaviour in this case
+        ASSERT_EQUALS(numberKeysMatch(bounds, document, true), 0);
+    }
+
+    // Mixed types - numbers and strings
+    {
+        const auto document = BSON("a" << BSON_ARRAY(0 << "test"));
+        ASSERT_EQUALS(numberKeysMatch(makePointIntervalBounds(0, "a"), document), 1);
+        ASSERT_EQUALS(numberKeysMatch(makePointIntervalBounds(1, "a"), document), 0);
+        IndexBounds bounds;
+        OrderedIntervalList oil("a");
+        oil.intervals.push_back(IndexBoundsBuilder::makePointInterval(BSON("" << "test")));
+        bounds.fields.push_back(oil);
+        ASSERT_EQUALS(numberKeysMatch(bounds, document), 1);
+        bounds.fields[0].intervals[0] = IndexBoundsBuilder::makePointInterval(BSON("" << "foo"));
+        ASSERT_EQUALS(numberKeysMatch(bounds, document), 0);
+    }
+
+    // Mixed types - numbers and string arrays
+    {
+        const auto document = BSON("a" << BSON_ARRAY(0 << BSON_ARRAY("test")));
+        ASSERT_EQUALS(numberKeysMatch(makePointIntervalBounds(0, "a"), document), 1);
+        ASSERT_EQUALS(numberKeysMatch(makePointIntervalBounds(1, "a"), document), 0);
+        IndexBounds bounds;
+        OrderedIntervalList oil("a");
+        oil.intervals.push_back(
+            IndexBoundsBuilder::makePointInterval(BSON("" << BSON_ARRAY("test"))));
+        bounds.fields.push_back(oil);
+        ASSERT_EQUALS(numberKeysMatch(bounds, document), 1);
+        bounds.fields[0].intervals[0] = IndexBoundsBuilder::makePointInterval(BSON("" << "test"));
+        ASSERT_EQUALS(numberKeysMatch(bounds, document), 0);
+    }
+}
+
 TEST_F(SamplingEstimatorTest, EstimateCardinalityByIndexBoundsAndMatchExpression) {
     const size_t card = 4000;
     insertDocuments(kTestNss, createDocuments(card));
@@ -891,6 +982,7 @@ TEST_F(SamplingEstimatorTest, EstimateCardinalityByIndexBoundsAndMatchExpression
     SamplingEstimatorForTesting samplingEstimator(
         operationContext(),
         colls,
+        kTestNss,
         PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
         sampleSize,
         SamplingEstimatorForTesting::SamplingStyle::kRandom,
@@ -957,34 +1049,6 @@ TEST_F(SamplingEstimatorTest, MatchElementAgainstIntervals) {
     ASSERT_TRUE(SamplingEstimatorForTesting::matches(list, BSON("val" << "").firstElement()));
 }
 
-TEST_F(SamplingEstimatorTest, IndexKeysGenerationTest) {
-    IndexBounds bounds;
-    // The only interesting information of 'bound' is the field name.
-    bounds.fields.push_back(OrderedIntervalList("val"));
-    bounds.fields.push_back(OrderedIntervalList("val2"));
-
-    auto obj = BSON("val" << 5 << "val2"
-                          << "string");
-    auto indexKeys = SamplingEstimatorForTesting::getIndexKeys(bounds, obj);
-    ASSERT_EQUALS(indexKeys.size(), 1);
-    ASSERT_BSONOBJ_EQ(indexKeys[0],
-                      BSON("" << 5 << ""
-                              << "string"));
-
-    // Test multi-key key generation.
-    obj = BSON("val" << 5 << "val2" << BSON_ARRAY(10 << "str" << BSONNULL));
-    indexKeys = SamplingEstimatorForTesting::getIndexKeys(bounds, obj);
-    ASSERT_EQUALS(indexKeys.size(), 3);
-    // Note that the index keys generated are already sorted.
-    auto expectedKeys = std::vector<BSONObj>{BSON("" << 5 << "" << BSONNULL),
-                                             BSON("" << 5 << "" << 10),
-                                             BSON("" << 5 << ""
-                                                     << "str")};
-    for (size_t i = 0; i < indexKeys.size(); i++) {
-        ASSERT_BSONOBJ_EQ(indexKeys[i], expectedKeys[i]);
-    }
-}
-
 TEST_F(SamplingEstimatorTest, ExtractTopLevelFieldsFromMatchExpressionDottedPath) {
     auto filter = fromjson("{a: 1, b: {c: 2}, b: {c: {d: 3}}}");
     auto expr = parse(filter);
@@ -1033,7 +1097,8 @@ TEST_F(SamplingEstimatorTest, ExtractTopLevelFieldsFromMatchExpressionNestedAndO
     }
 }
 
-DEATH_TEST_F(SamplingEstimatorTest,
+using SamplingEstimatorTestDeathTest = SamplingEstimatorTest;
+DEATH_TEST_F(SamplingEstimatorTestDeathTest,
              IndexBoundsAlignedWithMatchExpression,
              "bounds and expressions should have equal size.") {
     insertDocuments(kTestNss, createDocuments(10));
@@ -1044,6 +1109,7 @@ DEATH_TEST_F(SamplingEstimatorTest,
 
     SamplingEstimatorForTesting samplingEstimator(operationContext(),
                                                   colls,
+                                                  kTestNss,
                                                   PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
                                                   kSampleSize,
                                                   SamplingEstimatorImpl::SamplingStyle::kRandom,
@@ -1065,7 +1131,7 @@ DEATH_TEST_F(SamplingEstimatorTest,
     auto estimates = samplingEstimator.estimateRIDs(boundslist, expressions);
 }
 
-DEATH_TEST_F(SamplingEstimatorTest,
+DEATH_TEST_F(SamplingEstimatorTestDeathTest,
              TopLevelSampleFieldNamesContainDottedPath,
              "topLevelSampleFieldNames should not contain a dotted field path") {
     insertDocuments(kTestNss, createDocuments(10));
@@ -1076,6 +1142,7 @@ DEATH_TEST_F(SamplingEstimatorTest,
 
     SamplingEstimatorForTesting samplingEstimator(operationContext(),
                                                   colls,
+                                                  kTestNss,
                                                   PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
                                                   kSampleSize,
                                                   SamplingEstimatorImpl::SamplingStyle::kRandom,
@@ -1084,7 +1151,7 @@ DEATH_TEST_F(SamplingEstimatorTest,
     samplingEstimator.generateSample(StringSet{"a", "b.c"});
 }
 
-DEATH_TEST_F(SamplingEstimatorTest,
+DEATH_TEST_F(SamplingEstimatorTestDeathTest,
              TopLevelSampleFieldNamesIsEmpty,
              "topLevelSampleFieldNames must be a non-empty set if specified.") {
     insertDocuments(kTestNss, createDocuments(10));
@@ -1093,6 +1160,7 @@ DEATH_TEST_F(SamplingEstimatorTest,
 
     SamplingEstimatorForTesting samplingEstimator(operationContext(),
                                                   MultipleCollectionAccessor{coll},
+                                                  kTestNss,
                                                   PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
                                                   kSampleSize,
                                                   SamplingEstimatorImpl::SamplingStyle::kRandom,
@@ -1101,7 +1169,7 @@ DEATH_TEST_F(SamplingEstimatorTest,
     samplingEstimator.generateSample(StringSet{});
 }
 
-DEATH_TEST_F(SamplingEstimatorTest,
+DEATH_TEST_F(SamplingEstimatorTestDeathTest,
              SampleDoesNotContainFieldInMatchExpressionEstimateCardinality,
              "MatchExpression contains fields not present in topLevelSampleFieldNames") {
     insertDocuments(kTestNss, createDocuments(10));
@@ -1112,6 +1180,7 @@ DEATH_TEST_F(SamplingEstimatorTest,
 
     SamplingEstimatorForTesting samplingEstimator(operationContext(),
                                                   colls,
+                                                  kTestNss,
                                                   PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
                                                   kSampleSize,
                                                   SamplingEstimatorImpl::SamplingStyle::kRandom,
@@ -1124,7 +1193,7 @@ DEATH_TEST_F(SamplingEstimatorTest,
     samplingEstimator.estimateCardinality(&eq);
 }
 
-DEATH_TEST_F(SamplingEstimatorTest,
+DEATH_TEST_F(SamplingEstimatorTestDeathTest,
              SampleDoesNotContainFieldInMatchExpressionEstimateCardinalityBatched,
              "MatchExpression contains fields not present in topLevelSampleFieldNames") {
     insertDocuments(kTestNss, createDocuments(10));
@@ -1135,6 +1204,7 @@ DEATH_TEST_F(SamplingEstimatorTest,
 
     SamplingEstimatorForTesting samplingEstimator(operationContext(),
                                                   colls,
+                                                  kTestNss,
                                                   PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
                                                   kSampleSize,
                                                   SamplingEstimatorImpl::SamplingStyle::kRandom,
@@ -1147,7 +1217,7 @@ DEATH_TEST_F(SamplingEstimatorTest,
     samplingEstimator.estimateCardinality(std::vector<const MatchExpression*>{&eq});
 }
 
-DEATH_TEST_F(SamplingEstimatorTest,
+DEATH_TEST_F(SamplingEstimatorTestDeathTest,
              SampleDoesNotContainFieldInMatchExpressionEstimateRIDs,
              "MatchExpression contains fields not present in topLevelSampleFieldNames") {
     insertDocuments(kTestNss, createDocuments(10));
@@ -1158,6 +1228,7 @@ DEATH_TEST_F(SamplingEstimatorTest,
 
     SamplingEstimatorForTesting samplingEstimator(operationContext(),
                                                   colls,
+                                                  kTestNss,
                                                   PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
                                                   kSampleSize,
                                                   SamplingEstimatorImpl::SamplingStyle::kRandom,
@@ -1176,7 +1247,7 @@ DEATH_TEST_F(SamplingEstimatorTest,
     samplingEstimator.estimateRIDs(bounds, &eq);
 }
 
-DEATH_TEST_F(SamplingEstimatorTest,
+DEATH_TEST_F(SamplingEstimatorTestDeathTest,
              SampleDoesNotContainFieldInIndexBoundsEstimateRIDs,
              "Field in index bounds should be included in the set of sampled fields") {
     insertDocuments(kTestNss, createDocuments(10));
@@ -1187,6 +1258,7 @@ DEATH_TEST_F(SamplingEstimatorTest,
 
     SamplingEstimatorForTesting samplingEstimator(operationContext(),
                                                   colls,
+                                                  kTestNss,
                                                   PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
                                                   kSampleSize,
                                                   SamplingEstimatorImpl::SamplingStyle::kRandom,
@@ -1212,7 +1284,7 @@ DEATH_TEST_F(SamplingEstimatorTest,
     samplingEstimator.estimateRIDs(bounds, expr.get());
 }
 
-DEATH_TEST_F(SamplingEstimatorTest,
+DEATH_TEST_F(SamplingEstimatorTestDeathTest,
              SampleDoesNotContainFieldInIndexBoundsEstimateKeysScanned,
              "Field in index bounds should be included in the set of sampled fields") {
     insertDocuments(kTestNss, createDocuments(10));
@@ -1223,6 +1295,7 @@ DEATH_TEST_F(SamplingEstimatorTest,
 
     SamplingEstimatorForTesting samplingEstimator(operationContext(),
                                                   colls,
+                                                  kTestNss,
                                                   PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
                                                   kSampleSize,
                                                   SamplingEstimatorImpl::SamplingStyle::kRandom,
@@ -1248,7 +1321,7 @@ DEATH_TEST_F(SamplingEstimatorTest,
     samplingEstimator.estimateKeysScanned(bounds);
 }
 
-DEATH_TEST_F(SamplingEstimatorTest,
+DEATH_TEST_F(SamplingEstimatorTestDeathTest,
              SampleNotGeneratedEstimateKeysScanned,
              "Sample must be generated before calling") {
     insertDocuments(kTestNss, createDocuments(10));
@@ -1259,6 +1332,7 @@ DEATH_TEST_F(SamplingEstimatorTest,
 
     SamplingEstimatorForTesting samplingEstimator(operationContext(),
                                                   colls,
+                                                  kTestNss,
                                                   PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
                                                   kSampleSize,
                                                   SamplingEstimatorImpl::SamplingStyle::kRandom,
@@ -1275,7 +1349,7 @@ DEATH_TEST_F(SamplingEstimatorTest,
     samplingEstimator.estimateKeysScanned(bounds);
 }
 
-DEATH_TEST_F(SamplingEstimatorTest,
+DEATH_TEST_F(SamplingEstimatorTestDeathTest,
              SampleNotGeneratedEstimateRIDs,
              "Sample must be generated before calling") {
     insertDocuments(kTestNss, createDocuments(10));
@@ -1286,6 +1360,7 @@ DEATH_TEST_F(SamplingEstimatorTest,
 
     SamplingEstimatorForTesting samplingEstimator(operationContext(),
                                                   colls,
+                                                  kTestNss,
                                                   PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
                                                   kSampleSize,
                                                   SamplingEstimatorImpl::SamplingStyle::kRandom,
@@ -1302,7 +1377,7 @@ DEATH_TEST_F(SamplingEstimatorTest,
     samplingEstimator.estimateRIDs(bounds, expr.get());
 }
 
-DEATH_TEST_F(SamplingEstimatorTest,
+DEATH_TEST_F(SamplingEstimatorTestDeathTest,
              SampleNotGeneratedEstimateCardinality,
              "Sample must be generated before calling") {
     insertDocuments(kTestNss, createDocuments(10));
@@ -1313,6 +1388,7 @@ DEATH_TEST_F(SamplingEstimatorTest,
 
     SamplingEstimatorForTesting samplingEstimator(operationContext(),
                                                   colls,
+                                                  kTestNss,
                                                   PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
                                                   kSampleSize,
                                                   SamplingEstimatorImpl::SamplingStyle::kRandom,
@@ -1409,6 +1485,7 @@ TEST_F(SamplingEstimatorTest, EstimateNDVForFieldsSampleSizeOnePercent) {
 
     SamplingEstimatorForTesting estimator(operationContext(),
                                           colls,
+                                          kTestNss,
                                           PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
                                           sampleSize,
                                           SamplingEstimatorForTesting::SamplingStyle::kRandom,
@@ -1428,6 +1505,7 @@ TEST_F(SamplingEstimatorTest, EstimateNDVForFieldsSampleSizeTwoPercent) {
 
     SamplingEstimatorForTesting estimator(operationContext(),
                                           colls,
+                                          kTestNss,
                                           PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
                                           sampleSize,
                                           SamplingEstimatorForTesting::SamplingStyle::kRandom,
@@ -1447,6 +1525,7 @@ TEST_F(SamplingEstimatorTest, EstimateNDVForFieldsSampleSizeTenPercent) {
 
     SamplingEstimatorForTesting estimator(operationContext(),
                                           colls,
+                                          kTestNss,
                                           PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
                                           sampleSize,
                                           SamplingEstimatorForTesting::SamplingStyle::kRandom,
@@ -1455,7 +1534,7 @@ TEST_F(SamplingEstimatorTest, EstimateNDVForFieldsSampleSizeTenPercent) {
     makeNDVAssertions(estimator, sampleSize);
 }
 
-DEATH_TEST_F(SamplingEstimatorTest,
+DEATH_TEST_F(SamplingEstimatorTestDeathTest,
              EstimateNDVFailsWhenTopLevelFieldIsExcluded,
              "Sample must include the NDV fieldName as a top-level field") {
     const size_t card = 100;
@@ -1469,6 +1548,7 @@ DEATH_TEST_F(SamplingEstimatorTest,
     SamplingEstimatorForTesting samplingEstimator(
         operationContext(),
         colls,
+        kTestNss,
         PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
         sampleSize,
         SamplingEstimatorForTesting::SamplingStyle::kRandom,

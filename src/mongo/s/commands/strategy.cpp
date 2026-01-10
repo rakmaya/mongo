@@ -48,7 +48,6 @@
 #include "mongo/db/default_max_time_ms_cluster_parameter.h"
 #include "mongo/db/error_labels.h"
 #include "mongo/db/generic_argument_util.h"
-#include "mongo/db/global_catalog/catalog_cache/catalog_cache.h"
 #include "mongo/db/global_catalog/ddl/cannot_implicitly_create_collection_info.h"
 #include "mongo/db/global_catalog/ddl/cluster_ddl.h"
 #include "mongo/db/initialize_operation_session_info.h"
@@ -66,7 +65,7 @@
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/repl/read_concern_level.h"
-#include "mongo/db/replica_set_endpoint_util.h"
+#include "mongo/db/router_role/routing_cache/catalog_cache.h"
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/logical_session_id_gen.h"
@@ -75,15 +74,16 @@
 #include "mongo/db/stats/api_version_metrics.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/topology/mongos_topology_coordinator.h"
+#include "mongo/db/topology/vector_clock/vector_clock.h"
 #include "mongo/db/transaction_validation.h"
 #include "mongo/db/validate_api_parameters.h"
-#include "mongo/db/vector_clock/vector_clock.h"
 #include "mongo/db/versioning_protocol/stale_exception.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_severity_suppressor.h"
 #include "mongo/otel/telemetry_context_holder.h"
-#include "mongo/otel/telemetry_context_serialization.h"
+#include "mongo/otel/traces/span/span.h"
+#include "mongo/otel/traces/telemetry_context_serialization.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/rpc/check_allowed_op_query_cmd.h"
 #include "mongo/rpc/factory.h"
@@ -519,10 +519,10 @@ void ParseAndRunCommand::_parseCommand() {
     }
 
     if (auto& traceCtx = _invocation->getGenericArguments().getTraceCtx()) {
-        auto telemetryCtx = otel::TelemetryContextSerializer::fromBSON(*traceCtx);
+        auto telemetryCtx = otel::traces::TelemetryContextSerializer::fromBSON(*traceCtx);
         if (telemetryCtx) {
-            auto& telemetryCtxHolder = otel::TelemetryContextHolder::get(opCtx);
-            telemetryCtxHolder.set(telemetryCtx);
+            auto& telemetryCtxHolder = otel::TelemetryContextHolder::getDecoration(opCtx);
+            telemetryCtxHolder.setTelemetryContext(telemetryCtx);
         }
     }
 
@@ -931,10 +931,6 @@ Status ParseAndRunCommand::RunInvocation::_setup() {
         serviceOpCounters(opCtx).gotQuery();
     }
 
-    if (opCtx->routedByReplicaSetEndpoint()) {
-        replica_set_endpoint::checkIfCanRunCommand(opCtx, request);
-    }
-
     if (genericArgs.getRawData() && !invocation->supportsRawData()) {
         return {ErrorCodes::InvalidOptions, "Command does not support the rawData option"};
     }
@@ -1090,6 +1086,11 @@ void ParseAndRunCommand::RunAndRetry::_onCannotImplicitlyCreateCollection(Status
 }
 
 void ParseAndRunCommand::RunAndRetry::run() {
+    // We do not want to create a span for every incoming command, we only want a span when
+    // $traceCtx is specified on the command so we call Span::startIfExistingTraceParent instead of
+    // Span::start.
+    auto otelSpan = otel::traces::Span::startIfExistingTraceParent(
+        _parc->_rec->getOpCtx(), _parc->_rec->getCommand()->getName());
     do {
         try {
             // Try gMaxNumStaleVersionRetries times. On the last try, exceptions are

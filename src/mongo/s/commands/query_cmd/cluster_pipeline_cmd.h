@@ -33,12 +33,13 @@
 #include "mongo/db/auth/authorization_checks.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/commands.h"
-#include "mongo/db/global_catalog/router_role_api/collection_routing_info_targeter.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/pipeline/lite_parsed_pipeline.h"
-#include "mongo/db/raw_data_operation.h"
+#include "mongo/db/router_role/collection_routing_info_targeter.h"
+#include "mongo/db/shard_role/shard_catalog/raw_data_operation.h"
 #include "mongo/db/views/resolved_view.h"
 #include "mongo/s/query/planner/cluster_aggregate.h"
+#include "mongo/util/modules.h"
 
 namespace mongo {
 
@@ -78,7 +79,8 @@ public:
             Impl::parseAggregationRequest(opMsgRequest, explainVerbosity);
 
         auto privileges = uassertStatusOK(
-            auth::getPrivilegesForAggregate(AuthorizationSession::get(opCtx->getClient()),
+            auth::getPrivilegesForAggregate(opCtx,
+                                            AuthorizationSession::get(opCtx->getClient()),
                                             aggregationRequest.getNamespace(),
                                             aggregationRequest,
                                             true));

@@ -31,13 +31,13 @@
 
 #include "mongo/db/curop.h"
 #include "mongo/db/dbhelpers.h"
-#include "mongo/db/local_catalog/document_validation.h"
-#include "mongo/db/local_catalog/shard_role_api/shard_role.h"  // for acquireCollection() and CollectionAcquisitionRequest
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/repl/image_collection_entry_gen.h"
 #include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/session/logical_session_id_gen.h"
+#include "mongo/db/shard_role/shard_catalog/document_validation.h"
+#include "mongo/db/shard_role/shard_role.h"  // for acquireCollection() and CollectionAcquisitionRequest
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/util/assert_util.h"
 
 #include <string>
@@ -83,7 +83,7 @@ void writeToImageCollection(OperationContext* opCtx, OpStateAccumulator* opAccum
     auto collection = acquireCollection(
         opCtx,
         CollectionAcquisitionRequest(NamespaceString::kConfigImagesNamespace,
-                                     PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                     PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
                                      repl::ReadConcernArgs::get(opCtx),
                                      AcquisitionPrerequisites::kWrite),
         MODE_IX);

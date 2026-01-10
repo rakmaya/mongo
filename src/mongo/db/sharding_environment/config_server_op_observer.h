@@ -30,7 +30,6 @@
 #pragma once
 
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/local_catalog/collection.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/op_observer/op_observer_noop.h"
@@ -39,6 +38,8 @@
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/logical_session_id.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/uuid.h"
 
 #include <cstdint>
@@ -50,7 +51,7 @@ namespace mongo {
  * OpObserver which is installed on the op observers chain when the server is running as a config
  * server (--configsvr).
  */
-class ConfigServerOpObserver final : public OpObserverNoop {
+class MONGO_MOD_NEEDS_REPLACEMENT ConfigServerOpObserver final : public OpObserverNoop {
     ConfigServerOpObserver(const ConfigServerOpObserver&) = delete;
     ConfigServerOpObserver& operator=(const ConfigServerOpObserver&) = delete;
 

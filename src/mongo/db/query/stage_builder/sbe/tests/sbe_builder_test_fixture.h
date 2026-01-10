@@ -33,7 +33,6 @@
 #include "mongo/db/exec/sbe/stages/stages.h"
 #include "mongo/db/exec/sbe/values/slot.h"
 #include "mongo/db/exec/sbe/values/value.h"
-#include "mongo/db/local_catalog/collection.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/query/collation/collator_interface.h"
@@ -41,9 +40,11 @@
 #include "mongo/db/query/multiple_collection_accessor.h"
 #include "mongo/db/query/shard_filterer_factory_interface.h"
 #include "mongo/db/query/stage_builder/sbe/builder.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
 #include "mongo/unittest/golden_test.h"
 #include "mongo/unittest/golden_test_base.h"
 #include "mongo/unittest/unittest.h"
+#include "mongo/util/modules.h"
 
 #include <memory>
 #include <tuple>
@@ -52,9 +53,6 @@
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
-
-using namespace mongo::unittest;
-using namespace mongo::unittest::match;
 
 /**
  * SbeStageBuilderTestFixture is a unittest fixture that can be used to facilitate testing the
@@ -142,7 +140,7 @@ extern unittest::GoldenTestConfig goldenTestConfigSbe;
 class GoldenSbeStageBuilderTestFixture : public SbeStageBuilderTestFixture {
 public:
     GoldenSbeStageBuilderTestFixture()
-        : _gctx(std::make_unique<GoldenTestContext>(&goldenTestConfigSbe)) {
+        : _gctx(std::make_unique<unittest::GoldenTestContext>(&goldenTestConfigSbe)) {
         _gctx->validateOnClose(false);
     }
 
@@ -156,7 +154,7 @@ protected:
                  const mongo::BSONArray& expectedValue,
                  BuildPlanStageParam param = {});
 
-    std::unique_ptr<GoldenTestContext> _gctx;
+    std::unique_ptr<unittest::GoldenTestContext> _gctx;
     bool _collInitialized = false;
 };
 

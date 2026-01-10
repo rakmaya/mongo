@@ -333,6 +333,16 @@ def _set_up_tracing(
             evg_auth = get_auth()
             if evg_auth is not None:
                 extra_context["user.evg"] = evg_auth.username
+
+            try:
+                repo = git.Repo()
+                branch_name = repo.active_branch.name
+                extra_context["git.branch_name"] = branch_name
+            except Exception:
+                print(
+                    "Unable to setup git repo. This will result in incomplete telemetry data being uploaded."
+                )
+
             processor = BatchedBaggageSpanProcessor(OTLPSpanExporter(endpoint=COLLECTOR_ENDPOINT))
             provider.add_span_processor(processor)
         except Exception:
@@ -395,12 +405,18 @@ be invoked as either:
         raise RuntimeError(err)
 
     def set_up_feature_flags():
-        # These logging messages start with # becuase the output of this file must produce
+        # These logging messages start with # because the output of this file must produce
         # valid yaml. This comments out these print statements when the output is parsed.
         print("# Fetching feature flags...")
         if os.path.exists(BAZEL_GENERATED_OFF_FEATURE_FLAGS):
-            default_disabled_feature_flags = set(
-                process_feature_flag_file(BAZEL_GENERATED_OFF_FEATURE_FLAGS)
+            with open(
+                "buildscripts/resmokeconfig/fully_disabled_feature_flags.yml", encoding="utf8"
+            ) as fully_disabled_ffs:
+                force_disabled_flags = yaml.safe_load(fully_disabled_ffs)
+
+            default_disabled_feature_flags = list(
+                set(process_feature_flag_file(BAZEL_GENERATED_OFF_FEATURE_FLAGS))
+                - set(force_disabled_flags)
             )
         else:
             default_disabled_feature_flags = set(
@@ -527,6 +543,11 @@ flags in common: {common_set}
     _config.DOCKER_COMPOSE_BUILD_IMAGES = config.pop("docker_compose_build_images")
     if _config.DOCKER_COMPOSE_BUILD_IMAGES is not None:
         _config.DOCKER_COMPOSE_BUILD_IMAGES = _config.DOCKER_COMPOSE_BUILD_IMAGES.split(",")
+    _config.DOCKER_COMPOSE_TEST_COMPOSER_DIRS = config.pop("docker_compose_test_composer_dirs")
+    if _config.DOCKER_COMPOSE_TEST_COMPOSER_DIRS is not None:
+        _config.DOCKER_COMPOSE_TEST_COMPOSER_DIRS = _config.DOCKER_COMPOSE_TEST_COMPOSER_DIRS.split(
+            ","
+        )
     _config.DOCKER_COMPOSE_BUILD_ENV = config.pop("docker_compose_build_env")
     _config.DOCKER_COMPOSE_TAG = config.pop("docker_compose_tag")
     _config.EXTERNAL_SUT = config.pop("external_sut")
@@ -776,6 +797,8 @@ flags in common: {common_set}
     _config.SANITY_CHECK = config.pop("sanity_check")
     _config.PAUSE_AFTER_POPULATE = config.pop("pause_after_populate")
     _config.LOAD_ALL_EXTENSIONS = config.pop("load_all_extensions")
+    _config.NO_HOOKS = config.pop("no_hooks")
+    _config.HANG_ANALYZER_HOOK_TIMEOUT = config.pop("hang_analyzer_hook_timeout")
 
     # Internal testing options.
     _config.INTERNAL_PARAMS = config.pop("internal_params")

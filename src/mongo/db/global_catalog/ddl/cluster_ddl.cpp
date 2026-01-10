@@ -37,10 +37,9 @@
 #include "mongo/db/commands.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/generic_argument_util.h"
-#include "mongo/db/global_catalog/router_role_api/cluster_commands_helpers.h"
-#include "mongo/db/global_catalog/router_role_api/router_role.h"
-#include "mongo/db/global_catalog/type_database_gen.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/router_role/cluster_commands_helpers.h"
+#include "mongo/db/router_role/router_role.h"
 #include "mongo/db/sharding_environment/client/shard.h"
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/topology/shard_registry.h"
@@ -53,7 +52,6 @@
 #include "mongo/s/transaction_router_resource_yielder.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/fail_point.h"
-#include "mongo/util/read_through_cache.h"
 #include "mongo/util/str.h"
 
 #include <algorithm>
@@ -74,10 +72,10 @@ namespace {
 MONGO_FAIL_POINT_DEFINE(createUnshardedCollectionRandomizeDataShard);
 MONGO_FAIL_POINT_DEFINE(hangCreateUnshardedCollection);
 
-std::vector<AsyncRequestsSender::Request> buildUnshardedRequestsForAllShards(
+std::vector<AsyncRequestsSender::Request> buildUntrackedRequestsForAllShards(
     OperationContext* opCtx, std::vector<ShardId> shardIds, const BSONObj& cmdObj) {
     auto cmdToSend = cmdObj;
-    appendShardVersion(cmdToSend, ShardVersion::UNSHARDED());
+    appendShardVersion(cmdToSend, ShardVersion::UNTRACKED());
 
     std::vector<AsyncRequestsSender::Request> requests;
     requests.reserve(shardIds.size());
@@ -106,7 +104,7 @@ AsyncRequestsSender::Response executeCommandAgainstFirstShard(OperationContext* 
                         nss,
                         readPref,
                         retryPolicy,
-                        buildUnshardedRequestsForAllShards(
+                        buildUntrackedRequestsForAllShards(
                             opCtx, {shardId}, appendDbVersionIfPresent(cmdObj, dbInfo)));
     return std::move(responses.front());
 }
@@ -175,8 +173,6 @@ CreateCollectionResponse createCollection(OperationContext* opCtx,
         LOGV2(9913802,
               "Hanging createCollection due to failpoint 'hangCreateUnshardedCollection' finished");
     }
-
-    const auto dbInfo = createDatabase(opCtx, nss.dbName());
 
     // The config.system.session collection can only exist as sharded and it's essential for the
     // correct cluster functionality. To prevent potential issues, the operation must always be
@@ -268,6 +264,14 @@ CreateCollectionResponse createCollection(OperationContext* opCtx,
 
     // TODO (SERVER-100309): remove againstFirstShard option once 9.0 becomes last LTS.
     if (againstFirstShard) {
+        tassert(
+            113986,
+            "createCollection can only run against the first shard for `config.system.sessions` "
+            "collection.",
+            nss == NamespaceString::kLogicalSessionsNamespace);
+
+        const auto dbInfo =
+            uassertStatusOK(Grid::get(opCtx)->catalogCache()->getDatabase(opCtx, nss.dbName()));
         const auto cmdResponse =
             executeCommandAgainstFirstShard(opCtx,
                                             nss.dbName(),
@@ -281,11 +285,10 @@ CreateCollectionResponse createCollection(OperationContext* opCtx,
         uassertStatusOK(getWriteConcernStatusFromCommandResult(remoteResponse->data));
 
     } else {
-        sharding::router::DBPrimaryRouter router(opCtx->getServiceContext(), nss.dbName());
+        sharding::router::DBPrimaryRouter router(opCtx, nss.dbName());
+        router.createDbImplicitlyOnRoute();
         router.route(
-            opCtx,
-            "createCollection"_sd,
-            [&](OperationContext* opCtx, const CachedDatabaseInfo& dbInfo) {
+            "createCollection"_sd, [&](OperationContext* opCtx, const CachedDatabaseInfo& dbInfo) {
                 const auto cmdResponse = executeCommandAgainstDatabasePrimaryOnlyAttachingDbVersion(
                     opCtx,
                     nss.dbName(),
@@ -310,9 +313,8 @@ CreateCollectionResponse createCollection(OperationContext* opCtx,
 
 void createCollectionWithRouterLoop(OperationContext* opCtx,
                                     const ShardsvrCreateCollection& request) {
-    sharding::router::CollectionRouter router(opCtx->getServiceContext(), request.getNamespace());
-    router.route(opCtx,
-                 "cluster::createCollectionWithRouterLoop",
+    sharding::router::CollectionRouter router(opCtx, request.getNamespace());
+    router.route("cluster::createCollectionWithRouterLoop",
                  [&](OperationContext* opCtx, const CollectionRoutingInfo& cri) {
                      cluster::createCollection(opCtx, request);
                  });

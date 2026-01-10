@@ -65,10 +65,12 @@ DocumentSourceUnwind::DocumentSourceUnwind(const intrusive_ptr<ExpressionContext
       _indexPath(indexPath),
       _strict(strict) {}
 
-REGISTER_DOCUMENT_SOURCE(unwind,
-                         LiteParsedDocumentSourceDefault::parse,
-                         DocumentSourceUnwind::createFromBson,
-                         AllowedWithApiStrict::kAlways);
+REGISTER_LITE_PARSED_DOCUMENT_SOURCE(unwind,
+                                     UnwindLiteParsed::parse,
+                                     AllowedWithApiStrict::kAlways);
+
+REGISTER_DOCUMENT_SOURCE_WITH_STAGE_PARAMS_DEFAULT(unwind, DocumentSourceUnwind, UnwindStageParams);
+
 ALLOCATE_DOCUMENT_SOURCE_ID(unwind, DocumentSourceUnwind::id)
 
 const char* DocumentSourceUnwind::getSourceName() const {
@@ -124,7 +126,7 @@ bool DocumentSourceUnwind::canPushLimitBack(const DocumentSourceLimit* limit) co
     return !_smallestLimitPushedDown || limit->getLimit() < _smallestLimitPushedDown.value();
 }
 
-DocumentSourceContainer::iterator DocumentSourceUnwind::doOptimizeAt(
+DocumentSourceContainer::iterator DocumentSourceUnwind::optimizeAt(
     DocumentSourceContainer::iterator itr, DocumentSourceContainer* container) {
     tassert(5482200, "DocumentSourceUnwind: itr must point to this object", *itr == this);
 

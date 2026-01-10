@@ -41,10 +41,10 @@
 #include "mongo/db/commands/fle2_cleanup_gen.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/generic_argument_util.h"
-#include "mongo/db/global_catalog/catalog_cache/catalog_cache.h"
-#include "mongo/db/global_catalog/router_role_api/cluster_commands_helpers.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/router_role/cluster_commands_helpers.h"
+#include "mongo/db/router_role/routing_cache/catalog_cache.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/sharding_environment/client/shard.h"
 #include "mongo/db/sharding_environment/grid.h"
@@ -119,11 +119,9 @@ Cmd::Reply Cmd::Invocation::typedRun(OperationContext* opCtx) {
     auto req = request();
     generic_argument_util::setMajorityWriteConcern(req, &opCtx->getWriteConcern());
 
-    sharding::router::DBPrimaryRouter router(opCtx->getServiceContext(), nss.dbName());
+    sharding::router::DBPrimaryRouter router(opCtx, nss.dbName());
     return router.route(
-        opCtx,
-        Request::kCommandName,
-        [&](OperationContext* opCtx, const CachedDatabaseInfo& dbInfo) {
+        Request::kCommandName, [&](OperationContext* opCtx, const CachedDatabaseInfo& dbInfo) {
             // Rewrite command verb to _shardSvrCleanupStructuredEnccryptionData.
             auto cmd = req.toBSON();
             BSONObjBuilder reqBuilder;

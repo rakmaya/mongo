@@ -85,9 +85,7 @@ public:
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
         std::unique_ptr<Pipeline> pipeline,
         bool attachCursorAfterOptimizing,
-        std::function<void(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                           Pipeline* pipeline,
-                           CollectionMetadata collData)> finalizePipeline = nullptr,
+        std::function<void(Pipeline* pipeline)> optimizePipeline = nullptr,
         ShardTargetingPolicy shardTargetingPolicy = ShardTargetingPolicy::kAllowed,
         boost::optional<BSONObj> readConcern = boost::none,
         bool shouldUseCollectionDefaultCollator = false) override;
@@ -106,8 +104,10 @@ public:
         boost::optional<BSONObj> readConcern = boost::none,
         bool shouldUseCollectionDefaultCollator = false) override;
 
-    BSONObj preparePipelineAndExplain(std::unique_ptr<Pipeline> pipeline,
-                                      ExplainOptions::Verbosity verbosity) override;
+    BSONObj finalizePipelineAndExplain(
+        std::unique_ptr<Pipeline> pipeline,
+        ExplainOptions::Verbosity verbosity,
+        std::function<void(Pipeline* pipeline)> optimizePipeline = nullptr) override;
 
     void checkRoutingInfoEpochOrThrow(
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
@@ -135,17 +135,17 @@ public:
         const Document& documentKey,
         boost::optional<BSONObj> readConcern) final;
 
-    Status insert(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                  const NamespaceString& ns,
-                  std::unique_ptr<write_ops::InsertCommandRequest> insertCommand,
-                  const WriteConcernOptions& wc,
-                  boost::optional<OID> targetEpoch) override;
+    InsertResult insert(const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                        const NamespaceString& ns,
+                        std::unique_ptr<write_ops::InsertCommandRequest> insertCommand,
+                        const WriteConcernOptions& wc,
+                        boost::optional<OID> targetEpoch) override;
 
-    Status insertTimeseries(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                            const NamespaceString& ns,
-                            std::unique_ptr<write_ops::InsertCommandRequest> insertCommand,
-                            const WriteConcernOptions& wc,
-                            boost::optional<OID> targetEpoch) override;
+    InsertResult insertTimeseries(const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                                  const NamespaceString& ns,
+                                  std::unique_ptr<write_ops::InsertCommandRequest> insertCommand,
+                                  const WriteConcernOptions& wc,
+                                  boost::optional<OID> targetEpoch) override;
 
     StatusWith<UpdateResult> update(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                                     const NamespaceString& ns,
@@ -186,16 +186,16 @@ public:
                                         const NamespaceString& ns,
                                         const std::vector<BSONObj>& indexSpecs) override;
 
-    std::unique_ptr<ScopedExpectUnshardedCollection> expectUnshardedCollectionInScope(
+    std::unique_ptr<ScopedExpectUntrackedCollection> expectUntrackedCollectionInScope(
         OperationContext* opCtx,
         const NamespaceString& nss,
         const boost::optional<DatabaseVersion>& dbVersion) override {
-        class ScopedExpectUnshardedCollectionNoop : public ScopedExpectUnshardedCollection {
+        class ScopedExpectUntrackedCollectionNoop : public ScopedExpectUntrackedCollection {
         public:
-            ScopedExpectUnshardedCollectionNoop() = default;
+            ScopedExpectUntrackedCollectionNoop() = default;
         };
 
-        return std::make_unique<ScopedExpectUnshardedCollectionNoop>();
+        return std::make_unique<ScopedExpectUntrackedCollectionNoop>();
     }
 
 protected:

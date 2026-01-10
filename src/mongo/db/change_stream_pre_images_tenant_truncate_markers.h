@@ -30,10 +30,11 @@
 #pragma once
 
 #include "mongo/db/change_stream_pre_images_truncate_markers_per_nsUUID.h"
-#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/shard_role/shard_role.h"
 #include "mongo/db/storage/collection_truncate_markers.h"
 #include "mongo/util/concurrent_shared_values_map.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/uuid.h"
 
 #include <boost/optional/optional.hpp>

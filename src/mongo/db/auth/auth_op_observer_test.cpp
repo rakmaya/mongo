@@ -41,12 +41,6 @@
 #include "mongo/db/auth/authorization_manager_impl.h"
 #include "mongo/db/auth/authorization_router_impl_for_test.h"
 #include "mongo/db/client.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/clustered_collection_options_gen.h"
-#include "mongo/db/local_catalog/database.h"
-#include "mongo/db/local_catalog/lock_manager/exception_util.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/op_observer/op_observer_util.h"
 #include "mongo/db/repl/member_state.h"
 #include "mongo/db/repl/oplog.h"
@@ -57,6 +51,12 @@
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/repl/storage_interface_mock.h"
 #include "mongo/db/service_context_d_test_fixture.h"
+#include "mongo/db/shard_role/lock_manager/exception_util.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/clustered_collection_options_gen.h"
+#include "mongo/db/shard_role/shard_catalog/database.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
@@ -150,6 +150,13 @@ public:
                                                                << "test")));
     }
 
+    void assertCounts(uint64_t whole, uint64_t name, uint64_t tenant) {
+        auto counts = mockRouter->counts();
+        ASSERT_EQ(counts.wholeCache, whole);
+        ASSERT_EQ(counts.byName, name);
+        ASSERT_EQ(counts.byTenant, tenant);
+    }
+
     void doInsert(const NamespaceString& nss,
                   const std::vector<BSONObj> insertDocs,
                   bool shouldInvalidateCache) {
@@ -172,14 +179,14 @@ public:
                              /*recordIds*/ {},
                              /*fromMigrate=*/std::vector<bool>(stmts.size(), false),
                              /*defaultFromMigrate=*/false);
-        mockRouter->assertCounts(0, 0, 0);
+        assertCounts(0, 0, 0);
         wuow.commit();
 
         // The cache should only invalidate after the WUOW commits if shouldInvalidateCache is true.
         if (shouldInvalidateCache) {
-            mockRouter->assertCounts(0, 1, 0);
+            assertCounts(0, 1, 0);
         } else {
-            mockRouter->assertCounts(0, 0, 0);
+            assertCounts(0, 0, 0);
         }
     }
 
@@ -203,13 +210,13 @@ public:
         OplogUpdateEntryArgs entryArgs(&updateArgs, *autoColl);
         opObserver.onUpdate(opCtx.get(), entryArgs);
 
-        mockRouter->assertCounts(0, 0, 0);
+        assertCounts(0, 0, 0);
         wuow.commit();
 
         if (shouldInvalidateCache) {
-            mockRouter->assertCounts(0, 1, 0);
+            assertCounts(0, 1, 0);
         } else {
-            mockRouter->assertCounts(0, 0, 0);
+            assertCounts(0, 0, 0);
         }
     }
 
@@ -225,13 +232,13 @@ public:
 
         const auto& deleteDocumentKey = getDocumentKey(*coll, deleteDoc);
         opObserver.onDelete(opCtx.get(), *coll, {}, deleteDoc, deleteDocumentKey, args);
-        mockRouter->assertCounts(0, 0, 0);
+        assertCounts(0, 0, 0);
         wuow.commit();
 
         if (shouldInvalidateCache) {
-            mockRouter->assertCounts(0, 1, 0);
+            assertCounts(0, 1, 0);
         } else {
-            mockRouter->assertCounts(0, 0, 0);
+            assertCounts(0, 0, 0);
         }
     }
 
@@ -242,13 +249,13 @@ public:
 
         WriteUnitOfWork wuow(opCtx.get());
         opObserver.onDropDatabase(opCtx.get(), dbname, false /*fromMigrate*/);
-        mockRouter->assertCounts(0, 0, 0);
+        assertCounts(0, 0, 0);
         wuow.commit();
 
         if (shouldInvalidateCache) {
-            mockRouter->assertCounts(1, 0, 0);
+            assertCounts(1, 0, 0);
         } else {
-            mockRouter->assertCounts(0, 0, 0);
+            assertCounts(0, 0, 0);
         }
     }
 

@@ -33,18 +33,14 @@
 #include "mongo/util/modules.h"
 
 namespace mongo {
-/**
- * A 'LiteParsed' representation of either a $search or $searchMeta stage.
- * This is the parent class for the $listSearchIndexes stage.
- */
-class LiteParsedSearchStage : public LiteParsedDocumentSource {
-public:
-    static std::unique_ptr<LiteParsedSearchStage> parse(const NamespaceString& nss,
-                                                        const BSONElement& spec,
-                                                        const LiteParserOptions& options) {
-        return std::make_unique<LiteParsedSearchStage>(spec.fieldName(), std::move(nss));
-    }
 
+/**
+ * A 'LiteParsed' representation of a search stage. This is the parent class for the
+ * $listSearchIndexes stage.
+ */
+template <typename Derived>
+class LiteParsedSearchStage : public LiteParsedDocumentSourceDefault<Derived> {
+public:
     stdx::unordered_set<NamespaceString> getInvolvedNamespaces() const override {
         // There are no foreign namespaces.
         return stdx::unordered_set<NamespaceString>{};
@@ -65,17 +61,40 @@ public:
 
     ReadConcernSupportResult supportsReadConcern(repl::ReadConcernLevel level,
                                                  bool isImplicitDefault) const override {
-        return onlyReadConcernLocalSupported(getParseTimeName(), level, isImplicitDefault);
+        return this->onlyReadConcernLocalSupported(
+            this->getParseTimeName(), level, isImplicitDefault);
     }
 
     void assertSupportsMultiDocumentTransaction() const override {
-        transactionNotSupported(getParseTimeName());
+        this->transactionNotSupported(this->getParseTimeName());
     }
 
-    explicit LiteParsedSearchStage(std::string parseTimeName, NamespaceString nss)
-        : LiteParsedDocumentSource(std::move(parseTimeName)), _nss(std::move(nss)) {}
+    explicit LiteParsedSearchStage(const BSONElement& spec, NamespaceString nss)
+        : LiteParsedDocumentSourceDefault<Derived>(spec), _nss(std::move(nss)) {}
+
+    bool requiresAuthzChecks() const override {
+        return true;
+    }
 
 private:
     const NamespaceString _nss;
 };
+
+#define DEFINE_LITE_PARSED_SEARCH_STAGE_DERIVED(stageName)                                        \
+    DECLARE_STAGE_PARAMS_DERIVED_DEFAULT(stageName);                                              \
+    class stageName##LiteParsed : public LiteParsedSearchStage<stageName##LiteParsed> {           \
+    public:                                                                                       \
+        stageName##LiteParsed(const mongo::BSONElement& originalBson, mongo::NamespaceString nss) \
+            : LiteParsedSearchStage(originalBson, nss) {}                                         \
+        static std::unique_ptr<stageName##LiteParsed> parse(                                      \
+            const mongo::NamespaceString& nss,                                                    \
+            const mongo::BSONElement& spec,                                                       \
+            const mongo::LiteParserOptions& options) {                                            \
+            return std::make_unique<stageName##LiteParsed>(spec, nss);                            \
+        }                                                                                         \
+        std::unique_ptr<mongo::StageParams> getStageParams() const final {                        \
+            return std::make_unique<stageName##StageParams>(_originalBson);                       \
+        }                                                                                         \
+    };
+
 }  // namespace mongo

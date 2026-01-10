@@ -44,7 +44,6 @@
 #include "mongo/db/curop.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/feature_flag.h"
-#include "mongo/db/global_catalog/router_role_api/collection_routing_info_targeter.h"
 #include "mongo/db/initialize_operation_session_info.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/not_primary_error_tracker.h"
@@ -53,6 +52,7 @@
 #include "mongo/db/query/find_common.h"
 #include "mongo/db/query/shard_key_diagnostic_printer.h"
 #include "mongo/db/repl/read_concern_args.h"
+#include "mongo/db/router_role/collection_routing_info_targeter.h"
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/logical_session_id_gen.h"
@@ -74,9 +74,11 @@
 #include "mongo/s/query/exec/router_stage_queued_data.h"
 #include "mongo/s/would_change_owning_shard_exception.h"
 #include "mongo/s/write_ops/batched_command_request.h"
+#include "mongo/s/write_ops/unified_write_executor/stats.h"
 #include "mongo/s/write_ops/unified_write_executor/unified_write_executor.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
+#include "mongo/util/modules.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -241,31 +243,6 @@ public:
             std::vector<std::unique_ptr<NSTargeter>> targeters;
             targeters.reserve(bulkRequest.getNsInfo().size());
 
-            // This is used only for the ScopedDebugInfo construction below.
-            stdx::unordered_map<NamespaceString, boost::optional<BSONObj>> shardKeyDiagnosticInfo;
-
-            for (const auto& nsInfo : bulkRequest.getNsInfo()) {
-                auto targeter =
-                    std::make_unique<CollectionRoutingInfoTargeter>(opCtx, nsInfo.getNs());
-
-                shardKeyDiagnosticInfo.insert(
-                    {nsInfo.getNs(),
-                     targeter->getRoutingInfo().getChunkManager().isSharded()
-                         ? boost::optional<BSONObj>(targeter->getRoutingInfo()
-                                                        .getChunkManager()
-                                                        .getShardKeyPattern()
-                                                        .toBSON())
-                         : boost::none});
-
-                targeters.push_back(std::move(targeter));
-            }
-
-            // Create an RAII object that prints each collection's shard key in the case of a
-            // tassert or crash.
-            ScopedDebugInfo shardKeyDiagnostics(
-                "MultipleShardKeysDiagnostics",
-                diagnostic_printers::MultipleShardKeysDiagnosticPrinter{shardKeyDiagnosticInfo});
-
             if (auto let = bulkRequest.getLet()) {
                 // Evaluate the let parameters.
                 auto expCtx = ExpressionContextBuilder{}.opCtx(opCtx).letParameters(*let).build();
@@ -276,17 +253,47 @@ public:
                 bulkRequest.setLet(expCtx->variables.toBSON(expCtx->variablesParseState, *let));
             }
 
+            bulk_write_exec::BulkWriteExecStats execStats;
+            bulk_write_exec::BulkWriteReplyInfo replyInfo;
+            unified_write_executor::Stats uweStats;
             if (unified_write_executor::isEnabled(opCtx)) {
-                response = unified_write_executor::bulkWrite(opCtx, bulkRequest);
+                replyInfo = unified_write_executor::bulkWrite(opCtx, bulkRequest, uweStats);
+                execStats.markIgnore();
             } else {
+                // This is used only for the ScopedDebugInfo construction below.
+                stdx::unordered_map<NamespaceString, boost::optional<BSONObj>>
+                    shardKeyDiagnosticInfo;
+
+                for (const auto& nsInfo : bulkRequest.getNsInfo()) {
+                    auto targeter =
+                        std::make_unique<CollectionRoutingInfoTargeter>(opCtx, nsInfo.getNs());
+
+                    shardKeyDiagnosticInfo.insert(
+                        {nsInfo.getNs(),
+                         targeter->getRoutingInfo().getChunkManager().isSharded()
+                             ? boost::optional<BSONObj>(targeter->getRoutingInfo()
+                                                            .getChunkManager()
+                                                            .getShardKeyPattern()
+                                                            .toBSON())
+                             : boost::none});
+
+                    targeters.push_back(std::move(targeter));
+                }
+
+                // Create an RAII object that prints each collection's shard key in the case of a
+                // tassert or crash.
+                ScopedDebugInfo shardKeyDiagnostics(
+                    "MultipleShardKeysDiagnostics",
+                    diagnostic_printers::MultipleShardKeysDiagnosticPrinter{
+                        shardKeyDiagnosticInfo});
+
                 // Dispatch the bulk write through the cluster.
                 // - To ensure that possible writeErrors are properly managed, a "fire and forget"
                 //   request needs to be temporarily upgraded to 'w:1'(unless the request belongs to
                 //   a transaction, where per-operation WC settings are not supported);
                 // - Once done, The original WC is re-established to allow populateCursorReply
                 //   evaluating whether a reply needs to be returned to the external client.
-                bulk_write_exec::BulkWriteExecStats execStats;
-                auto bulkWriteReply = [&] {
+                replyInfo = [&] {
                     WriteConcernOptions originalWC = opCtx->getWriteConcern();
                     ScopeGuard resetWriteConcernGuard(
                         [opCtx, &originalWC] { opCtx->setWriteConcern(originalWC); });
@@ -297,16 +304,19 @@ public:
                     }
                     return cluster::bulkWrite(opCtx, bulkRequest, targeters, execStats);
                 }();
-
-                bool updatedShardKey = handleWouldChangeOwningShardError(
-                    opCtx, bulkRequest, bulkWriteReply, targeters);
-                // TODO SERVER-83869 handle BulkWriteExecStats for batches of size > 1 containing
-                // updates that modify a document’s owning shard.
-                execStats.updateMetrics(opCtx, targeters, updatedShardKey);
-
-                response = populateCursorReply(
-                    opCtx, bulkRequest, request.body, std::move(bulkWriteReply));
             }
+            bool updatedShardKey =
+                handleWouldChangeOwningShardError(opCtx, bulkRequest, replyInfo, targeters);
+            // TODO SERVER-83869 handle BulkWriteExecStats for batches of size > 1 containing
+            // updates that modify a document’s owning shard.
+            if (!execStats.getIgnore()) {
+                execStats.updateMetrics(opCtx, targeters, updatedShardKey);
+            } else {
+                uweStats.updateMetrics(opCtx, updatedShardKey);
+            }
+
+            response = populateCursorReply(opCtx, bulkRequest, request.body, std::move(replyInfo));
+
             result.appendElements(response.toBSON());
             return true;
         }
@@ -391,7 +401,7 @@ public:
             // targeted namespace for the first op, as a write that change's a document's owning
             // shard must be the only write in the incoming request.
             auto firstWriteNSIndex = BulkWriteCRUDOp(request.getOps()[0]).getNsInfoIdx();
-            auto nss = targeters[firstWriteNSIndex]->getNS();
+            auto nss = request.getNsInfo()[firstWriteNSIndex].getNs();
 
             bool updatedShardKey = false;
             boost::optional<BSONObj> upsertedId;

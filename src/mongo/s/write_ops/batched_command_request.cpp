@@ -41,7 +41,6 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/overloaded_visitor.h"  // IWYU pragma: keep
 
-#include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
 
@@ -223,6 +222,10 @@ void BatchedCommandRequest::evaluateAndReplaceLetParams(OperationContext* opCtx)
 const OptionalBool& BatchedCommandRequest::getBypassEmptyTsReplacement() const {
     return _visit([](auto&& op) -> decltype(auto) { return op.getBypassEmptyTsReplacement(); });
 };
+
+write_ops::WriteCommandRequestBase& BatchedCommandRequest::getWriteCommandRequestBase() {
+    return _visit([](auto&& op) -> decltype(auto) { return op.getWriteCommandRequestBase(); });
+}
 
 const write_ops::WriteCommandRequestBase& BatchedCommandRequest::getWriteCommandRequestBase()
     const {
@@ -421,6 +424,7 @@ int BatchedCommandRequest::getBaseCommandSizeEstimate(OperationContext* opCtx) c
     if (hasLegacyRuntimeConstants()) {
         request.setLegacyRuntimeConstants(*getLegacyRuntimeConstants());
     }
+    request.getGenericArguments().setComment(getGenericArguments().getComment());
 
     BSONObjBuilder builder;
     request.serialize(&builder);

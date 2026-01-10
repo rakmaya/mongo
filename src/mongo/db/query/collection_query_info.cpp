@@ -40,24 +40,25 @@
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/index/wildcard_access_method.h"
 #include "mongo/db/index_names.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/index_catalog.h"
-#include "mongo/db/local_catalog/index_catalog_entry.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/transformer_interface.h"
 #include "mongo/db/query/collection_index_usage_tracker_decoration.h"
 #include "mongo/db/query/compiler/metadata/index_entry.h"
+#include "mongo/db/query/compiler/metadata/path_arrayness.h"
 #include "mongo/db/query/plan_cache/classic_plan_cache.h"
 #include "mongo/db/query/query_feature_flags_gen.h"
 #include "mongo/db/query/query_knobs_gen.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog_entry.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/logv2/log.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/util/assert_util.h"
 
 #include <map>
+#include <memory>
 #include <set>
 #include <string>
 #include <vector>
@@ -68,12 +69,12 @@
 namespace mongo {
 namespace {
 
-CoreIndexInfo indexInfoFromIndexCatalogEntry(const IndexCatalogEntry& ice) {
-    auto desc = ice.descriptor();
-    invariant(desc);
+CoreIndexInfo indexInfoFromIndexCatalogEntry(std::shared_ptr<const IndexCatalogEntry> ice) {
+    auto desc = ice->descriptor();
+    tassert(11321500, "Index catalog entry descriptor must not be null", desc);
 
-    auto accessMethod = ice.accessMethod();
-    invariant(accessMethod);
+    auto accessMethod = ice->accessMethod();
+    tassert(11321501, "Index catalog entry access method must not be null", accessMethod);
 
     const WildcardProjection* projExec = nullptr;
     if (desc->getIndexType() == IndexType::INDEX_WILDCARD)
@@ -81,12 +82,10 @@ CoreIndexInfo indexInfoFromIndexCatalogEntry(const IndexCatalogEntry& ice) {
 
     return {desc->keyPattern(),
             desc->getIndexType(),
-            desc->isSparse(),
+            desc->isSetSparseByUser(),
             IndexEntry::Identifier{desc->indexName()},
-            ice.getFilterExpression(),
-            ice.getCollator(),
             projExec,
-            ice.shared_from_this()};
+            std::move(ice)};
 }
 
 }  // namespace
@@ -102,12 +101,10 @@ CollectionQueryInfo::PlanCacheState::PlanCacheState(OperationContext* opCtx,
 
     // TODO We shouldn't need to include unfinished indexes, but we must here because the index
     // catalog may be in an inconsistent state.  SERVER-18346.
-    auto ii = collection->getIndexCatalog()->getIndexIterator(
-        IndexCatalog::InclusionPolicy::kReady | IndexCatalog::InclusionPolicy::kUnfinished);
-    while (ii->more()) {
-        const IndexCatalogEntry* ice = ii->next();
+    for (auto&& ice : collection->getIndexCatalog()->getEntriesShared(
+             IndexCatalog::InclusionPolicy::kReady | IndexCatalog::InclusionPolicy::kUnfinished)) {
         if (ice->accessMethod()) {
-            indexCores.emplace_back(indexInfoFromIndexCatalogEntry(*ice));
+            indexCores.emplace_back(indexInfoFromIndexCatalogEntry(std::move(ice)));
         }
     }
 
@@ -167,6 +164,90 @@ const PlanCacheIndexabilityState& CollectionQueryInfo::getPlanCacheIndexabilityS
     return _planCacheState->planCacheIndexabilityState;
 }
 
+CollectionQueryInfo::PathArraynessCollectionState::PathArraynessCollectionState()
+    : pathArrayness{std::make_shared<PathArrayness>()} {}
+
+CollectionQueryInfo::PathArraynessCollectionState::PathArraynessCollectionState(
+    const CollectionQueryInfo::PathArraynessCollectionState& other) {
+    auto readLock = other.rwMutex.readLock();
+    // Copy other's PathArrayness ptr initially.
+    pathArrayness = other.pathArrayness;
+    // 'rwMutex' for this instance is default-constructed (not copied).
+}
+
+CollectionQueryInfo::PathArraynessCollectionState&
+CollectionQueryInfo::PathArraynessCollectionState::operator=(
+    const CollectionQueryInfo::PathArraynessCollectionState& other) {
+    if (this == &other) {
+        return *this;
+    }
+
+    // Take snapshot of other's PathArrayness pointer under other's read lock. This protects against
+    // any modifications made to other's PathArrayness ptr during this copy constructor.
+    // We only copy the shared_ptr reference.
+    std::shared_ptr<const PathArrayness> otherPathArrayness;
+    {
+        auto readLock = other.rwMutex.readLock();
+        otherPathArrayness = other.pathArrayness;
+    }
+    {
+        // Copy the other's PathArrayness shared_ptr into "this" PathArrayness under writeLock to
+        // prevent concurrent modifications.
+        auto writeLock = rwMutex.writeLock();
+        pathArrayness = std::move(otherPathArrayness);
+    }
+    return *this;
+}
+
+void CollectionQueryInfo::updatePathArraynessForSetMultikey(
+    const IndexDescriptor& descriptor, const MultikeyPaths& multikeyPaths) const {
+    if (PathArrayness::isIndexEligibleToAddToPathArrayness(descriptor) && !multikeyPaths.empty()) {
+        // Acquire a write lock to serialize updates to PathArrayness. This prevents any other
+        // operation from concurrently merging new paths into the tree. Within this critical
+        // section we deep-copy the existing PathArrayness structure and update it with the
+        // new multikey paths. These steps must be performed under the lock because we may
+        // need to merge index metadata from two separate document write transactions when
+        // multiple indexes are being marked multikey at the same time.
+        auto writeLock = _pathArraynessState.rwMutex.writeLock();
+        // Create local copy that we modify with new multikey paths.
+        auto newPathArrayness =
+            std::make_shared<PathArrayness>(*_pathArraynessState.pathArrayness.get());
+        newPathArrayness->addPathsFromIndexKeyPattern(descriptor.keyPattern(), multikeyPaths);
+        // Re-assign PathArrayness pointer.
+        _pathArraynessState.pathArrayness = std::move(newPathArrayness);
+    }
+}
+
+void CollectionQueryInfo::rebuildPathArrayness(OperationContext* opCtx, const Collection* coll) {
+    // Create a new pathArrayness that we populate before unseating the shared_ptr.
+    auto newPathArrayness = std::make_shared<PathArrayness>();
+    auto ii = coll->getIndexCatalog()->getIndexIterator(IndexCatalog::InclusionPolicy::kReady);
+    while (ii->more()) {
+        const IndexCatalogEntry* ice = ii->next();
+        const auto desc = ice->descriptor();
+        if (!PathArrayness::isIndexEligibleToAddToPathArrayness(*desc)) {
+            continue;
+        }
+
+        MultikeyPaths multikeyPaths;
+        coll->isIndexMultikey(opCtx, desc->indexName(), &multikeyPaths);
+        // If multikeyPaths is empty then that means we don't support path level index
+        // tracking. At that point there is no reason to append this path onto the trie
+        // since we should just assume this path is an array.
+        if (!multikeyPaths.empty()) {
+            newPathArrayness->addPathsFromIndexKeyPattern(desc->keyPattern(), multikeyPaths);
+        }
+    }
+    // We assume that this method will be called in a thread-safe manner and thus, can safely do
+    // this re-assignment without a mutex (see method header comment for more details).
+    _pathArraynessState.pathArrayness = std::move(newPathArrayness);
+}
+
+std::shared_ptr<const PathArrayness> CollectionQueryInfo::getPathArrayness() const {
+    auto readLock = _pathArraynessState.rwMutex.readLock();
+    return _pathArraynessState.pathArrayness;
+}
+
 void CollectionQueryInfo::init(OperationContext* opCtx, Collection* coll) {
     // Skip registering the index in a --repair, as the server will terminate after
     // the repair operation completes.
@@ -186,6 +267,9 @@ void CollectionQueryInfo::init(OperationContext* opCtx, Collection* coll) {
     }
 
     rebuildIndexData(opCtx, coll);
+    if (feature_flags::gFeatureFlagPathArrayness.isEnabled()) {
+        rebuildPathArrayness(opCtx, coll);
+    }
 }
 
 void CollectionQueryInfo::rebuildIndexData(OperationContext* opCtx, const Collection* coll) {

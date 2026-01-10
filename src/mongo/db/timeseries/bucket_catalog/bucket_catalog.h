@@ -34,22 +34,26 @@
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
 #include "mongo/db/timeseries/bucket_catalog/bucket.h"
 #include "mongo/db/timeseries/bucket_catalog/bucket_identifiers.h"
 #include "mongo/db/timeseries/bucket_catalog/bucket_state_registry.h"
 #include "mongo/db/timeseries/bucket_catalog/execution_stats.h"
 #include "mongo/db/timeseries/bucket_catalog/reopening.h"
+#include "mongo/db/timeseries/bucket_catalog/rollover.h"
 #include "mongo/db/timeseries/bucket_catalog/tracking_contexts.h"
 #include "mongo/db/timeseries/bucket_catalog/write_batch.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
 #include "mongo/stdx/mutex.h"
+#include "mongo/util/modules.h"
 
 #include <memory>
 #include <unordered_map>
 #include "mongo/util/tracking/btree_map.h"
 #include "mongo/util/tracking/flat_hash_set.h"
 #include "mongo/util/tracking/inlined_vector.h"
+#include "mongo/util/tracking/list.h"
+#include "mongo/util/tracking/memory.h"
 #include "mongo/util/tracking/unordered_map.h"
 #include "mongo/util/uuid.h"
 
@@ -60,15 +64,17 @@
 #include <unordered_map>
 #include <variant>
 
-#include <absl/container/inlined_vector.h>
-#include <boost/container/static_vector.hpp>
-#include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
 
 namespace mongo::timeseries::hcindex {
 class HCIndexCollectionManager;
 }  // namespace mongo::timeseries::hcindex
 
+namespace mongo::timeseries::hcindex {
+class HCIndexCollectionManager;
+}  // namespace mongo::timeseries::hcindex
+
+MONGO_MOD_PUBLIC;
 namespace mongo::timeseries::bucket_catalog {
 
 using StripeNumber = std::uint8_t;

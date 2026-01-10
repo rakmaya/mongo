@@ -61,8 +61,10 @@
 #include <boost/smart_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
-
 namespace mongo {
+
+DEFINE_LITE_PARSED_STAGE_DEFAULT_DERIVED(Densify);
+DEFINE_LITE_PARSED_STAGE_DEFAULT_DERIVED(InternalDensify);
 
 class RangeStatement;
 class DensifyValue {
@@ -381,9 +383,8 @@ public:
         return DistributedPlanLogic{nullptr, this, boost::none};
     }
 
-protected:
-    DocumentSourceContainer::iterator doOptimizeAt(DocumentSourceContainer::iterator itr,
-                                                   DocumentSourceContainer* container) final;
+    DocumentSourceContainer::iterator optimizeAt(DocumentSourceContainer::iterator itr,
+                                                 DocumentSourceContainer* container);
 
 private:
     friend boost::intrusive_ptr<exec::agg::Stage> documentSourceInternalDensifyToStageFn(

@@ -30,6 +30,7 @@
 
 #include "mongo/db/extension/public/api.h"
 #include "mongo/db/extension/sdk/aggregation_stage.h"
+#include "mongo/db/extension/sdk/api_version_vector_to_span.h"
 #include "mongo/db/extension/sdk/assert_util.h"
 #include "mongo/db/extension/sdk/host_portal.h"
 #include "mongo/db/extension/sdk/host_services.h"
@@ -55,14 +56,14 @@ protected:
     template <class StageDescriptor>
     void _registerStage(const HostPortalHandle& portal) {
         // Error out if StageDescriptor is already registered to this extension.
-        userAssert(10696402,
-                   (str::stream() << StageDescriptor::kStageName << " is already registered"),
-                   _stageDescriptors.find(StageDescriptor::kStageName) == _stageDescriptors.end());
+        sdk_uassert(10696402,
+                    (str::stream() << StageDescriptor::kStageName << " is already registered"),
+                    _stageDescriptors.find(StageDescriptor::kStageName) == _stageDescriptors.end());
 
         auto stageDesc =
             std::make_unique<ExtensionAggStageDescriptor>(std::make_unique<StageDescriptor>());
 
-        portal.registerStageDescriptor(stageDesc.get());
+        portal->registerStageDescriptor(stageDesc.get());
 
         _stageDescriptors.emplace(StageDescriptor::kStageName, std::move(stageDesc));
     }
@@ -79,13 +80,26 @@ class ExtensionAdapter final : public ::MongoExtension {
 public:
     ExtensionAdapter(std::unique_ptr<sdk::Extension> extensionPointer,
                      ::MongoExtensionAPIVersion version)
-        : ::MongoExtension{&VTABLE, version}, _extensionPointer(std::move(extensionPointer)) {}
+        : ::MongoExtension{&VTABLE, version}, _extensionPointer(std::move(extensionPointer)) {
+        sdk_tassert(11417101, "Provided Extension is null", _extensionPointer != nullptr);
+    }
 
     ExtensionAdapter(const VersionedExtension& versionedExtension)
         : ::MongoExtension{&VTABLE, versionedExtension.version},
-          _extensionPointer(versionedExtension.factoryFunc()) {}
+          _extensionPointer(versionedExtension.factoryFunc()) {
+        sdk_tassert(11417102, "Provided Extension is null", _extensionPointer != nullptr);
+    }
 
     ~ExtensionAdapter() = default;
+
+    // ExtensionAdapter is non-copyable and non-movable, as adapters should be heap-allocated, and
+    // managed via a unique_ptr or Handle. This property guarantees that the adapter's underlying
+    // implementation pointer remains valid for object's lifetime. The same is true for all
+    // adapters.
+    ExtensionAdapter(const ExtensionAdapter&) = delete;
+    ExtensionAdapter& operator=(const ExtensionAdapter&) = delete;
+    ExtensionAdapter(ExtensionAdapter&&) = delete;
+    ExtensionAdapter& operator=(ExtensionAdapter&&) = delete;
 
 private:
     static ::MongoExtensionStatus* _extInitialize(
@@ -94,7 +108,7 @@ private:
         const ::MongoExtensionHostServices* hostServices) noexcept {
         // Immediately set the static HostServices instance so that the extension can access it
         // during initialization if needed.
-        HostServicesHandle::setHostServices(hostServices);
+        HostServicesAPI::setHostServices(hostServices);
 
         return wrapCXXAndConvertExceptionToStatus([&]() {
             // The host portal will go out of scope on the host side after initialization, so we
@@ -140,7 +154,8 @@ private:
             const auto& versionedExtensionContainer =                                        \
                 mongo::extension::sdk::VersionedExtensionContainer::getInstance();           \
             static auto wrapper = std::make_unique<mongo::extension::sdk::ExtensionAdapter>( \
-                versionedExtensionContainer.getVersionedExtension(hostVersions));            \
+                versionedExtensionContainer.getVersionedExtension(                           \
+                    mongo::extension::sdk::to_span(hostVersions)));                          \
             *extension = reinterpret_cast<const ::MongoExtension*>(wrapper.get());           \
         });                                                                                  \
     }                                                                                        \

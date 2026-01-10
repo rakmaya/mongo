@@ -42,6 +42,7 @@
 #include "mongo/db/repl/read_concern_level.h"
 #include "mongo/db/sharding_environment/client/shard.h"
 #include "mongo/util/duration.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/net/hostandport.h"
 
 #include <functional>
@@ -81,7 +82,7 @@ public:
 
     std::string toString() const override;
 
-    bool isRetriableError(ErrorCodes::Error code,
+    bool isRetriableError(const Status& status,
                           std::span<const std::string> errorLabels,
                           RetryPolicy options) const final;
 

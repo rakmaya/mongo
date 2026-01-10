@@ -35,14 +35,14 @@ feature_flags:
         cpp_varname: gFeatureFlagSecurityToken
         default: false
         fcv_gated: true
-        fcv_context_unaware: true
+        check_against_fcv: legacy_fcv_snapshot_only
     featureFlagAllowAdditionalParticipants:
         description: "Enable adding additional participants to active transaction"
         cpp_varname: gFeatureFlagAllowAdditionalParticipants
         default: true
         version: 8.0
         fcv_gated: true
-        fcv_context_unaware: true
+        check_against_fcv: legacy_fcv_snapshot_only
     featureFlagBulkWriteCommand:
         description: "Support for bulkWrite command and one-shot transactions"
         cpp_varname: gFeatureFlagBulkWriteCommand
@@ -70,7 +70,7 @@ feature_flags:
         cpp_varname: feature_flags::gFeatureFlagEndOfTransactionChangeEvent
         default: false
         fcv_gated: true
-        fcv_context_unaware: true
+        check_against_fcv: legacy_fcv_snapshot_only
     featureFlagAllMongodsAreSharded:
         description: "Feature flag to enable and autobootstrap sharding for all mongods"
         cpp_varname: gFeatureFlagAllMongodsAreSharded
@@ -84,7 +84,7 @@ feature_flags:
         default: true
         version: 7.2
         fcv_gated: true
-        fcv_context_unaware: true
+        check_against_fcv: legacy_fcv_snapshot_only
     featureFlagRearchitectUserAcquisition:
         description: "Enable new flow for authentication and authorization"
         cpp_varname: gFeatureFlagRearchitectUserAcquisition
@@ -136,7 +136,7 @@ feature_flags:
         default: true
         version: 8.1
         fcv_gated: true
-        fcv_context_unaware: true
+        check_against_fcv: legacy_fcv_snapshot_only
     featureFlagCreateViewlessTimeseriesCollections:
         description: >-
             Enables the creation of viewless timeseries collections.
@@ -145,6 +145,7 @@ feature_flags:
         cpp_varname: gFeatureFlagCreateViewlessTimeseriesCollections
         default: false
         fcv_gated: true
+        check_against_fcv: operation_fcv_only
     featureFlagMarkTimeseriesEventsInOplog:
         description: >-
             Enables marking oplog entries writing to viewless timeseries collections.
@@ -203,15 +204,42 @@ feature_flags:
     featureFlagMandatoryAuthzChecks:
         description: "Feature flag to enable mandatory authorization checks on command and agg stages"
         cpp_varname: gFeatureFlagMandatoryAuthzChecks
-        default: false
-        fcv_gated: false
-    featureFlagSupportOverloadRetryability:
-        description: "Feature flag to enable support overload retryability in server-based clients"
-        cpp_varname: gFeatureFlagSupportOverloadRetryability
-        default: false
-        fcv_gated: false
+        default: true
+        version: 8.3
+        fcv_gated: true
     featureFlagDedicatedPortForMaintenanceOperations:
         description: "Feature flag to enable a dedicated port for high priority maintenance operations on mongoD and mongoS"
         cpp_varname: gFeatureFlagDedicatedPortForMaintenanceOperations
         default: false
         fcv_gated: false
+    featureFlagPreparedTransactionsPreciseCheckpoints:
+        description: "Enables logic necessary to recover prepared transactions with precise checkpoints"
+        cpp_varname: gFeatureFlagPreparedTransactionsPreciseCheckpoints
+        default: false
+        # TODO SERVER-113736 Set this to true and correctly gate any checks on FCV
+        fcv_gated: false
+    featureFlagKillOpErrorCodeOverride:
+        description: "Feature flag to enable specifying custom error codes when killing operations"
+        cpp_varname: gFeatureFlagKillOpErrorCodeOverride
+        default: true
+        version: 8.3
+        fcv_gated: true
+    # TODO SERVER-114804: Remove this feature flag.
+    featureFlagDisableTransactionUpdateCoalescing:
+        description: "Disable transaction table update coalescing on secondaries for testing purposes"
+        cpp_varname: gFeatureFlagDisableTransactionUpdateCoalescing
+        default: false
+        fcv_gated: false
+        incremental_rollout_phase: in_development
+    featureFlagOtelMetrics:
+        description: "Feature flag to enable exporting OpenTelemetry metrics"
+        cpp_varname: gFeatureFlagOtelMetrics
+        default: false
+        fcv_gated: false
+    featureFlagReplicateMultikeynessInTransactions:
+        description: "Enable explicit replication of multikey metadata inside multi-document transactions"
+        cpp_varname: gFeatureFlagReplicateMultikeynessInTransactions
+        default: true
+        version: 8.3
+        fcv_gated: true
+        check_against_fcv: operation_fcv_only

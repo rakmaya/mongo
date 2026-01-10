@@ -48,10 +48,14 @@
 
 namespace mongo {
 
-REGISTER_DOCUMENT_SOURCE(listSessions,
-                         DocumentSourceListSessions::LiteParsed::parse,
-                         DocumentSourceListSessions::createFromBson,
-                         AllowedWithApiStrict::kNeverInVersion1);
+REGISTER_LITE_PARSED_DOCUMENT_SOURCE(listSessions,
+                                     DocumentSourceListSessions::LiteParsed::parse,
+                                     AllowedWithApiStrict::kNeverInVersion1);
+
+REGISTER_DOCUMENT_SOURCE_WITH_STAGE_PARAMS_DEFAULT(listSessions,
+                                                   DocumentSourceListSessions,
+                                                   ListSessionsStageParams);
+
 ALLOCATE_DOCUMENT_SOURCE_ID(listSessions, DocumentSourceListSessions::id)
 
 boost::intrusive_ptr<DocumentSource> DocumentSourceListSessions::createFromBson(
@@ -74,7 +78,6 @@ boost::intrusive_ptr<DocumentSource> DocumentSourceListSessions::createFromBson(
         return new DocumentSourceListSessions(
             BSONObj(), pExpCtx, spec.getAllUsers(), spec.getUsers());
     }
-    invariant(spec.getUsers() && !spec.getUsers()->empty());
 
     BSONArrayBuilder builder;
     for (const auto& uid : listSessionsUsersToDigests(spec.getUsers().value())) {

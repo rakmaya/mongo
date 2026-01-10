@@ -47,18 +47,13 @@
 #include "mongo/db/global_catalog/ddl/cannot_implicitly_create_collection_info.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/query/client_cursor/cursor_server_params_gen.h"
-#include "mongo/db/query/write_ops/write_ops.h"
 #include "mongo/db/query/write_ops/write_ops_parsers.h"
-#include "mongo/db/raw_data_operation.h"
 #include "mongo/db/session/logical_session_id_helpers.h"
+#include "mongo/db/shard_role/shard_catalog/raw_data_operation.h"
 #include "mongo/db/sharding_environment/client/shard.h"
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/tenant_id.h"
-#include "mongo/db/versioning_protocol/chunk_version.h"
-#include "mongo/db/versioning_protocol/database_version.h"
-#include "mongo/db/versioning_protocol/shard_version.h"
-#include "mongo/db/versioning_protocol/shard_version_factory.h"
 #include "mongo/db/versioning_protocol/stale_exception.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/executor/remote_command_response.h"
@@ -76,19 +71,14 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/exit.h"
 #include "mongo/util/str.h"
-#include "mongo/util/uuid.h"
 
 #include <cstddef>
-#include <cstdint>
 #include <numeric>
 #include <string>
 #include <utility>
 #include <variant>
 
 #include <absl/container/node_hash_map.h>
-#include <absl/meta/type_traits.h>
-#include <boost/move/utility_core.hpp>
-#include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
@@ -242,6 +232,9 @@ void BulkWriteExecStats::noteTwoPhaseWriteProtocol(const BulkWriteCommandRequest
 void BulkWriteExecStats::updateMetrics(OperationContext* opCtx,
                                        const std::vector<std::unique_ptr<NSTargeter>>& targeters,
                                        bool updatedShardKey) {
+    if (_ignore) {
+        return;
+    }
     // Record the number of shards targeted by this bulkWrite.
     CurOp::get(opCtx)->debug().nShards = _targetedShards.size();
 
@@ -424,7 +417,11 @@ void executeWriteWithoutShardKey(
             // running errors only in which case we set an empty vector.
             auto items = std::vector<mongo::BulkWriteReplyItem>{};
             if (!bulkWriteOp.getClientRequest().getErrorsOnly()) {
-                items.push_back(BulkWriteReplyItem(0));
+                BulkWriteReplyItem item(0);
+                if (op.getType() == BulkWriteCRUDOp::OpType::kUpdate) {
+                    item.setNModified(0);
+                }
+                items.push_back(std::move(item));
             }
             bulkWriteResponse.setCursor(
                 BulkWriteCommandResponseCursor(0,  // cursorId
@@ -701,112 +698,6 @@ BulkWriteCommandReply createEmulatedErrorReply(const Status& error,
     return emulatedReply;
 }
 
-/**
- * Calculates an estimate of the size, in bytes, required to store the common fields that will
- * go into each child batch command sent to a shard, i.e. all fields besides the actual write
- * ops.
- */
-int computeBaseSizeEstimate(OperationContext* opCtx, const BulkWriteCommandRequest& clientRequest) {
-    // For simplicity, we build a dummy bulk write command request that contains all the common
-    // fields and serialize it to get the base command size. We only bother to copy over variable
-    // size and/or optional fields, since the value of fields that are fixed-size and always present
-    // (e.g. 'ordered') won't affect the size calculation.
-    BulkWriteCommandRequest request;
-
-    // We'll account for the size to store each individual nsInfo as we add them, so just put an
-    // empty vector as a placeholder for the array. This will ensure we properly count the size of
-    // the field name and the empty array.
-    request.setNsInfo({});
-
-    request.setDbName(clientRequest.getDbName());
-    request.setLet(clientRequest.getLet());
-
-    // We'll account for the size to store each individual op as we add them, so just put an empty
-    // vector as a placeholder for the array. This will ensure we properly count the size of the
-    // field name and the empty array.
-    request.setOps({});
-
-    if (opCtx->isRetryableWrite()) {
-        // We'll account for the size to store each individual stmtId as we add ops, so similar to
-        // above with ops, we just put an empty vector as a placeholder for now.
-        request.setStmtIds({});
-    }
-
-    request.setBypassEmptyTsReplacement(clientRequest.getBypassEmptyTsReplacement());
-
-    BSONObjBuilder builder;
-    request.serialize(&builder);
-    // Add writeConcern and lsid/txnNumber to ensure we save space for them.
-    logical_session_id_helpers::serializeLsidAndTxnNumber(opCtx, &builder);
-    builder.append(WriteConcernOptions::kWriteConcernField, opCtx->getWriteConcern().toBSON());
-
-    return builder.obj().objsize();
-}
-
-BulkCommandSizeEstimator::BulkCommandSizeEstimator(OperationContext* opCtx,
-                                                   const BulkWriteCommandRequest& clientRequest)
-    : _clientRequest(clientRequest),
-      _isRetryableWriteOrInTransaction(opCtx->getTxnNumber().has_value()),
-      _baseSizeEstimate(computeBaseSizeEstimate(opCtx, clientRequest)) {}
-
-int BulkCommandSizeEstimator::getBaseSizeEstimate() const {
-    return _baseSizeEstimate;
-}
-
-int BulkCommandSizeEstimator::getOpSizeEstimate(int opIdx, const ShardId& shardId) const {
-    // If retryable writes are used, MongoS needs to send an additional array of stmtId(s)
-    // corresponding to the statements that got routed to each individual shard, so they need to
-    // be accounted in the potential request size so it does not exceed the max BSON size.
-    int writeSizeBytes = BatchItemRef{&_clientRequest, opIdx}.estimateOpSizeInBytes() +
-        write_ops::kWriteCommandBSONArrayPerElementOverheadBytes +
-        (_isRetryableWriteOrInTransaction
-             ? write_ops::kStmtIdSize + write_ops::kWriteCommandBSONArrayPerElementOverheadBytes
-             : 0);
-
-    const auto& bulkWriteOp = BulkWriteCRUDOp(_clientRequest.getOps()[opIdx]);
-
-    // Get the set of nsInfos we've accounted for on this shardId.
-    auto iter = _accountedForNsInfos.find(shardId);
-
-    // If we have not accounted for this one already then increase the write size estimate by the
-    // nsInfo size and store this index so it does not get counted again.
-    if (iter == _accountedForNsInfos.end() || !iter->second.contains(bulkWriteOp.getNsInfoIdx())) {
-        // Account for optional fields that can be set per namespace to have a conservative
-        // estimate.
-        static const ShardVersion mockShardVersion =
-            ShardVersionFactory::make(ChunkVersion::IGNORED());
-        static const DatabaseVersion mockDBVersion = DatabaseVersion(UUID::gen(), Timestamp());
-
-        auto nsEntry = _clientRequest.getNsInfo()[bulkWriteOp.getNsInfoIdx()];
-        nsEntry.setShardVersion(mockShardVersion);
-        nsEntry.setDatabaseVersion(mockDBVersion);
-        if (!nsEntry.getNs().isTimeseriesBucketsCollection()) {
-            // This could be a timeseries view. To be conservative about the estimate, we
-            // speculatively account for the additional size needed for the timeseries bucket
-            // transalation and the 'isTimeseriesCollection' field.
-            nsEntry.setNs(nsEntry.getNs().makeTimeseriesBucketsNamespace());
-            nsEntry.setIsTimeseriesNamespace(true);
-        }
-
-        writeSizeBytes +=
-            nsEntry.toBSON().objsize() + write_ops::kWriteCommandBSONArrayPerElementOverheadBytes;
-    }
-
-    return writeSizeBytes;
-}
-
-void BulkCommandSizeEstimator::addOpToBatch(int opIdx, const ShardId& shardId) {
-    // Get the set of nsInfos we've accounted for on this shardId.
-    _accountedForNsInfos.try_emplace(shardId, absl::flat_hash_set<int>());
-    auto iter = _accountedForNsInfos.find(shardId);
-    invariant(iter != _accountedForNsInfos.end());
-
-    // If we have not accounted for this one already then increase the write size estimate by the
-    // nsInfo size and store this index so it does not get counted again.
-    const auto& bulkWriteOp = BulkWriteCRUDOp(_clientRequest.getOps()[opIdx]);
-    iter->second.insert(bulkWriteOp.getNsInfoIdx());
-}
-
 BulkWriteOp::BulkWriteOp(OperationContext* opCtx, const BulkWriteCommandRequest& clientRequest)
     : _opCtx(opCtx),
       _clientRequest(clientRequest),
@@ -826,7 +717,7 @@ StatusWith<WriteType> BulkWriteOp::target(const std::vector<std::unique_ptr<NSTa
                                           TargetedBatchMap& targetedBatches) {
     const auto ordered = _clientRequest.getOrdered();
 
-    BulkCommandSizeEstimator sizeEstimator(_opCtx, _clientRequest);
+    write_op_helpers::BulkCommandSizeEstimator sizeEstimator(_opCtx, _clientRequest);
 
     return targetWriteOps(
         _opCtx,
@@ -858,7 +749,7 @@ BulkWriteCommandRequest BulkWriteOp::buildBulkCommandRequest(
     // So we don't send unnecessary nsInfos in the subbatch we need to keep track of a mapping of
     // the original nsInfoIdx to the new nsInfoidx. If we don't do this then document sequenced
     // nsInfo array can cause child batches to be over the max BSON size.
-    absl::flat_hash_map<int, int> nsInfoIndexMap;
+    absl::flat_hash_map<NamespaceString, int> nsInfoIndexMap;
 
     std::vector<int> stmtIds;
     if (_isRetryableWrite)
@@ -888,13 +779,14 @@ BulkWriteCommandRequest BulkWriteOp::buildBulkCommandRequest(
         // nsInfo.
         const auto& bulkWriteOp = BulkWriteCRUDOp(ops.back());
         auto nsIdx = bulkWriteOp.getNsInfoIdx();
+        auto nss = nsInfo[nsIdx].getNs();
 
         // See if we have already added this index to the childBatch. If not then we need to add it
         // here.
-        auto iter = nsInfoIndexMap.find(nsIdx);
+        auto iter = nsInfoIndexMap.find(nss);
         if (iter == nsInfoIndexMap.end()) {
             batchNsInfo.push_back(nsInfo.at(nsIdx));
-            iter = nsInfoIndexMap.insert({nsIdx, batchNsInfo.size() - 1}).first;
+            iter = nsInfoIndexMap.insert({nss, batchNsInfo.size() - 1}).first;
         }
 
         // Set the new nsInfoIdx on the op for the childBatch.
@@ -952,6 +844,7 @@ BulkWriteCommandRequest BulkWriteOp::buildBulkCommandRequest(
     request.setBypassDocumentValidation(_clientRequest.getBypassDocumentValidation());
     request.setLet(_clientRequest.getLet());
     request.setErrorsOnly(_clientRequest.getErrorsOnly());
+    request.setComment(_clientRequest.getComment());
 
     if (_isRetryableWrite) {
         request.setStmtIds(stmtIds);
@@ -1140,7 +1033,7 @@ void BulkWriteOp::noteChildBatchResponse(
     int firstTargetedWriteOpIdx = targetedBatch.getWrites().front()->writeOpRef.first;
     bool isWithoutShardKeyWithIdWrite =
         (_writeOps[firstTargetedWriteOpIdx].getWriteType() == WriteType::WithoutShardKeyWithId);
-    bool shouldDeferWriteWithoutShardKeyReponse =
+    bool shouldDeferWriteWithoutShardKeyResponse =
         isWithoutShardKeyWithIdWrite && targetedBatch.getNumOps() > 1;
 
     const auto replyItems =
@@ -1163,12 +1056,12 @@ void BulkWriteOp::noteChildBatchResponse(
     // replies: [1, 3]       -> [1, 3]       -> [1, 3]       -> [1, 3]
     //           ^               ^                  ^               ^
     // Only moving forward in replies when we see a matching write op.
-    int replyIndex = -1;
+    size_t replyIndex = static_cast<size_t>(-1);
     // A batch will fail on an error if the request was sent with ordered:true or we are executing
     // the request within a transaction.
     bool batchWillContinue = !_clientRequest.getOrdered() && !_inTransaction;
     boost::optional<write_ops::WriteError> lastError;
-    for (int writeOpIdx = 0; writeOpIdx < (int)targetedBatch.getWrites().size(); ++writeOpIdx) {
+    for (size_t writeOpIdx = 0; writeOpIdx < targetedBatch.getWrites().size(); ++writeOpIdx) {
         const auto& write = targetedBatch.getWrites()[writeOpIdx];
         WriteOp& writeOp = _writeOps[write->writeOpRef.first];
 
@@ -1177,7 +1070,7 @@ void BulkWriteOp::noteChildBatchResponse(
             tassert(8266001,
                     "bulkWrite should always get replies when not in errorsOnly",
                     _clientRequest.getErrorsOnly());
-            if (shouldDeferWriteWithoutShardKeyReponse) {
+            if (shouldDeferWriteWithoutShardKeyResponse) {
                 if (!_deferredResponses) {
                     _deferredResponses.emplace();
                 }
@@ -1198,7 +1091,7 @@ void BulkWriteOp::noteChildBatchResponse(
         if (!batchWillContinue && lastError) {
             tassert(8266002,
                     "bulkWrite should not see replies after an error when ordered:true",
-                    replyIndex >= (int)replyItems.size());
+                    replyIndex >= replyItems.size());
             writeOp.resetWriteToReady(_opCtx);
             continue;
         }
@@ -1219,7 +1112,7 @@ void BulkWriteOp::noteChildBatchResponse(
              lastError->getStatus().code() == ErrorCodes::ShardCannotRefreshDueToLocksHeld ||
              lastError->getStatus() == ErrorCodes::CannotImplicitlyCreateCollection);
 
-        if (batchWillContinue && isStaleError && (replyIndex == (int)replyItems.size())) {
+        if (batchWillContinue && isStaleError && (replyIndex == replyItems.size())) {
             // Decrement the replyIndex so it keeps pointing to the same error (i.e. the
             // last error, which is a staleness error).
             LOGV2_DEBUG(7695304,
@@ -1232,7 +1125,7 @@ void BulkWriteOp::noteChildBatchResponse(
 
         // If we are out of replyItems but have more write ops then we must be in an ordered:false
         // errorsOnly:true bulkWrite where we have successful results after the last error.
-        if (replyIndex >= (int)replyItems.size()) {
+        if (replyIndex >= replyItems.size()) {
             tassert(8516601,
                     "bulkWrite received more replies than writes",
                     _clientRequest.getErrorsOnly());
@@ -1241,6 +1134,7 @@ void BulkWriteOp::noteChildBatchResponse(
             continue;
         }
 
+        tassert(11491901, "replyIndex out of range of replyItems", replyIndex < replyItems.size());
         auto& reply = replyItems[replyIndex];
 
         // This can only happen when running an errorsOnly:true bulkWrite. We will only receive a
@@ -1250,7 +1144,8 @@ void BulkWriteOp::noteChildBatchResponse(
         // a safe assumption.
         // writeOpIdx can be > than reply.getIdx when we are duplicating the last error
         // as described in the block above.
-        if (writeOpIdx < reply.getIdx()) {
+        tassert(11491902, "reply.getIdx() must not be negative", reply.getIdx() >= 0);
+        if (writeOpIdx < static_cast<size_t>(reply.getIdx())) {
             tassert(8266003,
                     "bulkWrite should get a reply for every write op when not in errorsOnly mode",
                     _clientRequest.getErrorsOnly());
@@ -1268,7 +1163,7 @@ void BulkWriteOp::noteChildBatchResponse(
             _approximateSize += reply.getApproximateSize();
         }
 
-        if (shouldDeferWriteWithoutShardKeyReponse) {
+        if (shouldDeferWriteWithoutShardKeyResponse) {
             if (!_deferredResponses) {
                 _deferredResponses.emplace();
             }

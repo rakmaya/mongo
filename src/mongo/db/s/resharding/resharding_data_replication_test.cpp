@@ -30,24 +30,16 @@
 #include "mongo/db/s/resharding/resharding_data_replication.h"
 
 #include "mongo/base/counter.h"
-#include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/oid.h"
-#include "mongo/crypto/encryption_fields_gen.h"
 #include "mongo/db/basic_types_gen.h"
 #include "mongo/db/client.h"
 #include "mongo/db/collection_crud/collection_write_path.h"
+#include "mongo/db/dbhelpers.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/global_catalog/chunk_manager.h"
 #include "mongo/db/global_catalog/type_chunk.h"
-#include "mongo/db/global_catalog/type_collection_common_types_gen.h"
-#include "mongo/db/local_catalog/clustered_collection_options_gen.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_options.h"
-#include "mongo/db/local_catalog/lock_manager/exception_util.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
 #include "mongo/db/persistent_task_store.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/db/query/collation/collator_factory_mock.h"
@@ -64,12 +56,14 @@
 #include "mongo/db/s/resharding/resharding_util.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/service_context_d_test_fixture.h"
+#include "mongo/db/shard_role/lock_manager/exception_util.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_options.h"
+#include "mongo/db/shard_role/shard_catalog/operation_sharding_state.h"
 #include "mongo/db/storage/write_unit_of_work.h"
-#include "mongo/db/timeseries/timeseries_gen.h"
 #include "mongo/db/versioning_protocol/chunk_version.h"
-#include "mongo/db/versioning_protocol/database_version.h"
 #include "mongo/logv2/log.h"
-#include "mongo/s/resharding/type_collection_fields_gen.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/duration.h"
@@ -128,8 +122,7 @@ public:
                                                true /* allowMigrations */,
                                                chunks);
 
-        return ChunkManager(makeStandaloneRoutingTableHistory(std::move(rt)),
-                            boost::none /* clusterTime */);
+        return CurrentChunkManager(makeStandaloneRoutingTableHistory(std::move(rt)));
     }
 
     DonorShardFetchTimestamp makeDonorShardFetchTimestamp(ShardId shardId,
@@ -387,15 +380,13 @@ TEST_F(ReshardingDataReplicationTest, GetOplogFetcherResumeId) {
         const auto oplogBufferColl = acquireCollection(
             opCtx.get(),
             CollectionAcquisitionRequest{oplogBufferNss,
-                                         PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                         PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
                                          repl::ReadConcernArgs::get(opCtx.get()),
                                          AcquisitionPrerequisites::kWrite},
             MODE_IX);
         WriteUnitOfWork wuow(opCtx.get());
-        ASSERT_OK(collection_internal::insertDocument(opCtx.get(),
-                                                      oplogBufferColl.getCollectionPtr(),
-                                                      InsertStatement{oplogEntry.toBSON()},
-                                                      nullptr));
+        ASSERT_OK(
+            Helpers::insert(opCtx.get(), oplogBufferColl.getCollectionPtr(), oplogEntry.toBSON()));
         wuow.commit();
     };
 

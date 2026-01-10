@@ -47,7 +47,6 @@
 #include "mongo/db/feature_flag.h"
 #include "mongo/db/generic_argument_util.h"
 #include "mongo/db/global_catalog/ddl/sharding_recovery_service.h"
-#include "mongo/db/global_catalog/router_role_api/cluster_commands_helpers.h"
 #include "mongo/db/global_catalog/shard_key_pattern.h"
 #include "mongo/db/global_catalog/sharding_catalog_client.h"
 #include "mongo/db/global_catalog/type_chunk.h"
@@ -55,26 +54,6 @@
 #include "mongo/db/index/index_constants.h"
 #include "mongo/db/index_builds/index_builds_coordinator.h"
 #include "mongo/db/keypattern.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_catalog.h"
-#include "mongo/db/local_catalog/collection_options.h"
-#include "mongo/db/local_catalog/database.h"
-#include "mongo/db/local_catalog/ddl/list_collections_gen.h"
-#include "mongo/db/local_catalog/ddl/list_indexes_allowed_fields.h"
-#include "mongo/db/local_catalog/ddl/list_indexes_gen.h"
-#include "mongo/db/local_catalog/document_validation.h"
-#include "mongo/db/local_catalog/index_catalog.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
-#include "mongo/db/local_catalog/list_indexes.h"
-#include "mongo/db/local_catalog/lock_manager/exception_util.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
-#include "mongo/db/local_catalog/shard_role_catalog/collection_metadata.h"
-#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_runtime.h"
-#include "mongo/db/local_catalog/shard_role_catalog/operation_sharding_state.h"
-#include "mongo/db/local_catalog/shard_role_catalog/shard_filtering_metadata_refresh.h"
 #include "mongo/db/logical_time.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
@@ -86,6 +65,7 @@
 #include "mongo/db/repl/read_concern_level.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/repl/replication_coordinator.h"
+#include "mongo/db/router_role/cluster_commands_helpers.h"
 #include "mongo/db/s/migration_batch_fetcher.h"
 #include "mongo/db/s/migration_destination_manager.h"
 #include "mongo/db/s/migration_util.h"
@@ -98,6 +78,26 @@
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/session_catalog.h"
 #include "mongo/db/session/session_catalog_mongod.h"
+#include "mongo/db/shard_role/ddl/list_collections_gen.h"
+#include "mongo/db/shard_role/ddl/list_indexes_allowed_fields.h"
+#include "mongo/db/shard_role/ddl/list_indexes_gen.h"
+#include "mongo/db/shard_role/lock_manager/exception_util.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/collection_metadata.h"
+#include "mongo/db/shard_role/shard_catalog/collection_options.h"
+#include "mongo/db/shard_role/shard_catalog/collection_sharding_runtime.h"
+#include "mongo/db/shard_role/shard_catalog/database.h"
+#include "mongo/db/shard_role/shard_catalog/document_validation.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
+#include "mongo/db/shard_role/shard_catalog/list_indexes.h"
+#include "mongo/db/shard_role/shard_catalog/operation_sharding_state.h"
+#include "mongo/db/shard_role/shard_catalog/shard_filtering_metadata_refresh.h"
+#include "mongo/db/shard_role/shard_role.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/sharding_environment/client/shard.h"
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/sharding_environment/sharding_feature_flags_gen.h"
@@ -105,9 +105,9 @@
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/topology/shard_registry.h"
 #include "mongo/db/topology/sharding_state.h"
+#include "mongo/db/topology/user_write_block/write_block_bypass.h"
+#include "mongo/db/topology/vector_clock/vector_clock.h"
 #include "mongo/db/transaction/transaction_participant.h"
-#include "mongo/db/user_write_block/write_block_bypass.h"
-#include "mongo/db/vector_clock/vector_clock.h"
 #include "mongo/db/write_concern.h"
 #include "mongo/executor/task_executor_pool.h"
 #include "mongo/logv2/log.h"
@@ -160,100 +160,6 @@ void checkOutSessionAndVerifyTxnState(OperationContext* opCtx) {
         {*opCtx->getTxnNumber()},
         boost::none /* autocommit */,
         TransactionParticipant::TransactionActions::kNone);
-}
-
-/**
- * Checks if any documents already exist in the given shard key range on the recipient shard.
- * This is used to detect spurious documents that may have been incorrectly present due to
- * historical reasons (e.g., inserts via direct connection) or unforeseen range deleter bugs.
- *
- * Returns the shard key of the first document found in the range, or boost::none if no documents
- * exist.
- */
-boost::optional<BSONObj> checkForExistingDocumentsInRange(OperationContext* opCtx,
-                                                          const NamespaceString& nss,
-                                                          const UUID& collUuid,
-                                                          const BSONObj& shardKeyPattern,
-                                                          const BSONObj& min,
-                                                          const BSONObj& max) {
-    // Acquire collection to scan for existing documents.
-    auto collection = acquireCollection(
-        opCtx,
-        CollectionAcquisitionRequest::fromOpCtx(opCtx, nss, AcquisitionPrerequisites::kRead),
-        MODE_IS);
-
-    uassert(ErrorCodes::NamespaceNotFound,
-            str::stream() << "Cannot find collection " << nss.toStringForErrorMsg(),
-            collection.exists());
-
-    // Verify collection UUID matches (safety check).
-    uassert(ErrorCodes::InvalidUUID,
-            str::stream() << "Collection UUID mismatch during migration. Expected "
-                          << collUuid.toString() << " but found "
-                          << collection.getCollectionPtr()->uuid().toString(),
-            collection.uuid() == collUuid);
-
-    // Find a shard key prefixed index to use for the scan.
-    const auto shardKeyIdx = findShardKeyPrefixedIndex(
-        opCtx, collection.getCollectionPtr(), shardKeyPattern, false /* requireSingleKey */);
-
-    uassert(ErrorCodes::IndexNotFound,
-            str::stream() << "Could not find shard key index for pattern " << shardKeyPattern
-                          << " on collection " << nss.toStringForErrorMsg(),
-            shardKeyIdx);
-
-    // Use InternalPlanner to scan the shard key index within the range.
-    auto exec = InternalPlanner::shardKeyIndexScan(opCtx,
-                                                   collection,
-                                                   *shardKeyIdx,
-                                                   min,
-                                                   max,
-                                                   BoundInclusion::kIncludeStartKeyOnly,
-                                                   PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
-                                                   InternalPlanner::FORWARD);
-
-    BSONObj doc;
-    PlanExecutor::ExecState state = exec->getNext(&doc, nullptr);
-
-    if (state == PlanExecutor::ADVANCED) {
-        // Found an index key in the range - reconstruct the shard key from index values:
-        // this avoids the need to load the full document in shardKeyIndexScan() with
-        // InternalPlanner::IXSCAN_FETCH. Index key format: {"": value1, "": value2, ...}, we need
-        // to map these to proper field names from the shard key pattern.
-
-        BSONObjBuilder shardKeyBuilder;
-        BSONObjIterator indexKeyIter(doc);
-        BSONObjIterator shardKeyPatternIter(shardKeyPattern);
-
-        // Map index key values to shard key field names.
-        while (indexKeyIter.more() && shardKeyPatternIter.more()) {
-            BSONElement indexValue = indexKeyIter.next();
-            BSONElement shardKeyField = shardKeyPatternIter.next();
-
-            // Append the index value with the proper field name from shard key pattern.
-            shardKeyBuilder.appendAs(indexValue, shardKeyField.fieldName());
-        }
-
-        BSONObj reconstructedShardKey = shardKeyBuilder.obj();
-
-        LOGV2_DEBUG(11095301,
-                    3,
-                    "Found index key in range, reconstructed shard key from index data",
-                    "indexKey"_attr = doc,
-                    "shardKeyPattern"_attr = shardKeyPattern,
-                    "reconstructedShardKey"_attr = reconstructedShardKey);
-
-        return reconstructedShardKey;
-    } else if (state == PlanExecutor::IS_EOF) {
-        // No documents found in the range.
-        return boost::none;
-    } else {
-        // Error occurred during scan.
-        uasserted(ErrorCodes::InternalError,
-                  str::stream() << "Error while scanning for existing documents in range [" << min
-                                << ", " << max << ") on collection " << nss.toStringForErrorMsg()
-                                << ": " << PlanExecutor::stateToStr(state));
-    }
 }
 
 template <typename Callable>
@@ -461,7 +367,7 @@ MONGO_FAIL_POINT_DEFINE(migrationRecipientFailPostCommitRefresh);
 }  // namespace
 
 const ReplicaSetAwareServiceRegistry::Registerer<MigrationDestinationManager> mdmRegistry(
-    "MigrationDestinationManager");
+    "MigrationDestinationManager", {"ShardingInitializationMongoDRegistry"});
 
 MigrationDestinationManager::MigrationDestinationManager() = default;
 
@@ -486,8 +392,7 @@ void MigrationDestinationManager::_setState(State newState) {
     _stateChangedCV.notify_all();
 }
 
-void MigrationDestinationManager::_setStateFail(StringData msg) {
-    LOGV2(21998, "Error during migration", "error"_attr = redact(msg));
+void MigrationDestinationManager::_setStateFailNoLog(StringData msg) {
     {
         stdx::lock_guard<stdx::mutex> sl(_mutex);
         _errmsg = std::string{msg};
@@ -500,18 +405,14 @@ void MigrationDestinationManager::_setStateFail(StringData msg) {
     }
 }
 
+void MigrationDestinationManager::_setStateFail(StringData msg) {
+    LOGV2(21998, "Error during migration", "error"_attr = redact(msg));
+    _setStateFailNoLog(msg);
+}
+
 void MigrationDestinationManager::_setStateFailWarn(StringData msg) {
     LOGV2_WARNING(22010, "Error during migration", "error"_attr = redact(msg));
-    {
-        stdx::lock_guard<stdx::mutex> sl(_mutex);
-        _errmsg = std::string{msg};
-        _state = kFail;
-        _stateChangedCV.notify_all();
-    }
-
-    if (_sessionMigration) {
-        _sessionMigration->forceFail(msg);
-    }
+    _setStateFailNoLog(msg);
 }
 
 bool MigrationDestinationManager::isActive() const {
@@ -1210,12 +1111,17 @@ void _cloneCollectionIndexesAndOptions(
             opCtx, collection, collectionOptionsAndIndexes.indexSpecs, opts);
         if (!indexSpecs.empty()) {
             // Only allow indexes to be copied if the collection does not have any documents.
-            uassert(ErrorCodes::CannotCreateCollection,
-                    str::stream() << "aborting, shard is missing " << indexSpecs.size()
-                                  << " indexes and "
-                                  << "collection is not empty. Non-trivial "
-                                  << "index creation should be scheduled manually",
-                    collection->isEmpty(opCtx));
+            std::string errMsg = "aborting, shard is missing " + std::to_string(indexSpecs.size()) +
+                " indexes and collection is not empty. Non-trivial " +
+                "index creation should be scheduled manually. Missing indexes:";
+            std::string separator = " ";
+            for (const auto& spec : indexSpecs) {
+                if (spec.hasField("name")) {
+                    errMsg += separator + std::string{spec.getStringField("name")};
+                    separator = ", ";
+                }
+            }
+            uassert(ErrorCodes::CannotCreateCollection, errMsg, collection->isEmpty(opCtx));
 
             // If synchronizing indexes strictly, mark waitForInProgressIndexBuildCompletion as
             // true to wait for index builds to be finished after releasing the locks.
@@ -1576,13 +1482,16 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* outerOpCtx,
                                                  range.getMax());
 
             if (existingDocShardKey) {
-                _setStateFail(
-                    str::stream()
+                std::string msg = str::stream()
                     << "Migration aborted: found existing document in range being migrated. "
                     << "Document with shard key " << *existingDocShardKey
                     << " already exists in range [" << range.getMin() << ", " << range.getMax()
                     << ") on recipient shard. Please investigate and remove "
-                    << "spurious documents before retrying migration.");
+                    << "spurious documents before retrying migration.";
+                LOGV2(11365900,
+                      "Migration aborted: found existing document",
+                      "error"_attr = redact(msg));
+                _setStateFailNoLog(msg);
                 return;
             }
 
@@ -1596,29 +1505,25 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* outerOpCtx,
 
         {
             // 3. Insert a pending range deletion task for the incoming range.
-            RangeDeletionTask recipientDeletionTask(*_migrationId,
-                                                    _nss,
-                                                    donorCollectionOptionsAndIndexes.uuid,
-                                                    _fromShard,
-                                                    range,
-                                                    CleanWhenEnum::kNow);
-            recipientDeletionTask.setPending(true);
-            const auto currentTime = VectorClock::get(outerOpCtx)->getTime();
-            recipientDeletionTask.setTimestamp(currentTime.clusterTime().asTimestamp());
-            recipientDeletionTask.setKeyPattern(KeyPattern(_shardKeyPattern));
 
             // Installing an IGNORED collection version since, if this range deletion task prevails,
             // it will mean that the migration has been aborted.
-            recipientDeletionTask.setPreMigrationShardVersion(ChunkVersion::IGNORED());
+            rangedeletionutil::createAndPersistRangeDeletionTask(
+                outerOpCtx,
+                *_migrationId,
+                _nss,
+                donorCollectionOptionsAndIndexes.uuid,
+                _fromShard,
+                range,
+                CleanWhenEnum::kNow,
+                true,
+                KeyPattern(_shardKeyPattern),
+                ChunkVersion::IGNORED(),
+                ShardingCatalogClient::writeConcernLocalHavingUpstreamWaiter());
 
             // It is illegal to wait for write concern with a session checked out, so persist the
             // range deletion task with an immediately satsifiable write concern and then wait for
             // majority after yielding the session.
-            rangedeletionutil::persistRangeDeletionTaskLocally(
-                outerOpCtx,
-                recipientDeletionTask,
-                ShardingCatalogClient::writeConcernLocalHavingUpstreamWaiter());
-
             runWithoutSession(outerOpCtx, [&] {
                 WriteConcernResult ignoreResult;
                 auto latestOpTime =
@@ -1694,7 +1599,7 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* outerOpCtx,
                         ReadPreferenceSetting(ReadPreference::PrimaryOnly),
                         DatabaseName::kAdmin,
                         xferModsRequest,
-                        Shard::RetryPolicy::kNoRetry),
+                        Shard::RetryPolicy::kStrictlyNotIdempotent),
                     "_transferMods failed: ");
 
                 uassertStatusOKWithContext(
@@ -1820,7 +1725,7 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* outerOpCtx,
                         ReadPreferenceSetting(ReadPreference::PrimaryOnly),
                         DatabaseName::kAdmin,
                         xferModsRequest,
-                        Shard::RetryPolicy::kNoRetry),
+                        Shard::RetryPolicy::kStrictlyNotIdempotent),
                     "_transferMods failed in STEADY STATE: ");
 
                 uassertStatusOKWithContext(Shard::CommandResponse::getEffectiveStatus(res),
@@ -2206,6 +2111,93 @@ void MigrationDestinationManager::onStepDown() {
               "migrationId"_attr = _migrationId,
               logAttrs(_nss));
         migrateThreadFinishedFuture->wait();
+    }
+}
+
+boost::optional<BSONObj> MigrationDestinationManager::checkForExistingDocumentsInRange(
+    OperationContext* opCtx,
+    const NamespaceString& nss,
+    const UUID& collUuid,
+    const BSONObj& shardKeyPattern,
+    const BSONObj& min,
+    const BSONObj& max) {
+    // Acquire collection to scan for existing documents.
+    auto collection = acquireCollection(
+        opCtx,
+        CollectionAcquisitionRequest::fromOpCtx(opCtx, nss, AcquisitionPrerequisites::kRead),
+        MODE_IS);
+
+    uassert(ErrorCodes::NamespaceNotFound,
+            str::stream() << "Cannot find collection " << nss.toStringForErrorMsg(),
+            collection.exists());
+
+    // Verify collection UUID matches (safety check).
+    uassert(ErrorCodes::InvalidUUID,
+            str::stream() << "Collection UUID mismatch during migration. Expected "
+                          << collUuid.toString() << " but found "
+                          << collection.getCollectionPtr()->uuid().toString(),
+            collection.uuid() == collUuid);
+
+    // Find a shard key prefixed index to use for the scan.
+    const auto shardKeyIdx = findShardKeyPrefixedIndex(
+        opCtx, collection.getCollectionPtr(), shardKeyPattern, false /* requireSingleKey */);
+
+    uassert(ErrorCodes::IndexNotFound,
+            str::stream() << "Could not find shard key index for pattern " << shardKeyPattern
+                          << " on collection " << nss.toStringForErrorMsg(),
+            shardKeyIdx);
+
+    // Use InternalPlanner to scan the shard key index within the range.
+    auto exec = InternalPlanner::shardKeyIndexScan(opCtx,
+                                                   collection,
+                                                   *shardKeyIdx,
+                                                   min,
+                                                   max,
+                                                   BoundInclusion::kIncludeStartKeyOnly,
+                                                   PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
+                                                   InternalPlanner::FORWARD);
+
+    BSONObj doc;
+    PlanExecutor::ExecState state = exec->getNext(&doc, nullptr);
+
+    if (state == PlanExecutor::ADVANCED) {
+        // Found an index key in the range - reconstruct the shard key from index values:
+        // this avoids the need to load the full document in shardKeyIndexScan() with
+        // InternalPlanner::IXSCAN_FETCH. Index key format: {"": value1, "": value2, ...}, we need
+        // to map these to proper field names from the shard key pattern.
+
+        BSONObjBuilder shardKeyBuilder;
+        BSONObjIterator indexKeyIter(doc);
+        BSONObjIterator shardKeyPatternIter(shardKeyPattern);
+
+        // Map index key values to shard key field names.
+        while (indexKeyIter.more() && shardKeyPatternIter.more()) {
+            BSONElement indexValue = indexKeyIter.next();
+            BSONElement shardKeyField = shardKeyPatternIter.next();
+
+            // Append the index value with the proper field name from shard key pattern.
+            shardKeyBuilder.appendAs(indexValue, shardKeyField.fieldName());
+        }
+
+        BSONObj reconstructedShardKey = shardKeyBuilder.obj();
+
+        LOGV2_DEBUG(11095301,
+                    3,
+                    "Found index key in range, reconstructed shard key from index data",
+                    "indexKey"_attr = doc,
+                    "shardKeyPattern"_attr = shardKeyPattern,
+                    "reconstructedShardKey"_attr = reconstructedShardKey);
+
+        return reconstructedShardKey;
+    } else if (state == PlanExecutor::IS_EOF) {
+        // No documents found in the range.
+        return boost::none;
+    } else {
+        // Error occurred during scan.
+        uasserted(ErrorCodes::InternalError,
+                  str::stream() << "Error while scanning for existing documents in range [" << min
+                                << ", " << max << ") on collection " << nss.toStringForErrorMsg()
+                                << ": " << PlanExecutor::stateToStr(state));
     }
 }
 

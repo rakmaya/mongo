@@ -221,6 +221,7 @@ const internalCommandsMap = {
         command: {
             _configsvrGetHistoricalPlacement: "x.y",
             at: new Timestamp(1691525961, 12),
+            ignoreRemovedShards: false,
         },
     },
     _configsvrMoveRange: {
@@ -659,6 +660,14 @@ const internalCommandsMap = {
         testname: "_shardsvrNotifyShardingEvent",
         command: {_shardsvrNotifyShardingEvent: "test", eventType: "collectionResharded", details: {}},
     },
+    _shardsvrRecreateRangeDeletionTasks: {
+        testname: "_shardsvrRecreateRangeDeletionTasks",
+        command: {_shardsvrRecreateRangeDeletionTasks: "collection", skipEmptyRanges: true},
+    },
+    _shardsvrRecreateRangeDeletionTasksParticipant: {
+        testname: "_shardsvrRecreateRangeDeletionTasksParticipant",
+        command: {_shardsvrRecreateRangeDeletionTasksParticipant: "collection", skipEmptyRanges: true, uuid: UUID()},
+    },
     _shardsvrRenameCollection: {
         testname: "_shardsvrRenameCollection",
         command: {_shardsvrRenameCollection: "test.collection", to: "db.collection_renamed"},
@@ -689,6 +698,8 @@ const internalCommandsMap = {
         testname: "_shardsvrDropDatabase",
         command: {
             _shardsvrDropDatabase: 1,
+            // This test relies on failing due to write concern not being majority since running this command on the admin database will hang.
+            writeConcern: {w: 1},
         },
     },
     _shardsvrDropDatabaseParticipant: {
@@ -733,6 +744,12 @@ const internalCommandsMap = {
             cloneTimestamp: Timestamp(),
             approxCopySize: {},
             donorShards: [],
+        },
+    },
+    _shardsvrReshardRecipientCriticalSectionStarted: {
+        testname: "_shardsvrReshardRecipientCriticalSectionStarted",
+        command: {
+            _shardsvrReshardRecipientCriticalSectionStarted: UUID(),
         },
     },
     _shardsvrRefineCollectionShardKey: {

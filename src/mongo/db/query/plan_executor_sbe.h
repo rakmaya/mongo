@@ -54,6 +54,7 @@
 #include "mongo/db/record_id.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
+#include "mongo/util/modules.h"
 
 #include <deque>
 #include <memory>
@@ -91,7 +92,8 @@ public:
                     std::unique_ptr<RemoteCursorMap> remoteCursors,
                     std::unique_ptr<RemoteExplainVector> remoteExplains,
                     std::unique_ptr<MultiPlanStage> classicRuntimePlannerStage,
-                    const MultipleCollectionAccessor& mca);
+                    const MultipleCollectionAccessor& mca,
+                    bool usedJoinOpt = false);
 
     CanonicalQuery* getCanonicalQuery() const override {
         return _cq.get();
@@ -175,7 +177,7 @@ public:
     }
 
     const PlanExplainer& getPlanExplainer() const final {
-        invariant(_planExplainer);
+        tassert(11321410, "_planExplainer must not be null", _planExplainer);
         return *_planExplainer;
     }
 
@@ -203,11 +205,15 @@ private:
 
     enum class State { kClosed, kOpened };
 
+    static StringData serializeState(State state);
+
     State _state{State::kClosed};
 
     OperationContext* _opCtx;
 
     NamespaceString _nss;
+
+    CollectionAcquisition _collection;
 
     // Vector of secondary namespaces.
     std::vector<NamespaceStringOrUUID> _secondaryNssVector{};

@@ -30,18 +30,18 @@
 #include "mongo/db/query/stage_builder/sbe/tests/sbe_builder_test_fixture.h"
 
 #include "mongo/base/string_data.h"
-#include "mongo/db/collection_crud/collection_write_path.h"
+#include "mongo/db/dbhelpers.h"
 #include "mongo/db/exec/sbe/expressions/expression.h"
 #include "mongo/db/exec/sbe/expressions/runtime_environment.h"
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/db/exec/shard_filterer.h"
 #include "mongo/db/keypattern.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_mock.h"
-#include "mongo/db/local_catalog/shard_role_api/shard_role_mock.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/stage_builder/sbe/builder.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_mock.h"
+#include "mongo/db/shard_role/shard_role_mock.h"
 #include "mongo/unittest/unittest.h"
 
 #include <boost/optional/optional.hpp>
@@ -120,24 +120,16 @@ SbeStageBuilderTestFixture::buildPlanStage(std::unique_ptr<QuerySolution> queryS
 
 void SbeStageBuilderTestFixture::insertDocuments(const NamespaceString& nss,
                                                  const std::vector<BSONObj>& docs) {
-    std::vector<InsertStatement> inserts{docs.begin(), docs.end()};
-
     auto coll = acquireCollection(
         operationContext(),
         CollectionAcquisitionRequest(nss,
-                                     PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                     PlacementConcern(boost::none, ShardVersion::UNTRACKED()),
                                      repl::ReadConcernArgs::get(operationContext()),
                                      AcquisitionPrerequisites::kWrite),
         MODE_IX);
-    {
-        WriteUnitOfWork wuow{operationContext()};
-        ASSERT_OK(collection_internal::insertDocuments(operationContext(),
-                                                       coll.getCollectionPtr(),
-                                                       inserts.begin(),
-                                                       inserts.end(),
-                                                       nullptr /* opDebug */));
-        wuow.commit();
-    }
+    WriteUnitOfWork wuow{operationContext()};
+    ASSERT_OK(Helpers::insert(operationContext(), coll.getCollectionPtr(), docs));
+    wuow.commit();
 }
 
 void GoldenSbeStageBuilderTestFixture::createCollection(const std::vector<BSONObj>& docs,
@@ -180,8 +172,9 @@ void GoldenSbeStageBuilderTestFixture::runTest(std::unique_ptr<QuerySolutionNode
     ASSERT_EQ(resultAccessors.size(), 1u);
 
     // Print the stage explain output and verify.
-    _gctx->printTestHeader(GoldenTestContext::HeaderFormat::Text);
-    auto explain = sbe::DebugPrinter().print(*stage.get());
+    _gctx->printTestHeader(unittest::GoldenTestContext::HeaderFormat::Text);
+    sbe::DebugPrintInfo debugPrintInfo{};
+    auto explain = sbe::DebugPrinter().print(*stage.get(), debugPrintInfo);
     _gctx->outStream() << (localColl ? replaceUuid(explain, localColl->getCollection().uuid())
                                      : explain);
     _gctx->outStream() << std::endl;
@@ -235,7 +228,7 @@ void GoldenSbeExprBuilderTestFixture::setUp() {
                    _expCtx,
                    false /* needsMerge */,
                    false /* allowDiskUse */,
-                   _expCtx->getIfrContext());
+                   *_expCtx->getIfrContext());
 }
 
 void GoldenSbeExprBuilderTestFixture::runTest(stage_builder::SbExpr sbExpr,
@@ -244,7 +237,7 @@ void GoldenSbeExprBuilderTestFixture::runTest(stage_builder::SbExpr sbExpr,
                                               StringData test) {
     auto sbeEExpr = sbExpr.lower(*_state);
     // Print the stage explain output and verify.
-    _gctx->printTestHeader(GoldenTestContext::HeaderFormat::Text);
+    _gctx->printTestHeader(unittest::GoldenTestContext::HeaderFormat::Text);
     _gctx->outStream() << test << std::endl;
     _gctx->outStream() << sbe::DebugPrinter().print(sbeEExpr->debugPrint());
     _gctx->outStream() << std::endl;
@@ -252,12 +245,12 @@ void GoldenSbeExprBuilderTestFixture::runTest(stage_builder::SbExpr sbExpr,
     sbe::CompileCtx _compileCtx(std::make_unique<sbe::RuntimeEnvironment>());
     sbe::vm::CodeFragment code = sbeEExpr->compileDirect(_env.ctx);
     sbe::vm::ByteCode vm;
-    auto [owned, resultsTag, resultsVal] = vm.run(&code);
-    sbe::value::ValueGuard resultGuard{owned, resultsTag, resultsVal};
+    auto results = vm.run(&code);
 
 
-    ASSERT_TRUE(PlanStageTestFixture::valueEquals(resultsTag, resultsVal, expectedTag, expectedVal))
+    ASSERT_TRUE(
+        PlanStageTestFixture::valueEquals(results.tag(), results.value(), expectedTag, expectedVal))
         << "for test: " << test << " expected: " << std::make_pair(expectedTag, expectedVal)
-        << " but got: " << std::make_pair(resultsTag, resultsVal);
+        << " but got: " << results.raw();
 }
 }  // namespace mongo

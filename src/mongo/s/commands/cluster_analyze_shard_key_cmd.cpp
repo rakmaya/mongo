@@ -38,12 +38,12 @@
 #include "mongo/db/auth/resource_pattern.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/database_name.h"
-#include "mongo/db/global_catalog/catalog_cache/catalog_cache.h"
 #include "mongo/db/global_catalog/chunk_manager.h"
-#include "mongo/db/global_catalog/router_role_api/cluster_commands_helpers.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/read_concern_args.h"
+#include "mongo/db/router_role/cluster_commands_helpers.h"
+#include "mongo/db/router_role/routing_cache/catalog_cache.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/sharding_environment/client/shard.h"
 #include "mongo/db/sharding_environment/grid.h"
@@ -86,16 +86,19 @@ public:
             const auto& nss = ns();
             uassertStatusOK(validateNamespace(nss));
 
-            sharding::router::CollectionRouter router{opCtx->getServiceContext(), nss};
-            return router.route(
-                opCtx,
-                Request::kCommandName,
-                [&](OperationContext* opCtx, const CollectionRoutingInfo& cri) {
+            sharding::router::CollectionRouter router(opCtx, nss);
+            return router.routeWithRoutingContext(
+                Request::kCommandName, [&](OperationContext* opCtx, RoutingContext& routingCtx) {
+                    auto cri = routingCtx.getCollectionRoutingInfo(nss);
+                    uassert(ErrorCodes::IllegalOperation,
+                            "Cannot analyze a shard key for a collection in a fixed database",
+                            !cri.getDbVersion().isFixed());
+
                     auto primaryShardId = cri.getDbPrimaryShardId();
 
                     std::set<ShardId> candidateShardIds;
                     if (cri.hasRoutingTable()) {
-                        cri.getChunkManager().getAllShardIds(&candidateShardIds);
+                        cri.getCurrentChunkManager().getAllShardIds(&candidateShardIds);
                     } else {
                         candidateShardIds.insert(primaryShardId);
                     }
@@ -138,28 +141,21 @@ public:
                         }();
                         candidateShardIds.erase(shardId);
 
-                        uassert(ErrorCodes::IllegalOperation,
-                                "Cannot analyze a shard key for a collection in a fixed database",
-                                !cri.getDbVersion().isFixed());
-
-                        auto expCtx = makeExpressionContextWithDefaultsForTargeter(
-                            opCtx, nss, cri, BSONObj(), boost::none, boost::none, boost::none);
-                        // Execute the command against the shard.
-                        auto requests =
-                            buildVersionedRequests(expCtx, nss, cri, {shardId}, unversionedCmdObj);
-                        invariant(requests.size() == 1);
-
                         ReadPreferenceSetting readPref = request().getReadPreference().value_or(
                             ReadPreferenceSetting(ReadPreference::SecondaryPreferred));
 
                         try {
-                            auto response = gatherResponses(opCtx,
-                                                            DatabaseName::kAdmin,
-                                                            nss,
-                                                            std::move(readPref),
-                                                            Shard::RetryPolicy::kIdempotent,
-                                                            requests)
+                            auto response = scatterGatherVersionedTargetToShards(
+                                                opCtx,
+                                                routingCtx,
+                                                DatabaseName::kAdmin,
+                                                nss,
+                                                {shardId},
+                                                unversionedCmdObj,
+                                                readPref,
+                                                Shard::RetryPolicy::kIdempotent)
                                                 .front();
+
                             uassertStatusOK(
                                 AsyncRequestsSender::Response::getEffectiveStatus(response));
                             return AnalyzeShardKeyResponse::parse(

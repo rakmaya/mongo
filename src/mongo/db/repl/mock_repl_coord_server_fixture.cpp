@@ -31,11 +31,9 @@
 
 #include "mongo/client/connection_string.h"
 #include "mongo/db/client.h"
-#include "mongo/db/collection_crud/collection_write_path.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/dbdirectclient.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/dbhelpers.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/member_state.h"
@@ -51,6 +49,8 @@
 #include "mongo/db/repl/storage_interface_mock.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/service_context_d_test_fixture.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
 #include "mongo/db/storage/snapshot_manager.h"
 #include "mongo/db/storage/storage_engine.h"
 #include "mongo/db/storage/write_unit_of_work.h"
@@ -111,11 +111,7 @@ void MockReplCoordServerFixture::insertOplogEntry(const repl::OplogEntry& entry)
     ASSERT_TRUE(coll);
 
     WriteUnitOfWork wuow(opCtx());
-    auto status = collection_internal::insertDocument(opCtx(),
-                                                      *coll,
-                                                      InsertStatement(entry.getEntry().toBSON()),
-                                                      &CurOp::get(opCtx())->debug(),
-                                                      /* fromMigrate */ false);
+    auto status = Helpers::insert(opCtx(), *coll, entry.getEntry().toBSON());
     ASSERT_OK(status);
     wuow.commit();
 }

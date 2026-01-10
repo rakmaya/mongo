@@ -29,80 +29,123 @@
 #pragma once
 
 #include "mongo/db/extension/public/api.h"
-#include "mongo/db/extension/public/extension_log_gen.h"
-#include "mongo/db/extension/shared/byte_buf.h"
+#include "mongo/db/extension/sdk/logger.h"
 #include "mongo/db/extension/shared/extension_status.h"
+#include "mongo/db/extension/shared/handle/aggregation_stage/parse_node.h"
 #include "mongo/db/extension/shared/handle/handle.h"
 #include "mongo/util/modules.h"
 
-namespace mongo::extension::sdk {
+namespace mongo::extension {
+namespace sdk {
+class IdleThreadBlockAPI;
+class HostServicesAPI;
+}  // namespace sdk
+
+template <>
+struct c_api_to_cpp_api<::MongoExtensionIdleThreadBlock> {
+    using CppApi_t = sdk::IdleThreadBlockAPI;
+};
+
+template <>
+struct c_api_to_cpp_api<::MongoExtensionHostServices> {
+    using CppApi_t = sdk::HostServicesAPI;
+};
+
+namespace sdk {
+
+/**
+ * Wrapper for ::MongoExtensionIdleThreadBlock, providing access to an 'IdleThreadBlock' object
+ * constructed by the host-side adapter, marking a spawned thread as idle in gdb.
+ *
+ * Typically, ownership of the 'IdleThreadBlock' object is transferred to the extension by the host,
+ * so this API should be referenced via an OwnedHandle. This ensures that the said object remains
+ * valid for as long as the handle lifetime is managed by still in scope.
+ */
+class IdleThreadBlockAPI : public VTableAPI<::MongoExtensionIdleThreadBlock> {
+public:
+    IdleThreadBlockAPI(::MongoExtensionIdleThreadBlock* ptr)
+        : VTableAPI<::MongoExtensionIdleThreadBlock>(ptr) {}
+
+    static void assertVTableConstraints(const VTable_t& vtable) {}
+};
+
+using IdleThreadBlockHandle = OwnedHandle<::MongoExtensionIdleThreadBlock>;
+using HostServicesHandle = UnownedHandle<const ::MongoExtensionHostServices>;
 
 /**
  * Wrapper for ::MongoExtensionHostServices, providing safe access to its public API through the
  * underlying vtable.
  *
  * The host services pointer is expected to be valid for the lifetime of the extension and is
- * statically accessible via HostServicesHandle::getHostServices().
+ * statically accessible via HostServicesAPI::getInstance()
  *
- * This is an unowned handle, meaning the host services remain fully owned by the host, and
- * ownership is never transferred to the extension.
+ * The HostServices pointer remains fully owned by the Host, and ownership is never transferred to
+ * the extension, so this API should only be referenced via an UnownedHandle.
  */
-class HostServicesHandle : public UnownedHandle<const ::MongoExtensionHostServices> {
+class HostServicesAPI : public VTableAPI<::MongoExtensionHostServices> {
 public:
-    HostServicesHandle(const ::MongoExtensionHostServices* services)
-        : UnownedHandle<const ::MongoExtensionHostServices>(services) {}
+    HostServicesAPI(::MongoExtensionHostServices* services)
+        : VTableAPI<::MongoExtensionHostServices>(services) {}
 
-    static BSONObj createExtensionLogMessage(
-        std::string message,
-        std::int32_t code,
-        mongo::extension::MongoExtensionLogSeverityEnum severity);
-
-    static BSONObj createExtensionDebugLogMessage(std::string message,
-                                                  std::int32_t code,
-                                                  std::int32_t level);
-
-    ::MongoExtensionStatus* userAsserted(::MongoExtensionByteView structuredErrorMessage) {
-        assertValid();
+    ::MongoExtensionStatus* userAsserted(::MongoExtensionByteView structuredErrorMessage) const {
         return vtable().user_asserted(structuredErrorMessage);
     }
-    ::MongoExtensionStatus* tripwireAsserted(::MongoExtensionByteView structuredErrorMessage) {
-        assertValid();
+
+    ::MongoExtensionStatus* tripwireAsserted(
+        ::MongoExtensionByteView structuredErrorMessage) const {
         return vtable().tripwire_asserted(structuredErrorMessage);
     }
 
-    static HostServicesHandle* getHostServices() {
-        return &_hostServices;
+    static UnownedHandle<const ::MongoExtensionHostServices>& getInstance() {
+        return _sHostServices;
     }
 
-    void log(std::string message,
-             std::int32_t code,
-             mongo::extension::MongoExtensionLogSeverityEnum severity =
-                 mongo::extension::MongoExtensionLogSeverityEnum::kInfo) const {
-        assertValid();
-
-        BSONObj obj = createExtensionLogMessage(std::move(message), code, severity);
-        invokeCAndConvertStatusToException([&]() { return vtable().log(objAsByteView(obj)); });
-    }
-
-    void logDebug(std::string message, std::int32_t code, std::int32_t level = 1) const {
-        assertValid();
-        BSONObj debugLogBsonObj = createExtensionDebugLogMessage(message, code, level);
+    IdleThreadBlockHandle markIdleThread(const char* location) const {
+        ::MongoExtensionIdleThreadBlock* idleThreadBlock = nullptr;
         invokeCAndConvertStatusToException(
-            [&]() { return vtable().log_debug(objAsByteView(debugLogBsonObj)); });
-    }
+            [&] { return vtable().mark_idle_thread_block(&idleThreadBlock, location); });
 
+        return IdleThreadBlockHandle{idleThreadBlock};
+    }
     /**
-     * setHostServices() should be called only once during initialization of the extension. The host
-     * guarantees that the pointer remains valid during the lifetime of the extension.
+     * setHostServices() should be called only once during initialization of the extension. The
+     * host guarantees that the pointer remains valid during the lifetime of the extension.
      */
     static void setHostServices(const ::MongoExtensionHostServices* services) {
-        _hostServices = HostServicesHandle(services);
+        // The host should only call this function once.
+        _sHostServices = UnownedHandle<const ::MongoExtensionHostServices>{services};
     }
 
+    AggStageParseNodeHandle createHostAggStageParseNode(BSONObj spec) const {
+        ::MongoExtensionAggStageParseNode* result = nullptr;
+        invokeCAndConvertStatusToException([&] {
+            return vtable().create_host_agg_stage_parse_node(objAsByteView(spec), &result);
+        });
+        return AggStageParseNodeHandle{result};
+    }
+
+    AggStageAstNodeHandle createIdLookup(BSONObj spec) const {
+        ::MongoExtensionAggStageAstNode* result = nullptr;
+        invokeCAndConvertStatusToException(
+            [&] { return vtable().create_id_lookup(objAsByteView(spec), &result); });
+        return AggStageAstNodeHandle{result};
+    }
+
+    LoggerHandle getLogger() const {
+        return LoggerHandle(vtable().get_logger());
+    }
+
+    static void assertVTableConstraints(const VTable_t& vtable);
+
 private:
-    static HostServicesHandle _hostServices;
-
-    void _assertVTableConstraints(const VTable_t& vtable) const override;
+    static UnownedHandle<const ::MongoExtensionHostServices> _sHostServices;
 };
-
-}  // namespace mongo::extension::sdk
+/**
+ * These macros are used to get 'file:line' as a const char*. You should only be calling
+ * MONGO_EXTENSION_IDLE_LOCATION as a parameter to 'markIdleThread'.
+ */
+#define MONGO_EXTENSION_IDLE_LOCATION_STR1_(x) #x
+#define MONGO_EXTENSION_IDLE_LOCATION_STR_(x) MONGO_EXTENSION_IDLE_LOCATION_STR1_(x)
+#define MONGO_EXTENSION_IDLE_LOCATION __FILE__ ":" MONGO_EXTENSION_IDLE_LOCATION_STR_(__LINE__)
+}  // namespace sdk
+}  // namespace mongo::extension

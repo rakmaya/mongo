@@ -28,22 +28,20 @@
  */
 
 #include "mongo/bson/json.h"
-#include "mongo/db/collection_crud/collection_write_path.h"
 #include "mongo/db/commands.h"
-#include "mongo/db/local_catalog/catalog_test_fixture.h"
-#include "mongo/db/local_catalog/collection_options.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
+#include "mongo/db/dbhelpers.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/pipeline/pipeline_d.h"
 #include "mongo/db/query/canonical_query.h"
-#include "mongo/db/query/compiler/metadata/index_entry.h"
 #include "mongo/db/query/explain_diagnostic_printer.h"
 #include "mongo/db/query/get_executor.h"
-#include "mongo/db/query/mock_yield_policies.h"
 #include "mongo/db/query/multiple_collection_accessor.h"
 #include "mongo/db/query/plan_executor_factory.h"
 #include "mongo/db/query/plan_explainer_sbe.h"
 #include "mongo/db/query/plan_yield_policy.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_test_fixture.h"
+#include "mongo/db/shard_role/shard_catalog/collection_options.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
 #include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/unittest/unittest.h"
 
@@ -78,22 +76,15 @@ protected:
             BSONObj obj = BSON("_id" << i << "a" << i % 100 << "b" << i % 10);
             docs.push_back(obj);
         }
-        std::vector<InsertStatement> inserts{docs.begin(), docs.end()};
 
         const auto coll = acquireCollection(
             operationContext(),
             CollectionAcquisitionRequest::fromOpCtx(
                 operationContext(), nss, AcquisitionPrerequisites::OperationType::kWrite),
             MODE_IX);
-        {
-            WriteUnitOfWork wuow{operationContext()};
-            ASSERT_OK(collection_internal::insertDocuments(operationContext(),
-                                                           coll.getCollectionPtr(),
-                                                           inserts.begin(),
-                                                           inserts.end(),
-                                                           nullptr /* opDebug */));
-            wuow.commit();
-        }
+        WriteUnitOfWork wuow{operationContext()};
+        ASSERT_OK(Helpers::insert(operationContext(), coll.getCollectionPtr(), docs));
+        wuow.commit();
     }
 
     void createIndexOnEmptyCollection(OperationContext* opCtx,
@@ -469,11 +460,13 @@ TEST_F(PlanExplainerTest, HashJoinEmbeddingTest) {
                 {
                     "stage": "COLLSCAN",
                     "planNodeId": 0,
+                    "nss": "testdb.explain",
                     "direction": "forward"
                 },
                 {
                     "stage": "COLLSCAN",
                     "planNodeId": 0,
+                    "nss": "testdb.foreign_explain",
                     "direction": "forward"
                 }
             ]
@@ -512,11 +505,13 @@ TEST_F(PlanExplainerTest, NLJEmbeddingTest) {
                 {
                     "stage": "COLLSCAN",
                     "planNodeId": 0,
+                    "nss": "testdb.explain",
                     "direction": "forward"
                 },
                 {
                     "stage": "COLLSCAN",
                     "planNodeId": 0,
+                    "nss": "testdb.foreign_explain",
                     "direction": "forward"
                 }
             ]
@@ -555,11 +550,13 @@ TEST_F(PlanExplainerTest, INLJEmbeddingTest) {
                 {
                     "stage": "COLLSCAN",
                     "planNodeId": 0,
+                    "nss": "testdb.explain",
                     "direction": "forward"
                 },
                 {
                     "stage": "COLLSCAN",
                     "planNodeId": 0,
+                    "nss": "testdb.foreign_explain",
                     "direction": "forward"
                 }
             ]

@@ -31,8 +31,10 @@
 
 #include "mongo/db/commands/server_status/server_status_metric.h"
 #include "mongo/db/database_name.h"
+#include "mongo/db/pipeline/change_stream.h"
 #include "mongo/db/pipeline/change_stream_helpers.h"
 #include "mongo/db/pipeline/change_stream_pipeline_helpers.h"
+#include "mongo/db/pipeline/change_stream_read_mode.h"
 #include "mongo/db/pipeline/change_stream_reader_builder.h"
 #include "mongo/db/pipeline/data_to_shards_allocation_query_service.h"
 #include "mongo/db/pipeline/resume_token.h"
@@ -40,7 +42,7 @@
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/server_options.h"
-#include "mongo/db/vector_clock/vector_clock.h"
+#include "mongo/db/topology/vector_clock/vector_clock.h"
 #include "mongo/db/version_context.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/util/pcre_util.h"
@@ -62,13 +64,17 @@ auto& changeStreamsShowExpandedEvents =
     *MetricBuilder<Counter64>{"changeStreams.showExpandedEvents"};
 }
 
+REGISTER_LITE_PARSED_DOCUMENT_SOURCE(changeStream,
+                                     DocumentSourceChangeStream::LiteParsed::parse,
+                                     AllowedWithApiStrict::kConditionally);
+
 // The $changeStream stage is an alias for many stages.
-REGISTER_DOCUMENT_SOURCE(changeStream,
-                         DocumentSourceChangeStream::LiteParsed::parse,
-                         DocumentSourceChangeStream::createFromBson,
-                         AllowedWithApiStrict::kConditionally);
+REGISTER_DOCUMENT_SOURCE_CONTAINER_WITH_STAGE_PARAMS_DEFAULT(changeStream,
+                                                             DocumentSourceChangeStream,
+                                                             ChangeStreamStageParams);
 
 ALLOCATE_DOCUMENT_SOURCE_ID(_internalChangeStreamStage, DocumentSourceInternalChangeStreamStage::id)
+
 
 void DocumentSourceChangeStream::checkValueType(const Value v,
                                                 const StringData fieldName,
@@ -345,8 +351,8 @@ ChangeStreamReaderVersionEnum DocumentSourceChangeStream::_determineChangeStream
 
     // The user has explicitly selected the v2 change stream reader version.
 
-    // v2 change stream readers are currently only supported for collection-level change streams.
-    if (changeStream.getChangeStreamType() != ChangeStreamType::kCollection) {
+    // v2 change stream readers are currently not supported for all databases level change streams.
+    if (changeStream.getChangeStreamType() == ChangeStreamType::kAllDatabases) {
         return ChangeStreamReaderVersionEnum::kV1;
     }
 

@@ -45,7 +45,7 @@ CardinalityEstimate makeCE(double ce) {
 // Test invalid inputs, and calculations that produce invalid estimates.
 // Since the principle of checking validity is the same for all estimates, here we check only
 // few typical cases.
-// DEATH_TEST(EstimatesFramework, NegativeCardinality, "Negative cardinality") {
+// DEATH_TEST(EstimatesFrameworkDeathTest, NegativeCardinality, "Negative cardinality") {
 //    const CardinalityEstimate ce1(CardinalityType{-7.0}, defaultSrc);
 //}
 
@@ -160,9 +160,8 @@ TEST(EstimatesFramework, PrintEstimates) {
 
     CostCoefficient cc1(CostCoefficientType::minValue());
     CostCoefficient cc2(CostCoefficientType::maxValue());
-    ASSERT_EQUALS(cc1.toBSON().toString(),
-                  "{ Cost coefficient: 9.999999999999999e-06, Source: \"Code\" }");
-    ASSERT_EQUALS(cc2.toBSON().toString(), "{ Cost coefficient: 0.015, Source: \"Code\" }");
+    ASSERT_EQUALS(cc1.toBSON().toString(), "{ Cost coefficient: 1.167e-05, Source: \"Code\" }");
+    ASSERT_EQUALS(cc2.toBSON().toString(), "{ Cost coefficient: 0.02406701, Source: \"Code\" }");
 }
 
 TEST(EstimatesFramework, SourceMerge) {

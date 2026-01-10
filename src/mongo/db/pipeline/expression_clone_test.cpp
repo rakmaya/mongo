@@ -237,6 +237,8 @@ MONGO_INITIALIZER_GENERAL(InitExpressionsForCloneTest, ("EndExpressionRegistrati
         fromjson("{$bitOr: [ '$a', '$b' ]}"),
         fromjson("{$bitXor: [ '$a', '$b' ]}"),
         fromjson("{$bsonSize: '$foo'}"),
+        fromjson("{$bottom: {input: '$foo', sortBy: 1}}"),
+        fromjson("{$bottomN: {input: '$foo', n: 2, sortBy: 1}}"),
         fromjson("{$cond: { if: { $gte: [ '$foo', 250 ] }, then: 30, else: 20 }}"),
         fromjson("{$const: '$foo'}"),
         fromjson("{$cos: '$foo'}"),
@@ -251,6 +253,8 @@ MONGO_INITIALIZER_GENERAL(InitExpressionsForCloneTest, ("EndExpressionRegistrati
         fromjson("{$first: '$foo'}"),
         fromjson("{$firstN: {input: '$foo', n: 2}}"),
         fromjson("{$getField: {field: '$foo', input: '$bar'}}"),
+        fromjson("{$hash: {input: '$foo', algorithm: '$bar'}}"),
+        fromjson("{$hexHash: {input: '$foo', algorithm: '$bar'}}"),
         fromjson("{$ifNull: ['$a', '$b', '$c']}"),
         fromjson("{$isNumber: '$foo'}"),
         fromjson("{$last: '$foo'}"),
@@ -297,13 +301,18 @@ MONGO_INITIALIZER_GENERAL(InitExpressionsForCloneTest, ("EndExpressionRegistrati
         })"),
         fromjson("{$tan: '$foo'}"),
         fromjson("{$tanh: '$foo'}"),
+        fromjson("{$top: {input: '$foo', sortBy: 1}}"),
+        fromjson("{$topN: {input: '$foo', n: 2, sortBy: 1}}"),
         fromjson("{$toHashedIndexKey: '$foo'}"),
         fromjson("{$toUUID: '$foo'}"),
         fromjson("{$tsIncrement: '$foo'}"),
         fromjson("{$tsSecond: '$foo'}"),
         fromjson("{$unsetField: {field: 'bar', input: '$foo'}}"),
         fromjson("{$toArray: '$foo'}"),
-        fromjson("{$toObject: '$foo'}")};
+        fromjson("{$toObject: '$foo'}"),
+        fromjson("{$serializeEJSON: {input: '$foo'}}"),
+        fromjson("{$deserializeEJSON: {input: '$foo'}}"),
+    };
 
     // Some expressions in the list above may be disable for one reason or another (e.g., they can
     // be hidden behind a feature flag which is not enabled yet). We will remove such expressions

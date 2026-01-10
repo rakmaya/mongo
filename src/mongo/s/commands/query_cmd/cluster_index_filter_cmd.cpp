@@ -39,12 +39,11 @@
 #include "mongo/db/auth/resource_pattern.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/database_name.h"
-#include "mongo/db/global_catalog/router_role_api/cluster_commands_helpers.h"
-#include "mongo/db/global_catalog/router_role_api/router_role.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/pipeline/legacy_runtime_constants_gen.h"
 #include "mongo/db/query/collation/collation_spec.h"
+#include "mongo/db/router_role/cluster_commands_helpers.h"
+#include "mongo/db/router_role/router_role.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/sharding_environment/client/shard.h"
 #include "mongo/db/sharding_environment/shard_id.h"
@@ -60,7 +59,6 @@
 #include <utility>
 #include <vector>
 
-#include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 
 namespace mongo {
@@ -119,9 +117,9 @@ public:
         const NamespaceString nss(parseNs(dbName, cmdObj));
         const BSONObj query;
 
-        sharding::router::CollectionRouter router{opCtx->getServiceContext(), nss};
+        sharding::router::CollectionRouter router(opCtx, nss);
         return router.routeWithRoutingContext(
-            opCtx, getName(), [&](OperationContext* opCtx, RoutingContext& routingCtx) {
+            getName(), [&](OperationContext* opCtx, RoutingContext& routingCtx) {
                 // Clear the result builder since this lambda function may be retried if the router
                 // cache is stale.
                 result.resetToEmpty();

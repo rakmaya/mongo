@@ -128,7 +128,6 @@ public:
         std::vector{std::string{ErrorLabel::kStreamProcessorUserError}};
 
     static constexpr std::int32_t kMaxNumberOfRetries = 64;
-    static constexpr std::int32_t kKnownSeed = 12345;
 
     static constexpr DefaultRetryStrategy::RetryParameters kBackoffParameters{
         .maxRetryAttempts = kMaxNumberOfRetries,
@@ -229,12 +228,21 @@ TEST_F(RetryStrategyTest, DefaultRetryStrategyCallbackNoRetry) {
 TEST_F(RetryStrategyTest, DefaultRetryStrategyHasDelay) {
     auto strategy = makeDefaultRetryStrategy();
 
-    BackoffWithJitter::initRandomEngineWithSeed_forTest(kKnownSeed);
+    auto _ = FailPointEnableBlock{"returnMaxBackoffDelay"};
 
+    auto lastBackoff = Milliseconds{0};
     for (std::int32_t i = 0; i < kMaxNumberOfRetries; ++i) {
         ASSERT(strategy.recordFailureAndEvaluateShouldRetry(
             statusRetriableErrorCategory, target1, errorLabelsSystemOverloaded));
-        ASSERT_GT(strategy.getNextRetryDelay(), Milliseconds{0});
+
+        const auto backoff = strategy.getNextRetryDelay();
+
+        if (backoff < Milliseconds{kDefaultClientMaxBackoffMillisDefault}) {
+            ASSERT_GT(backoff, lastBackoff);
+        } else {
+            ASSERT_EQ(backoff, Milliseconds{kDefaultClientMaxBackoffMillisDefault});
+        }
+        lastBackoff = backoff;
     }
 }
 
@@ -286,8 +294,10 @@ TEST_F(RetryStrategyTest, DefaultRetryStrategyTargetingMetadataRetryable) {
     ASSERT(strategy.recordFailureAndEvaluateShouldRetry(
         statusRetriableErrorCategory, target1, errorLabelsSystemOverloaded));
     ASSERT_EQ(targetingMetadata.deprioritizedServers.size(), 1);
-    ASSERT(targetingMetadata.deprioritizedServers.contains(target1));
-    ASSERT_FALSE(targetingMetadata.deprioritizedServers.contains(target2));
+    ASSERT_NE(std::ranges::find(targetingMetadata.deprioritizedServers, target1),
+              targetingMetadata.deprioritizedServers.end());
+    ASSERT_EQ(std::ranges::find(targetingMetadata.deprioritizedServers, target2),
+              targetingMetadata.deprioritizedServers.end());
 }
 
 TEST_F(RetryStrategyTest, DefaultRetryStrategyTargetingMetadataRetryExhausted) {
@@ -305,18 +315,18 @@ TEST_F(RetryStrategyTest, DefaultRetryStrategyTargetingMetadataRetryExhausted) {
     // The amount of deprioritized server here stays to 1 because we don't need to deprioritize
     // servers if we stop the retry loop by returning false.
     ASSERT_EQ(targetingMetadata.deprioritizedServers.size(), 1);
-    ASSERT_FALSE(targetingMetadata.deprioritizedServers.contains(target2));
+    ASSERT_EQ(std::ranges::find(targetingMetadata.deprioritizedServers, target2),
+              targetingMetadata.deprioritizedServers.end());
 }
 
 TEST_F(RetryStrategyTest, AdaptiveRetryStrategyNonZeroRetryDelay) {
     auto strategy = makeAdaptiveRetryStrategy();
-
-    BackoffWithJitter::initRandomEngineWithSeed_forTest(kKnownSeed);
+    auto _ = FailPointEnableBlock{"returnMaxBackoffDelay"};
 
     ASSERT(strategy.recordFailureAndEvaluateShouldRetry(
         statusRetriableErrorCategory, target1, errorLabelsSystemOverloaded));
 
-    ASSERT_GT(strategy.getNextRetryDelay(), Milliseconds{0});
+    ASSERT_EQ(strategy.getNextRetryDelay(), Milliseconds{200});
 }
 
 TEST_F(RetryStrategyTest, AdaptiveRetryStrategyCallbackCalled) {
@@ -540,14 +550,16 @@ TEST_F(RetryStrategyTest, RunWithRetryStrategyTargetingMetadata) {
     auto result =
         runWithRetryStrategy(opCtx(), strategy, [&](const TargetingMetadata& targetingMetadata) {
             // At the first try, there is no target1 in the list of deprioritized servers.
-            if (!targetingMetadata.deprioritizedServers.contains(target1)) {
+            if (std::ranges::find(targetingMetadata.deprioritizedServers, target1) ==
+                targetingMetadata.deprioritizedServers.end()) {
                 return RetryStrategy::Result<StringData>{
                     statusNonRetriable, errorLabelsSystemOverloaded, target1};
             }
 
             // At the second try, there is target1, but no target2 in the list of deprioritized
             // servers.
-            if (!targetingMetadata.deprioritizedServers.contains(target2)) {
+            if (std::ranges::find(targetingMetadata.deprioritizedServers, target2) ==
+                targetingMetadata.deprioritizedServers.end()) {
                 return RetryStrategy::Result<StringData>{
                     statusNonRetriable, errorLabelsSystemOverloaded, target2};
             }

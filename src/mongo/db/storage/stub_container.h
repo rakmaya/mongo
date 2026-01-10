@@ -30,10 +30,11 @@
 #pragma once
 
 #include "mongo/db/storage/container_base.h"
+#include "mongo/util/modules.h"
 
-namespace mongo {
+namespace MONGO_MOD_PUBLIC mongo {
 
-class StubIntegerKeyedContainer : public IntegerKeyedContainerBase {
+class StubIntegerKeyedContainer final : public IntegerKeyedContainerBase {
 public:
     StubIntegerKeyedContainer() : IntegerKeyedContainerBase(nullptr) {}
     Status insert(RecoveryUnit& ru, int64_t key, std::span<const char> value) final {
@@ -42,9 +43,15 @@ public:
     Status remove(RecoveryUnit& ru, int64_t key) final {
         return Status::OK();
     }
+    std::unique_ptr<Cursor> getCursor(RecoveryUnit& ru) const final {
+        return nullptr;
+    }
+    std::shared_ptr<Cursor> getSharedCursor(RecoveryUnit& ru) const final {
+        return nullptr;
+    }
 };
 
-class StubStringKeyedContainer : public StringKeyedContainerBase {
+class StubStringKeyedContainer final : public StringKeyedContainerBase {
 public:
     StubStringKeyedContainer() : StringKeyedContainerBase(nullptr) {}
     Status insert(RecoveryUnit& ru, std::span<const char> key, std::span<const char> value) final {
@@ -53,6 +60,12 @@ public:
     Status remove(RecoveryUnit& ru, std::span<const char> key) final {
         return Status::OK();
     }
+    std::unique_ptr<Cursor> getCursor(RecoveryUnit& ru) const final {
+        return nullptr;
+    }
+    std::shared_ptr<Cursor> getSharedCursor(RecoveryUnit& ru) const final {
+        return nullptr;
+    }
 };
 
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUBLIC mongo

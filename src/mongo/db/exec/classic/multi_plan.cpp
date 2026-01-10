@@ -32,12 +32,16 @@
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
+#include "mongo/db/commands/server_status/histogram_server_status_metric.h"
 #include "mongo/db/commands/server_status/server_status_metric.h"
-#include "mongo/db/exec/classic/histogram_server_status_metric.h"
 #include "mongo/db/exec/classic/multi_plan_rate_limiter.h"
-#include "mongo/db/exec/trial_period_utils.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/collection_query_info.h"
+#include "mongo/db/query/compiler/ce/ce_common.h"
+#include "mongo/db/query/compiler/ce/exact/exact_cardinality_impl.h"
+#include "mongo/db/query/compiler/optimizer/cost_based_ranker/cost_estimator.h"
+#include "mongo/db/query/compiler/optimizer/cost_based_ranker/estimates.h"
+#include "mongo/db/query/compiler/optimizer/cost_based_ranker/estimates_storage.h"
 #include "mongo/db/query/plan_cache/classic_plan_cache.h"
 #include "mongo/db/query/plan_cache/plan_cache_key_factory.h"
 #include "mongo/db/query/plan_explainer.h"
@@ -67,6 +71,7 @@
 
 
 namespace mongo {
+using namespace cost_based_ranker;
 using std::unique_ptr;
 
 // static
@@ -262,10 +267,24 @@ MultiPlanTicket MultiPlanStage::rateLimit(PlanYieldPolicy* yieldPolicy,
     return std::move(ticket.value());
 }
 
-Status MultiPlanStage::pickBestPlan(PlanYieldPolicy* yieldPolicy) {
-    if (bestPlanChosen()) {
-        return Status::OK();
-    }
+size_t MultiPlanStage::numCandidatePlans() const {
+    return _candidates.size();
+}
+
+Status MultiPlanStage::runTrials(PlanYieldPolicy* yieldPolicy) {
+    return runTrials(yieldPolicy, getTrialPhaseConfig());
+}
+
+Status MultiPlanStage::runTrials(PlanYieldPolicy* yieldPolicy,
+                                 trial_period::TrialPhaseConfig trialConfig) {
+    tassert(11521900,
+            "Running trials for multi-plan stage when we already have a solution.",
+            !bestPlanChosen());
+
+    tassert(11482700,
+            "Running trials for multi-plan stage when we have a winning candidate! We "
+            "should be choosing the best plan instead.",
+            !_specificStats.earlyExit);
 
     const size_t candidatesSize = _candidates.size();
 
@@ -276,7 +295,7 @@ Status MultiPlanStage::pickBestPlan(PlanYieldPolicy* yieldPolicy) {
     });
 
     boost::optional<MultiPlanTicket> multiPlanTicket{};
-    if (expCtx()->getIfrContext().getSavedFlagValue(feature_flags::gfeatureFlagMultiPlanLimiter) &&
+    if (expCtx()->getIfrContext()->getSavedFlagValue(feature_flags::gfeatureFlagMultiPlanLimiter) &&
         concurrentMultiPlanJobs > internalQueryConcurrentMultiPlanningThreshold.load() &&
         yieldPolicy->canAutoYield()) {
         multiPlanTicket = rateLimit(yieldPolicy, candidatesSize);
@@ -304,18 +323,12 @@ Status MultiPlanStage::pickBestPlan(PlanYieldPolicy* yieldPolicy) {
     classicNumPlansTotal.increment(_candidates.size());
     classicCount.increment();
 
-    const double collFraction =
-        trial_period::getCollFractionPerCandidatePlan(*_query, _candidates.size());
-    const size_t numWorks = trial_period::getTrialPeriodMaxWorks(
-        opCtx(), collectionPtr(), internalQueryPlanEvaluationWorks.load(), collFraction);
-    size_t numResults = trial_period::getTrialPeriodNumToReturn(*_query);
-
     try {
         // Work the plans, stopping when a plan hits EOF or returns some fixed number of results.
         size_t ix = 0;
         bool moreToDo = true;
-        for (; ix < numWorks && moreToDo; ++ix) {
-            moreToDo = workAllPlans(numResults, yieldPolicy);
+        for (; ix < trialConfig.maxNumWorksPerPlan && moreToDo; ++ix) {
+            moreToDo = workAllPlans(trialConfig.targetNumResults, yieldPolicy);
         }
         auto totalWorks = ix * _candidates.size();
         classicWorksHistogram.increment(totalWorks);
@@ -323,6 +336,16 @@ Status MultiPlanStage::pickBestPlan(PlanYieldPolicy* yieldPolicy) {
         if (moreToDo) {
             multiPlannerHitWorksLimitTotal.incrementRelaxed();
         }
+
+        int numDocsFound = 0;
+        for (const auto& candidate : _candidates) {
+            numDocsFound += candidate.results.size();
+        }
+
+        _specificStats.totalWorks += totalWorks;
+        _specificStats.numResultsFound = numDocsFound;
+        _specificStats.numCandidatePlans = _candidates.size();
+        _specificStats.earlyExit = !moreToDo;
     } catch (DBException& e) {
         return e.toStatus().withContext("error while multiplanner was selecting best plan");
     }
@@ -331,6 +354,22 @@ Status MultiPlanStage::pickBestPlan(PlanYieldPolicy* yieldPolicy) {
         tickSource->ticksTo<Microseconds>(tickSource->getTicks() - startTicks));
     classicMicrosHistogram.increment(durationMicros);
     classicMicrosTotal.increment(durationMicros);
+    return Status::OK();
+}
+
+trial_period::TrialPhaseConfig MultiPlanStage::getTrialPhaseConfig() const {
+    const double collFraction =
+        trial_period::getCollFractionPerCandidatePlan(*_query, _candidates.size());
+
+    const size_t numWorks = trial_period::getTrialPeriodMaxWorks(
+        opCtx(), collectionPtr(), internalQueryPlanEvaluationWorks.load(), collFraction);
+
+    size_t numResults = trial_period::getTrialPeriodNumToReturn(*_query);
+    return {numWorks, numResults};
+}
+
+Status MultiPlanStage::pickBestPlan() {
+    tassert(11484502, "Picking best plan without having run trials", _specificStats.totalWorks > 0);
 
     // After picking best plan, ranking will own plan stats from candidate solutions (winner and
     // losers).
@@ -342,7 +381,7 @@ Status MultiPlanStage::pickBestPlan(PlanYieldPolicy* yieldPolicy) {
     auto ranking = std::move(statusWithRanking.getValue());
     // Since the status was ok there should be a ranking containing at least one successfully ranked
     // plan.
-    invariant(ranking);
+    tassert(11051637, "Expecting plan ranking decision to be made", ranking);
     _bestPlanIdx = ranking->candidateOrder[0];
 
     MONGO_verify(_bestPlanIdx >= 0 && _bestPlanIdx < static_cast<int>(_candidates.size()));
@@ -425,7 +464,8 @@ bool MultiPlanStage::workAllPlans(size_t numResults, PlanYieldPolicy* yieldPolic
             candidate.results.push_back(id);
 
             // Once a plan returns enough results, stop working.
-            if (candidate.results.size() >= numResults) {
+            if (candidate.results.size() >= numResults || candidate.root->isEOF()) {
+                candidate.exitedEarly = true;
                 doneWorking = true;
                 multiPlannerHitResultsLimitTotal.incrementRelaxed();
             }
@@ -433,9 +473,9 @@ bool MultiPlanStage::workAllPlans(size_t numResults, PlanYieldPolicy* yieldPolic
             // First plan to hit EOF wins automatically.  Stop evaluating other plans.
             // Assumes that the ranking will pick this plan.
             doneWorking = true;
+            candidate.exitedEarly = true;
             multiPlannerHitEofTotal.incrementRelaxed();
         } else if (PlanStage::NEED_YIELD == state) {
-            invariant(id == WorkingSet::INVALID_ID);
             // Run-time plan selection occurs before a WriteUnitOfWork is opened and it's not
             // subject to TemporarilyUnavailableException's.
             invariant(!expCtx()->getTemporarilyUnavailableException());
@@ -535,6 +575,46 @@ bool MultiPlanStage::bestSolutionEof() const {
     tassert(8523500, "The best plan is not chosen by the multi-planner", bestPlanChosen());
     auto& bestPlan = _candidates[_bestPlanIdx];
     return bestPlan.root->isEOF();
+}
+
+MultiPlanStage::EstimationResult MultiPlanStage::estimateAllPlans() const {
+    EstimateMap ceMap;
+    CostEstimator costEstimator(ceMap);
+    CostEstimate totalCost = zeroCost;
+    double bestProductivity = 0.0;
+    size_t bestPlanNumResults = 0;
+    size_t numWorksPerPlan = _specificStats.totalWorks / numCandidatePlans();
+
+    for (size_t ix = 0; ix < _candidates.size(); ++ix) {
+        auto& candidate = _candidates[ix];
+        const QuerySolution* plan = candidate.solution.get();
+        const PlanStage* execPlan = candidate.root;
+
+        const auto res = ce::ExactCardinalityImpl::calculateExactCardinality(plan, execPlan, ceMap);
+        uassertStatusOK(res);  // TODO: handle error
+        const auto planCost = costEstimator.estimatePlan(*plan);
+        totalCost += planCost;
+
+        // Queries with SKIP usually will not produce any documents within the allocated budget
+        // TODO SERVER-115645 use the child of LIMIT/SORT nodes to estimate plan productivity
+        //  Compute planProductivity from the statistics of the child node, and then use that to
+        //  estimate the number of additional works needed to fill the skip value.
+        //  For example: child productivity=0.3, skip=42, extra works needed to skip = 42/0.3
+        //  StageType nodeType = plan->root()->getType();
+        //  if (nodeType == STAGE_SKIP) {
+        //      const auto childNode = plan->root()->children[0].get();
+        //      extract childNode stats;
+        //  }
+
+        const size_t numDocs = candidate.results.size();
+        if (const double planProductivity = static_cast<double>(numDocs) / numWorksPerPlan;
+            planProductivity >= bestProductivity) {
+            bestPlanNumResults = numDocs;
+            bestProductivity = planProductivity;
+        }
+    }
+    tassert(11306809, "Total MP cost must be > 0", totalCost > zeroCost);
+    return {totalCost, bestProductivity, bestPlanNumResults};
 }
 
 unique_ptr<PlanStageStats> MultiPlanStage::getStats() {

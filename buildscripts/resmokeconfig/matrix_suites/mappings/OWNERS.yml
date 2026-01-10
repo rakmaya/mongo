@@ -77,3 +77,12 @@ filters:
   - "replica_sets_recordids_replicated_jscore_passthrough.yml":
     approvers:
       - 10gen/server-collection-write-path
+  - "*execution_control*":
+    approvers:
+      - 10gen/server-workload-resilience
+  - "transitioning_replica_sets_jscore_passthrough.yml":
+    approvers:
+      - 10gen/server-catalog-and-routing
+  - "replica_sets_reconfig*":
+    approvers:
+      - 10gen/server-catalog-and-routing

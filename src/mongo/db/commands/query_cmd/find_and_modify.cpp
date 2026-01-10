@@ -46,14 +46,6 @@
 #include "mongo/db/curop_failpoint_helpers.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/fle_crud.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/database_holder.h"
-#include "mongo/db/local_catalog/document_validation.h"
-#include "mongo/db/local_catalog/lock_manager/exception_util.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
-#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_state.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/legacy_runtime_constants_gen.h"
@@ -65,10 +57,10 @@
 #include "mongo/db/query/get_executor.h"
 #include "mongo/db/query/plan_yield_policy.h"
 #include "mongo/db/query/query_settings/query_settings_gen.h"
+#include "mongo/db/query/write_ops/canonical_update.h"
 #include "mongo/db/query/write_ops/delete_request_gen.h"
 #include "mongo/db/query/write_ops/insert.h"
 #include "mongo/db/query/write_ops/parsed_delete.h"
-#include "mongo/db/query/write_ops/parsed_update.h"
 #include "mongo/db/query/write_ops/parsed_writes_common.h"
 #include "mongo/db/query/write_ops/update_request.h"
 #include "mongo/db/query/write_ops/update_result.h"
@@ -76,12 +68,20 @@
 #include "mongo/db/query/write_ops/write_ops_gen.h"
 #include "mongo/db/query/write_ops/write_ops_parsers.h"
 #include "mongo/db/query/write_ops/write_ops_retryability.h"
-#include "mongo/db/raw_data_operation.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/s/query_analysis_writer.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/logical_session_id.h"
+#include "mongo/db/shard_role/lock_manager/exception_util.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_sharding_state.h"
+#include "mongo/db/shard_role/shard_catalog/database_holder.h"
+#include "mongo/db/shard_role/shard_catalog/document_validation.h"
+#include "mongo/db/shard_role/shard_catalog/raw_data_operation.h"
+#include "mongo/db/shard_role/shard_role.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/stats/top.h"
 #include "mongo/db/storage/duplicate_key_error_info.h"
 #include "mongo/db/timeseries/timeseries_index_schema_conversion_functions.h"
@@ -387,30 +387,34 @@ void CmdFindAndModify::Invocation::explain(OperationContext* opCtx,
         timeseries::getCollectionPreConditionsAndIsTimeseriesLogicalRequest(
             opCtx, nss, request, /*expectedUUID=*/boost::none);
 
-    nss = preConditions.getTargetNs(nss);
+    // Explain calls of the findAndModify command are read-only, but we take write
+    // locks so that the timing information is more accurate.
+    const auto collection = preConditions.acquireCollectionAndCheck(
+        opCtx,
+        CollectionAcquisitionRequest::fromOpCtx(
+            opCtx, nss, AcquisitionPrerequisites::OperationType::kWrite),
+        MODE_IX);
+
+    // In case of timeseries collection make sure that from now on we refer to the translated
+    // namespace
+    nss = collection.nss();
+
+    uassert(ErrorCodes::NamespaceNotFound,
+            str::stream() << "database " << nss.dbName().toStringForErrorMsg() << " does not exist",
+            DatabaseHolder::get(opCtx)->getDb(opCtx, nss.dbName()));
 
     uassertStatusOK(userAllowedWriteNS(opCtx, nss));
+
+    CollectionShardingState::assertCollectionLockedAndAcquire(opCtx, nss)
+        ->checkShardVersionOrThrow(opCtx);
+
     OpDebug* const opDebug = &curOp->debug();
-    auto const dbName = request.getDbName();
 
     if (request.getRemove().value_or(false)) {
         auto deleteRequest = DeleteRequest{};
         deleteRequest.setNsString(nss);
         const bool isExplain = true;
         makeDeleteRequest(opCtx, request, isExplain, &deleteRequest);
-
-        // Explain calls of the findAndModify command are read-only, but we take write
-        // locks so that the timing information is more accurate.
-        const auto collection =
-            acquireCollection(opCtx,
-                              CollectionAcquisitionRequest::fromOpCtx(
-                                  opCtx, nss, AcquisitionPrerequisites::OperationType::kWrite),
-                              MODE_IX);
-        timeseries::CollectionPreConditions::checkAcquisitionAgainstPreConditions(
-            opCtx, preConditions, collection);
-        uassert(ErrorCodes::NamespaceNotFound,
-                str::stream() << "database " << dbName.toStringForErrorMsg() << " does not exist",
-                DatabaseHolder::get(opCtx)->getDb(opCtx, nss.dbName()));
 
         if (isTimeseriesLogicalRequest) {
             timeseries::timeseriesRequestChecks<DeleteRequest>(
@@ -425,9 +429,6 @@ void CmdFindAndModify::Invocation::explain(OperationContext* opCtx,
         ParsedDelete parsedDelete(
             opCtx, &deleteRequest, collection.getCollectionPtr(), isTimeseriesLogicalRequest);
         uassertStatusOK(parsedDelete.parseRequest());
-
-        CollectionShardingState::assertCollectionLockedAndAcquire(opCtx, nss)
-            ->checkShardVersionOrThrow(opCtx);
 
         const auto exec =
             uassertStatusOK(getExecutorDelete(opDebug, collection, &parsedDelete, verbosity));
@@ -446,18 +447,6 @@ void CmdFindAndModify::Invocation::explain(OperationContext* opCtx,
         updateRequest.setNamespaceString(nss);
         update::makeUpdateRequest(opCtx, request, verbosity, &updateRequest);
 
-        // Explain calls of the findAndModify command are read-only, but we take write
-        // locks so that the timing information is more accurate.
-        const auto collection =
-            acquireCollection(opCtx,
-                              CollectionAcquisitionRequest::fromOpCtx(
-                                  opCtx, nss, AcquisitionPrerequisites::OperationType::kWrite),
-                              MODE_IX);
-        timeseries::CollectionPreConditions::checkAcquisitionAgainstPreConditions(
-            opCtx, preConditions, collection);
-        uassert(ErrorCodes::NamespaceNotFound,
-                str::stream() << "database " << dbName.toStringForErrorMsg() << " does not exist",
-                DatabaseHolder::get(opCtx)->getDb(opCtx, nss.dbName()));
         if (isTimeseriesLogicalRequest) {
             timeseries::timeseriesRequestChecks<UpdateRequest>(
                 VersionContext::getDecoration(opCtx),
@@ -468,18 +457,29 @@ void CmdFindAndModify::Invocation::explain(OperationContext* opCtx,
                                                                  &updateRequest);
         }
 
-        ParsedUpdate parsedUpdate(opCtx,
-                                  &updateRequest,
-                                  collection.getCollectionPtr(),
-                                  false /*forgoOpCounterIncrements*/,
-                                  isTimeseriesLogicalRequest);
-        uassertStatusOK(parsedUpdate.parseRequest());
+        auto [collatorToUse, expCtxCollationMatchesDefault] =
+            resolveCollator(opCtx, updateRequest.getCollation(), collection.getCollectionPtr());
 
-        CollectionShardingState::assertCollectionLockedAndAcquire(opCtx, nss)
-            ->checkShardVersionOrThrow(opCtx);
+        auto expCtx =
+            ExpressionContextBuilder{}
+                .fromRequest(opCtx, updateRequest)
+                .collator(std::move(collatorToUse))
+                .collationMatchesDefault(expCtxCollationMatchesDefault)
+                .requiresTimeseriesExtendedRangeSupport(
+                    isTimeseriesLogicalRequest && collection.getCollectionPtr() &&
+                    collection.getCollectionPtr()->getRequiresTimeseriesExtendedRangeSupport())
+                .build();
 
-        const auto exec =
-            uassertStatusOK(getExecutorUpdate(opDebug, collection, &parsedUpdate, verbosity));
+        auto parsedUpdate = uassertStatusOK(parsed_update_command::parse(
+            expCtx, &updateRequest, makeExtensionsCallback<ExtensionsCallbackReal>(opCtx, &nss)));
+
+        auto canonicalUpdate = uassertStatusOK(CanonicalUpdate::make(expCtx,
+                                                                     std::move(parsedUpdate),
+                                                                     collection.getCollectionPtr(),
+                                                                     isTimeseriesLogicalRequest));
+
+        const auto exec = uassertStatusOK(
+            getExecutorUpdate(opDebug, collection, canonicalUpdate.get(), verbosity));
 
         auto bodyBuilder = result->getBodyBuilder();
         Explain::explainStages(
@@ -605,7 +605,6 @@ write_ops::FindAndModifyCommandReply CmdFindAndModify::Invocation::typedRun(
                                           &deleteRequest,
                                           &curOp,
                                           inTransaction,
-                                          boost::none,
                                           docFound,
                                           preConditions,
                                           isTimeseriesLogicalRequest);
@@ -645,7 +644,6 @@ write_ops::FindAndModifyCommandReply CmdFindAndModify::Invocation::typedRun(
                                                       inTransaction,
                                                       req.getRemove().value_or(false),
                                                       req.getUpsert().value_or(false),
-                                                      boost::none,
                                                       docFound,
                                                       &updateRequest,
                                                       preConditions,
@@ -654,8 +652,22 @@ write_ops::FindAndModifyCommandReply CmdFindAndModify::Invocation::typedRun(
                     return buildResponse(updateResult, req.getRemove().value_or(false), docFound);
 
                 } catch (const ExceptionFor<ErrorCodes::DuplicateKey>& ex) {
-                    auto cq = uassertStatusOK(
-                        parseWriteQueryToCQ(opCtx, nullptr /* expCtx */, updateRequest));
+                    // The function shouldRetryDuplicateKeyException() will check the collation from
+                    // the collection using 'ex'. So we only need to resolve the collator from the
+                    // request and pass it into 'expCtx'.
+                    auto requestCollator = [&]() -> std::unique_ptr<CollatorInterface> {
+                        if (updateRequest.getCollation().isEmpty()) {
+                            return nullptr;
+                        }
+                        return uassertStatusOK(
+                            CollatorFactoryInterface::get(opCtx->getServiceContext())
+                                ->makeFromBSON(updateRequest.getCollation()));
+                    }();
+                    auto expCtx = ExpressionContextBuilder{}
+                                      .fromRequest(opCtx, updateRequest)
+                                      .collator(std::move(requestCollator))
+                                      .build();
+                    auto cq = uassertStatusOK(parseWriteQueryToCQ(expCtx.get(), updateRequest));
                     if (!write_ops_exec::shouldRetryDuplicateKeyException(
                             opCtx,
                             updateRequest,

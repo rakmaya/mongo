@@ -31,7 +31,6 @@
 
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/exec/sbe/expressions/compile_ctx.h"
 #include "mongo/db/exec/sbe/expressions/expression.h"
@@ -86,10 +85,7 @@ public:
         for (auto keepRunning : state) {
             for (auto [inputTag, inputVal] : inputs) {
                 inputAccessor->reset(false, inputTag, inputVal);
-                auto [owned, tag, val] = vm.run(&code);
-                if (owned) {
-                    value::releaseValue(tag, val);
-                }
+                auto value = vm.run(&code);
             }
             benchmark::ClobberMemory();
         }

@@ -36,8 +36,8 @@
 #include "mongo/db/index_builds/index_builds.h"
 #include "mongo/db/index_builds/resumable_index_builds_gen.h"
 #include "mongo/db/storage/ident.h"
-#include "mongo/db/storage/spill_table.h"
 #include "mongo/db/storage/temporary_record_store.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/periodic_runner.h"
 #include "mongo/util/str.h"
 
@@ -50,15 +50,18 @@
 #include <boost/filesystem.hpp>
 #include <boost/serialization/strong_typedef.hpp>
 
+MONGO_MOD_PUBLIC;
+
 namespace mongo {
 
-class KVBackupBlock;
 class JournalListener;
-class MDBCatalog;
+class KVBackupBlock;
 class KVEngine;
+class MDBCatalog;
 class OperationContext;
 class RecoveryUnit;
 class SnapshotManager;
+class SpillTable;
 class StorageEngineLockFile;
 class StorageEngineMetadata;
 
@@ -252,6 +255,7 @@ public:
      */
     virtual void loadMDBCatalog(OperationContext* opCtx, LastShutdownState lastShutdownState) = 0;
     virtual void closeMDBCatalog(OperationContext* opCtx) = 0;
+    virtual bool isMDBCatalogOpen() const = 0;
 
     /**
      * Checkpoints the data to disk.
@@ -304,6 +308,11 @@ public:
      * Returns the timestamp of the checkpoint that the backup cursor is opened on.
      */
     virtual Timestamp getBackupCheckpointTimestamp() = 0;
+
+    /**
+     * Return the storage engine status
+     */
+    [[nodiscard]] virtual BSONObj getStatus(OperationContext* opCtx) const = 0;
 
     /**
      * Represents the options that the storage engine can use during full and incremental backups.
@@ -673,6 +682,11 @@ public:
     virtual std::shared_ptr<Ident> markIdentInUse(StringData ident) = 0;
 
     /**
+     * Accessor for this storage engine's timestamp monitor.
+     */
+    virtual TimestampMonitor* getTimestampMonitor() const = 0;
+
+    /**
      * Starts the timestamp monitor. This periodically drops idents queued by addDropPendingIdent,
      * and removes historical ident entries no longer necessary.
      */
@@ -789,18 +803,6 @@ public:
      * Returns the initial data timestamp.
      */
     virtual Timestamp getInitialDataTimestamp() const = 0;
-
-    /**
-     * Uses the current stable timestamp to set the oldest timestamp for which the storage engine
-     * must maintain snapshot history through.
-     *
-     * oldest_timestamp will be set to stable_timestamp adjusted by
-     * 'minSnapshotHistoryWindowInSeconds' to create a window of available snapshots on the
-     * storage engine from oldest to stable. Furthermore, oldest_timestamp will never be set ahead
-     * of the oplog read timestamp, ensuring the oplog reader's 'read_timestamp' can always be
-     * serviced.
-     */
-    virtual void setOldestTimestampFromStable() = 0;
 
     /**
      * Sets the oldest timestamp for which the storage engine must maintain snapshot history

@@ -32,7 +32,7 @@
 # see "wt dump" for that.  But this is standalone (doesn't require linkage with any WT
 # libraries), and may be useful as 1) a learning tool 2) quick way to hack/extend dumping.
 
-import codecs, io, os, re, sys, traceback, pprint
+import codecs, io, os, re, sys, traceback, pprint, json
 from py_common import binary_data, btree_format
 from dataclasses import dataclass
 import typing
@@ -52,7 +52,17 @@ try:
     import snappy
     have_snappy = True
 except:
-    pass
+    # Try to install it automatically
+    print('python-snappy not found, attempting to install...')
+    try:
+        import subprocess
+        subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'python-snappy'])
+        import snappy
+        have_snappy = True
+        print('Successfully installed python-snappy')
+    except Exception as e:
+        print(f'Warning: Failed to install python-snappy: {e}')
+        print('Compressed pages will not be readable.')
 
 # Optional dependency: bson
 have_bson = False
@@ -213,12 +223,12 @@ class Printer(object):
         self.cellpfx = ''
         if pfx == '' and self.in_cell:
             pfx = '  '
-        print(pfx + s)
+        print(pfx + str(s))
 
     def rint_v(self, s):
         if self.verbose:
             self.rint(s)
-            
+
     def rint_ext(self, s):
         if self.ext:
             self.rint(s)
@@ -250,7 +260,7 @@ def raw_bytes(b):
         val, s = binary_data.unpack_int(s)
         if result != '':
             result += ' '
-        result += f'<packed {d_and_h(val)}>'
+        result += f'<packed {binary_data.d_and_h(val)}>'
     if len(s) == 0:
         return result
 
@@ -264,10 +274,6 @@ def raw_bytes(b):
 
     # The earlier steps failed, so it must be binary data
     return binary_to_pretty_string(b, start_with_line_prefix=False)
-
-# Show an integer as decimal and hex
-def d_and_h(n):
-    return f'{n} (0x{n:x})'
 
 def dumpraw(p, b, pos):
     savepos = b.tell()
@@ -335,9 +341,95 @@ def process_timestamps(p, cell: btree_format.Cell, pagestats: PageStats):
         pagestats.num_d_stop_ts += 1
         p.rint_v(' durable stop ts: ' + ts(cell.durable_stop_ts))
 
+def decode_snappy_varint(data):
+    """
+    Decode the uncompressed length from snappy-compressed data.
+    Snappy uses a variable-length encoding for the uncompressed size at the start.
+    Returns (uncompressed_length, bytes_used) or (None, 0) if invalid.
+    """
+    if len(data) == 0:
+        return (None, 0)
+
+    result = 0
+    shift = 0
+    for i, byte in enumerate(data[:5]):  # Varint is max 5 bytes for 32-bit length
+        result |= (byte & 0x7f) << shift
+        if (byte & 0x80) == 0:
+            return (result, i + 1)
+        shift += 7
+    return (None, 0)  # Invalid varint
+
+def print_snappy_diagnostics(p, compressed_data, stored_length, pagehead, compress_skip):
+    """Print detailed diagnostics about invalid compressed data."""
+    p.rint('? Decompression of the block failed, analyzing compressed data:')
+    p.rint(f'??  Compressed data length: {len(compressed_data)} bytes')
+    p.rint(f'??  Stored length from WiredTiger prefix: {stored_length} (0x{stored_length:x})')
+
+    # Analyze the snappy header
+    uncompressed_len, varint_bytes = decode_snappy_varint(compressed_data)
+    if uncompressed_len:
+        p.rint(f'??  Snappy header claims: {uncompressed_len} bytes uncompressed (varint: {varint_bytes} bytes)')
+        expected_uncompressed = pagehead.mem_size - compress_skip
+        p.rint(f'??  Page header expects: {expected_uncompressed} bytes uncompressed')
+
+        if abs(uncompressed_len - expected_uncompressed) > 100:
+            p.rint(f'??  WARNING: size mismatch of {abs(uncompressed_len - expected_uncompressed)} bytes!')
+    else:
+        p.rint(f'??  ERROR: could not decode snappy varint header')
+
+    # Try the full decompression first to get detailed error message
+    try:
+        snappy.uncompress(compressed_data)
+        # If we get here, decompression succeeded (shouldn't happen if we're in diagnostics)
+        p.rint(f'??  WARNING: Full decompression unexpectedly succeeded')
+    except snappy.UncompressError as e:
+        # Try to extract the underlying error message from the exception chain
+        error_details = ""
+        if e.__cause__ is not None:
+            error_details = str(e.__cause__)
+        elif e.__context__ is not None:
+            error_details = str(e.__context__)
+        else:
+            # Fallback to the exception itself
+            error_details = str(e)
+
+        # Parse error message for corruption details
+        import re
+        dst_match = re.search(r'dst position:\s*(\d+)', error_details)
+        offset_match = re.search(r'offset\s+(\d+)', error_details)
+
+        if dst_match:
+            dst_pos = int(dst_match.group(1))
+            p.rint(f'??  Error at output position: {dst_pos} bytes')
+            if uncompressed_len:
+                percent = (dst_pos / uncompressed_len) * 100
+                p.rint(f'??  Successfully decompressed: {dst_pos} / {uncompressed_len} bytes ({percent:.1f}%)')
+            else:
+                p.rint(f'??  Successfully decompressed: {dst_pos} bytes before failure')
+
+        if offset_match:
+            bad_offset = int(offset_match.group(1))
+            p.rint(f'??  Invalid backreference: Snappy tried to copy from output offset {bad_offset}')
+            if dst_match:
+                if bad_offset > dst_pos:
+                    p.rint(f'??  ERROR: backreference offset {bad_offset} exceeds decompressed data {dst_pos} by {bad_offset - dst_pos} bytes')
+                p.rint(f'??  Corruption occurred in compressed stream while decompressing bytes 0-{dst_pos}')
+
+            # Note: The backreference offset may exceed compressed data length - that's expected
+            # because it refers to a position in the OUTPUT buffer, not the input stream
+            if bad_offset > len(compressed_data):
+                p.rint(f'??  Note: backreference offset ({bad_offset}) > compressed size ({len(compressed_data)}) is expected')
+                p.rint(f'??       (offset refers to output buffer position, not input position)')
+
+        if error_details and not (dst_match or offset_match):
+            p.rint(f'??  Error details: {error_details}')
+
+    # Show first bytes for debugging
+    if len(compressed_data) >= 32:
+        p.rint(f'??  first 32 bytes: {compressed_data[:32].hex(" ")}')
+
 def block_decode(p, b, nbytes, opts):
     disk_pos = b.tell()
-    disagg_delta = False
 
     # Switch the printer and the binary stream to work on the page data as opposed to working on
     # the file itself. We need to do this to support compressed blocks. As a consequence, offsets
@@ -345,11 +437,7 @@ def block_decode(p, b, nbytes, opts):
     # the file.
     if opts.disagg:
         # Size of WT_PAGE_HEADER
-        page_data = bytearray(b.read(28))
-        if page_data[0] == 0xdd:
-            disagg_delta = True
-         # Add 16 for block header + 28 bytes for page header, total of 44
-        page_data += bytearray(b.read(16))
+        page_data = bytearray(b.read(44))
     else:
         # Size of WT_PAGE_HEADER + size of WT_BLOCK_HEADER
         page_data = bytearray(b.read(40))
@@ -357,61 +445,38 @@ def block_decode(p, b, nbytes, opts):
     b_page = binary_data.BinaryFile(io.BytesIO(page_data))
     p = Printer(b_page, opts)
 
-    if disagg_delta:
-        # WT_BLOCK_HEADER in block.h (44 bytes)
-        blockhead = btree_format.BlockHeader.parse(b_page, disagg=opts.disagg)
-        # WT_PAGE_HEADER in btmem.h (28 bytes)
-        pagehead = btree_format.PageHeader.parse(b_page)
+    # WT_PAGE_HEADER in btmem.h (28 bytes)
+    pagehead = btree_format.PageHeader.parse(b_page)
+    # WT_BLOCK_HEADER in block.h (12 bytes or 44 bytes)
+    if opts.disagg:
+        blockhead = btree_format.BlockDisaggHeader.parse(b_page)
     else:
-        # WT_PAGE_HEADER in btmem.h (28 bytes)
-        pagehead = btree_format.PageHeader.parse(b_page)
-        # WT_BLOCK_HEADER in block.h (12 bytes or 44 bytes)
-        blockhead = btree_format.BlockHeader.parse(b_page, disagg=opts.disagg)
+        blockhead = btree_format.BlockHeader.parse(b_page)
 
-        if pagehead.unused != 0:
-            p.rint('? garbage in unused bytes')
-            return
-        if pagehead.type == btree_format.PageType.WT_PAGE_INVALID:
-            p.rint('? invalid page')
-            return
+    if pagehead.unused != 0:
+        p.rint('? garbage in unused bytes')
+        return
+    if pagehead.type == btree_format.PageType.WT_PAGE_INVALID:
+        p.rint('? invalid page')
+        return
 
-        p.rint('Page Header:')
-        p.rint('  recno: ' + str(pagehead.recno))
-        p.rint('  writegen: ' + str(pagehead.write_gen))
-        p.rint('  memsize: ' + str(pagehead.mem_size))
-        p.rint('  ncells (oflow len): ' + str(pagehead.entries))
-        p.rint('  page type: ' + str(pagehead.type.value) + ' (' + pagehead.type.name + ')')
-        p.rint('  page flags: ' + hex(pagehead.flags))
-        p.rint('  version: ' + str(pagehead.version))
+    p.rint(pagehead)
 
     if blockhead.unused != 0:
         p.rint('garbage in unused bytes')
         return
 
-    if opts.disagg and nbytes > 0:
-        blockhead.disk_size = nbytes
+    disk_size = nbytes if opts.disagg else blockhead.disk_size
 
-    if blockhead.disk_size > 17 * 1024 * 1024:
+    if disk_size > 17 * 1024 * 1024:
         # The maximum document size in MongoDB is 16MB. Larger block sizes are suspect.
         p.rint('the block is too big')
         return
-    if blockhead.disk_size < 40 and not opts.disagg:
+    if disk_size < 40 and not opts.disagg:
         # The disk size is too small
         return
 
-    p.rint('Block Header:')
-    p.rint('  disk_size: ' + str(blockhead.disk_size))
-    p.rint('  checksum: ' + hex(blockhead.checksum))
-    p.rint('  block flags: ' + hex(blockhead.flags))
-
-    if disagg_delta:
-        p.rint('Delta Page Header:')
-        p.rint('  writegen: ' + str(pagehead.write_gen))
-        p.rint('  memsize: ' + str(pagehead.mem_size))
-        p.rint('  ncells (oflow len): ' + str(pagehead.entries))
-        p.rint('  page type: ' + str(pagehead.type.value) + ' (' + pagehead.type.name + ')')
-        p.rint('  page flags: ' + hex(pagehead.flags))
-        p.rint('  version: ' + str(pagehead.version))
+    p.rint(blockhead)
 
     pagestats = PageStats()
 
@@ -419,8 +484,9 @@ def block_decode(p, b, nbytes, opts):
     if have_crc32c:
         savepos = b.tell()
         b.seek(disk_pos)
-        if blockhead.flags & btree_format.BlockHeader.WT_BLOCK_DATA_CKSUM != 0:
-            check_size = blockhead.disk_size
+        if (opts.disagg and blockhead.flags & btree_format.BlockDisaggFlags.WT_BLOCK_DISAGG_DATA_CKSUM) \
+            or (not opts.disagg and blockhead.flags & btree_format.BlockFlags.WT_BLOCK_DATA_CKSUM):
+            check_size = disk_size
         else:
             check_size = 64
         data = bytearray(b.read(check_size))
@@ -438,42 +504,73 @@ def block_decode(p, b, nbytes, opts):
 
     # Skip the rest if we don't want to display the data
     skip_data = opts.skip_data
-    if opts.disagg and blockhead.flags & btree_format.BlockHeader.WT_BLOCK_DISAGG_COMPRESSED:
-        p.rint(f'? the block is compressed, skipping payload')
-        skip_data = True
-    if opts.disagg and blockhead.flags & btree_format.BlockHeader.WT_BLOCK_DISAGG_ENCRYPTED:
-        p.rint(f'? the block is encrypted, skipping payload')
-        skip_data = True
 
     if skip_data:
-        b.seek(disk_pos + blockhead.disk_size)
+        b.seek(disk_pos + disk_size)
         return
 
     # Read the block contents
     payload_pos = b.tell()
     header_length = payload_pos - disk_pos
-    if pagehead.flags & btree_format.PageHeader.WT_PAGE_COMPRESSED != 0:
+    if pagehead.flags & btree_format.PageFlags.WT_PAGE_COMPRESSED:
         if not have_snappy:
-            p.rint('? the page is compressed (install python-snappy to parse)')
-            return
+            raise ModuleNotFoundError('python-snappy is required to decode compressed pages')
         try:
             compress_skip = 64
             # The first few bytes are uncompressed
             payload_data = bytearray(b.read(compress_skip - header_length))
             # Read the length of the remaining data
-            length = min(b.read_uint64(), blockhead.disk_size - compress_skip - 8)
-            # Read the compressed data, seek to the end of the block, and uncompress
-            compressed_data = b.read(length)
-            b.seek(disk_pos + blockhead.disk_size)
-            payload_data.extend(snappy.uncompress(compressed_data))
+            compressed_byte_count = b.read_uint64()
+            calculated_length = disk_size - compress_skip - 8
+            lengths_match = (compressed_byte_count == calculated_length)
+
+            # Read the maximum possible amount of compressed data
+            compressed_data_full = b.read(max(calculated_length, compressed_byte_count))
+            b.seek(disk_pos + disk_size)
+
+            # Try decompression with both sizes, preferring the stored length first
+            decompressed = None
+
+            # Try stored length first (most likely to be correct)
+            if compressed_byte_count <= len(compressed_data_full):
+                p.rint_v(f'Trying to decompress using stored length: {compressed_byte_count} bytes')
+                compressed_data = compressed_data_full[:compressed_byte_count]
+                if snappy.isValidCompressed(compressed_data):
+                    try:
+                        decompressed = snappy.uncompress(compressed_data)
+                        if not lengths_match:
+                            p.rint_v(f'  Successfully decompressed using stored length ({compressed_byte_count} bytes)')
+                    except:
+                        pass
+
+            # If that failed and lengths differ, try calculated length
+            if decompressed is None and not lengths_match and calculated_length <= len(compressed_data_full):
+                p.rint_v(f'Trying to decompress using calculated length: {calculated_length} bytes')
+                compressed_data = compressed_data_full[:calculated_length]
+                if snappy.isValidCompressed(compressed_data):
+                    try:
+                        decompressed = snappy.uncompress(compressed_data)
+                        p.rint_v(f'  Successfully decompressed using calculated length ({calculated_length} bytes)')
+                    except:
+                        pass
+
+            # If any attempt succeeded, use the result
+            if decompressed is not None:
+                payload_data.extend(decompressed)
+            else:
+                # Both failed - print diagnostics and stop processing this block
+                # Use the stored length for diagnostics as it's more likely to be correct
+                compressed_data = compressed_data_full[:min(compressed_byte_count, len(compressed_data_full))]
+                print_snappy_diagnostics(p, compressed_data, compressed_byte_count, pagehead, compress_skip)
+                return  # Stop processing this corrupted block
         except:
-            p.rint('? the page failed to uncompress')
+            p.rint('? The page failed to uncompress')
             if opts.debug:
                 traceback.print_exception(*sys.exc_info())
             return
     else:
         payload_data = b.read(pagehead.mem_size - header_length)
-        b.seek(disk_pos + blockhead.disk_size)
+        b.seek(disk_pos + disk_size)
 
     # Add the payload to the page data & reinitialize the stream and the printer
     page_data.extend(payload_data)
@@ -491,7 +588,7 @@ def block_decode(p, b, nbytes, opts):
         p.rint_v(binary_to_pretty_string(payload_data))
     elif pagehead.type == btree_format.PageType.WT_PAGE_ROW_INT or \
         pagehead.type == btree_format.PageType.WT_PAGE_ROW_LEAF:
-        row_decode(p, b_page, pagehead, blockhead, pagestats, opts)
+        row_decode(p, b_page, pagehead, pagestats, opts)
     elif pagehead.type == btree_format.PageType.WT_PAGE_OVFL:
         # Use b_page.read() so that we can also print the raw bytes in the split mode
         p.rint_v(raw_bytes(b_page.read(len(payload_data))))
@@ -501,8 +598,8 @@ def block_decode(p, b, nbytes, opts):
 
     outfile_stats_end(opts, pagehead, blockhead, pagestats)
 
-# Hacking this up so we count timestamps and txns
-def row_decode(p, b, pagehead, blockhead, pagestats, opts):
+# Decode the contents of a cell 
+def row_decode(p, b, pagehead, pagestats, opts):
     for cellnum in range(0, pagehead.entries):
         cellpos = b.tell()
         if cellpos >= pagehead.mem_size:
@@ -512,59 +609,38 @@ def row_decode(p, b, pagehead, blockhead, pagestats, opts):
 
         try:
             cell = btree_format.Cell.parse(b, True)
-
-            desc_str = f'desc: 0x{cell.descriptor:x} '
-            if cell.extra_descriptor != 0:
-                p.rint_v(desc_str + f'extra: 0x{cell.extra_descriptor:x}')
-                desc_str = ''
+            
+            p.rint_v(cell.descriptor_string())
+            if cell.has_timestamps():
                 process_timestamps(p, cell, pagestats)
-            if cell.run_length is not None:
-                p.rint_v(desc_str + f'runlength/addr: {d_and_h(cell.run_length)}')
-                desc_str = ''
-
-            s = '?'
-            if cell.is_address:
-                s = 'addr (leaf no-overflow) '
-            elif cell.is_key:
-                s = 'key '
-            elif cell.is_value:
-                s = 'val '
-            elif cell.is_unsupported:
-                p.rint(desc_str + ', celltype = {} ({}) not implemented' \
-                       .format(cell.cell_type.value, cell.cell_type.name))
-                desc_str = ''
-            else:
-                raise ValueError('Unexpected cell type')
-
-            if cell.is_overflow:
-                s = 'overflow ' + s
-            if cell.is_short:
-                s = 'short ' + s
-            if cell.prefix is not None:
-                s += 'prefix={}'.format(hex(cell.prefix))
-            if not cell.is_unsupported:
-                s += '{} bytes'.format(len(cell.data))
 
             if cell.is_key:
                 pagestats.num_keys += 1
                 pagestats.keys_sz += len(cell.data)
+            
+            # If the cell cannot be decoded as a valid type, dump the raw bytes and raise an error.
+            if not cell.is_valid_type():
+                dumpraw(p, b, cellpos)
+                raise ValueError('Unexpected cell type')
 
+            p.rint_v(cell.type_string())
+            
+            # Print the contents of the cell.
             try:
-                if s != '?':
-                    if (cell.is_value and opts.bson and have_bson):
-                        if (bson.is_valid(cell.data)):
-                            p.rint_v("cell is valid BSON")
-                            decoded_data = bson.BSON(cell.data).decode()
-                            p.rint_v(pprint.pformat(decoded_data, indent=2))
-                        else:
-                            p.rint_v("cannot decode cell as BSON")
-                            p.rint_v(f'{desc_str}{s}:')
-                            p.rint_v(raw_bytes(cell.data))
-                    else:
-                        p.rint_v(f'{desc_str}{s}:')
-                        p.rint_v(raw_bytes(cell.data))
+                # Attempt the decode the cell as BSON.
+                if (cell.is_value and opts.bson and have_bson):
+                    decoded_data = bson.BSON(cell.data).decode()
+                    p.rint_v(pprint.pformat(decoded_data, indent=2))
+                # If the cell is an address and we're in disagg mode, print the cell as a DisaggAddr
+                # type.
+                elif cell.is_address and opts.disagg:
+                    addr = btree_format.DisaggAddr.parse(cell.data)
+                    p.rint(json.dumps(addr.__dict__))
                 else:
-                    dumpraw(p, b, cellpos)
+                    p.rint_v(raw_bytes(cell.data))
+            except bson.InvalidBSON as e:
+                p.rint_v(f"cannot decode cell as BSON: {e}")
+                p.rint_v(raw_bytes(cell.data))
             except (IndexError, ValueError):
                 # FIXME-WT-13000 theres a bug in raw_bytes
                 pass
@@ -572,7 +648,7 @@ def row_decode(p, b, pagehead, blockhead, pagestats, opts):
         finally:
             p.end_cell()
 
-def extlist_decode(p, b, pagehead, blockhead, pagestats):
+def extlist_decode(p, b, pagehead):
     WT_BLOCK_EXTLIST_MAGIC = 71002       # from block.h
     # Written by block_ext.c
     okay = True
@@ -686,7 +762,7 @@ def wtdecode_file_object(b, opts, nbytes):
     outfile_header(opts)
 
     while (nbytes == 0 or startblock < nbytes) and (opts.pages == 0 or pagecount < opts.pages):
-        d_h = d_and_h(startblock)
+        d_h = binary_data.d_and_h(startblock)
         outfile_stats_start(opts, d_h)
         print('Decode at ' + d_h)
         b.seek(startblock)
@@ -694,11 +770,14 @@ def wtdecode_file_object(b, opts, nbytes):
             block_decode(p, b, nbytes, opts)
         except BrokenPipeError:
             break
+        except ModuleNotFoundError as e:
+            # We're missing snappy compression support. No point continuing from here.
+            p.rint('ERROR: ' + str(e))
+            exit(1)
         except Exception:
-            p.rint(f'ERROR decoding block at {d_and_h(startblock)}')
+            p.rint(f'ERROR decoding block at {binary_data.d_and_h(startblock)}')
             if opts.debug:
                 traceback.print_exception(*sys.exc_info())
-        p.rint('')
         pos = b.tell()
         pos = (pos + 0x1FF) & ~(0x1FF)
         if startblock == pos:
@@ -717,22 +796,95 @@ def encode_bytes(f):
         # Keep anything that looks like it could be hexadecimal,
         # remove everything else.
         nospace = re.sub(r'[^a-fA-F\d]', '', line)
-        print('LINE (len={}): {}'.format(len(nospace), nospace))
+        if opts.debug:
+            print('LINE (len={}): {}'.format(len(nospace), nospace))
         if len(nospace) > 0:
-            print('first={}, last={}'.format(nospace[0], nospace[-1]))
+            if opts.debug:
+                print('first={}, last={}'.format(nospace[0], nospace[-1]))
             b = codecs.decode(nospace, 'hex')
             #b = bytearray.fromhex(line).decode()
             allbytes += b
     return allbytes
 
+def extract_mongodb_log_hex(f):
+    """
+    Extract hex dump from MongoDB log file containing checksum mismatch errors.
+    Looks for __bm_corrupt_dump messages and extracts all hex chunks.
+    Returns the bytes from the __first__ complete checksum mismatch found.
+    """
+    import json
+
+    lines = f.readlines()
+    current_chunks = []
+    block_info = None
+
+    for line_num, line in enumerate(lines):
+        try:
+            log_entry = json.loads(line)
+            msg = log_entry.get('attr', {}).get('message', {})
+
+            # Check if this is a corrupt dump message
+            if isinstance(msg, dict) and '__bm_corrupt_dump' in msg.get('msg', ''):
+                # Extract block info and hex data
+                msg_text = msg.get('msg', '')
+
+                # Parse the block info: {offset, size, checksum}: (chunk N of M): hexdata
+                match = re.search(r'\{0:\s*(\d+),\s*(\d+),\s*(0x[0-9a-f]+)\}:\s*\(chunk\s+(\d+)\s+of\s+(\d+)\):\s*([0-9a-f\s]+)', msg_text)
+                if match:
+                    offset, size, checksum, chunk_num, total_chunks, hexdata = match.groups()
+                    chunk_num = int(chunk_num)
+                    total_chunks = int(total_chunks)
+
+                    if chunk_num == 1:
+                        # Start of a new block
+                        if current_chunks and len(current_chunks) == block_info[4]:
+                            # We have a complete previous block, return it
+                            if (opts.debug):
+                                print(f'Found complete checksum mismatch block: offset={block_info[0]}, size={block_info[1]}, checksum={block_info[2]}')
+                            return b''.join(current_chunks)
+
+                        # Reset for new block
+                        current_chunks = []
+                        block_info = (offset, size, checksum, chunk_num, total_chunks)
+                        if (opts.debug):
+                            print(f'Found checksum mismatch at line: {line_num} for block with address: offset {offset}, size {size}, checksum {checksum} ({total_chunks} chunks)')
+
+                    # Add this chunk
+                    hexdata_clean = re.sub(r'[^0-9a-f]', '', hexdata.lower())
+                    if hexdata_clean:
+                        current_chunks.append(codecs.decode(hexdata_clean, 'hex'))
+
+                    # Check if block is complete
+                    if len(current_chunks) == total_chunks:
+                        if (opts.debug):
+                            print(f'Complete block collected: {len(current_chunks)} chunks')
+                        return b''.join(current_chunks)
+        except json.JSONDecodeError:
+            # If we don't have a JSON log line, then this isn't a MongoDB log. Reset the file 
+            # pointer to the start to read all the bytes again.
+            f.seek(0)
+            return encode_bytes(f)
+        except Exception as e:
+            if opts.debug:
+                print(f'Error parsing line {line_num}: {e}')
+
+    # Return any incomplete block we collected
+    if current_chunks:
+        print(f'Warning: Returning incomplete block with {len(current_chunks)} chunks (expected {block_info[4] if block_info else "unknown"})')
+        return b''.join(current_chunks)
+
+    # No checksum mismatch found
+    print('Error: No checksum mismatch found in log file')
+    return bytearray()
+
 def wtdecode(opts):
     if opts.dumpin:
         opts.fragment = True
         if opts.filename == '-':
-            allbytes = encode_bytes(sys.stdin)
+            allbytes = extract_mongodb_log_hex(sys.stdin)
         else:
             with open(opts.filename, "r") as infile:
-                allbytes = encode_bytes(infile)
+                allbytes = extract_mongodb_log_hex(infile)
         b = binary_data.BinaryFile(io.BytesIO(allbytes))
         wtdecode_file_object(b, opts, len(allbytes))
     elif opts.filename == '-':

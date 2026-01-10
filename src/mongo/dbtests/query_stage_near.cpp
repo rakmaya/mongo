@@ -34,7 +34,6 @@
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/client.h"
@@ -45,26 +44,24 @@
 #include "mongo/db/exec/classic/working_set.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/value.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
+#include "mongo/db/index_builds/index_build_test_helpers.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/query/compiler/physical_model/query_solution/stage_types.h"
-#include "mongo/db/query/plan_executor.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
 #include "mongo/db/storage/snapshot.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/dbtests/dbtests.h"  // IWYU pragma: keep
 #include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/unittest/unittest.h"
-#include "mongo/util/intrusive_counter.h"
 
 #include <memory>
 #include <utility>
 #include <vector>
 
-#include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
@@ -80,12 +77,12 @@ public:
         _expCtx = ExpressionContextBuilder{}.opCtx(_opCtx).ns(kTestNamespace).build();
 
         directClient.createCollection(kTestNamespace);
-        ASSERT_OK(dbtests::createIndex(_opCtx, kTestNamespace.ns_forTest(), kTestKeyPattern));
+        ASSERT_OK(createIndex(_opCtx, kTestNamespace.ns_forTest(), kTestKeyPattern));
 
         _coll = acquireCollectionMaybeLockFree(
             _opCtx,
             CollectionAcquisitionRequest(kTestNamespace,
-                                         PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                         PlacementConcern(boost::none, ShardVersion::UNTRACKED()),
                                          repl::ReadConcernArgs::get(_opCtx),
                                          AcquisitionPrerequisites::kRead));
         const auto& collPtr = _coll->getCollectionPtr();
@@ -113,7 +110,7 @@ protected:
     boost::intrusive_ptr<ExpressionContext> _expCtx;
 
     boost::optional<CollectionAcquisition> _coll;
-    const IndexDescriptor* _mockGeoIndex;
+    const IndexCatalogEntry* _mockGeoIndex;
 };
 
 /**
@@ -134,13 +131,9 @@ public:
     MockNearStage(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                   WorkingSet* workingSet,
                   const CollectionAcquisition& coll,
-                  const IndexDescriptor* indexDescriptor)
-        : NearStage(expCtx.get(),
-                    "MOCK_DISTANCE_SEARCH_STAGE",
-                    STAGE_UNKNOWN,
-                    workingSet,
-                    coll,
-                    indexDescriptor),
+                  const IndexCatalogEntry* entry)
+        : NearStage(
+              expCtx.get(), "MOCK_DISTANCE_SEARCH_STAGE", STAGE_UNKNOWN, workingSet, coll, entry),
           _pos(0) {}
 
     void addInterval(std::vector<BSONObj> data, double min, double max) {
@@ -257,7 +250,7 @@ TEST_F(QueryStageNearTest, EmptyResults) {
     auto coll = acquireCollectionMaybeLockFree(
         _opCtx,
         CollectionAcquisitionRequest(kTestNamespace,
-                                     PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                     PlacementConcern(boost::none, ShardVersion::UNTRACKED()),
                                      repl::ReadConcernArgs::get(_opCtx),
                                      AcquisitionPrerequisites::kRead));
     ASSERT(coll.exists());

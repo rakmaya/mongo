@@ -36,15 +36,10 @@
 #include "mongo/bson/timestamp.h"
 #include "mongo/crypto/encryption_fields_gen.h"
 #include "mongo/db/collection_crud/collection_write_path.h"
+#include "mongo/db/dbhelpers.h"
 #include "mongo/db/global_catalog/chunk_manager.h"
 #include "mongo/db/global_catalog/type_chunk.h"
 #include "mongo/db/global_catalog/type_collection_common_types_gen.h"
-#include "mongo/db/local_catalog/clustered_collection_options_gen.h"
-#include "mongo/db/local_catalog/collection_options.h"
-#include "mongo/db/local_catalog/index_catalog.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_catalog/collection_metadata.h"
-#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_runtime.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/op_observer/op_observer_impl.h"
@@ -79,6 +74,12 @@
 #include "mongo/db/session/logical_session_cache.h"
 #include "mongo/db/session/logical_session_cache_noop.h"
 #include "mongo/db/session/session_catalog_mongod.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/clustered_collection_options_gen.h"
+#include "mongo/db/shard_role/shard_catalog/collection_metadata.h"
+#include "mongo/db/shard_role/shard_catalog/collection_options.h"
+#include "mongo/db/shard_role/shard_catalog/collection_sharding_runtime.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog.h"
 #include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
@@ -299,33 +300,51 @@ public:
         }
     }
 
-    struct SlimApplyOpsInfo {
+    struct OplogEntryInfo {
         BSONObj rawCommand;
         std::vector<repl::DurableReplOperation> operations;
     };
 
-    std::vector<SlimApplyOpsInfo> findApplyOpsNewerThan(OperationContext* opCtx, Timestamp ts) {
-        std::vector<SlimApplyOpsInfo> result;
+    std::vector<OplogEntryInfo> findOpsNewerThan(OperationContext* opCtx, Timestamp ts) {
+        std::vector<OplogEntryInfo> result;
+
 
         PersistentTaskStore<repl::OplogEntryBase> store(NamespaceString::kRsOplogNamespace);
+
+        store.forEach(
+            opCtx,
+            // A "d" or "i" op.
+            BSON("$or" << BSON_ARRAY(BSON("op" << "d") << BSON("op" << "i")) << "ts"
+                       << BSON("$gt" << ts)),
+            [&](const auto& oplogEntry) {
+                // applyOps might be elided if there's only one oplog entry.
+                auto op = oplogEntry.getDurableReplOperation();
+                auto cmd = oplogEntry.toBSON().copy();
+                result.emplace_back(OplogEntryInfo{
+                    std::move(cmd), {repl::DurableReplOperation::parseOwned(op.toBSON())}});
+                return true;
+            });
+
+        // A command op w/applyOps.
         store.forEach(opCtx,
                       BSON("op" << "c"
                                 << "o.applyOps" << BSON("$exists" << true) << "ts"
-                                << BSON("$gt" << ts)),
+                                << BSON("$gt" << ts)) /*))*/,
                       [&](const auto& oplogEntry) {
-                          auto applyOpsCmd = oplogEntry.getObject().getOwned();
-                          auto applyOpsInfo = repl::ApplyOpsCommandInfo::parse(applyOpsCmd);
+                          auto cmd = oplogEntry.getObject().getOwned();
+                          std::cout << ">>> " << oplogEntry.toBSON().toString() << "\n";
+                          auto applyOpsInfo = repl::ApplyOpsCommandInfo::parse(cmd);
 
                           std::vector<repl::DurableReplOperation> operations;
                           operations.reserve(applyOpsInfo.getOperations().size());
 
                           for (const auto& innerOp : applyOpsInfo.getOperations()) {
                               operations.emplace_back(repl::DurableReplOperation::parse(
-                                  innerOp, IDLParserContext{"findApplyOpsNewerThan"}));
+                                  innerOp, IDLParserContext{"findOpsNewerThan"_sd}));
                           }
 
                           result.emplace_back(
-                              SlimApplyOpsInfo{std::move(applyOpsCmd), std::move(operations)});
+                              OplogEntryInfo{std::move(cmd), std::move(operations)});
                           return true;
                       });
 
@@ -333,11 +352,11 @@ public:
     }
 
 private:
-    ChunkManager makeChunkManager(const OID& epoch,
-                                  const NamespaceString& nss,
-                                  const UUID& uuid,
-                                  const BSONObj& shardKey,
-                                  const std::vector<ChunkType>& chunks) {
+    CurrentChunkManager makeChunkManager(const OID& epoch,
+                                         const NamespaceString& nss,
+                                         const UUID& uuid,
+                                         const BSONObj& shardKey,
+                                         const std::vector<ChunkType>& chunks) {
         auto rt = RoutingTableHistory::makeNew(nss,
                                                uuid,
                                                shardKey,
@@ -350,11 +369,10 @@ private:
                                                boost::none /* reshardingFields */,
                                                true /* allowMigrations */,
                                                chunks);
-        return ChunkManager(makeStandaloneRoutingTableHistory(std::move(rt)),
-                            boost::none /* clusterTime */);
+        return CurrentChunkManager(makeStandaloneRoutingTableHistory(std::move(rt)));
     }
 
-    ChunkManager makeChunkManagerForSourceCollection() {
+    CurrentChunkManager makeChunkManagerForSourceCollection() {
         // Create three chunks, two that are owned by this donor shard and one owned by some other
         // shard. The chunk for {sk: null} is owned by this donor shard to allow test cases to omit
         // the shard key field when it isn't relevant.
@@ -380,7 +398,7 @@ private:
             epoch, _sourceNss, _sourceUUID, BSON(_currentShardKey << 1), chunks);
     }
 
-    ChunkManager makeChunkManagerForOutputCollection() {
+    CurrentChunkManager makeChunkManagerForOutputCollection() {
         const OID epoch = OID::gen();
         const UUID outputUuid = UUID::gen();
         std::vector<ChunkType> chunks = {
@@ -763,7 +781,7 @@ TEST_F(ReshardingOplogCrudApplicationTest, DeleteOpRemovesFromOutputCollection) 
     // oplog for an applyOps entry with a "d" op on the output collection.
     {
         auto opCtx = makeOperationContext();
-        auto applyOpsInfo = findApplyOpsNewerThan(opCtx.get(), beforeDeleteOpTime.getTimestamp());
+        auto applyOpsInfo = findOpsNewerThan(opCtx.get(), beforeDeleteOpTime.getTimestamp());
         ASSERT_EQ(applyOpsInfo.size(), 2U);
         for (size_t i = 0; i < applyOpsInfo.size(); ++i) {
             ASSERT_EQ(applyOpsInfo[i].operations.size(), 1U);
@@ -794,11 +812,8 @@ TEST_F(ReshardingOplogCrudApplicationTest, DeleteOpAtomicallyMovesFromOtherStash
                     opCtx.get(), otherStashNss(), AcquisitionPrerequisites::kWrite),
                 MODE_IX);
             WriteUnitOfWork wuow(opCtx.get());
-            ASSERT_OK(
-                collection_internal::insertDocument(opCtx.get(),
-                                                    otherStashColl.getCollectionPtr(),
-                                                    InsertStatement{BSON("_id" << 0 << sk() << -3)},
-                                                    nullptr /* opDebug */));
+            ASSERT_OK(Helpers::insert(
+                opCtx.get(), otherStashColl.getCollectionPtr(), BSON("_id" << 0 << sk() << -3)));
             wuow.commit();
         }
 
@@ -830,7 +845,7 @@ TEST_F(ReshardingOplogCrudApplicationTest, DeleteOpAtomicallyMovesFromOtherStash
     //   (3) op="i" on the output collection.
     {
         auto opCtx = makeOperationContext();
-        auto applyOpsInfo = findApplyOpsNewerThan(opCtx.get(), beforeDeleteOpTime.getTimestamp());
+        auto applyOpsInfo = findOpsNewerThan(opCtx.get(), beforeDeleteOpTime.getTimestamp());
         ASSERT_EQ(applyOpsInfo.size(), 1U);
         ASSERT_EQ(applyOpsInfo[0].operations.size(), 3U);
 

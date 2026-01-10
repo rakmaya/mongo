@@ -36,11 +36,11 @@
 #include "mongo/client/dbclient_base.h"
 #include "mongo/client/dbclient_cursor.h"
 #include "mongo/client/read_preference.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/logv2/log.h"
 #include "mongo/platform/compiler.h"
@@ -359,6 +359,8 @@ extern const JSFile collection;
 extern const JSFile crud_api;
 extern const JSFile db;
 extern const JSFile db_global;
+extern const JSFile multi_router;
+extern const JSFile multi_router_global;
 extern const JSFile error_codes;
 extern const JSFile explain_query;
 extern const JSFile explain_query_global;
@@ -390,6 +392,7 @@ void Scope::execCoreFiles() {
     execSetup(JSFiles::utils);
     execSetup(JSFiles::utils_auth);
     execSetup(JSFiles::utils_sh);
+    execSetup(JSFiles::multi_router);
 
     // globals
     execSetup(JSFiles::bulk_api_global);
@@ -402,6 +405,7 @@ void Scope::execCoreFiles() {
     execSetup(JSFiles::utils_global);
     execSetup(JSFiles::utils_auth_global);
     execSetup(JSFiles::utils_sh_global);
+    execSetup(JSFiles::multi_router_global);
 
     // scripts
     execSetup(JSFiles::mongo);

@@ -27,26 +27,28 @@
  *    it in the license file.
  */
 
-#include "mongo/db/pipeline/aggregation_context_fixture.h"
-#include "mongo/db/pipeline/optimization/optimize.h"
 #include "mongo/db/query/compiler/optimizer/join/agg_join_model.h"
+#include "mongo/db/query/compiler/optimizer/join/agg_join_model_fixture.h"
 #include "mongo/unittest/golden_test.h"
 #include "mongo/unittest/unittest.h"
 
 namespace mongo::join_ordering {
-class AggJoinModelGoldenTest : public AggregationContextFixture {
+class AggJoinModelGoldenTest : public AggJoinModelFixture {
 public:
-    AggJoinModelGoldenTest() : _cfg{"src/mongo/db/test_output/query/compiler/optimizer/join"} {
-        _opCtx = _serviceContext.makeOperationContext();
-    }
+    static constexpr size_t kMaxNumberNodesConsideredForImplicitEdges = 4;
 
-    void runVariation(std::unique_ptr<Pipeline> pipeline, StringData variationName) {
+    AggJoinModelGoldenTest() : _cfg{"src/mongo/db/test_output/query/compiler/optimizer/join"} {}
+
+    void runVariation(std::unique_ptr<Pipeline> pipeline,
+                      StringData variationName,
+                      boost::optional<AggModelBuildParams> buildParams = boost::none) {
         unittest::GoldenTestContext ctx(&_cfg);
 
         ctx.outStream() << "VARIATION " << variationName << std::endl;
         ctx.outStream() << "input " << toString(pipeline) << std::endl;
 
-        auto joinModel = AggJoinModel::constructJoinModel(*pipeline);
+        auto joinModel = AggJoinModel::constructJoinModel(
+            *pipeline, buildParams.get_value_or(defaultBuildParams));
 
         if (joinModel.isOK()) {
             ctx.outStream() << "output: " << joinModel.getValue().toString(/*pretty*/ true)
@@ -58,50 +60,7 @@ public:
         ctx.outStream() << std::endl;
     }
 
-    auto makePipeline(StringData query, std::vector<StringData> collNames) {
-        stdx::unordered_set<NamespaceString> secondaryNamespaces;
-        for (auto&& collName : collNames) {
-            secondaryNamespaces.insert(
-                NamespaceString::createNamespaceString_forTest("test", collName));
-        }
-        auto expCtx = getExpCtx();
-        expCtx->addResolvedNamespaces(secondaryNamespaces);
-
-        const auto bsonStages = pipelineFromJsonArray(query);
-        auto pipeline = Pipeline::parse(bsonStages, expCtx);
-        pipeline_optimization::optimizePipeline(*pipeline);
-
-        return pipeline;
-    }
-
-private:
-    static std::string toString(const BSONObj& bson) {
-        return bson.jsonString(
-            /*format*/ ExtendedCanonicalV2_0_0,
-            /*pretty*/ true);
-    }
-
-    static std::string toString(const std::unique_ptr<Pipeline>& pipeline) {
-        auto bson = pipeline->serializeToBson();
-        BSONArrayBuilder ba{};
-        ba.append(bson.begin(), bson.end());
-        return toString(BSON("pipeline" << ba.arr()));
-    }
-
-    std::vector<BSONObj> pipelineFromJsonArray(StringData jsonArray) {
-        auto inputBson = fromjson("{pipeline: " + jsonArray + "}");
-        ASSERT_EQUALS(inputBson["pipeline"].type(), BSONType::array);
-        std::vector<BSONObj> rawPipeline;
-        for (auto&& stageElem : inputBson["pipeline"].Array()) {
-            ASSERT_EQUALS(stageElem.type(), BSONType::object);
-            rawPipeline.push_back(stageElem.embeddedObject().getOwned());
-        }
-        return rawPipeline;
-    }
-
     unittest::GoldenTestConfig _cfg;
-    QueryTestServiceContext _serviceContext;
-    ServiceContext::UniqueOperationContext _opCtx;
 };
 
 TEST_F(AggJoinModelGoldenTest, longPrefix) {
@@ -116,5 +75,89 @@ TEST_F(AggJoinModelGoldenTest, longPrefix) {
         ])";
     auto pipeline = makePipeline(query, {"A", "B"});
     runVariation(std::move(pipeline), "longPrefix");
+}
+
+TEST_F(AggJoinModelGoldenTest, veryLargePipeline) {
+    auto pipeline = makePipelineOfSize(/*numJoins*/ kHardMaxNodesInJoin + 3);
+    runVariation(std::move(pipeline), "veryLargePipeline");
+}
+
+/**
+ * The test case with three nodes: A.b = base.a = B.b;
+ * one implicit precicate: A.b = B.b.
+ */
+TEST_F(AggJoinModelGoldenTest, addImplicitEdges_OneImplictEdge) {
+    const auto query = R"([
+            {$lookup: {from: "A", localField: "a", foreignField: "b", as: "fromA"}},
+            {$unwind: "$fromA"},
+            {$lookup: {from: "B", localField: "a", foreignField: "b", as: "fromB"}},
+            {$unwind: "$fromB"}
+        ])";
+    auto pipeline = makePipeline(query, {"A", "B"});
+    runVariation(std::move(pipeline), "addImplicitEdges_OneImplictEdge");
+}
+
+/**
+ * The test case with four nodes nodes: base.a = A.a = B.b = C.c;
+ * three implicit predicates: base.a = B.b, base.a = C.c, A.a = C.c
+ */
+TEST_F(AggJoinModelGoldenTest, addImplicitEdges_MultipleImplictEdges) {
+    const auto query = R"([
+            {$lookup: {from: "A", localField: "a", foreignField: "a", as: "fromA"}},
+            {$unwind: "$fromA"},
+            {$lookup: {from: "B", localField: "fromA.a", foreignField: "b", as: "fromB"}},
+            {$unwind: "$fromB"},
+            {$lookup: {from: "C", localField: "fromB.b", foreignField: "c", as: "fromC"}},
+            {$unwind: "$fromC"}
+        ])";
+    auto pipeline = makePipeline(query, {"A", "B", "C"});
+    runVariation(std::move(pipeline), "addImplicitEdges_MultipleImplictEdges");
+}
+
+/**
+ * The test case with two connected components:
+ * - base.a = A.a = B.b = C.c,
+ * - C.d = D.d = E.e
+ * implicit predicates:
+ * - base.a = B.b, base.a = C.c, A.a = C.c
+ * - C.d = E.e
+ */
+TEST_F(AggJoinModelGoldenTest, addImplicitEdges_TwoConnectedComponents) {
+    const auto query = R"([
+            {$lookup: {from: "A", localField: "a", foreignField: "a", as: "fromA"}},
+            {$unwind: "$fromA"},
+            {$lookup: {from: "B", localField: "fromA.a", foreignField: "b", as: "fromB"}},
+            {$unwind: "$fromB"},
+            {$lookup: {from: "C", localField: "fromB.b", foreignField: "c", as: "fromC"}},
+            {$unwind: "$fromC"},
+            {$lookup: {from: "D", localField: "fromC.d", foreignField: "d", as: "fromD"}},
+            {$unwind: "$fromD"},
+            {$lookup: {from: "E", localField: "fromD.d", foreignField: "e", as: "fromE"}},
+            {$unwind: "$fromE"}
+        ])";
+    auto pipeline = makePipeline(query, {"A", "B", "C", "D", "E"});
+    runVariation(std::move(pipeline), "addImplicitEdges_TwoConnectedComponents");
+}
+
+/**
+ * The test case without connected components:
+ * - base.a = A.a, A.b = B.b, B.c = C.c, C.d = D.d, D.e = E.e
+ * implicit predicates: none
+ */
+TEST_F(AggJoinModelGoldenTest, addImplicitEdges_NoImplicitEdges) {
+    const auto query = R"([
+            {$lookup: {from: "A", localField: "a", foreignField: "a", as: "fromA"}},
+            {$unwind: "$fromA"},
+            {$lookup: {from: "B", localField: "fromA.b", foreignField: "b", as: "fromB"}},
+            {$unwind: "$fromB"},
+            {$lookup: {from: "C", localField: "fromB.c", foreignField: "c", as: "fromC"}},
+            {$unwind: "$fromC"},
+            {$lookup: {from: "D", localField: "fromC.d", foreignField: "d", as: "fromD"}},
+            {$unwind: "$fromD"},
+            {$lookup: {from: "E", localField: "fromD.e", foreignField: "e", as: "fromE"}},
+            {$unwind: "$fromE"}
+        ])";
+    auto pipeline = makePipeline(query, {"A", "B", "C", "D", "E"});
+    runVariation(std::move(pipeline), "addImplicitEdges_NoImplicitEdges");
 }
 }  // namespace mongo::join_ordering

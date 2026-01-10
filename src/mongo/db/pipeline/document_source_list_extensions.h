@@ -40,6 +40,7 @@
 #include "mongo/db/pipeline/stage_constraints.h"
 #include "mongo/db/pipeline/variables.h"
 #include "mongo/stdx/unordered_set.h"
+#include "mongo/util/modules.h"
 
 #include <memory>
 #include <string>
@@ -50,23 +51,25 @@
 
 namespace mongo {
 
+DECLARE_STAGE_PARAMS_DERIVED_DEFAULT(ListExtensions);
+
 /**
  * Document source for the $listExtensions stage, implemented as a wrapper of DocumentSourceQueue.
  */
-class DocumentSourceListExtensions final {
+class MONGO_MOD_NEEDS_REPLACEMENT DocumentSourceListExtensions final {
 public:
     static constexpr StringData kStageName = "$listExtensions"_sd;
 
-    class LiteParsed : public LiteParsedDocumentSource {
+    class LiteParsed : public LiteParsedDocumentSourceDefault<LiteParsed> {
     public:
         static std::unique_ptr<LiteParsed> parse(const NamespaceString& nss,
                                                  const BSONElement& specElem,
                                                  const LiteParserOptions& options) {
-            return std::make_unique<LiteParsed>(specElem.fieldName());
+            return std::make_unique<LiteParsed>(specElem);
         }
 
-        LiteParsed(std::string parseTimeName)
-            : LiteParsedDocumentSource(std::move(parseTimeName)),
+        LiteParsed(const BSONElement& spec)
+            : LiteParsedDocumentSourceDefault(spec),
               _privileges({Privilege(ResourcePattern::forClusterResource(boost::none),
                                      ActionType::listExtensions)}) {}
 
@@ -81,6 +84,10 @@ public:
 
         bool isInitialSource() const final {
             return true;
+        }
+
+        std::unique_ptr<StageParams> getStageParams() const final {
+            return std::make_unique<ListExtensionsStageParams>(_originalBson);
         }
 
     private:

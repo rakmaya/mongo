@@ -39,13 +39,19 @@
 #include "mongo/db/versioning_protocol/chunk_version.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/s/write_ops/batched_command_request.h"
-#include "mongo/stdx/unordered_map.h"
+#include "mongo/util/modules.h"
 
-#include <memory>
-#include <string>
 #include <vector>
 
-namespace mongo {
+namespace MONGO_MOD_PUBLIC mongo {
+
+struct MONGO_MOD_PRIVATE InsertStrategyStatistics {
+    size_t insertDocAttempts = 0;
+    size_t insertErrors = 0;
+    const size_t minInsertAttempts =
+        static_cast<size_t>(internalQueryMergeMinInsertAttempts.loadRelaxed());
+    const double maxInsertErrorRate = internalQueryMergeMaxInsertErrorRate.loadRelaxed();
+};
 
 // A descriptor for a merge strategy. Holds a merge strategy function and a set of actions the
 // client should be authorized to perform in order to be able to execute a merge operation using
@@ -62,11 +68,13 @@ struct MergeStrategyDescriptor {
     // whenMatched/whenNotMatched modes.
     using MergeStrategy = std::function<void(const boost::intrusive_ptr<ExpressionContext>&,
                                              const NamespaceString&,
+                                             const std::set<FieldPath>&,
                                              const WriteConcernOptions&,
                                              boost::optional<OID>,
                                              MongoProcessInterface::BatchedObjects&&,
                                              BatchedCommandRequest&&,
-                                             UpsertType upsert)>;
+                                             UpsertType upsert,
+                                             InsertStrategyStatistics&)>;
 
     // A function object that will be invoked to generate a BatchedCommandRequest.
     using BatchedCommandGenerator = std::function<BatchedCommandRequest(
@@ -99,10 +107,8 @@ struct MergeStrategyDescriptor {
     BatchTransform transform;
     UpsertType upsertType;
     BatchedCommandGenerator batchedCommandGenerator;
+    bool isInsertWithUpdateBackupStrategy = false;
 };
-
-const std::map<const MergeStrategyDescriptor::MergeMode, const MergeStrategyDescriptor>&
-getMergeStrategyDescriptors();
 
 /**
  * This class is used by the aggregation framework and streams enterprise module
@@ -110,6 +116,12 @@ getMergeStrategyDescriptors();
  */
 class MergeProcessor {
 public:
+    /**
+     * The strictly-typed flag to allow or disable merge strategires that try insert first and
+     * fallback to update if errors happen.
+     */
+    enum AllowInsertWithUpdateBackupStrategies : bool {};
+
     /**
      * If 'collectionPlacementVersion' is provided then processing will stop with an error if the
      * collection's epoch changes during the course of execution. This is used as a mechanism to
@@ -121,7 +133,8 @@ public:
                    boost::optional<BSONObj> letVariables,
                    boost::optional<std::vector<BSONObj>> pipeline,
                    boost::optional<ChunkVersion> collectionPlacementVersion,
-                   bool allowMergeOnNullishValues);
+                   bool allowMergeOnNullishValues,
+                   AllowInsertWithUpdateBackupStrategies allowInsertWithUpdateBackupStrategies);
 
     const MergeStrategyDescriptor& getMergeStrategyDescriptor() const {
         return _descriptor;
@@ -148,8 +161,11 @@ public:
                                                        bool mergeOnFieldPathsIncludeId) const;
 
     void flush(const NamespaceString& outputNs,
+               const std::set<FieldPath>& mergeOnFieldPaths,
                BatchedCommandRequest bcr,
-               MongoProcessInterface::BatchedObjects batch) const;
+               MongoProcessInterface::BatchedObjects batch);
+
+    bool shouldFlush(size_t currentBatchSize);
 
 private:
     /**
@@ -211,6 +227,12 @@ private:
 
     boost::optional<ChunkVersion> _collectionPlacementVersion;
     bool _allowMergeOnNullishValues;
+
+    InsertStrategyStatistics _insertStats;
 };
 
-}  // namespace mongo
+const std::map<const MergeStrategyDescriptor::MergeMode, const MergeStrategyDescriptor>&
+getMergeStrategyDescriptors(
+    MergeProcessor::AllowInsertWithUpdateBackupStrategies allowInsertWithUpdateBackupStrategies);
+
+}  // namespace MONGO_MOD_PUBLIC mongo

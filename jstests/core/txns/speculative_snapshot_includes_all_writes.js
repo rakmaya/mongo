@@ -9,6 +9,12 @@
  *  uses_parallel_shell,
  *  # 'setDefaultRWConcern' is not supposed to be run on shard nodes.
  *  command_not_supported_in_serverless,
+ *  # TODO(SERVER-113803): Support setDefaultRWConcern on replicaset started with --shardsvr
+ *  transitioning_replicaset_incompatible,
+ *  # The test uses a failpoint that is only available on mongod.
+ *  assumes_against_mongod_not_mongos,
+ *  # TODO (SERVER-115947): Re-enable this test on primary driven index builds
+ *  primary_driven_index_builds_incompatible
  * ]
  */
 

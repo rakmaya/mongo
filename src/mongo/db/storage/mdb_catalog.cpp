@@ -30,10 +30,10 @@
 #include "mongo/db/storage/mdb_catalog.h"
 
 #include "mongo/bson/bsonobj.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/record_id.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/feature_document_util.h"
 #include "mongo/db/storage/kv/kv_engine.h"
 #include "mongo/db/storage/record_store.h"
@@ -276,28 +276,25 @@ StatusWith<std::pair<RecordId, std::unique_ptr<RecordStore>>> MDBCatalog::import
     EntryIdentifier& entry = swEntry.getValue();
     auto indexIdents = _getIndexIdents(catalogEntryObj);
 
+    auto ru = shard_role_details::getRecoveryUnit(opCtx);
     shard_role_details::getRecoveryUnit(opCtx)->onRollback(
-        [catalog = this, ident = entry.ident, indexIdents = indexIdents](OperationContext* opCtx) {
-            catalog->_engine->dropIdentForImport(
-                *opCtx, *shard_role_details::getRecoveryUnit(opCtx), ident);
+        [catalog = this, ident = entry.ident, indexIdents = indexIdents, ru = ru](
+            OperationContext* opCtx) {
+            catalog->_engine->dropIdentForImport(*opCtx, *ru, ident);
             for (const auto& indexIdent : indexIdents) {
-                catalog->_engine->dropIdentForImport(
-                    *opCtx, *shard_role_details::getRecoveryUnit(opCtx), indexIdent);
+                catalog->_engine->dropIdentForImport(*opCtx, *ru, indexIdent);
             }
         });
 
-    Status status =
-        _engine->importRecordStore(entry.ident, storageMetadata, panicOnCorruptWtMetadata, repair);
+    Status status = _engine->importRecordStore(
+        *ru, entry.ident, storageMetadata, panicOnCorruptWtMetadata, repair);
 
     if (!status.isOK())
         return status;
 
     for (const auto& indexIdent : indexIdents) {
-        status = _engine->importSortedDataInterface(*shard_role_details::getRecoveryUnit(opCtx),
-                                                    indexIdent,
-                                                    storageMetadata,
-                                                    panicOnCorruptWtMetadata,
-                                                    repair);
+        status = _engine->importSortedDataInterface(
+            *ru, indexIdent, storageMetadata, panicOnCorruptWtMetadata, repair);
         if (!status.isOK()) {
             return status;
         }

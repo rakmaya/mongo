@@ -34,11 +34,13 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/s/migration_coordinator_document_gen.h"
 #include "mongo/db/s/migration_session_id.h"
+#include "mongo/db/s/range_deletion_task_gen.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/logical_session_id_gen.h"
 #include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/db/versioning_protocol/chunk_version.h"
 #include "mongo/util/future.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/uuid.h"
 
 #include <utility>
@@ -53,7 +55,7 @@ namespace migrationutil {
  * Manages the migration commit/abort process, including updates to config.rangeDeletions on the
  * donor and the recipient, and updates to the routing table on the config server.
  */
-class MigrationCoordinator {
+class MONGO_MOD_NEEDS_REPLACEMENT MigrationCoordinator {
 public:
     MigrationCoordinator(MigrationSessionId sessionId,
                          ShardId donorShard,
@@ -157,6 +159,7 @@ private:
     ChunkVersion _shardVersionPriorToTheMigration;
     bool _waitForDelete = false;
     boost::optional<ExecutorFuture<void>> _releaseRecipientCriticalSectionFuture;
+    boost::optional<RangeDeletionTask> _donorRangeDeletionTask;
 };
 
 }  // namespace migrationutil

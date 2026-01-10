@@ -37,18 +37,18 @@
 #include "mongo/bson/oid.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/client.h"
-#include "mongo/db/local_catalog/collection_options.h"
-#include "mongo/db/local_catalog/durable_catalog.h"
-#include "mongo/db/local_catalog/durable_catalog_entry_metadata.h"
-#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/multitenancy_gen.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/rss/replicated_storage_service.h"
 #include "mongo/db/service_context_test_fixture.h"
+#include "mongo/db/shard_role/lock_manager/d_concurrency.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/collection_options.h"
+#include "mongo/db/shard_role/shard_catalog/durable_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/durable_catalog_entry_metadata.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/key_format.h"
 #include "mongo/db/storage/key_string/key_string.h"
 #include "mongo/db/storage/kv/kv_engine.h"
@@ -118,8 +118,10 @@ protected:
         auto opCtx = clientAndCtx.opCtx();
         KVEngine* engine = helper->getEngine();
         auto& provider = rss::ReplicatedStorageService::get(opCtx).getPersistenceProvider();
+        auto& ru = *shard_role_details::getRecoveryUnit(opCtx);
         ASSERT_OK(
             engine->createRecordStore(provider,
+                                      ru,
                                       NamespaceString::createNamespaceString_forTest("catalog"),
                                       "collection-catalog",
                                       RecordStore::Options{}));
@@ -235,7 +237,8 @@ protected:
                                                 boost::optional<UUID> uuid) {
         auto opCtx = _makeOperationContext(engine);
         auto& provider = rss::ReplicatedStorageService::get(opCtx.get()).getPersistenceProvider();
-        ASSERT_OK(engine->createRecordStore(provider, nss, ident, recordStoreOptions));
+        auto& ru = *shard_role_details::getRecoveryUnit(opCtx.get());
+        ASSERT_OK(engine->createRecordStore(provider, ru, nss, ident, recordStoreOptions));
         auto rs = engine->getRecordStore(opCtx.get(), nss, ident, recordStoreOptions, uuid);
         ASSERT(rs);
         return rs;
@@ -744,7 +747,8 @@ TEST_F(KVEngineTestHarness, BasicTimestampMultiple) {
  * | Read A (NOT_FOUND)   |
  * | Write A 1 (NOT_FOUND)|
  */
-DEATH_TEST_REGEX_F(KVEngineTestHarness, SnapshotHidesVisibility, ".*item not found.*") {
+using KVEngineTestHarnessDeathTest = KVEngineTestHarness;
+DEATH_TEST_REGEX_F(KVEngineTestHarnessDeathTest, SnapshotHidesVisibility, ".*item not found.*") {
     std::unique_ptr<KVHarnessHelper> helper(KVHarnessHelper::create(getServiceContext()));
     KVEngine* engine = helper->getEngine();
     std::unique_ptr<RecordStore> rs = newRecordStore(engine);
@@ -914,7 +918,7 @@ TEST_F(KVEngineTestHarness, PinningOldestTimestampWithReadConflict) {
  * | Write A 1                   |                            |
  * | Commit :commit 2 (WCE)      |                            |
  */
-DEATH_TEST_REGEX_F(KVEngineTestHarness,
+DEATH_TEST_REGEX_F(KVEngineTestHarnessDeathTest,
                    PinningOldestTimestampWithWriteConflict,
                    "Fatal assertion.*39001") {
     std::unique_ptr<KVHarnessHelper> helper(KVHarnessHelper::create(getServiceContext()));
@@ -1035,7 +1039,7 @@ TEST_F(KVEngineTestHarness, RollingBackToLastStable) {
  * | Write A 1                       |                            |
  * | Timestamp :commit 1  (ROLLBACK) |                            |
  */
-DEATH_TEST_REGEX_F(KVEngineTestHarness, CommitBehindStable, "Fatal assertion.*39001") {
+DEATH_TEST_REGEX_F(KVEngineTestHarnessDeathTest, CommitBehindStable, "Fatal assertion.*39001") {
     std::unique_ptr<KVHarnessHelper> helper(KVHarnessHelper::create(getServiceContext()));
     KVEngine* engine = helper->getEngine();
 

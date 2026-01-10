@@ -60,20 +60,22 @@
 namespace mongo {
 namespace analyze_shard_key {
 
+DECLARE_STAGE_PARAMS_DERIVED_DEFAULT(AnalyzeShardKeyReadWriteDistribution);
+
 class DocumentSourceAnalyzeShardKeyReadWriteDistribution final : public DocumentSource {
 public:
     static constexpr StringData kStageName = "$_analyzeShardKeyReadWriteDistribution"_sd;
 
-    class LiteParsed final : public LiteParsedDocumentSource {
+    class LiteParsed final : public LiteParsedDocumentSourceDefault<LiteParsed> {
     public:
         static std::unique_ptr<LiteParsed> parse(const NamespaceString& nss,
                                                  const BSONElement& specElem,
                                                  const LiteParserOptions& options);
 
-        explicit LiteParsed(std::string parseTimeName,
+        explicit LiteParsed(const BSONElement& specElem,
                             NamespaceString nss,
                             DocumentSourceAnalyzeShardKeyReadWriteDistributionSpec spec)
-            : LiteParsedDocumentSource(std::move(parseTimeName)), _nss(std::move(nss)) {}
+            : LiteParsedDocumentSourceDefault(specElem), _nss(std::move(nss)) {}
 
         PrivilegeVector requiredPrivileges(bool isMongos,
                                            bool bypassDocumentValidation) const override {
@@ -91,6 +93,10 @@ public:
 
         void assertSupportsMultiDocumentTransaction() const override {
             transactionNotSupported(kStageName);
+        }
+
+        std::unique_ptr<StageParams> getStageParams() const final {
+            return std::make_unique<AnalyzeShardKeyReadWriteDistributionStageParams>(_originalBson);
         }
 
     private:

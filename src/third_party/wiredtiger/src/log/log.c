@@ -276,7 +276,7 @@ __log_fsync_file(WT_SESSION_IMPL *session, WT_LSN *min_lsn, const char *method, 
         if (use_own_fh)
             WT_ERR(__log_openfile(session, min_lsn->l.file, 0, &log_fh));
         else
-            log_fh = log->log_fh;
+            log_fh = __wt_tsan_suppress_load_wt_fh_ptr(&log->log_fh);
         __wt_verbose(session, WT_VERB_LOG, "%s: sync %s to LSN %" PRIu32 "/%" PRIu32, method,
           log_fh->name, min_lsn->l.file, __wt_lsn_offset(min_lsn));
         time_start = __wt_clock(session);
@@ -464,7 +464,7 @@ __wt_log_written_reset(WT_SESSION_IMPL *session)
     conn = S2C(session);
 
     if (F_ISSET(&conn->log_mgr, WT_LOG_ENABLED))
-        conn->log_mgr.log->log_written = 0;
+        __wt_tsan_suppress_store_int64(&conn->log_mgr.log->log_written, 0);
 }
 
 /*
@@ -757,11 +757,11 @@ __wti_log_fill(
     WT_STAT_CONN_INCRV(session, log_bytes_written, record->size);
     if (lsnp != NULL) {
         WT_ASSIGN_LSN(lsnp, &myslot->slot->slot_start_lsn);
-        __wt_atomic_add32(&lsnp->l.offset, (uint32_t)myslot->offset);
+        __wt_atomic_add_uint32(&lsnp->l.offset, (uint32_t)myslot->offset);
     }
 err:
-    if (ret != 0 && __wt_atomic_loadi32(&myslot->slot->slot_error) == 0)
-        __wt_atomic_storei32(&myslot->slot->slot_error, ret);
+    if (ret != 0 && __wt_atomic_load_int32_relaxed(&myslot->slot->slot_error) == 0)
+        __wt_atomic_store_int32_relaxed(&myslot->slot->slot_error, ret);
     return (ret);
 }
 
@@ -1148,7 +1148,7 @@ __log_newfile(WT_SESSION_IMPL *session, bool conn_open, bool *created, bool *clo
      * one is closed. Wait for that to close.
      */
     WT_ASSERT(session, FLD_ISSET(session->lock_flags, WT_SESSION_LOCKED_SLOT));
-    WT_ACQUIRE_READ(close_fh, log->log_close_fh);
+    close_fh = __wt_atomic_load_ptr_acquire(&log->log_close_fh);
     for (yield_cnt = 0; close_fh != NULL;) {
         WT_STAT_CONN_INCR(session, log_close_yields);
         /*
@@ -1164,7 +1164,7 @@ __log_newfile(WT_SESSION_IMPL *session, bool conn_open, bool *created, bool *clo
         if (++yield_cnt > WT_THOUSAND * 10)
             return (__wt_set_return(session, EBUSY));
         __wt_yield();
-        WT_ACQUIRE_READ(close_fh, log->log_close_fh);
+        close_fh = __wt_atomic_load_ptr_acquire(&log->log_close_fh);
     }
     /*
      * Note, the file server worker thread requires the LSN be set once the close file handle is
@@ -1187,7 +1187,7 @@ __log_newfile(WT_SESSION_IMPL *session, bool conn_open, bool *created, bool *clo
      */
     create_log = true;
     if (__wti_log_is_prealloc_enabled(session) &&
-      __wt_atomic_load64(&conn->hot_backup_start) == 0) {
+      __wt_atomic_load_uint64_relaxed(&conn->hot_backup_start) == 0) {
         WT_WITH_HOTBACKUP_READ_LOCK(
           session, ret = __log_alloc_prealloc(session, log->fileid), &skipp);
 
@@ -1216,8 +1216,8 @@ __log_newfile(WT_SESSION_IMPL *session, bool conn_open, bool *created, bool *clo
          * hot backup is not in progress. We are deliberately not using pre-allocated log files
          * during backup (see comment above).
          */
-        if (__wt_atomic_load64(&conn->hot_backup_start) == 0 && !conn_open)
-            __wt_atomic_add32_relaxed(&log->prep_missed, 1);
+        if (__wt_atomic_load_uint64_relaxed(&conn->hot_backup_start) == 0 && !conn_open)
+            __wt_atomic_add_uint32_relaxed(&log->prep_missed, 1);
         WT_RET(__wti_log_allocfile(session, log->fileid, WT_LOG_FILENAME));
     }
     /*
@@ -1408,7 +1408,7 @@ __log_truncate_file(WT_SESSION_IMPL *session, WT_FH *log_fh, wt_off_t offset)
     log = log_mgr->log;
 
     if (!F_ISSET(log, WTI_LOG_TRUNCATE_NOTSUP) &&
-      __wt_atomic_load64(&conn->hot_backup_start) == 0) {
+      __wt_atomic_load_uint64_relaxed(&conn->hot_backup_start) == 0) {
         WT_WITH_HOTBACKUP_READ_LOCK(session, ret = __wt_ftruncate(session, log_fh, offset), &skipp);
         if (!skipp) {
             if (ret != ENOTSUP)
@@ -1551,7 +1551,7 @@ __wti_log_allocfile(WT_SESSION_IMPL *session, uint32_t lognum, const char *dest)
      */
     WT_RET(__wt_scr_alloc(session, 0, &from_path));
     WT_ERR(__wt_scr_alloc(session, 0, &to_path));
-    tmp_id = __wt_atomic_add32(&log->tmp_fileid, 1);
+    tmp_id = __wt_atomic_add_uint32(&log->tmp_fileid, 1);
     WT_ERR(__wt_log_filename(session, tmp_id, WTI_LOG_TMPNAME, from_path));
     WT_ERR(__wt_log_filename(session, lognum, dest, to_path));
     __wt_spin_lock(session, &log->log_fs_lock);
@@ -1908,8 +1908,9 @@ __wti_log_release(WT_SESSION_IMPL *session, WTI_LOGSLOT *slot, bool *freep)
     log = conn->log_mgr.log;
     if (freep != NULL)
         *freep = true;
-    release_buffered = WTI_LOG_SLOT_RELEASED_BUFFERED(__wt_atomic_loadiv64(&slot->slot_state));
-    release_bytes = release_buffered + __wt_atomic_loadi64(&slot->slot_unbuffered);
+    release_buffered =
+      WTI_LOG_SLOT_RELEASED_BUFFERED(__wt_atomic_load_int64_v_relaxed(&slot->slot_state));
+    release_bytes = release_buffered + __wt_atomic_load_int64_relaxed(&slot->slot_unbuffered);
 
     /*
      * Checkpoints can be configured based on amount of log written. Add in this log record to the
@@ -1919,7 +1920,7 @@ __wti_log_release(WT_SESSION_IMPL *session, WTI_LOGSLOT *slot, bool *freep)
      * shutdown before logging.
      */
     if (WT_CKPT_LOGSIZE(conn) && !F_ISSET_ATOMIC_32(conn, WT_CONN_CLOSING)) {
-        log->log_written += (wt_off_t)release_bytes;
+        __wt_tsan_suppress_add_int64(&log->log_written, (wt_off_t)release_bytes);
         __wt_checkpoint_signal(session, log->log_written);
     }
 
@@ -1938,7 +1939,7 @@ __wti_log_release(WT_SESSION_IMPL *session, WTI_LOGSLOT *slot, bool *freep)
       FLD_ISSET(conn->server_flags, WT_CONN_SERVER_LOG)) {
         if (freep != NULL)
             *freep = false;
-        __wt_atomic_storeiv64(&slot->slot_state, WTI_LOG_SLOT_WRITTEN);
+        __wt_atomic_store_int64_v_relaxed(&slot->slot_state, WTI_LOG_SLOT_WRITTEN);
         /*
          * After this point the worker thread owns the slot. There is nothing more to do but return.
          */
@@ -2024,8 +2025,8 @@ __wti_log_release(WT_SESSION_IMPL *session, WTI_LOGSLOT *slot, bool *freep)
     }
 err:
     __wt_spin_unlock_if_owned(session, &log->log_sync_lock);
-    if (ret != 0 && __wt_atomic_loadi32(&slot->slot_error) == 0)
-        __wt_atomic_storei32(&slot->slot_error, ret);
+    if (ret != 0 && __wt_atomic_load_int32_relaxed(&slot->slot_error) == 0)
+        __wt_atomic_store_int32_relaxed(&slot->slot_error, ret);
     return (ret);
 }
 
@@ -2269,6 +2270,15 @@ advance:
         reclen = __wt_bswap32(reclen);
 #endif
         /*
+         * If the record length is larger than the remaining bytes to EOF from the records offset,
+         * flag log file corruption.
+         */
+        if (reclen > log_size - __wt_lsn_offset(&rd_lsn)) {
+            need_salvage = true;
+            WT_ERR(__log_salvage_message(
+              session, log_fh->name, " record length oversize", __wt_lsn_offset(&rd_lsn)));
+        }
+        /*
          * Log files are pre-allocated. We need to detect the difference between a hole in the file
          * (where this location would be considered the end of log) and the last record in the log
          * and we're at the zeroed part of the file. If we find a zeroed record, scan forward in the
@@ -2377,7 +2387,7 @@ advance:
          */
         WT_STAT_CONN_INCR(session, log_scan_records);
         WT_ASSIGN_LSN(&next_lsn, &rd_lsn);
-        __wt_atomic_add32(&next_lsn.l.offset, rdup_len);
+        __wt_atomic_add_uint32(&next_lsn.l.offset, rdup_len);
         if (__wt_lsn_offset(&rd_lsn) != 0) {
             /*
              * We need to manage the different buffers here. Buf is the buffer this function uses to
@@ -2482,7 +2492,7 @@ __wti_log_force_write(WT_SESSION_IMPL *session, bool retry, bool *did_work)
     WT_STAT_CONN_INCR(session, log_force_write);
     if (did_work != NULL)
         *did_work = true;
-    myslot.slot = __wt_atomic_load_pointer(&log->active_slot);
+    myslot.slot = __wt_atomic_load_ptr_relaxed(&log->active_slot);
     return (__wti_log_slot_switch(session, &myslot, retry, true, did_work));
 }
 
@@ -2705,7 +2715,7 @@ __log_write_internal(WT_SESSION_IMPL *session, WT_ITEM *record, WT_LSN *lsnp, ui
      * may still need to call release and free.
      */
     if (ret != 0)
-        __wt_atomic_storei32(&myslot.slot->slot_error, ret);
+        __wt_atomic_store_int32_relaxed(&myslot.slot->slot_error, ret);
     WT_ASSERT(session, ret == 0);
     if (WTI_LOG_SLOT_DONE(release_size)) {
         WT_ERR(__wti_log_release(session, myslot.slot, &free_slot));
@@ -2726,12 +2736,12 @@ __log_write_internal(WT_SESSION_IMPL *session, WT_ITEM *record, WT_LSN *lsnp, ui
     if (LF_ISSET(WT_LOG_FLUSH)) {
         /* Wait for our writes to reach the OS */
         while (__wt_log_cmp(&log->write_lsn, &lsn) <= 0 &&
-          __wt_atomic_loadi32(&myslot.slot->slot_error) == 0)
+          __wt_atomic_load_int32_relaxed(&myslot.slot->slot_error) == 0)
             __wt_cond_wait(session, log->log_write_cond, 10 * WT_THOUSAND, NULL);
     } else if (LF_ISSET(WT_LOG_FSYNC)) {
         /* Wait for our writes to reach disk */
         while (__wt_log_cmp(&log->sync_lsn, &lsn) <= 0 &&
-          __wt_atomic_loadi32(&myslot.slot->slot_error) == 0)
+          __wt_atomic_load_int32_relaxed(&myslot.slot->slot_error) == 0)
             __wt_cond_wait(session, log->log_sync_cond, 10 * WT_THOUSAND, NULL);
     }
 
@@ -2744,7 +2754,7 @@ err:
      * it. If we're not synchronous, only report if our own operation got an error.
      */
     if (LF_ISSET(WT_LOG_DSYNC | WT_LOG_FSYNC) && ret == 0 && myslot.slot != NULL)
-        ret = __wt_atomic_loadi32(&myslot.slot->slot_error);
+        ret = __wt_atomic_load_int32_relaxed(&myslot.slot->slot_error);
 
     /*
      * If one of the sync flags is set, assert the proper LSN has moved to match on success.

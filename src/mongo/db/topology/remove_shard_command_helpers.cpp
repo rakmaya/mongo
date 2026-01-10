@@ -32,7 +32,6 @@
 #include "mongo/db/global_catalog/ddl/sharding_catalog_manager.h"
 #include "mongo/db/global_catalog/ddl/sharding_ddl_coordinator_gen.h"
 #include "mongo/db/global_catalog/ddl/sharding_ddl_coordinator_service.h"
-#include "mongo/db/s/replica_set_endpoint_feature_flag.h"
 #include "mongo/db/sharding_environment/sharding_feature_flags_gen.h"
 #include "mongo/db/topology/remove_shard_commit_coordinator.h"
 #include "mongo/db/topology/remove_shard_commit_coordinator_document_gen.h"
@@ -60,11 +59,8 @@ RemoveShardProgress runCoordinatorRemoveShard(
         coordinatorDoc.setShardId(shardId);
         coordinatorDoc.setIsTransitionToDedicated(shardId == ShardId::kConfigServerId);
         // The Operation FCV is currently propagated only for DDL operations,
-        // which cannot be nested. Therefore, the VersionContext shouldn't have
-        // been initialized yet.
-        invariant(!VersionContext::getDecoration(opCtx).isInitialized());
-        coordinatorDoc.setShouldUpdateClusterCardinality(
-            replica_set_endpoint::isFeatureFlagEnabled(VersionContext::getDecoration(opCtx)));
+        // which cannot be nested. Therefore, the VersionContext shouldn't have an OFCV yet.
+        invariant(!VersionContext::getDecoration(opCtx).hasOperationFCV());
         coordinatorDoc.setShardingDDLCoordinatorMetadata(
             {{NamespaceString::kConfigsvrShardsNamespace,
               DDLCoordinatorTypeEnum::kRemoveShardCommit}});
@@ -119,9 +115,8 @@ RemoveShardProgress removeShard(OperationContext* opCtx, const ShardId& shardId)
                 LockMode::MODE_X};
             boost::optional<FixedFCVRegion> fixedFCV{boost::in_place_init, opCtx};
             // The Operation FCV is currently propagated only for DDL operations,
-            // which cannot be nested. Therefore, the VersionContext shouldn't have
-            // been initialized yet.
-            invariant(!VersionContext::getDecoration(opCtx).isInitialized());
+            // which cannot be nested. Therefore, the VersionContext shouldn't have an OFCV yet.
+            invariant(!VersionContext::getDecoration(opCtx).hasOperationFCV());
             if (feature_flags::gUseTopologyChangeCoordinators.isEnabled(
                     VersionContext::getDecoration(opCtx), (*fixedFCV)->acquireFCVSnapshot())) {
                 return runCoordinatorRemoveShard(opCtx, ddlLock, fixedFCV, shardId);

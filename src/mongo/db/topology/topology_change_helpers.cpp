@@ -47,9 +47,6 @@
 #include "mongo/client/remote_command_targeter.h"
 #include "mongo/client/replica_set_monitor.h"
 #include "mongo/db/audit.h"
-#include "mongo/db/cluster_parameters/cluster_server_parameter_common.h"
-#include "mongo/db/cluster_parameters/set_cluster_parameter_invocation.h"
-#include "mongo/db/cluster_parameters/sharding_cluster_parameters_gen.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/dbdirectclient.h"
@@ -66,10 +63,6 @@
 #include "mongo/db/global_catalog/type_remove_shard_event_gen.h"
 #include "mongo/db/global_catalog/type_shard.h"
 #include "mongo/db/keys_collection_util.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/ddl/list_collections_gen.h"
-#include "mongo/db/local_catalog/ddl/list_databases_for_all_tenants_gen.h"
-#include "mongo/db/local_catalog/drop_database.h"
 #include "mongo/db/logical_time.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
@@ -89,6 +82,10 @@
 #include "mongo/db/server_parameter.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/logical_session_id.h"
+#include "mongo/db/shard_role/ddl/list_collections_gen.h"
+#include "mongo/db/shard_role/ddl/list_databases_for_all_tenants_gen.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/drop_database.h"
 #include "mongo/db/sharding_environment/client/shard.h"
 #include "mongo/db/sharding_environment/cluster_identity_loader.h"
 #include "mongo/db/sharding_environment/grid.h"
@@ -96,13 +93,16 @@
 #include "mongo/db/sharding_environment/sharding_config_server_parameters_gen.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/db/topology/add_shard_gen.h"
+#include "mongo/db/topology/cluster_parameters/cluster_server_parameter_common.h"
+#include "mongo/db/topology/cluster_parameters/set_cluster_parameter_invocation.h"
+#include "mongo/db/topology/cluster_parameters/sharding_cluster_parameters_gen.h"
 #include "mongo/db/topology/remove_shard_draining_progress_gen.h"
 #include "mongo/db/topology/topology_change_helpers.h"
+#include "mongo/db/topology/user_write_block/set_user_write_block_mode_gen.h"
+#include "mongo/db/topology/user_write_block/user_writes_critical_section_document_gen.h"
+#include "mongo/db/topology/user_write_block/user_writes_recoverable_critical_section_service.h"
+#include "mongo/db/topology/vector_clock/vector_clock_mutable.h"
 #include "mongo/db/transaction/transaction_api.h"
-#include "mongo/db/user_write_block/set_user_write_block_mode_gen.h"
-#include "mongo/db/user_write_block/user_writes_critical_section_document_gen.h"
-#include "mongo/db/user_write_block/user_writes_recoverable_critical_section_service.h"
-#include "mongo/db/vector_clock/vector_clock_mutable.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/executor/remote_command_request.h"
 #include "mongo/executor/remote_command_response.h"
@@ -136,72 +136,6 @@ const ReadPreferenceSetting kConfigReadSelector(ReadPreference::Nearest, TagSet{
 constexpr StringData kAddOrRemoveShardInProgressRecoveryDocumentId =
     "addOrRemoveShardInProgressRecovery"_sd;
 
-AggregateCommandRequest makeUnshardedCollectionsOnSpecificShardAggregation(OperationContext* opCtx,
-                                                                           const ShardId& shardId,
-                                                                           bool isCount = false) {
-    static const BSONObj listStage = fromjson(R"({
-       $listClusterCatalog: { "shards": true }
-     })");
-    const BSONObj shardsCondition = BSON("shards" << shardId);
-    // TODO SERVER-101594 remove condition about type:timeseries. After 9.0 becomes last LTS only
-    // viewless timeseries will exist and they will always have an associated UUID.
-    const BSONObj matchStage = fromjson(str::stream() << R"({
-       $match: {
-           $and: [
-               { sharded: false },
-               { db: {$ne: 'config'} },
-               { db: {$ne: 'admin'} },
-               )" << shardsCondition.jsonString() << R"(,
-               { type: {$ne: "view"} },
-               { $or: [
-                    {type: {$ne: "timeseries"}},
-                    {"info.uuid": {$exists: true}}
-               ]},
-               { ns: {$not: {$regex: "^enxcol_\..*(\.esc|\.ecc|\.ecoc|\.ecoc\.compact)$"} }},
-               { $or: [
-                    {ns: {$not: { $regex: "\.system\." }}},
-                    {ns: {$regex: "\.system\.buckets\."}}
-               ]}
-           ]
-        }
-    })");
-    static const BSONObj projectStage = fromjson(R"({
-       $project: {
-           _id: 0,
-           ns: {
-               $cond: [
-                   "$options.timeseries",
-                   {
-                       $replaceAll: {
-                           input: "$ns",
-                           find: ".system.buckets",
-                           replacement: ""
-                       }
-                   },
-                   "$ns"
-               ]
-           }
-       }
-    })");
-    const BSONObj countStage = BSON("$count" << "totalCount");
-
-    auto dbName = NamespaceString::makeCollectionlessAggregateNSS(DatabaseName::kAdmin);
-
-    std::vector<mongo::BSONObj> pipeline;
-    pipeline.reserve(4);
-    pipeline.push_back(listStage);
-    pipeline.push_back(matchStage);
-    if (isCount) {
-        pipeline.push_back(countStage);
-    } else {
-        pipeline.push_back(projectStage);
-    }
-
-    AggregateCommandRequest aggRequest{dbName, pipeline};
-    aggRequest.setReadConcern(repl::ReadConcernArgs::kLocal);
-    aggRequest.setWriteConcern({});
-    return aggRequest;
-}
 
 AggregateCommandRequest makeChunkCountAggregation(OperationContext* opCtx, const ShardId& shardId) {
     std::vector<BSONObj> pipeline;
@@ -248,13 +182,17 @@ long long getCollectionsToMoveForShardCount(OperationContext* opCtx,
                                             const ShardId& shardId) {
 
     auto listCollectionAggReq =
-        makeUnshardedCollectionsOnSpecificShardAggregation(opCtx, shardId, true);
+        topology_change_helpers::makeUnshardedCollectionsOnSpecificShardAggregation(
+            opCtx, shardId, true);
 
     long long collectionsCounter = 0;
 
+    // TODO(SERVER-113504): Consider using kIdempotent since onRetry allows read only aggregation
+    // processes to be restarted.
     uassertStatusOK(shard->runAggregation(
         opCtx,
         listCollectionAggReq,
+        Shard::RetryPolicy::kStrictlyNotIdempotent,
         [&collectionsCounter](const std::vector<BSONObj>& batch,
                               const boost::optional<BSONObj>& postBatchResumeToken) {
             if (batch.size() > 0) {
@@ -262,7 +200,8 @@ long long getCollectionsToMoveForShardCount(OperationContext* opCtx,
                 collectionsCounter = batch[0].getField("totalCount").safeNumberLong();
             }
             return true;
-        }));
+        },
+        [&collectionsCounter](const Status&) { collectionsCounter = 0; }));
 
     return collectionsCounter;
 }
@@ -273,16 +212,20 @@ long long getChunkForShardCount(OperationContext* opCtx, Shard* shard, const Sha
 
     long long chunkCounter = 0;
 
+    // TODO(SERVER-113504): Consider using kIdempotent since onRetry allows read only aggregation
+    // processes to be restarted.
     uassertStatusOK(shard->runAggregation(
         opCtx,
         chunkCounterAggReq,
+        Shard::RetryPolicy::kStrictlyNotIdempotent,
         [&chunkCounter](const std::vector<BSONObj>& batch,
                         const boost::optional<BSONObj>& postBatchResumeToken) {
             if (batch.size() > 0) {
                 chunkCounter = batch[0].getField("totalChunks").safeNumberLong();
             }
             return true;
-        }));
+        },
+        [&chunkCounter](const Status&) { chunkCounter = 0; }));
 
     return chunkCounter;
 }
@@ -778,6 +721,74 @@ boost::optional<ShardType> getExistingShard(OperationContext* opCtx,
 
     return {boost::none};
 }
+
+AggregateCommandRequest makeUnshardedCollectionsOnSpecificShardAggregation(OperationContext* opCtx,
+                                                                           const ShardId& shardId,
+                                                                           bool isCount) {
+    static const BSONObj listStage = fromjson(R"({
+       $listClusterCatalog: { "shards": true }
+     })");
+    const BSONObj shardsCondition = BSON("shards" << shardId);
+    // TODO SERVER-101594 remove condition about type:timeseries. After 9.0 becomes last LTS only
+    // viewless timeseries will exist and they will always have an associated UUID.
+    const BSONObj matchStage = fromjson(str::stream() << R"({
+       $match: {
+           $and: [
+               { sharded: false },
+               { db: {$ne: 'config'} },
+               { db: {$ne: 'admin'} },
+               )" << shardsCondition.jsonString() << R"(,
+               { type: {$ne: "view"} },
+               { $or: [
+                    {type: {$ne: "timeseries"}},
+                    {"info.uuid": {$exists: true}}
+               ]},
+               { ns: {$not: {$regex: "^enxcol_\..*(\.esc|\.ecc|\.ecoc|\.ecoc\.compact)$"} }},
+               { $or: [
+                    {ns: {$not: { $regex: "\.system\." }}},
+                    {ns: {$regex: "\.system\.buckets\."}}
+               ]}
+           ]
+        }
+    })");
+    static const BSONObj projectStage = fromjson(R"({
+       $project: {
+           _id: 0,
+           ns: {
+               $cond: [
+                   "$options.timeseries",
+                   {
+                       $replaceAll: {
+                           input: "$ns",
+                           find: ".system.buckets",
+                           replacement: ""
+                       }
+                   },
+                   "$ns"
+               ]
+           }
+       }
+    })");
+    const BSONObj countStage = BSON("$count" << "totalCount");
+
+    auto dbName = NamespaceString::makeCollectionlessAggregateNSS(DatabaseName::kAdmin);
+
+    std::vector<mongo::BSONObj> pipeline;
+    pipeline.reserve(4);
+    pipeline.push_back(listStage);
+    pipeline.push_back(matchStage);
+    if (isCount) {
+        pipeline.push_back(countStage);
+    } else {
+        pipeline.push_back(projectStage);
+    }
+
+    AggregateCommandRequest aggRequest{dbName, pipeline};
+    aggRequest.setReadConcern(repl::ReadConcernArgs::kLocal);
+    aggRequest.setWriteConcern({});
+    return aggRequest;
+}
+
 
 Shard::CommandResponse runCommandForAddShard(OperationContext* opCtx,
                                              RemoteCommandTargeter& targeter,

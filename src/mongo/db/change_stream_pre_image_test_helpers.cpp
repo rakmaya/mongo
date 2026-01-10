@@ -31,7 +31,7 @@
 
 #include "mongo/db/change_stream_pre_image_util.h"
 #include "mongo/db/change_stream_pre_images_collection_manager.h"
-#include "mongo/db/collection_crud/collection_write_path.h"
+#include "mongo/db/dbhelpers.h"
 
 namespace mongo {
 namespace {
@@ -59,14 +59,13 @@ void insertDirectlyToPreImagesCollection(OperationContext* opCtx,
     const auto preImagesAcq = acquireCollection(
         opCtx,
         CollectionAcquisitionRequest(NamespaceString::kChangeStreamPreImagesNamespace,
-                                     PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                     PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
                                      repl::ReadConcernArgs::get(opCtx),
                                      AcquisitionPrerequisites::kWrite),
         MODE_IX);
 
     WriteUnitOfWork wuow(opCtx);
-    uassertStatusOK(collection_internal::insertDocument(
-        opCtx, preImagesAcq.getCollectionPtr(), InsertStatement{preImage.toBSON()}, nullptr));
+    uassertStatusOK(Helpers::insert(opCtx, preImagesAcq.getCollectionPtr(), preImage.toBSON()));
     wuow.commit();
 }
 
@@ -204,7 +203,7 @@ CollectionAcquisition acquirePreImagesCollectionForRead(OperationContext* opCtx)
     return acquireCollection(
         opCtx,
         CollectionAcquisitionRequest(NamespaceString::kChangeStreamPreImagesNamespace,
-                                     PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                     PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
                                      repl::ReadConcernArgs::get(opCtx),
                                      AcquisitionPrerequisites::kRead),
         MODE_IS);

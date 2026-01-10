@@ -59,6 +59,7 @@
 #include "mongo/platform/decimal128.h"
 #include "mongo/platform/endian.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/pcre.h"
 #include "mongo/util/represent_as.h"
 #include "mongo/util/shared_buffer.h"
@@ -78,6 +79,8 @@
 #include <type_traits>
 #include <utility>
 #include <vector>
+
+// TODO(SERVER-114140): Remove all MONGO_MOD_NEEDS_REPLACEMENT annotations
 
 namespace mongo {
 /**
@@ -138,7 +141,7 @@ static constexpr size_t kNewUUIDLength = 16;
  * SBE type 'tag', if 'value::tagToType(tag) != EOO' is true then 'tag' must be a native type.
  * Likewise, if 'tag' is an extended type then 'value::tagToType(tag) == EOO' must be true.
  */
-enum class TypeTags : uint8_t {
+enum class MONGO_MOD_NEEDS_REPLACEMENT TypeTags : uint8_t {
     // The value does not exist, aka Nothing in the Maybe monad.
     Nothing = 0,
 
@@ -413,7 +416,7 @@ inline std::pair<TypeTags, Value> compare3way(TypeTags lhsTag,
     return compareValue(lhsTag, lhsValue, rhsTag, rhsValue, comparator);
 }
 
-bool isNaN(TypeTags tag, Value val) noexcept;
+MONGO_MOD_NEEDS_REPLACEMENT bool isNaN(TypeTags tag, Value val) noexcept;
 
 bool isInfinity(TypeTags tag, Value val) noexcept;
 
@@ -462,6 +465,119 @@ private:
 };
 
 /**
+ * A view of a tag & value, not owned here.
+ */
+struct TagValueView {
+    TypeTags tag;
+    Value value;
+
+    operator std::pair<TypeTags, Value>() {
+        return {tag, value};
+    }
+};
+
+inline TagValueView rawToView(std::pair<TypeTags, Value> tv) {
+    return TagValueView{tv.first, tv.second};
+}
+
+std::ostream& operator<<(std::ostream& os, TagValueView v);
+str::stream& operator<<(str::stream& str, TagValueView v);
+
+static_assert(std::is_trivially_copyable<TagValueView>::value, "Must be trivially copyable");
+static_assert(std::is_trivially_default_constructible<TagValueView>::value,
+              "Must be trivially default constructible");
+static_assert(std::is_trivially_constructible<TagValueView>::value,
+              "Must be trivially constructible");
+static_assert(sizeof(TagValueView) <= 16);
+
+/**
+ * A tag and value which are uniquely owned by this class. Supports moving and explicit copying.
+ */
+class TagValueOwned {
+public:
+    static TagValueOwned fromRaw(std::pair<TypeTags, Value> tv) {
+        auto [t, v] = tv;
+        return TagValueOwned(t, v);
+    }
+
+    static TagValueOwned fromRaw(TypeTags t, Value v) {
+        return TagValueOwned(t, v);
+    }
+
+    TagValueOwned() : _tag(TypeTags::Nothing), _value(0) {}
+
+    TagValueOwned(TypeTags tag, Value value) : _tag(tag), _value(value) {}
+
+    TagValueOwned(std::pair<TypeTags, Value> tv) : TagValueOwned(tv.first, tv.second) {}
+
+    TagValueOwned(TagValueOwned&& o) {
+        _tag = o._tag;
+        _value = o._value;
+        o.disown();
+    }
+
+    ~TagValueOwned() {
+        release();
+    }
+
+    TagValueOwned& operator=(TagValueOwned&& o) {
+        if (&o != this) {
+            release();
+            _tag = o._tag;
+            _value = o._value;
+            o.disown();
+        }
+        return *this;
+    }
+
+    TagValueOwned(const TagValueOwned&) = delete;
+
+    TagValueOwned& operator=(const TagValueOwned&) = delete;
+
+    std::pair<TypeTags, Value> raw() const {
+        return {_tag, _value};
+    }
+    TagValueView view() const {
+        return {_tag, _value};
+    }
+    TagValueOwned copy() const {
+        return TagValueOwned::fromRaw(copyValue(_tag, _value));
+    }
+
+    TypeTags tag() const {
+        return _tag;
+    }
+    Value value() const {
+        return _value;
+    }
+
+    std::pair<TypeTags, Value> releaseToRaw() {
+        std::pair<TypeTags, Value> ret{_tag, _value};
+        disown();
+        return ret;
+    }
+
+    FastTuple<bool, TypeTags, Value> releaseToMaybeOwnedRaw() {
+        FastTuple<bool, TypeTags, Value> ret{true, _tag, _value};
+        disown();
+        return ret;
+    }
+
+    void disown() {
+        _tag = TypeTags::Nothing;
+        _value = 0;
+    }
+
+private:
+    void release() {
+        releaseValue(_tag, _value);
+    }
+
+    TypeTags _tag;
+    Value _value;
+};
+
+/**
  * A value which behaves like a view or an owned value depending on 'owned' flag provided at
  * runtime.
  */
@@ -478,11 +594,20 @@ public:
 
     TagValueMaybeOwned() : _owned(false), _tag(TypeTags::Nothing), _value(0) {}
 
+    TagValueMaybeOwned(bool owned, TypeTags t, Value v) : _owned(owned), _tag(t), _value(v) {}
+
     TagValueMaybeOwned(TagValueMaybeOwned&& o) {
         _tag = o._tag;
         _value = o._value;
         _owned = o._owned;
         o.disownAndClear();
+    }
+
+    TagValueMaybeOwned(TagValueOwned&& o) {
+        _tag = o.tag();
+        _value = o.value();
+        _owned = true;
+        o.disown();
     }
 
     ~TagValueMaybeOwned() {
@@ -514,11 +639,32 @@ public:
         return ret;
     }
 
+    std::pair<TypeTags, Value> releaseToOwnedRaw() {
+        makeOwned();
+        std::pair<TypeTags, Value> ret{_tag, _value};
+        disownAndClear();
+        return ret;
+    }
+
     TypeTags tag() const {
         return _tag;
     }
     Value value() const {
         return _value;
+    }
+    bool owned() const {
+        return _owned;
+    }
+
+    TagValueOwned getOwnedCopy() const {
+        return TagValueOwned::fromRaw(value::copyValue(_tag, _value));
+    }
+
+    TagValueOwned moveToOwned() {
+        makeOwned();
+        TagValueOwned ret = TagValueOwned::fromRaw(_tag, _value);
+        disownAndClear();
+        return ret;
     }
 
     /**
@@ -542,8 +688,6 @@ public:
     }
 
 private:
-    TagValueMaybeOwned(bool owned, TypeTags t, Value v) : _owned(owned), _tag(t), _value(v) {}
-
     void release() {
         if (_owned) {
             releaseValue(_tag, _value);
@@ -588,7 +732,7 @@ private:
     std::vector<Value>& _values;
 };
 
-inline char* getRawPointerView(Value val) noexcept {
+MONGO_MOD_NEEDS_REPLACEMENT inline char* getRawPointerView(Value val) noexcept {
     return reinterpret_cast<char*>(val);
 }
 
@@ -640,7 +784,8 @@ Value bitcastFrom(
 }
 
 template <typename T>
-T bitcastTo(const Value in) noexcept {  // NOLINT(readability-avoid-const-params-in-decls)
+MONGO_MOD_NEEDS_REPLACEMENT T
+bitcastTo(const Value in) noexcept {  // NOLINT(readability-avoid-const-params-in-decls)
     static_assert(std::is_pointer_v<T> || std::is_integral_v<T> || std::is_floating_point_v<T> ||
                   std::is_same_v<Decimal128, T>);
 
@@ -1021,7 +1166,7 @@ public:
         }
     }
 
-    std::pair<TypeTags, Value> getField(StringData field) {
+    TagValueView getField(StringData field) {
         for (size_t idx = 0; idx < _typeTags.size(); ++idx) {
             if (_names[idx] == field) {
                 return {_typeTags[idx], _values[idx]};
@@ -1042,7 +1187,7 @@ public:
         return _names[idx];
     }
 
-    std::pair<TypeTags, Value> getAt(std::size_t idx) const {
+    TagValueView getAt(std::size_t idx) const {
         if (idx >= _values.size()) {
             return {TypeTags::Nothing, 0};
         }
@@ -1113,6 +1258,11 @@ public:
         MONGO_COMPILER_DIAGNOSTIC_POP
     }
 
+    void push_back(TagValueOwned value) {
+        auto [tag, val] = value.releaseToRaw();
+        push_back(tag, val);
+    }
+
     void pop_back() {
         if (_vals.size() > 0) {
             releaseValue(_vals.back().first, _vals.back().second);
@@ -1124,15 +1274,15 @@ public:
         return _vals.size();
     }
 
-    std::pair<TypeTags, Value> getAt(std::size_t idx) const {
+    TagValueView getAt(std::size_t idx) const {
         if (idx >= _vals.size()) {
             return {TypeTags::Nothing, 0};
         }
 
-        return _vals[idx];
+        return {_vals[idx].first, _vals[idx].second};
     }
 
-    std::pair<TypeTags, Value> swapAt(std::size_t idx, TypeTags tag, Value val) {
+    TagValueOwned swapAt(std::size_t idx, TypeTags tag, Value val) {
         if (idx >= _vals.size() || tag == TypeTags::Nothing) {
             return {TypeTags::Nothing, 0};
         }
@@ -1141,6 +1291,11 @@ public:
         _vals[idx].first = tag;
         _vals[idx].second = val;
         return ret;
+    }
+
+    TagValueOwned swapAt(std::size_t idx, TagValueOwned value) {
+        auto [tag, val] = value.releaseToRaw();
+        return swapAt(idx, tag, val);
     }
 
     auto& values() const noexcept {
@@ -1160,6 +1315,11 @@ public:
             releaseValue(_vals[idx].first, _vals[idx].second);
             _vals[idx] = {tag, val};
         }
+    }
+
+    void setAt(std::size_t idx, TagValueOwned value) {
+        auto [tag, val] = value.releaseToRaw();
+        setAt(idx, tag, val);
     }
 
     void reserve(size_t s) {
@@ -1458,7 +1618,7 @@ bool operator==(const MultiMap& lhs, const MultiMap& rhs);
 bool operator!=(const MultiMap& lhs, const MultiMap& rhs);
 
 constexpr size_t kSmallStringMaxLength = 7;
-using ObjectIdType = std::array<uint8_t, 12>;
+using ObjectIdType MONGO_MOD_NEEDS_REPLACEMENT = std::array<uint8_t, 12>;
 static_assert(sizeof(ObjectIdType) == 12);
 
 /**
@@ -1569,7 +1729,8 @@ struct TinyStrHelpers {
 /**
  * getStringView() should be preferred over getRawStringView() where possible.
  */
-inline StringData getStringView(TypeTags tag, const Value& val) noexcept {
+MONGO_MOD_NEEDS_REPLACEMENT inline StringData getStringView(TypeTags tag,
+                                                            const Value& val) noexcept {
     return {getRawStringView(tag, val), getStringLength(tag, val)};
 }
 
@@ -1578,7 +1739,7 @@ inline StringData getStringOrSymbolView(TypeTags tag, const Value& val) noexcept
     return {getRawStringView(tag, val), getStringLength(tag, val)};
 }
 
-inline size_t getBSONBinDataSize(TypeTags tag, Value val) {
+MONGO_MOD_NEEDS_REPLACEMENT inline size_t getBSONBinDataSize(TypeTags tag, Value val) {
     invariant(tag == TypeTags::bsonBinData);
     return static_cast<size_t>(
         ConstDataView(getRawPointerView(val)).read<LittleEndian<uint32_t>>());
@@ -1876,7 +2037,7 @@ inline TimeZone* getTimeZoneView(Value val) noexcept {
  *
  *   <pattern> <NULL> <flags> <NULL>
  */
-struct BsonRegex {
+struct MONGO_MOD_NEEDS_REPLACEMENT BsonRegex {
     explicit BsonRegex(const char* rawValue) {
         pattern = rawValue;
         // Add one to account for the NULL byte after 'pattern'.
@@ -1902,7 +2063,7 @@ inline std::pair<TypeTags, Value> makeCopyBsonRegex(const BsonRegex& regex) {
     return makeNewBsonRegex(regex.pattern, regex.flags);
 }
 
-inline StringData getBsonJavascriptView(Value val) noexcept {
+MONGO_MOD_NEEDS_REPLACEMENT inline StringData getBsonJavascriptView(Value val) noexcept {
     return getStringView(TypeTags::StringBig, val);
 }
 
@@ -1916,7 +2077,7 @@ std::pair<TypeTags, Value> makeCopyBsonJavascript(StringData code);
  *
  * In BSON, a DBRef is encoded as a bsonString ('ns') followed by an ObjectId ('id').
  */
-struct BsonDBPointer {
+struct MONGO_MOD_NEEDS_REPLACEMENT BsonDBPointer {
     explicit BsonDBPointer(const char* rawValue) {
         uint32_t lenWithNull = ConstDataView(rawValue).read<LittleEndian<uint32_t>>();
         ns = {rawValue + sizeof(uint32_t), lenWithNull - sizeof(char)};
@@ -2266,7 +2427,7 @@ public:
             MONGO_UNREACHABLE_TASSERT(11122924);
         }
     }
-    std::pair<TypeTags, Value> getViewOfValue() const;
+    TagValueView getViewOfValue() const;
     StringData getFieldName() const;
 
     bool atEnd() const {
@@ -2340,7 +2501,7 @@ public:
         }
     }
 
-    std::pair<TypeTags, Value> getViewOfValue() const;
+    TagValueView getViewOfValue() const;
 
     bool atEnd() const {
         if (_array) {

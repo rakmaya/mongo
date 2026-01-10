@@ -109,16 +109,18 @@ SemiFuture<HostAndPort> RemoteCommandTargeterRS::findHost(
     if (_mustTargetLocalHost(readPref)) {
         return getLocalHostAndPort(_serviceContext);
     }
-    return _rsMonitor->getAtLeastOneHostOrRefresh(
-        readPref, targetingMetadata.deprioritizedServers, cancelToken);
+
+    return _rsMonitor->getHostOrRefresh(readPref, targetingMetadata, cancelToken).semi();
 }
 
 SemiFuture<std::vector<HostAndPort>> RemoteCommandTargeterRS::findHosts(
-    const ReadPreferenceSetting& readPref, const CancellationToken& cancelToken) {
+    const ReadPreferenceSetting& readPref,
+    const TargetingMetadata& targetingMetadata,
+    const CancellationToken& cancelToken) {
     if (_mustTargetLocalHost(readPref)) {
         return std::vector<HostAndPort>{getLocalHostAndPort(_serviceContext)};
     }
-    return _rsMonitor->getHostsOrRefresh(readPref, cancelToken);
+    return _rsMonitor->getHostsOrRefresh(readPref, targetingMetadata, cancelToken).semi();
 }
 
 StatusWith<HostAndPort> RemoteCommandTargeterRS::findHost(
@@ -136,11 +138,9 @@ StatusWith<HostAndPort> RemoteCommandTargeterRS::findHost(
 
     bool maxTimeMsLesser = (opCtx->getRemainingMaxTimeMillis() <
                             Milliseconds(gDefaultFindReplicaSetHostTimeoutMS.load()));
-    auto swHostAndPort = _rsMonitor
-                             ->getAtLeastOneHostOrRefresh(readPref,
-                                                          targetingMetadata.deprioritizedServers,
-                                                          opCtx->getCancellationToken())
-                             .getNoThrow(opCtx);
+    auto swHostAndPort =
+        _rsMonitor->getHostOrRefresh(readPref, targetingMetadata, opCtx->getCancellationToken())
+            .getNoThrow(opCtx);
 
     // If opCtx is interrupted, getHostOrRefresh may be canceled through the token (rather than
     // opCtx) and therefore we may get a generic FailedToSatisfyReadPreference as tokens do not

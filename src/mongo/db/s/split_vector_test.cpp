@@ -36,14 +36,14 @@
 #include "mongo/bson/util/builder.h"
 #include "mongo/bson/util/builder_fwd.h"
 #include "mongo/db/dbdirectclient.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/create_collection.h"
-#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_catalog/collection_metadata.h"
-#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_runtime.h"
-#include "mongo/db/local_catalog/shard_role_catalog/operation_sharding_state.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/shard_role/lock_manager/d_concurrency.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/collection_metadata.h"
+#include "mongo/db/shard_role/shard_catalog/collection_sharding_runtime.h"
+#include "mongo/db/shard_role/shard_catalog/create_collection.h"
+#include "mongo/db/shard_role/shard_catalog/operation_sharding_state.h"
 #include "mongo/db/sharding_environment/shard_server_test_fixture.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
@@ -61,7 +61,7 @@ namespace {
 const NamespaceString kNss = NamespaceString::createNamespaceString_forTest("foo", "bar");
 const std::string kPattern = "_id";
 
-void setUnshardedFilteringMetadata(OperationContext* opCtx, const NamespaceString& nss) {
+void setUntrackedFilteringMetadata(OperationContext* opCtx, const NamespaceString& nss) {
     AutoGetDb autoDb(opCtx, nss.dbName(), MODE_IX);
     Lock::CollectionLock collLock(opCtx, nss, MODE_IX);
     CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(opCtx, nss)
@@ -76,7 +76,7 @@ public:
         auto opCtx = operationContext();
 
         createTestCollection(opCtx, kNss);
-        setUnshardedFilteringMetadata(opCtx, kNss);
+        setUntrackedFilteringMetadata(opCtx, kNss);
         DBDirectClient client(opCtx);
         client.createIndex(kNss, BSON(kPattern << 1));
 
@@ -332,7 +332,7 @@ public:
         auto opCtx = operationContext();
 
         createTestCollection(opCtx, kJumboNss);
-        setUnshardedFilteringMetadata(opCtx, kJumboNss);
+        setUntrackedFilteringMetadata(opCtx, kJumboNss);
         DBDirectClient client(opCtx);
         client.createIndex(kJumboNss, BSON(kJumboPattern << 1));
 
@@ -392,7 +392,7 @@ public:
         auto opCtx = operationContext();
 
         createTestCollection(opCtx, kMaxResponseNss);
-        setUnshardedFilteringMetadata(opCtx, kMaxResponseNss);
+        setUntrackedFilteringMetadata(opCtx, kMaxResponseNss);
         DBDirectClient client(opCtx);
         client.createIndex(kMaxResponseNss, BSON("a" << 1));
 

@@ -30,12 +30,12 @@
 #pragma once
 
 #include "mongo/bson/bsonobj.h"
-#include "mongo/db/global_catalog/router_role_api/sharding_write_router.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_options.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer.h"
+#include "mongo/db/router_role/sharding_write_router.h"
 #include "mongo/db/rss/persistence_provider.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_options.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/fail_point.h"
@@ -101,14 +101,5 @@ DocumentKey getDocumentKey(const CollectionPtr& coll, BSONObj const& doc);
 
 
 DocumentKey getDocumentKey(const ShardKeyPattern& shardKeyPattern, BSONObj const& doc);
-
-/**
- * Provides access to the ShardingWriteRouter attached to the op accumulator.
- * The ShardingWriteRouter instance is created in OpObserverImpl and subsequently
- * destroyed in MigrationChunkClonerSourceOpObserver.
- *
- */
-extern const OpStateAccumulator::Decoration<std::unique_ptr<ShardingWriteRouter>>
-    shardingWriteRouterOpStateAccumulatorDecoration;
 
 }  // namespace MONGO_MOD_PUB mongo

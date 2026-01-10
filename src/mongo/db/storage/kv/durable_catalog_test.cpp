@@ -26,12 +26,12 @@
  *    exception statement from all source files in the program, then also delete
  *    it in the license file.
  */
-#include "mongo/db/local_catalog/durable_catalog.h"
+
+#include "mongo/db/shard_role/shard_catalog/durable_catalog.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/oid.h"
 #include "mongo/bson/timestamp.h"
@@ -40,25 +40,28 @@
 #include "mongo/db/index/index_constants.h"
 #include "mongo/db/index/multikey_paths.h"
 #include "mongo/db/index_names.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/catalog_test_fixture.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_catalog.h"
-#include "mongo/db/local_catalog/collection_impl.h"
-#include "mongo/db/local_catalog/collection_options.h"
-#include "mongo/db/local_catalog/durable_catalog_entry_metadata.h"
-#include "mongo/db/local_catalog/index_catalog.h"
-#include "mongo/db/local_catalog/index_catalog_entry.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
-#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/multitenancy_gen.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/record_id.h"
+#include "mongo/db/rss/replicated_storage_service.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/lock_manager/d_concurrency.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_test_fixture.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/collection_impl.h"
+#include "mongo/db/shard_role/shard_catalog/collection_options.h"
+#include "mongo/db/shard_role/shard_catalog/collection_record_store_options.h"
+#include "mongo/db/shard_role/shard_catalog/durable_catalog_entry_metadata.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog_entry.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
+#include "mongo/db/shard_role/shard_role.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/ident.h"
 #include "mongo/db/storage/kv/kv_engine.h"
 #include "mongo/db/storage/mdb_catalog.h"
@@ -86,10 +89,7 @@
 #include <boost/container/flat_set.hpp>
 #include <boost/container/small_vector.hpp>
 #include <boost/container/vector.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
 #include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
 #include <fmt/format.h>
 
 namespace mongo {
@@ -528,7 +528,8 @@ TEST_F(DurableCatalogTest, CanSetMultipleFieldsAndComponentsAsMultikey) {
     }
 }
 
-DEATH_TEST_REGEX_F(DurableCatalogTest,
+using DurableCatalogTestDeathTest = DurableCatalogTest;
+DEATH_TEST_REGEX_F(DurableCatalogTestDeathTest,
                    CannotOmitPathLevelMultikeyInfoWithBtreeIndex,
                    R"#(Invariant failure.*!multikeyPaths.empty\(\))#") {
     auto indexEntry = createIndex(BSON("a" << 1 << "b" << 1));
@@ -540,7 +541,7 @@ DEATH_TEST_REGEX_F(DurableCatalogTest,
         operationContext(), indexEntry->descriptor()->indexName(), MultikeyPaths{});
 }
 
-DEATH_TEST_REGEX_F(DurableCatalogTest,
+DEATH_TEST_REGEX_F(DurableCatalogTestDeathTest,
                    AtLeastOnePathComponentMustCauseIndexToBeMultikey,
                    R"#(Invariant failure.*somePathIsMultikey)#") {
     auto indexEntry = createIndex(BSON("a" << 1 << "b" << 1));
@@ -816,7 +817,7 @@ TEST_F(DurableCatalogTest, TwoPhaseIndexBuild) {
     ASSERT_FALSE(collection->getIndexBuildUUID(indexEntry->descriptor()->indexName()));
 }
 
-DEATH_TEST_REGEX_F(DurableCatalogTest,
+DEATH_TEST_REGEX_F(DurableCatalogTestDeathTest,
                    CannotSetIndividualPathComponentsOfTextIndexAsMultikey,
                    R"#(Invariant failure.*multikeyPaths.empty\(\))#") {
     std::string indexType = IndexNames::TEXT;
@@ -1250,6 +1251,36 @@ TEST_F(DurableCatalogTest, CreateCollectionWithCatalogIdentifierSucceedsAfterRol
     ASSERT_EQUALS(catalogId, parsedEntry.catalogId);
     ASSERT_EQUALS(nss, parsedEntry.nss);
     ASSERT_EQUALS(ident, parsedEntry.ident);
+}
+
+TEST_F(DurableCatalogTest, CreateTableToleratesExistingIdent) {
+    auto opCtx = operationContext();
+    auto storageEngine = opCtx->getServiceContext()->getStorageEngine();
+    auto engine = storageEngine->getEngine();
+    auto& provider = rss::ReplicatedStorageService::get(opCtx).getPersistenceProvider();
+    auto& ru = *shard_role_details::getRecoveryUnit(opCtx);
+    auto mdbCatalog = getMDBCatalog();
+
+    const NamespaceString nss =
+        NamespaceString::createNamespaceString_forTest("unittests.create_collection_reuses_ident");
+    const std::string ident = generateNewCollectionIdent(nss);
+    CollectionOptions collOptions;
+    collOptions.uuid = UUID::gen();
+    const auto recordStoreOptions = getRecordStoreOptions(nss, collOptions);
+
+    const auto catalogId = mdbCatalog->reserveCatalogId(opCtx);
+
+    ASSERT_OK(engine->createRecordStore(provider, ru, nss, ident, recordStoreOptions));
+    Lock::DBLock dbLk(opCtx, nss.dbName(), MODE_IX);
+    Lock::CollectionLock collLk(opCtx, nss, MODE_IX);
+    WriteUnitOfWork wuow(opCtx);
+    auto swRecordStore =
+        durable_catalog::createCollection(opCtx, catalogId, nss, ident, collOptions, mdbCatalog);
+    auto rs = unittest::assertGet(std::move(swRecordStore));
+    wuow.commit();
+
+    auto cursor = rs->getCursor(opCtx, ru);
+    ASSERT_FALSE(cursor->next());
 }
 
 TEST_F(DurableCatalogTest, RollingBackCreateIndexAddsIdentToReaper) {

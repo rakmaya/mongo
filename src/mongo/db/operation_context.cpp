@@ -33,11 +33,11 @@
 #include "mongo/base/error_extra_info.h"
 #include "mongo/base/string_data.h"
 #include "mongo/db/client.h"
-#include "mongo/db/local_catalog/lock_manager/locker.h"
 #include "mongo/db/operation_context_options_gen.h"
 #include "mongo/db/operation_key_manager.h"
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/lock_manager/locker.h"
 #include "mongo/db/storage/storage_engine.h"
 #include "mongo/logv2/log.h"
 #include "mongo/platform/compiler.h"
@@ -142,7 +142,7 @@ void OperationContext::setDeadlineAfterNowBy(Microseconds maxTime, ErrorCodes::E
     setDeadlineAndMaxTime(when, maxTime, timeoutError);
 }
 
-bool OperationContext::hasDeadlineExpired() const {
+bool OperationContext::_hasDeadlineExpired(Date_t now) const {
     if (!hasDeadline()) {
         return false;
     }
@@ -153,8 +153,16 @@ bool OperationContext::hasDeadlineExpired() const {
         return true;
     }
 
-    const auto now = fastClockSource().now();
     return now >= getDeadline();
+}
+
+bool OperationContext::hasDeadlineExpired() const {
+    if (!hasDeadline()) {
+        return false;
+    }
+
+    const auto now = fastClockSource().now();
+    return _hasDeadlineExpired(now);
 }
 
 ErrorCodes::Error OperationContext::getTimeoutError() const {
@@ -233,10 +241,7 @@ Status OperationContext::checkForInterruptNoAssert() noexcept {
     }
 
     if (hasDeadlineExpired()) {
-        if (!_hasArtificialDeadline) {
-            markKilled(_timeoutError);
-        }
-        return Status(_timeoutError, "operation exceeded time limit");
+        return _markKilledAndReturnDeadlineError();
     }
 
     if (_ignoreInterrupts) {
@@ -396,6 +401,21 @@ StatusWith<stdx::cv_status> OperationContext::waitForConditionOrInterruptNoAsser
         // contract.
         return ex.toStatus();
     }
+}
+
+Status OperationContext::_markKilledAndReturnDeadlineError() noexcept {
+    // TODO SERVER-115028: Unify with _markKilledIfDeadlineRequires
+    if (!_hasArtificialDeadline) {
+        markKilled(_timeoutError);
+    }
+    return Status(_timeoutError, "operation exceeded time limit");
+}
+
+Status OperationContext::checkForDeadlineExpiredNoAssert(Date_t now) noexcept {
+    if (_hasDeadlineExpired(now)) {
+        return _markKilledAndReturnDeadlineError();
+    }
+    return Status::OK();
 }
 
 void OperationContext::markKilled(ErrorCodes::Error killCode) {

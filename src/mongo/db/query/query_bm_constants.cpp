@@ -33,6 +33,55 @@
 
 namespace mongo {
 namespace query_benchmark_constants {
+
+// This is a snapshot of the client metadata generated from our IDHACK genny workload. The
+// specifics aren't so important, but it chosen in an attempt to be indicative of the size/shape
+// of this kind of thing "in the wild".
+const BSONObj kMockMetadataWrapper = fromjson(R"({metadata: {
+        "application" : {
+            "name" : "Genny"
+        },
+        "driver" : {
+            "name" : "mongoc / mongocxx",
+            "version" : "1.23.2 / 3.7.0"
+        },
+        "os" : {
+            "type" : "Linux",
+            "name" : "Ubuntu",
+            "version" : "22.04",
+            "architecture" : "aarch64"
+        },
+        "platform" : "cfg=0x03215e88e9 posix=200809 stdc=201710 CC=GCC 11.3.0 CFLAGS=\"-fPIC\" LDFLAGS=\"\""
+    }})");
+const BSONElement kMockClientMetadataElem =
+    query_benchmark_constants::kMockMetadataWrapper["metadata"];
+
+// Different levels of query complexity for the benchmarks.
+BSONObj queryComplexityToJSON(const QueryComplexity& complexity) {
+    switch (complexity) {
+        case QueryComplexity::kIDHack:
+            return query_benchmark_constants::kIDHackPredicate;
+        case QueryComplexity::kMildlyComplex:
+            return query_benchmark_constants::kMildlyComplexPredicate;
+        case QueryComplexity::kMkComplex:
+            return query_benchmark_constants::kComplexPredicate;
+        case QueryComplexity::kVeryComplex:
+            return query_benchmark_constants::kChangeStreamPredicate;
+        default:
+            MONGO_UNREACHABLE;
+    }
+}
+
+const BSONObj kIDHackPredicate = fromjson("{_id: 4}");
+
+const BSONObj kMildlyComplexPredicate = fromjson(R"({
+                clientId: {$nin: ["432345", "4386945", "111111"]},
+                nEmployees: {$gte: 4, $lt: 20},
+                deactivated: false,
+                region: "US",
+                yearlySpend: {$lte: 1000}
+            })");
+
 const BSONObj kComplexPredicate = fromjson(R"({
     "$and": [
         {"index": {"$gte": 0, "$lt": 10}},
@@ -249,5 +298,55 @@ const BSONObj kVeryComplexProjection = fromjson(R"({
                             "else": 0
                           } } } } ] } } } } } }
 )");
+
+// Update complexity constants for benchmarks.
+
+// A simple replacement update used in the benchmarks.
+const UpdateSpec kReplacementUpdate = {fromjson(R"({ name: "John", age: 30 })") /*u*/,
+                                       boost::none /*c*/};
+
+// An equivalent pipeline-style update, so we are benchmarking the overhead of the update style.
+const UpdateSpec kPipelineUpdateSimple = {
+    fromjson(R"([{ $set: { name: "John", age: 30 } }])") /*u*/, boost::none /*c*/};
+
+// A pipeline update that uses constants.
+const UpdateSpec kPipelineUpdateWithConstants = {
+    fromjson(R"([{ $set: { name: "$$constName", age: "$$constAge" } }])") /*u*/,
+    fromjson(R"({ constName: "John", constAge: 30 })") /*c*/};
+
+// A more complex pipeline update with multiple stages.
+const UpdateSpec kPipelineUpdateWithMultipleStages = {fromjson(R"([
+    { "$addFields": { "dessert": "Pumpkin Pie", "servings": 12 } },
+    { "$project": { "dessert": 1, "_id": 1 } }, 
+    { "$replaceRoot": { "newRoot": { "originalDoc": "$$ROOT", "napped": true } } }
+])") /*u*/,
+                                                      boost::none /*c*/};
+
+// The same pipeline structure, but using expressions instead of constants to test expression
+// shapification overhead.
+const UpdateSpec kPipelineUpdateWithMultipleStagesAndExpressions = {fromjson(R"([
+    { "$addFields": { 
+        "dessert": { "$concat": ["Pumpkin", " ", "Pie"] }, 
+        "servings": { "$multiply": [3, 4] } 
+    } },
+    { "$project": { "dessert": 1, "_id": 1 } }, 
+    { "$replaceRoot": { "newRoot": { "originalDoc": "$$ROOT", "napped": { "$eq": [1, 1] } } } }
+])") /*u*/,
+                                                                    boost::none /*c*/};
+
+UpdateSpec getUpdateSpec(const PipelineComplexity& complexity) {
+    switch (complexity) {
+        case PipelineComplexity::kSimple:
+            return kPipelineUpdateSimple;
+        case PipelineComplexity::kWithConstants:
+            return kPipelineUpdateWithConstants;
+        case PipelineComplexity::kWithMultipleStages:
+            return kPipelineUpdateWithMultipleStages;
+        case PipelineComplexity::kWithMultipleStagesAndExpressions:
+            return kPipelineUpdateWithMultipleStagesAndExpressions;
+        default:
+            MONGO_UNREACHABLE_TASSERT(11400601);
+    }
+}
 }  // namespace query_benchmark_constants
 }  // namespace mongo

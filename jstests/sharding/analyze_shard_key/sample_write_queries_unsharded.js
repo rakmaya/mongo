@@ -53,44 +53,68 @@ const shardNames = [st.rs0.name];
         ]),
     );
 
+    const collation = QuerySamplingUtil.generateRandomCollation();
+    const letField = {var1: {$literal: 1}};
+    // When UWE is enabled, shards receive bulkWrite commands instead, so the test expectation changes accordingly.
     const cmdName = "update";
-    const updateOp0 = {
+    const singleUpdateOp0 = {
         q: {x: 1},
         u: {$mul: {y: 10}, $set: {"z.$[element]": 10}},
         arrayFilters: [{"element": {$gte: 1}}],
         multi: false,
         upsert: false,
-        collation: QuerySamplingUtil.generateRandomCollation(),
+        collation,
     };
+    const bulkUpdateOp0 = {
+        update: 0,
+        filter: {x: 1},
+        updateMods: {$mul: {y: 10}, $set: {"z.$[element]": 10}},
+        arrayFilters: [{"element": {$gte: 1}}],
+        multi: false,
+        upsert: false,
+        collation,
+    };
+    const updateOp0Filter = {"cmd.updates.0.q": singleUpdateOp0.q};
+    const cmdObj0 = {update: collName, updates: [singleUpdateOp0], let: letField};
     const diff0 = {y: "u", z: "u"};
-    const updateOp1 = {
+
+    const singleUpdateOp1 = {
         q: {x: 2},
         u: [{$set: {y: 20, w: 200}}],
         c: {var0: 1},
         multi: true,
     };
+    const bulkUpdateOp1 = {
+        update: 0,
+        filter: {x: 2},
+        updateMods: [{$set: {y: 20, w: 200}}],
+        constants: {var0: 1},
+        multi: true,
+    };
+    const updateOp1Filter = {"cmd.updates.0.q": singleUpdateOp1.q};
+    const cmdObj1 = {update: collName, updates: [singleUpdateOp1], let: letField};
     const diff1 = {y: "u", w: "i"};
+
     const originalCmdObj = {
         update: collName,
-        updates: [updateOp0, updateOp1],
+        updates: [singleUpdateOp0, singleUpdateOp1],
         let: {var1: 1},
     };
-
     assert.commandWorked(mongosDB.runCommand(originalCmdObj));
     assert.neq(mongosColl.findOne({x: 1, y: 10, z: [10, 0, 10]}), null);
     assert.neq(mongosColl.findOne({x: 2, y: 20, z: [2], w: 200}), null);
 
     expectedSampledQueryDocs.push({
-        filter: {"cmd.updates.0.q": updateOp0.q},
+        filter: updateOp0Filter,
         cmdName: cmdName,
-        cmdObj: Object.assign({}, originalCmdObj, {updates: [updateOp0], let: {var1: {$literal: 1}}}),
+        cmdObj: cmdObj0,
         diff: diff0,
         shardNames,
     });
     expectedSampledQueryDocs.push({
-        filter: {"cmd.updates.0.q": updateOp1.q},
+        filter: updateOp1Filter,
         cmdName: cmdName,
-        cmdObj: Object.assign({}, originalCmdObj, {updates: [updateOp1], let: {var1: {$literal: 1}}}),
+        cmdObj: cmdObj1,
         diff: diff1,
         shardNames,
     });
@@ -105,32 +129,45 @@ const shardNames = [st.rs0.name];
     // Perform some deletes.
     assert.commandWorked(mongosColl.insert([{x: 3}, {x: 4}]));
 
+    const collation = QuerySamplingUtil.generateRandomCollation();
+    // When UWE is enabled, shards receive bulkWrite commands instead, so the test expectation changes accordingly.
     const cmdName = "delete";
-    const deleteOp0 = {
+    const singleDeleteOp0 = {
         q: {x: 3},
         limit: 1,
-        collation: QuerySamplingUtil.generateRandomCollation(),
+        collation,
     };
-    const deleteOp1 = {q: {x: 4}, limit: 0};
+    const bulkDeleteOp0 = {
+        filter: {x: 3},
+        multi: false,
+        collation,
+    };
+    const deleteOp0Filter = {"cmd.deletes.0.q": singleDeleteOp0.q};
+    const cmdObj0 = {delete: collName, deletes: [singleDeleteOp0]};
+
+    const singleDeleteOp1 = {q: {x: 4}, limit: 0};
+    const bulkDeleteOp1 = {filter: {x: 4}, multi: true};
+    const deleteOp1Filter = {"cmd.deletes.0.q": singleDeleteOp1.q};
+    const cmdObj1 = {delete: collName, deletes: [singleDeleteOp1]};
+
     const originalCmdObj = {
         delete: collName,
-        deletes: [deleteOp0, deleteOp1],
+        deletes: [singleDeleteOp0, singleDeleteOp1],
     };
-
     assert.commandWorked(mongosDB.runCommand(originalCmdObj));
     assert.eq(mongosColl.findOne({x: 3}), null);
     assert.eq(mongosColl.findOne({x: 4}), null);
 
     expectedSampledQueryDocs.push({
-        filter: {"cmd.deletes.0.q": deleteOp0.q},
+        filter: deleteOp0Filter,
         cmdName: cmdName,
-        cmdObj: Object.assign({}, originalCmdObj, {deletes: [deleteOp0]}),
+        cmdObj: cmdObj0,
         shardNames,
     });
     expectedSampledQueryDocs.push({
-        filter: {"cmd.deletes.0.q": deleteOp1.q},
+        filter: deleteOp1Filter,
         cmdName: cmdName,
-        cmdObj: Object.assign({}, originalCmdObj, {deletes: [deleteOp1]}),
+        cmdObj: cmdObj1,
         shardNames,
     });
 

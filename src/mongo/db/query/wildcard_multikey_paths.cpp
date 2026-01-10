@@ -45,9 +45,6 @@
 #include "mongo/db/index/multikey_metadata_access_stats.h"
 #include "mongo/db/index/wildcard_access_method.h"
 #include "mongo/db/index_names.h"
-#include "mongo/db/local_catalog/index_catalog_entry.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
-#include "mongo/db/local_catalog/lock_manager/exception_util.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/compiler/optimizer/index_bounds_builder/index_bounds_builder.h"
@@ -56,6 +53,9 @@
 #include "mongo/db/query/wildcard_multikey_paths.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/record_id_helpers.h"
+#include "mongo/db/shard_role/lock_manager/exception_util.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog_entry.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
 #include "mongo/db/storage/index_entry_comparison.h"
 #include "mongo/db/storage/key_format.h"
 #include "mongo/db/storage/sorted_data_interface.h"
@@ -169,6 +169,12 @@ static std::set<FieldRef> getWildcardMultikeyPathSetHelper(OperationContext* opC
                                                            const IndexCatalogEntry* index,
                                                            const IndexBounds& indexBounds,
                                                            MultikeyMetadataAccessStats* stats) {
+#ifdef MONGO_CONFIG_DEBUG_BUILD
+    // TODO SERVER-94613: This writeConflictRetry loop shouldn't exist as the operation is
+    // exclusively performing a read. Temporarily disable the consistent collection checker
+    // until this gets resolved.
+    DisableCollectionConsistencyChecks disableChecks{opCtx};
+#endif
     const WildcardAccessMethod* wam =
         static_cast<const WildcardAccessMethod*>(index->accessMethod());
     return writeConflictRetry(
@@ -241,7 +247,9 @@ std::vector<Interval> getMultikeyPathIndexIntervalsForField(FieldRef field) {
 
     if (hasNumericPathComponent) {
         pointIntervalPrefixParts = *numericPathComponents.begin();
-        invariant(pointIntervalPrefixParts > 0);
+        tassert(11321104,
+                "pointIntervalPrefixParts must be greater than 0",
+                pointIntervalPrefixParts > 0);
     }
 
     constexpr bool inclusive = true;
@@ -390,6 +398,10 @@ static std::pair<BSONObj, BSONObj> buildMetadataKeyRange(const BSONObj& keyPatte
 std::set<FieldRef> getWildcardMultikeyPathSet(OperationContext* opCtx,
                                               const IndexCatalogEntry* index,
                                               MultikeyMetadataAccessStats* stats) {
+#ifdef MONGO_CONFIG_DEBUG_BUILD
+    // TODO SERVER-94613: Remove this once there is no more writeConflictRetry loop here.
+    DisableCollectionConsistencyChecks disableChecks{opCtx};
+#endif
     return writeConflictRetry(
         opCtx, "wildcard multikey path retrieval", NamespaceString::kEmpty, [&]() {
             tassert(7354611, "stats must be non-null", stats);

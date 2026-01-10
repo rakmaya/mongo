@@ -31,7 +31,7 @@
 #include "mongo/db/exec/sbe/stages/sort.h"
 #include "mongo/db/exec/sbe/values/row.h"
 #include "mongo/db/sorter/sorter.h"
-#include "mongo/db/sorter/sorter_template_defs.h"
+#include "mongo/db/sorter/sorter_template_defs.h"  // IWYU pragma: keep
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
 
@@ -203,15 +203,15 @@ public:
     }
 
 private:
-    using SorterIterator = SortIteratorInterface<KeyRow, ValueRow>;
+    using SorterIterator = sorter::Iterator<KeyRow, ValueRow>;
     using SorterData = std::pair<KeyRow, ValueRow>;
 
     int64_t _runLimitCode() {
-        auto [owned, tag, val] = vm::ByteCode{}.run(_limitCode.get());
-        value::ValueGuard guard{owned, tag, val};
-        tassert(
-            8349205, "Limit code returned unexpected value", tag == value::TypeTags::NumberInt64);
-        return value::bitcastTo<size_t>(val);
+        value::TagValueMaybeOwned res = vm::ByteCode{}.run(_limitCode.get());
+        tassert(8349205,
+                "Limit code returned unexpected value",
+                res.tag() == value::TypeTags::NumberInt64);
+        return value::bitcastTo<size_t>(res.value());
     }
 
     SortOptions _makeSortOptions() {
@@ -226,15 +226,14 @@ private:
             if (!_sorterFileStats) {
                 _sorterFileStats = std::make_unique<SorterFileStats>(nullptr);
             }
-            opts.FileStats(_sorterFileStats.get());
         }
         return opts;
     }
 
     void _makeSorter() {
         auto opts = _makeSortOptions();
-
-        auto comp = [this](const KeyRow& lhs, const KeyRow& rhs) {
+        std::function<int(const KeyRow&, const KeyRow&)> comparator =
+            [this](const KeyRow& lhs, const KeyRow& rhs) -> int {
             auto size = lhs.size();
             for (size_t idx = 0; idx < size; ++idx) {
                 auto [lhsTag, lhsVal] = lhs.getViewOfValue(idx);
@@ -243,14 +242,20 @@ private:
                 uassert(7086700, "Invalid comparison result", tag == value::TypeTags::NumberInt32);
                 auto result = value::bitcastTo<int32_t>(val);
                 if (result) {
-                    return _stage._dirs[idx] == value::SortDirection::Descending ? -result : result;
+                    return this->_stage._dirs[idx] == value::SortDirection::Descending ? -result
+                                                                                       : result;
                 }
             }
-
             return 0;
         };
 
-        _sorter = Sorter<KeyRow, ValueRow>::make(opts, comp, {});
+        _sorter = Sorter<KeyRow, ValueRow>::make(
+            opts,
+            comparator,
+            (opts.tempDir) ? std::make_shared<FileBasedSorterSpiller<KeyRow, ValueRow>>(
+                                 *opts.tempDir, _sorterFileStats.get())
+                           : nullptr,
+            {});
         _outputIt.reset();
     }
 

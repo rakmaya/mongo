@@ -30,7 +30,7 @@
 
 #include "mongo/db/exec/classic/record_store_fast_count.h"
 
-#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
 #include "mongo/util/assert_util.h"
 
 namespace mongo {
@@ -42,8 +42,8 @@ RecordStoreFastCountStage::RecordStoreFastCountStage(ExpressionContext* expCtx,
                                                      long long skip,
                                                      long long limit)
     : RequiresCollectionStage(kStageType, expCtx, collection), _skip(skip), _limit(limit) {
-    invariant(_skip >= 0);
-    invariant(_limit >= 0);
+    tassert(11051634, "Expecting skip parameter to be non-negative", _skip >= 0);
+    tassert(11051633, "Expecting limit parameter to be non-negative", _limit >= 0);
 }
 
 std::unique_ptr<PlanStageStats> RecordStoreFastCountStage::getStats() {

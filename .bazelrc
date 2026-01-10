@@ -55,7 +55,7 @@ common --nolegacy_external_runfiles
 common --remote_download_outputs=all
 
 # Files we always want to download for debugging and error checking
-common --remote_download_regex=.*\.(dwo|h|cpp|test.xml)$
+common --remote_download_regex=.*\.(dwo|h|cpp|test.xml|clang-tidy|clang-tidy\.strict)$
 
 # Disable caching of test results by default since many of our tests are non-deterministic.
 common --cache_test_results=no
@@ -90,11 +90,20 @@ common:macos --repo_env=LLVM_VERSION=19
 
 # Pin down the Microsoft Visual compiler. If you would like to use
 # the default compiler version installed in this host, comment the line.
+common:windows --repo_env=BAZEL_VS="C:/Program Files/Microsoft Visual Studio/2022/Professional"
+common:windows --repo_env=BAZEL_VC="C:/Program Files/Microsoft Visual Studio/2022/Professional/VC"
 common:windows --repo_env=BAZEL_VC_FULL_VERSION=14.31.31103
 
 # Default the Visual C Redistribution to v14.3 for Windows installer.
 common:windows --repo_env=MONGO_VC_REDIST_FULL_VERSION=v143
 
+# host_features will build tools that are meant to run in the build
+# we don't care about running sanitizer checks on tools that run in the build
+common:linux --host_features=-any_sanitizer
+common:linux --host_features=-asan
+common:linux --host_features=-fsan
+common:linux --host_features=-ubsan
+common:linux --host_features=-tsan
 
 # while in hybrid build state, using local unsandboxed linking should be faster. When most of our link
 # targets have been converted (i.e. unittest binaries) and we can BWOB, remote linking should be faster
@@ -102,13 +111,13 @@ common:windows --repo_env=MONGO_VC_REDIST_FULL_VERSION=v143
 common --strategy=CppLink=local
 common --strategy=CppArchive=local
 common --strategy=SolibSymlink=local
-common --strategy=StripDebuginfo=local
-common --strategy=ExtractDebuginfo=local
+common --strategy=StripDebugInfo=local
+common --strategy=ExtractDebugInfo=local
 common --strategy=TestRunner=local
 common --strategy=CoverageReport=local
 common --strategy=CcGenerateIntermediateDwp=local
 common --strategy=CcGenerateDwp=local
-common --modify_execution_info=^(TestRunner|CppLink|CppArchive|SolibSymlink|ExtractDebuginfo|StripDebuginfo|CcGenerateIntermediateDwp|CcGenerateDwp)$=+no-remote-cache
+common --modify_execution_info=^(TestRunner|CppLink|CppArchive|SolibSymlink|ExtractDebugInfo|StripDebugInfo|CcGenerateIntermediateDwp|CcGenerateDwp)$=+no-remote-cache
 
 # Global clang tidy flags to avoid invalidating analysis cache between clang-tidy / regular runs
 common --@bazel_clang_tidy//:clang_tidy_excludes=".pb.cc,icu_init.cpp"
@@ -141,7 +150,6 @@ common --flag_alias=use_wiredtiger=//bazel/config:use_wiredtiger
 common --flag_alias=use_glibcxx_debug=//bazel/config:use_glibcxx_debug
 common --flag_alias=use_tracing_profiler=//bazel/config:use_tracing_profiler
 common --flag_alias=build_otel=//bazel/config:build_otel
-common --flag_alias=detect_odr_violations=//bazel/config:detect_odr_violations
 common --flag_alias=shared_archive=//bazel/config:shared_archive
 common --flag_alias=skip_archive=//bazel/config:skip_archive
 common --flag_alias=streams_release_build=//bazel/config:streams_release_build
@@ -185,6 +193,7 @@ common --flag_alias=build_atlas=//bazel/config:build_atlas
 common --flag_alias=dtlto=//bazel/config:dtlto
 common --flag_alias=all_headers=//bazel/config:all_headers
 common --flag_alias=evg=//bazel/config:evg
+common --flag_alias=extensions_signature_verification_secure=//bazel/config:extensions_signature_verification_secure
 
 #############################################################################################################################
 # BUILD 'PROFILES' - this is the area to set up configurations of flags to be used by developers.
@@ -354,6 +363,8 @@ common:opt_profiled --enable_platform_specific_config=true
 common:evg --config=opt
 common:evg --fission=no
 common:evg --evg=True
+# TODO(SERVER-114370): Remove once atlas module is enabled in CI by default
+common:evg --//bazel/config:build_atlas=False
 common:evg --//bazel/config:opt=auto
 common:evg --//bazel/config:separate_debug=True
 common:evg --enable_platform_specific_config=true
@@ -417,12 +428,12 @@ common:remote_test --strategy=TestRunner=remote
 common:remote_test --features=-thin_archive
 common:remote_test --remote_download_outputs=minimal
 common:remote_test --test_output=summary
-common:remote_test --modify_execution_info=^(CppLink|CppArchive|SolibSymlink|ExtractDebuginfo|StripDebuginfo|CcGenerateIntermediateDwp|CcGenerateDwp)$=-no-remote-cache
-common:remote_test --remote_download_regex=.*(TestLogs.*|report.*\.json$|\.core$|data_archives.*\.tgz$) # Resmoke TestLogs directory, report, core dumps, and data directory archives.
-test:remote_test --test_timeout=660 # Allow extra 60s for coredump on abort
+common:remote_test --modify_execution_info=^(CppLink|CppArchive|SolibSymlink|ExtractDebugInfo|StripDebugInfo|CcGenerateIntermediateDwp|CcGenerateDwp)$=-no-remote-cache
 test:remote_test --test_tag_filters=-incompatible_with_bazel_remote_test
+test:remote_test --zip_undeclared_test_outputs
 
 # Coverage
+coverage --//bazel/config:coverage=True
 coverage --config=dbg
 coverage --compiler_type=clang
 coverage --linkstatic=False
@@ -459,6 +470,7 @@ common:macos --//bazel/config:compress_debug_compile=False
 
 # Dynamic linking on Windows (DLL generation) is currently not supported.
 common:windows --//bazel/config:linkstatic=True
+common:windows --//bazel/config:skip_archive=False
 
 # The only Windows compiler we support is MSVC.
 common:windows --//bazel/config:compiler_type=msvc
@@ -486,6 +498,10 @@ common:linux --remote_executor=grpcs://sodalite.cluster.engflow.com
 common:windows --remote_executor=
 common:macos --remote_executor=
 
+# Disable atlas module by default on Windows and MacOS since Atlas is only deployed on Linux
+common:windows --//bazel/config:build_atlas=False
+common:macos --//bazel/config:build_atlas=False
+
 # Enable remote cache (also necessary for remote build execution):
 common --experimental_remote_downloader=grpcs://sodalite.cluster.engflow.com
 common --remote_cache=grpcs://sodalite.cluster.engflow.com
@@ -499,10 +515,8 @@ common --remote_upload_local_results=False
 
 # Settings specific for clang-tidy
 --config=clang-tidy
-common:clang-tidy --config=dbg
-common:clang-tidy --build_atlas
 common:clang-tidy --remote_download_outputs=all
-common:clang-tidy --build_tag_filters=-third_party,-mongo-tidy-tests,-third_party_debug,-mongo-tidy-tests_debug
+common:clang-tidy --build_tag_filters=not_third_party,-mongo-tidy-tests,-mongo-tidy-tests_debug
 common:clang-tidy --//bazel/config:compiler_type=clang
 common:clang-tidy --keep_going
 common:clang-tidy --aspects @bazel_clang_tidy//clang_tidy:clang_tidy.bzl%clang_tidy_aspect
@@ -511,13 +525,18 @@ common:clang-tidy --jobs=300
 
 --config=mod-scanner
 common:mod-scanner --config=dbg
-common:mod-scanner --build_atlas
-common:mod-scanner --build_tag_filters=-third_party,-mongo-tidy-tests,-third_party_debug,-mongo-tidy-tests_debug
+common:mod-scanner --build_tag_filters=not_third_party,-mongo-tidy-tests,-mongo-tidy-tests_debug
 common:mod-scanner --//bazel/config:compiler_type=clang
 common:mod-scanner --//bazel/config:mongo_toolchain_version=v5
 common:mod-scanner --output_groups=report
 common:mod-scanner --aspects //modules_poc:mod_scanner.bzl%mod_scanner_aspect
 common:mod-scanner --remote_download_regex=.*\.mod_scanner_decls.json$
+
+--config=symbol-checker
+common:symbol-checker --aspects //bazel/symbol_checker:symbol_checker.bzl%symbol_checker_aspect
+common:symbol-checker --output_groups=symbol_checker
+common:symbol-checker --skip_archive=False
+common:symbol-checker --keep_going
 
 # if you don't have access to the remote execution cluster above, use the local config
 # by passing "--config=local" on the bazel command line
@@ -552,6 +571,8 @@ common:public-release --remote_cache_compression=false
 common:public-release --grpc_keepalive_time=0s
 common:public-release --legacy_important_outputs
 common:public-release --//bazel/config:release=True
+common:public-release --//bazel/config:extensions_signature_verification_secure=True
+common:public-release --stamp
 
 --config=fission
 common:fission --fission=yes
@@ -572,6 +593,10 @@ common --experimental_repository_downloader_retries=3
 # Place golden test output files where buildscripts/golden_tests.py can find them
 common --test_env=GOLDEN_TEST_CONFIG_PATH
 
+# Upload build events to EngFlow
+common --experimental_build_event_upload_strategy=remote
+
+
 # TODO(WT-12780): delete this once wiredtiger switches to /.bazelrc.evergreen.
 try-import %workspace%/.bazelrc.evergreen_engflow_creds
 
@@ -581,8 +606,8 @@ try-import %workspace%/.bazelrc.evergreen
 # local default dev settings
 try-import %workspace%/.bazelrc.common_bes
 
-# local default dev settings
-try-import %workspace%/.bazelrc.mongo_variables
+# Settings unconditionally written by the wrapper hook
+try-import %workspace%/.bazelrc.wrapper_hook
 
 # local git version info
 try-import %workspace%/.bazelrc.git
@@ -595,3 +620,9 @@ try-import %workspace%/.bazelrc.bazelisk
 
 # Flags synced from Flag Sync
 try-import %workspace%/.bazelrc.sync
+
+# Engflow auth credentials
+try-import %workspace%/.bazelrc.engflow_creds
+
+# Repository root absolute path to set --execution_log_compact_file
+#try-import %workspace%/.bazelrc.exec_log_file

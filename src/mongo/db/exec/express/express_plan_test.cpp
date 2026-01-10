@@ -32,16 +32,9 @@
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/json.h"
-#include "mongo/db/collection_crud/collection_write_path.h"
 #include "mongo/db/curop.h"
+#include "mongo/db/dbhelpers.h"
 #include "mongo/db/index/index_constants.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/catalog_test_fixture.h"
-#include "mongo/db/local_catalog/clustered_collection_options_gen.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_options.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
@@ -49,6 +42,13 @@
 #include "mongo/db/query/compiler/logical_model/projection/projection_parser.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/repl/oplog.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_test_fixture.h"
+#include "mongo/db/shard_role/shard_catalog/clustered_collection_options_gen.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_options.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
 #include "mongo/db/storage/snapshot.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/unittest/unittest.h"
@@ -88,13 +88,10 @@ public:
             wuow.commit();
         }
 
-        OpDebug* const nullOpDebug = nullptr;
-        for (const auto& document : documentList) {
+        {
             WriteUnitOfWork wuow(operationContext());
-            ASSERT_OK(collection_internal::insertDocument(operationContext(),
-                                                          collection.getCollectionPtr(),
-                                                          InsertStatement(document),
-                                                          nullOpDebug));
+            ASSERT_OK(
+                Helpers::insert(operationContext(), collection.getCollectionPtr(), documentList));
             wuow.commit();
         }
 
@@ -138,12 +135,15 @@ public:
 static std::pair<PlanProgress, BSONObj> iterateAndExpectDocument(
     OperationContext* opCtx, auto& iterator, PlanProgress continuationReturnValue = Ready()) {
     boost::optional<BSONObj> producedObj;
-    auto result = iterator.consumeOne(
-        opCtx, [&](const CollectionAcquisition, RecordId, Snapshotted<BSONObj> obj) {
-            ASSERT(!bool(producedObj));
-            producedObj.emplace(std::move(obj.value()));
-            return std::move(continuationReturnValue);
-        });
+    auto result = iterator.consumeOne(opCtx,
+                                      [&](const CollectionAcquisition,
+                                          RecordId,
+                                          Snapshotted<BSONObj> obj,
+                                          const SeekableRecordCursor*) {
+                                          ASSERT(!bool(producedObj));
+                                          producedObj.emplace(std::move(obj.value()));
+                                          return std::move(continuationReturnValue);
+                                      });
     ASSERT(bool(producedObj));
     return {std::move(result), std::move(*producedObj)};
 }
@@ -152,9 +152,9 @@ static std::pair<PlanProgress, BSONObj> iterateAndExpectDocument(
 // not produce an output document).
 static PlanProgress iterateButExpectNoDocument(OperationContext* opCtx, auto& iterator) {
     return iterator.consumeOne(
-        opCtx, [](const CollectionAcquisition, RecordId, Snapshotted<BSONObj>) -> PlanProgress {
-            MONGO_UNREACHABLE;
-        });
+        opCtx,
+        [](const CollectionAcquisition, RecordId, Snapshotted<BSONObj>, const SeekableRecordCursor*)
+            -> PlanProgress { MONGO_UNREACHABLE; });
 }
 
 TEST_F(ExpressPlanTest, TestIdLookupViaIndexWithMatchingQuery) {
@@ -258,18 +258,14 @@ TEST_F(ExpressPlanTest, TestLookupViaUserIndexWithMatchingQuery) {
         indexSpec, "{_id: 0, a: 2}"_sd, "{_id: 1, a: 3}"_sd, "{_id: 2, a: 5}"_sd);
     const CollectionPtr& collectionPtr = collection.getCollectionPtr();
 
-    auto indexDescriptor =
+    auto indexEntry =
         collectionPtr->getIndexCatalog()->findIndexByName(operationContext(), indexName);
 
     IteratorStats iteratorStats;
     auto filter = fromjson("{a: 5}");
     CollatorInterface* collator = nullptr;
     LookupViaUserIndex<FetchFromCollectionCallback> iterator(
-        filter.firstElement(),
-        indexDescriptor->getEntry()->getIdent(),
-        std::string{indexName},
-        collator,
-        nullptr);
+        filter.firstElement(), indexEntry->getIdent(), std::string{indexName}, collator, nullptr);
     iterator.open(operationContext(), collection, &iteratorStats);
 
     // The first call to 'consumeOne()' should provide a document and return 'Exhausted' to indicate
@@ -299,18 +295,14 @@ TEST_F(ExpressPlanTest, TestLookupViaUserIndexWithMatchingQueryUsingCollator) {
         indexSpec, "{_id: 0, a: 'II'}"_sd, "{_id: 1, a: 'III'}"_sd, "{_id: 2, a: 'V'}"_sd);
     const CollectionPtr& collectionPtr = collection.getCollectionPtr();
 
-    auto indexDescriptor =
+    auto indexEntry =
         collectionPtr->getIndexCatalog()->findIndexByName(operationContext(), indexName);
-    auto collator = indexDescriptor->getEntry()->getCollator();
+    auto collator = indexEntry->getCollator();
 
     IteratorStats iteratorStats;
     auto filter = fromjson("{a: 'iii'}");
     LookupViaUserIndex<FetchFromCollectionCallback> iterator(
-        filter.firstElement(),
-        indexDescriptor->getEntry()->getIdent(),
-        std::string{indexName},
-        collator,
-        nullptr);
+        filter.firstElement(), indexEntry->getIdent(), std::string{indexName}, collator, nullptr);
     iterator.open(operationContext(), collection, &iteratorStats);
 
     // The first call to 'consumeOne()' should provide a document and return 'Exhausted' to indicate
@@ -337,18 +329,14 @@ TEST_F(ExpressPlanTest, TestLookupViaUserIndexWWithNonMatchingQuery) {
         indexSpec, "{_id: 0, a: 2}"_sd, "{_id: 1, a: 3}"_sd, "{_id: 2, a: 5}"_sd);
     const CollectionPtr& collectionPtr = collection.getCollectionPtr();
 
-    auto indexDescriptor =
+    auto indexEntry =
         collectionPtr->getIndexCatalog()->findIndexByName(operationContext(), indexName);
 
     IteratorStats iteratorStats;
     auto filter = fromjson("{a: 7}");
     CollatorInterface* collator = nullptr;
     LookupViaUserIndex<FetchFromCollectionCallback> iterator(
-        filter.firstElement(),
-        indexDescriptor->getEntry()->getIdent(),
-        std::string{indexName},
-        collator,
-        nullptr);
+        filter.firstElement(), indexEntry->getIdent(), std::string{indexName}, collator, nullptr);
     iterator.open(operationContext(), collection, &iteratorStats);
 
     // Any number of repeated calls to 'consumeOne()' should return an 'Exhausted' result without
@@ -381,7 +369,7 @@ TEST_F(ExpressPlanTest, TestLookupViaUserIndexWithCoveredProjection) {
                                                                "{_id: 2, a: 8, b: 9, c: 10}"_sd);
     const CollectionPtr& collectionPtr = collection.getCollectionPtr();
 
-    auto indexDescriptor =
+    auto indexEntry =
         collectionPtr->getIndexCatalog()->findIndexByName(operationContext(), indexName);
 
     IteratorStats iteratorStats;
@@ -391,7 +379,7 @@ TEST_F(ExpressPlanTest, TestLookupViaUserIndexWithCoveredProjection) {
     auto projection = parseProjection(operationContext(), fromjson("{_id: 0, a: 1, c: 1}"));
 
     LookupViaUserIndex<CreateDocumentFromIndexKey> iterator(filter.firstElement(),
-                                                            indexDescriptor->getEntry()->getIdent(),
+                                                            indexEntry->getIdent(),
                                                             std::string{indexName},
                                                             collator,
                                                             &projection);

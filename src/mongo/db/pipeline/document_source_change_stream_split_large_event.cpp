@@ -48,10 +48,14 @@
 
 namespace mongo {
 
-REGISTER_DOCUMENT_SOURCE(changeStreamSplitLargeEvent,
-                         LiteParsedDocumentSourceDefault::parse,
-                         DocumentSourceChangeStreamSplitLargeEvent::createFromBson,
-                         AllowedWithApiStrict::kNeverInVersion1);
+REGISTER_LITE_PARSED_DOCUMENT_SOURCE(changeStreamSplitLargeEvent,
+                                     ChangeStreamSplitLargeEventLiteParsed::parse,
+                                     AllowedWithApiStrict::kNeverInVersion1);
+
+REGISTER_DOCUMENT_SOURCE_WITH_STAGE_PARAMS_DEFAULT(changeStreamSplitLargeEvent,
+                                                   DocumentSourceChangeStreamSplitLargeEvent,
+                                                   ChangeStreamSplitLargeEventStageParams);
+
 ALLOCATE_DOCUMENT_SOURCE_ID(changeStreamSplitLargeEvent,
                             DocumentSourceChangeStreamSplitLargeEvent::id)
 
@@ -120,7 +124,7 @@ DocumentSource::GetModPathsReturn DocumentSourceChangeStreamSplitLargeEvent::get
     return {GetModPathsReturn::Type::kAllPaths, {}, {}};
 }
 
-DocumentSourceContainer::iterator DocumentSourceChangeStreamSplitLargeEvent::doOptimizeAt(
+DocumentSourceContainer::iterator DocumentSourceChangeStreamSplitLargeEvent::optimizeAt(
     DocumentSourceContainer::iterator itr, DocumentSourceContainer* container) {
     // Helper to determine whether the iterator has reached its final position in the pipeline.
     // Checks whether $changeStreamSplitLargeEvent should move ahead of the given stage.

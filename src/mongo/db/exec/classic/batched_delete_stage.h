@@ -36,11 +36,12 @@
 #include "mongo/db/exec/classic/plan_stage.h"
 #include "mongo/db/exec/classic/working_set.h"
 #include "mongo/db/exec/plan_stats.h"
-#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/query/compiler/physical_model/query_solution/stage_types.h"
+#include "mongo/db/shard_role/shard_role.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/util/duration.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/timer.h"
 
 #include <cstddef>
@@ -49,7 +50,7 @@
 
 namespace mongo {
 
-struct BatchedDeleteStageParams {
+struct MONGO_MOD_PUBLIC BatchedDeleteStageParams {
     BatchedDeleteStageParams()
         : targetBatchDocs(gBatchedDeletesTargetBatchDocs.load()),
           targetBatchTimeMS(Milliseconds(gBatchedDeletesTargetBatchTimeMS.load())),

@@ -30,6 +30,7 @@
 #pragma once
 
 #include "mongo/s/change_streams/change_stream_db_absent_state_event_handler.h"
+#include "mongo/util/modules.h"
 
 #include <memory>
 
@@ -43,6 +44,8 @@ public:
      */
     std::unique_ptr<ChangeStreamShardTargeterStateEventHandler> buildDbPresentStateEventHandler()
         const override;
+
+    std::string toString() const override;
 };
 
 }  // namespace mongo

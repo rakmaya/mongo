@@ -37,10 +37,10 @@
 #include "mongo/db/global_catalog/ddl/sharding_ddl_coordinator_gen.h"
 #include "mongo/db/global_catalog/ddl/sharding_ddl_util.h"
 #include "mongo/db/global_catalog/sharding_catalog_client.h"
-#include "mongo/db/local_catalog/lock_manager/locker.h"
-#include "mongo/db/local_catalog/shard_role_catalog/operation_sharding_state.h"
 #include "mongo/db/query/write_ops/write_ops_gen.h"
 #include "mongo/db/repl/repl_client_info.h"
+#include "mongo/db/shard_role/lock_manager/locker.h"
+#include "mongo/db/shard_role/shard_catalog/operation_sharding_state.h"
 #include "mongo/db/sharding_environment/client/shard.h"
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/sharding_environment/shard_id.h"
@@ -127,13 +127,27 @@ ShardingDDLCoordinatorMetadata extractShardingDDLCoordinatorMetadata(const BSONO
         coorDoc, IDLParserContext("ShardingDDLCoordinatorMetadata"));
 }
 
+// Enables propagation of the versionContext (OFCV) to sub-operations of this ShardingDDLCoordinator
+// for network calls. For ShardingDDLCoordinators, this is safe since their metadata is persisted to
+// disk, which allows setFCV to drain them before it proceeding to the metadata cleanup phase.
+ForwardableOperationMetadata enableVersionContextPropagation(
+    ForwardableOperationMetadata forwardableOperationMetadata) {
+    // TODO SERVER-99655: update once gSnapshotFCVInDDLCoordinators is enabled on lastLTS
+    if (const auto& vCtx = forwardableOperationMetadata.getVersionContext()) {
+        forwardableOperationMetadata.setVersionContext(vCtx->withPropagationAcrossShards_UNSAFE());
+    }
+
+    return forwardableOperationMetadata;
+}
+
 ShardingDDLCoordinator::ShardingDDLCoordinator(ShardingDDLCoordinatorService* service,
                                                const BSONObj& coorDoc)
     : _service(service),
       _coordId(extractShardingDDLCoordinatorMetadata(coorDoc).getId()),
       _recoveredFromDisk(extractShardingDDLCoordinatorMetadata(coorDoc).getRecoveredFromDisk()),
       _forwardableOpMetadata(
-          extractShardingDDLCoordinatorMetadata(coorDoc).getForwardableOpMetadata()),
+          extractShardingDDLCoordinatorMetadata(coorDoc).getForwardableOpMetadata().map(
+              enableVersionContextPropagation)),
       _databaseVersion(extractShardingDDLCoordinatorMetadata(coorDoc).getDatabaseVersion()),
       _firstExecution(!_recoveredFromDisk),
       _externalState(_service->createExternalState()) {}
@@ -603,8 +617,8 @@ bool ShardingDDLCoordinator::_isRetriableErrorForDDLCoordinator(const Status& st
         status.isA<ErrorCategory::CancellationError>() ||
         status.isA<ErrorCategory::ExceededTimeLimitError>() ||
         status.isA<ErrorCategory::WriteConcernError>() ||
-        status == ErrorCodes::FailedToSatisfyReadPreference || status == ErrorCodes::Interrupted ||
-        status == ErrorCodes::LockBusy || status == ErrorCodes::CommandNotFound;
+        status == ErrorCodes::FailedToSatisfyReadPreference || status == ErrorCodes::LockBusy ||
+        status == ErrorCodes::CommandNotFound;
 }
 
 ShardingDDLCoordinatorExternalState* ShardingDDLCoordinator::_getExternalState() {

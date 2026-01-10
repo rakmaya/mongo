@@ -34,7 +34,6 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/json.h"
 #include "mongo/db/basic_types_gen.h"
-#include "mongo/db/local_catalog/collection_type.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
@@ -42,6 +41,7 @@
 #include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/pipeline/pipeline.h"
+#include "mongo/db/pipeline/pipeline_factory.h"
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/query/parsed_find_command.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
@@ -52,6 +52,7 @@
 #include "mongo/db/query/query_stats/key.h"
 #include "mongo/db/query/query_stats/query_stats.h"
 #include "mongo/db/service_context_test_fixture.h"
+#include "mongo/db/shard_role/shard_catalog/collection_type.h"
 #include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/platform/decimal128.h"
 #include "mongo/unittest/unittest.h"
@@ -296,7 +297,7 @@ TEST_F(QueryStatsStoreTest, GenerateMaxBsonSizeQueryShape) {
         }
     })());
     auto& opDebug = CurOp::get(*opCtx)->debug();
-    ASSERT_EQ(opDebug.queryStatsInfo.keyHash, boost::none);
+    ASSERT_EQ(opDebug.getQueryStatsInfo().keyHash, boost::none);
 }
 
 TEST_F(QueryStatsStoreTest, CorrectlyRedactsFindCommandRequestAllFields) {
@@ -935,7 +936,8 @@ TEST_F(QueryStatsStoreTest, CorrectlyTokenizesAggregateCommandRequestAllFieldsSi
     auto outStage = fromjson(R"({$out: 'outColl'})");
     auto rawPipeline = {matchStage, unwindStage, groupStage, limitStage, outStage};
     acr.setPipeline(rawPipeline);
-    auto pipeline = Pipeline::parse(rawPipeline, expCtx);
+    auto pipeline =
+        pipeline_factory::makePipeline(rawPipeline, expCtx, pipeline_factory::kOptionsMinimal);
 
     auto shapified = makeQueryStatsKeyAggregateRequest(
         acr, *pipeline, expCtx, LiteralSerializationPolicy::kToDebugTypeString, true);
@@ -1311,7 +1313,8 @@ TEST_F(QueryStatsStoreTest, CorrectlyTokenizesAggregateCommandRequestEmptyFields
     auto expCtx = make_intrusive<ExpressionContextForTest>(kDefaultTestNss.nss());
     AggregateCommandRequest acr(kDefaultTestNss.nss());
     acr.setPipeline({});
-    auto pipeline = Pipeline::parse({}, expCtx);
+    auto pipeline = pipeline_factory::makePipeline(
+        std::vector<BSONObj>{}, expCtx, pipeline_factory::kOptionsMinimal);
 
     auto shapified = makeQueryStatsKeyAggregateRequest(
         acr, *pipeline, expCtx, LiteralSerializationPolicy::kToDebugTypeString, true);
@@ -1364,7 +1367,8 @@ TEST_F(QueryStatsStoreTest,
     auto sortStage = fromjson("{$sort: {age: 1}}");
     auto rawPipeline = {unionWithStage, sortStage};
     acr.setPipeline(rawPipeline);
-    auto pipeline = Pipeline::parse(rawPipeline, expCtx);
+    auto pipeline =
+        pipeline_factory::makePipeline(rawPipeline, expCtx, pipeline_factory::kOptionsMinimal);
 
     auto shapified = makeQueryStatsKeyAggregateRequest(
         acr, *pipeline, expCtx, LiteralSerializationPolicy::kToDebugTypeString, true);
@@ -1531,12 +1535,14 @@ TEST_F(QueryStatsStoreTest, SumOfSquaresOverflowDoubleTest) {
 struct QueryStatsBSONParams {
     bool useSubsections = false;
     bool includeWriteMetrics = false;
+    bool includeCBRMetrics = false;
     long long lastExecutionMicros = 0LL;
     long long execCount = 0LL;
     BSONObj hasSortStage = boolMetricBson(0, 0);
     BSONObj usedDisk = boolMetricBson(0, 0);
     BSONObj nMatched = intMetricBson(0, std::numeric_limits<int64_t>::max(), 0, 0);
     BSONObj nModified = intMetricBson(0, std::numeric_limits<int64_t>::max(), 0, 0);
+    BSONObj planningTimeMicros = intMetricBson(0, std::numeric_limits<int64_t>::max(), 0, 0);
 };
 
 void verifyQueryStatsBSON(QueryStatsEntry& qse, const QueryStatsBSONParams& params = {}) {
@@ -1570,6 +1576,10 @@ void verifyQueryStatsBSON(QueryStatsEntry& qse, const QueryStatsBSONParams& para
         .append("delinquentAcquisitions", emptyIntMetric)
         .append("totalAcquisitionDelinquencyMillis", emptyIntMetric)
         .append("maxAcquisitionDelinquencyMillis", emptyIntMetric)
+        .append("totalTimeQueuedMicros", emptyIntMetric)
+        .append("totalAdmissions", emptyIntMetric)
+        .append("wasLoadShed", boolMetricBson(0, 0))
+        .append("wasDeprioritized", boolMetricBson(0, 0))
         .append("numInterruptChecksPerSec", emptyIntMetric)
         .append("overdueInterruptApproxMaxMillis", emptyIntMetric);
 
@@ -1583,6 +1593,10 @@ void verifyQueryStatsBSON(QueryStatsEntry& qse, const QueryStatsBSONParams& para
         .append("usedDisk", params.usedDisk)
         .append("fromMultiPlanner", boolMetricBson(0, 0))
         .append("fromPlanCache", boolMetricBson(0, 0));
+
+    if (params.includeCBRMetrics) {
+        subsectionBuilder->append("planningTimeMicros", params.planningTimeMicros);
+    }
 
     if (params.useSubsections) {
         testBuilder.append("queryPlanner", subsectionBuilder->obj());
@@ -1604,8 +1618,9 @@ void verifyQueryStatsBSON(QueryStatsEntry& qse, const QueryStatsBSONParams& para
     testBuilder.append("firstSeenTimestamp", qse.firstSeenTimestamp)
         .append("latestSeenTimestamp", Date_t());
 
-    ASSERT_BSONOBJ_EQ(qse.toBSON(params.useSubsections, params.includeWriteMetrics),
-                      testBuilder.obj());
+    ASSERT_BSONOBJ_EQ(
+        qse.toBSON(params.useSubsections, params.includeWriteMetrics, params.includeCBRMetrics),
+        testBuilder.obj());
 }
 
 TEST_F(QueryStatsStoreTest, BasicDiskUsage) {
@@ -1677,6 +1692,33 @@ TEST_F(QueryStatsStoreTest, BasicDiskUsage) {
                                      .usedDisk = boolMetricBson(1, 0),
                                      .nMatched = intMetricBson(1, 1, 1, 1),
                                      .nModified = intMetricBson(1, 1, 1, 1),
+                                 });
+        }
+
+        // Collect some metrics again but with CBR metrics.
+        {
+            auto metrics = collectMetricsBase(query1);
+            metrics->execCount += 1;
+            metrics->lastExecutionMicros += 100;
+            metrics->queryPlannerStats.planningTimeMicros.aggregate(500);
+        }
+
+        // With CBR metrics.
+        // TODO SERVER-115607 and SERVER-SERVER-115606 Add cases for nDocsSampled and CE method.
+        {
+            auto qse3 = getMetrics(query1);
+            verifyQueryStatsBSON(qse3,
+                                 {
+                                     .useSubsections = useSubsections,
+                                     .includeWriteMetrics = true,
+                                     .includeCBRMetrics = true,
+                                     .lastExecutionMicros = 247012LL,
+                                     .execCount = 3LL,
+                                     .hasSortStage = boolMetricBson(0, 1),
+                                     .usedDisk = boolMetricBson(1, 0),
+                                     .nMatched = intMetricBson(1, 1, 1, 1),
+                                     .nModified = intMetricBson(1, 1, 1, 1),
+                                     .planningTimeMicros = intMetricBson(500, 500, 500, 250000),
                                  });
         }
     }

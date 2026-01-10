@@ -31,19 +31,18 @@
 
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobj.h"
-#include "mongo/db/local_catalog/index_catalog.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
+#include "mongo/util/modules.h"
 
 #include <vector>
 
 #include <boost/optional/optional.hpp>
 
-/**
- * Namespace for helper functions converting index spec schema between time-series collection and
- * underlying buckets collection.
- */
+MONGO_MOD_PUBLIC;
+
 namespace mongo::timeseries {
 
 /**

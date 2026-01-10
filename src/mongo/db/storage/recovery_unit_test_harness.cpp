@@ -32,9 +32,9 @@
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/record_data.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/recovery_unit.h"
@@ -260,24 +260,26 @@ TEST_F(RecoveryUnitTestHarness, FlipReadOnly) {
     ASSERT_FALSE(ru->readOnly());
 }
 
-DEATH_TEST_F(RecoveryUnitTestHarness, RegisterChangeMustBeInUnitOfWork, "invariant") {
+using RecoveryUnitTestHarnessDeathTest = RecoveryUnitTestHarness;
+DEATH_TEST_F(RecoveryUnitTestHarnessDeathTest, RegisterChangeMustBeInUnitOfWork, "invariant") {
     int count = 0;
     ru->registerChange(std::make_unique<TestChange>(&count));
 }
 
-DEATH_TEST_F(RecoveryUnitTestHarness, CommitMustBeInUnitOfWork, "invariant") {
+DEATH_TEST_F(RecoveryUnitTestHarnessDeathTest, CommitMustBeInUnitOfWork, "invariant") {
     ru->commitUnitOfWork();
 }
 
-DEATH_TEST_F(RecoveryUnitTestHarness, AbortMustBeInUnitOfWork, "invariant") {
+DEATH_TEST_F(RecoveryUnitTestHarnessDeathTest, AbortMustBeInUnitOfWork, "invariant") {
     ru->abortUnitOfWork();
 }
 
-DEATH_TEST_F(RecoveryUnitTestHarness, CannotHaveUnfinishedUnitOfWorkOnExit, "invariant") {
+DEATH_TEST_F(RecoveryUnitTestHarnessDeathTest, CannotHaveUnfinishedUnitOfWorkOnExit, "invariant") {
     ru->beginUnitOfWork(opCtx->readOnly());
+    opCtx.reset();
 }
 
-DEATH_TEST_F(RecoveryUnitTestHarness, PrepareMustBeInUnitOfWork, "invariant") {
+DEATH_TEST_F(RecoveryUnitTestHarnessDeathTest, PrepareMustBeInUnitOfWork, "invariant") {
     try {
         ru->prepareUnitOfWork();
     } catch (const ExceptionFor<ErrorCodes::CommandNotSupported>&) {
@@ -286,7 +288,7 @@ DEATH_TEST_F(RecoveryUnitTestHarness, PrepareMustBeInUnitOfWork, "invariant") {
     }
 }
 
-DEATH_TEST_F(RecoveryUnitTestHarness, AbandonSnapshotMustBeOutOfUnitOfWork, "invariant") {
+DEATH_TEST_F(RecoveryUnitTestHarnessDeathTest, AbandonSnapshotMustBeOutOfUnitOfWork, "invariant") {
     ru->beginUnitOfWork(opCtx->readOnly());
     ru->abandonSnapshot();
 }

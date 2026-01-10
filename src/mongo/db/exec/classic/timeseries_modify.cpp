@@ -41,9 +41,6 @@
 #include "mongo/db/global_catalog/shard_key_pattern.h"
 #include "mongo/db/global_catalog/type_collection_common_types_gen.h"
 #include "mongo/db/internal_transactions_feature_flag_gen.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/shard_role_catalog/operation_sharding_state.h"
-#include "mongo/db/local_catalog/shard_role_catalog/scoped_collection_metadata.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/plan_executor.h"
@@ -51,6 +48,9 @@
 #include "mongo/db/record_id.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/server_options.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/operation_sharding_state.h"
+#include "mongo/db/shard_role/shard_catalog/scoped_collection_metadata.h"
 #include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/storage/snapshot.h"
@@ -361,12 +361,10 @@ void TimeseriesModifyStage::_checkUpdateChangesExistingShardKey(const BSONObj& n
     }
 }
 
-void TimeseriesModifyStage::_checkUpdateChangesReshardingKey(
-    const ShardingWriteRouter& shardingWriteRouter,
-    const BSONObj& newBucket,
-    const BSONObj& oldBucket,
-    const BSONObj& newMeasurement,
-    const BSONObj& oldMeasurement) {
+void TimeseriesModifyStage::_checkUpdateChangesReshardingKey(const BSONObj& newBucket,
+                                                             const BSONObj& oldBucket,
+                                                             const BSONObj& newMeasurement,
+                                                             const BSONObj& oldMeasurement) {
     const auto& collDesc = collectionAcquisition().getShardingDescription();
 
     auto reshardingKeyPattern = collDesc.getReshardingKeyIfShouldForwardOps();
@@ -382,8 +380,13 @@ void TimeseriesModifyStage::_checkUpdateChangesReshardingKey(
     FieldRefSet shardKeyPaths(collDesc.getKeyPatternFields());
     _checkRestrictionsOnUpdatingShardKeyAreNotViolated(collDesc, shardKeyPaths);
 
-    auto oldRecipShard = *shardingWriteRouter.getReshardingDestinedRecipient(oldBucket);
-    auto newRecipShard = *shardingWriteRouter.getReshardingDestinedRecipient(newBucket);
+    auto& postReshardingPlacement = collectionAcquisition().getPostReshardingPlacement();
+    tassert(
+        11273400,
+        "Expected the post resharding placement to be available when a resharding key is present",
+        postReshardingPlacement.has_value());
+    auto oldRecipShard = postReshardingPlacement->getReshardingDestinedRecipient(oldBucket);
+    auto newRecipShard = postReshardingPlacement->getReshardingDestinedRecipient(newBucket);
 
     if (oldRecipShard != newRecipShard) {
         // We send the 'oldMeasurement' instead of the old bucket document to leverage timeseries
@@ -394,7 +397,8 @@ void TimeseriesModifyStage::_checkUpdateChangesReshardingKey(
                                        false,
                                        collectionPtr()->ns(),
                                        collectionPtr()->uuid(),
-                                       newMeasurement),
+                                       newMeasurement,
+                                       oldRecipShard),
             "This update would cause the doc to change owning shards under the new shard key");
     }
 }
@@ -411,9 +415,7 @@ void TimeseriesModifyStage::_checkUpdateChangesShardKeyFields(const BSONObj& new
     // It is possible that both the existing and new shard keys are being updated, so we do not want
     // to short-circuit checking whether either is being modified.
     _checkUpdateChangesExistingShardKey(newBucket, oldBucket, newMeasurement, oldMeasurement);
-    ShardingWriteRouter shardingWriteRouter(opCtx(), collectionPtr()->ns());
-    _checkUpdateChangesReshardingKey(
-        shardingWriteRouter, newBucket, oldBucket, newMeasurement, oldMeasurement);
+    _checkUpdateChangesReshardingKey(newBucket, oldBucket, newMeasurement, oldMeasurement);
 }
 
 template <typename F>

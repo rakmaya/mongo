@@ -35,8 +35,8 @@
 #include "mongo/db/client.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/allowed_contexts.h"
-#include "mongo/db/raw_data_operation.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/shard_catalog/raw_data_operation.h"
 #include "mongo/db/timeseries/catalog_helper.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
@@ -51,11 +51,13 @@
 
 namespace mongo {
 
+REGISTER_LITE_PARSED_DOCUMENT_SOURCE(out,
+                                     DocumentSourceOut::LiteParsed::parse,
+                                     AllowedWithApiStrict::kAlways);
 
-REGISTER_DOCUMENT_SOURCE(out,
-                         DocumentSourceOut::LiteParsed::parse,
-                         DocumentSourceOut::createFromBson,
-                         AllowedWithApiStrict::kAlways);
+REGISTER_DOCUMENT_SOURCE_WITH_STAGE_PARAMS_DEFAULT(out, DocumentSourceOut, OutStageParams);
+
+
 ALLOCATE_DOCUMENT_SOURCE_ID(out, DocumentSourceOut::id)
 
 StageConstraints DocumentSourceOut::constraints(PipelineSplitState pipeState) const {
@@ -111,7 +113,7 @@ std::unique_ptr<DocumentSourceOut::LiteParsed> DocumentSourceOut::LiteParsed::pa
         ErrorCodes::InvalidNamespace,
         fmt::format("Invalid {} target namespace, {}", kStageName, targetNss.toStringForErrorMsg()),
         targetNss.isValid());
-    return std::make_unique<DocumentSourceOut::LiteParsed>(spec.fieldName(), std::move(targetNss));
+    return std::make_unique<DocumentSourceOut::LiteParsed>(spec, std::move(targetNss));
 }
 
 boost::intrusive_ptr<DocumentSource> DocumentSourceOut::create(

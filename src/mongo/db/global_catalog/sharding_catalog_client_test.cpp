@@ -58,7 +58,7 @@
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/sharding_environment/sharding_mongos_test_fixture.h"
 #include "mongo/db/time_proof_service.h"
-#include "mongo/db/vector_clock/vector_clock.h"
+#include "mongo/db/topology/vector_clock/vector_clock.h"
 #include "mongo/db/versioning_protocol/database_version.h"
 #include "mongo/executor/network_connection_hook.h"
 #include "mongo/executor/network_interface_mock.h"
@@ -94,6 +94,7 @@ struct ShardingCatalogClientTest : ShardingTestFixture {
     static constexpr int kMaxCommandExecutions = kDefaultClientMaxRetryAttemptsDefault + 1;
     inline static const NamespaceString kNamespace =
         NamespaceString::createNamespaceString_forTest("TestDB", "TestColl");
+    FailPointEnableBlock _{"returnMaxBackoffDelay"};
 };
 
 TEST_F(ShardingCatalogClientTest, GetCollectionExisting) {
@@ -1214,7 +1215,6 @@ TEST_F(ShardingCatalogClientTest, RetryOnFindCommandSystemOverloadedAtMaxRetry) 
     configTargeter()->setFindHostReturnValue(HostAndPort("TestHost1"));
 
     auto future = launchAsync([this] {
-        BackoffWithJitter::initRandomEngineWithSeed_forTest(kKnownGoodSeed);
         ASSERT_THROWS_CODE(catalogClient()->getDatabase(
                                operationContext(),
                                DatabaseName::createDatabaseName_forTest(boost::none, "TestDB"),
@@ -1243,7 +1243,6 @@ TEST_F(ShardingCatalogClientTest, RetryOnFindCommandSystemOverloadedWithDeadline
     configTargeter()->setFindHostReturnValue(HostAndPort("TestHost1"));
 
     auto future = launchAsync([this] {
-        BackoffWithJitter::initRandomEngineWithSeed_forTest(kKnownGoodSeed);
         ASSERT_THROWS_CODE(catalogClient()->getDatabase(
                                operationContext(),
                                DatabaseName::createDatabaseName_forTest(boost::none, "TestDB"),
@@ -1273,7 +1272,6 @@ TEST_F(ShardingCatalogClientTest, RetryOnUserManagementReadCommandSystemOverload
     auto future = launchAsync([this] {
         BSONObjBuilder responseBuilder;
 
-        BackoffWithJitter::initRandomEngineWithSeed_forTest(kKnownGoodSeed);
         bool ok = catalogClient()->runUserManagementReadCommand(
             operationContext(),
             DatabaseName::createDatabaseName_forTest(boost::none, "test"),

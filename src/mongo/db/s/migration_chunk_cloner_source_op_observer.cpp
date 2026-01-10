@@ -34,18 +34,18 @@
 #include "mongo/base/string_data.h"
 #include "mongo/db/global_catalog/chunk.h"
 #include "mongo/db/global_catalog/chunk_manager.h"
-#include "mongo/db/global_catalog/router_role_api/sharding_write_router.h"
 #include "mongo/db/global_catalog/shard_key_pattern.h"
-#include "mongo/db/local_catalog/collection_operation_source.h"
-#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
-#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_runtime.h"
-#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_state.h"
-#include "mongo/db/local_catalog/shard_role_catalog/database_sharding_state.h"
 #include "mongo/db/op_observer/op_observer_util.h"
 #include "mongo/db/repl/read_concern_args.h"
+#include "mongo/db/router_role/sharding_write_router.h"
 #include "mongo/db/s/migration_chunk_cloner_source.h"
+#include "mongo/db/shard_role/lock_manager/d_concurrency.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/collection_operation_source.h"
+#include "mongo/db/shard_role/shard_catalog/collection_sharding_runtime.h"
+#include "mongo/db/shard_role/shard_catalog/collection_sharding_state.h"
+#include "mongo/db/shard_role/shard_catalog/database_sharding_state.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/topology/sharding_state.h"
 #include "mongo/db/transaction/transaction_participant.h"
@@ -72,7 +72,7 @@ void MigrationChunkClonerSourceOpObserver::assertIntersectingChunkHasNotMoved(
     const LogicalTime& atClusterTime) {
     // We can assume the simple collation because shard keys do not support non-simple collations.
     auto cmAtTimeOfWrite =
-        ChunkManager::makeAtTime(*metadata.getChunkManager(), atClusterTime.asTimestamp());
+        PointInTimeChunkManager::make(*metadata.getChunkManager(), atClusterTime.asTimestamp());
     auto chunk = cmAtTimeOfWrite.findIntersectingChunkWithSimpleCollation(shardKey);
 
     // Throws if the chunk has moved since the timestamp of the running transaction's atClusterTime
@@ -138,16 +138,6 @@ void MigrationChunkClonerSourceOpObserver::onInserts(
     std::vector<bool> fromMigrate,
     bool defaultFromMigrate,
     OpStateAccumulator* opAccumulator) {
-    // Take ownership of ShardingWriteRouter attached to the op accumulator by OpObserverImpl.
-    // Release upon return from this function because this resource is not needed by downstream
-    // OpObserver instances.
-    // If there's no ShardingWriteRouter instance available, it means that OpObserverImpl did not
-    // get far enough to require one so there's nothing to do here but return early.
-    auto shardingWriteRouter =
-        std::move(shardingWriteRouterOpStateAccumulatorDecoration(opAccumulator));
-    if (!shardingWriteRouter) {
-        return;
-    }
 
     if (defaultFromMigrate) {
         return;
@@ -158,11 +148,12 @@ void MigrationChunkClonerSourceOpObserver::onInserts(
         return;
     }
 
-    auto* const css = shardingWriteRouter->getCss();
+    auto scopedCss = CollectionShardingState::assertCollectionLockedAndAcquire(opCtx, nss);
+    const CollectionShardingState* css = &(*scopedCss);
     css->checkShardVersionOrThrow(opCtx);
     DatabaseShardingState::acquire(opCtx, nss.dbName())->checkDbVersionOrThrow(opCtx);
 
-    auto* const csr = checked_cast<CollectionShardingRuntime*>(css);
+    auto* const csr = checked_cast<const CollectionShardingRuntime*>(css);
     auto metadata = csr->getCurrentMetadataIfKnown();
     if (!metadata || !metadata->hasRoutingTable()) {
         MigrationChunkClonerSourceOpObserver::assertNoMovePrimaryInProgress(opCtx, nss);
@@ -202,17 +193,6 @@ void MigrationChunkClonerSourceOpObserver::onInserts(
 void MigrationChunkClonerSourceOpObserver::onUpdate(OperationContext* opCtx,
                                                     const OplogUpdateEntryArgs& args,
                                                     OpStateAccumulator* opAccumulator) {
-    // Take ownership of ShardingWriteRouter attached to the op accumulator by OpObserverImpl.
-    // Release upon return from this function because this resource is not needed by downstream
-    // OpObserver instances.
-    // If there's no ShardingWriteRouter instance available, it means that OpObserverImpl did not
-    // get far enough to require one so there's nothing to do here but return early.
-    auto shardingWriteRouter =
-        std::move(shardingWriteRouterOpStateAccumulatorDecoration(opAccumulator));
-    if (!shardingWriteRouter) {
-        return;
-    }
-
     if (args.updateArgs->source == OperationSource::kFromMigrate) {
         return;
     }
@@ -229,11 +209,12 @@ void MigrationChunkClonerSourceOpObserver::onUpdate(OperationContext* opCtx,
     const auto& preImageDoc = args.updateArgs->preImageDoc;
     const auto& postImageDoc = args.updateArgs->updatedDoc;
 
-    auto* const css = shardingWriteRouter->getCss();
+    auto scopedCss = CollectionShardingState::assertCollectionLockedAndAcquire(opCtx, nss);
+    const CollectionShardingState* css = &(*scopedCss);
     css->checkShardVersionOrThrow(opCtx);
     DatabaseShardingState::acquire(opCtx, nss.dbName())->checkDbVersionOrThrow(opCtx);
 
-    auto* const csr = checked_cast<CollectionShardingRuntime*>(css);
+    auto* const csr = checked_cast<const CollectionShardingRuntime*>(css);
     auto metadata = csr->getCurrentMetadataIfKnown();
     if (!metadata || !metadata->hasRoutingTable()) {
         MigrationChunkClonerSourceOpObserver::assertNoMovePrimaryInProgress(opCtx, nss);
@@ -275,12 +256,12 @@ void MigrationChunkClonerSourceOpObserver::onDelete(OperationContext* opCtx,
         return;
     }
 
-    ShardingWriteRouter shardingWriteRouter(opCtx, nss);
-    auto* const css = shardingWriteRouter.getCss();
+    auto scopedCss = CollectionShardingState::assertCollectionLockedAndAcquire(opCtx, nss);
+    const CollectionShardingState* css = &(*scopedCss);
     css->checkShardVersionOrThrow(opCtx);
     DatabaseShardingState::acquire(opCtx, nss.dbName())->checkDbVersionOrThrow(opCtx);
 
-    auto* const csr = checked_cast<CollectionShardingRuntime*>(css);
+    auto* const csr = checked_cast<const CollectionShardingRuntime*>(css);
     auto metadata = csr->getCurrentMetadataIfKnown();
     if (!metadata || !metadata->hasRoutingTable()) {
         assertNoMovePrimaryInProgress(opCtx, nss);

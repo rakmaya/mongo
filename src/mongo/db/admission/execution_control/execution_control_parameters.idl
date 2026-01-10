@@ -1,0 +1,222 @@
+# Copyright (C) 2022-present MongoDB, Inc.
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the Server Side Public License, version 1,
+# as published by MongoDB, Inc.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# Server Side Public License for more details.
+#
+# You should have received a copy of the Server Side Public License
+# along with this program. If not, see
+# <http://www.mongodb.com/licensing/server-side-public-license>.
+#
+# As a special exception, the copyright holders give permission to link the
+# code of portions of this program with the OpenSSL library under certain
+# conditions as described in each individual source file and distribute
+# linked combinations including the program with the OpenSSL library. You
+# must comply with the Server Side Public License in all respects for
+# all of the code used other than as permitted herein. If you modify file(s)
+# with this exception, you may extend this exception to your version of the
+# file(s), but you are not obligated to do so. If you do not wish to do so,
+# delete this exception statement from your version. If you delete this
+# exception statement from all source files in the program, then also delete
+# it in the license file.
+#
+
+global:
+    mod_visibility: public
+    cpp_namespace: "mongo::admission::execution_control"
+    cpp_includes:
+        - "mongo/db/admission/execution_control/ticketing_system.h"
+
+enums:
+    ExecutionControlConcurrencyAdjustmentAlgorithm:
+        description: "Algorithm for adjusting the number of concurrent execution control transactions"
+        type: string
+        # 'kFixedConcurrentTransactions': Number of concurrent transactions are controlled by
+        # executionControlConcurrentWriteTransactions/executionControlConcurrentReadTransactions and
+        # will not be adjusted automatically based on overall system throughput.
+        #
+        # 'kThroughputProbing': Number of concurrent transactions are dynamically adjusted, either
+        # increasing or decreasing concurrency in the execution control, based on system throughput.
+        values:
+            kFixedConcurrentTransactions: "fixedConcurrentTransactions"
+            kThroughputProbing: "throughputProbing"
+
+server_parameters:
+    executionControlConcurrentWriteTransactions:
+        description: >-
+            The number of maximum concurrent write transactions (write tickets) allowed for
+            execution control.
+        set_at: [startup, runtime]
+        cpp_vartype: AtomicWord<int32_t>
+        cpp_varname: gConcurrentWriteTransactions
+        on_update: "TicketingSystem::NormalPrioritySettings::updateConcurrentWriteTransactions"
+        deprecated_name:
+            - storageEngineConcurrentWriteTransactions
+            - wiredTigerConcurrentWriteTransactions
+        default: {expr: "TicketingSystem::kDefaultConcurrentTransactionsValue"}
+        validator:
+            callback: "TicketingSystem::NormalPrioritySettings::validateConcurrentWriteTransactions"
+        redact: false
+
+    executionControlConcurrentWriteLowPriorityTransactions:
+        description: >-
+            The number of maximum concurrent write low-priority transactions (write tickets) allowed
+            for execution control. Using the default value means to use the number of logical CPU
+            cores.
+        set_at: [startup, runtime]
+        cpp_vartype: AtomicWord<int32_t>
+        cpp_varname: gConcurrentWriteLowPriorityTransactions
+        on_update: "TicketingSystem::LowPrioritySettings::updateConcurrentWriteTransactions"
+        default:
+            {
+                expr: "TicketingSystem::kUnsetLowPriorityConcurrentTransactionsValue",
+            }
+        validator:
+            callback: "TicketingSystem::LowPrioritySettings::validateConcurrentWriteTransactions"
+        redact: false
+
+    executionControlConcurrentReadTransactions:
+        description: >-
+            The number of maximum concurrent read transactions (read tickets) allowed for execution
+            control.
+        set_at: [startup, runtime]
+        cpp_vartype: AtomicWord<int32_t>
+        cpp_varname: gConcurrentReadTransactions
+        on_update: "TicketingSystem::NormalPrioritySettings::updateConcurrentReadTransactions"
+        deprecated_name:
+            - storageEngineConcurrentReadTransactions
+            - wiredTigerConcurrentReadTransactions
+        default: {expr: "TicketingSystem::kDefaultConcurrentTransactionsValue"}
+        validator:
+            callback: "TicketingSystem::NormalPrioritySettings::validateConcurrentReadTransactions"
+        redact: false
+
+    executionControlConcurrentReadLowPriorityTransactions:
+        description: >-
+            The number of maximum concurrent read low-priority transactions (read tickets) allowed
+            for execution control. Using the default value means to use the number of logical CPU
+            cores.
+        set_at: [startup, runtime]
+        cpp_vartype: AtomicWord<int32_t>
+        cpp_varname: gConcurrentReadLowPriorityTransactions
+        on_update: "TicketingSystem::LowPrioritySettings::updateConcurrentReadTransactions"
+        default:
+            {
+                expr: "TicketingSystem::kUnsetLowPriorityConcurrentTransactionsValue",
+            }
+        validator:
+            callback: "TicketingSystem::LowPrioritySettings::validateConcurrentReadTransactions"
+        redact: false
+
+    executionControlReadMaxQueueDepth:
+        description: >-
+            Controls the maximum number of read transactions waiting in queue for a thread to be free.
+            Setting this number to 0 will not allow any transaction above the max concurrency amount.
+            Reducing this value will only affect new enqueued read transactions
+        set_at: [startup, runtime]
+        cpp_vartype: Atomic<std::int32_t>
+        cpp_varname: gReadMaxQueueDepth
+        on_update: "TicketingSystem::NormalPrioritySettings::updateReadMaxQueueDepth"
+        deprecated_name:
+            - storageEngineReadMaxQueueDepth
+        default: {expr: "TicketHolder::kDefaultMaxQueueDepth"}
+        validator: {gte: 0}
+        redact: false
+
+    executionControlReadLowPriorityMaxQueueDepth:
+        description: >-
+            Controls the maximum number of read low priority transactions waiting in queue for a thread to be free.
+            Setting this number to 0 will not allow any transaction above the max concurrency amount.
+            Reducing this value will only affect new enqueued read transactions
+        set_at: [startup, runtime]
+        cpp_vartype: Atomic<std::int32_t>
+        cpp_varname: gReadLowPriorityMaxQueueDepth
+        on_update: "TicketingSystem::LowPrioritySettings::updateReadMaxQueueDepth"
+        default: {expr: "TicketHolder::kDefaultMaxQueueDepth"}
+        validator: {gte: 0}
+        redact: false
+
+    executionControlWriteMaxQueueDepth:
+        description: >-
+            Controls the maximum number of write transactions waiting in queue for a thread to be free.
+            Setting this number to 0 will not allow any transaction above the max concurrency amount.
+            Reducing this value will only affect new enqueued write transactions
+        set_at: [startup, runtime]
+        cpp_vartype: Atomic<std::int32_t>
+        cpp_varname: gWriteMaxQueueDepth
+        on_update: "TicketingSystem::NormalPrioritySettings::updateWriteMaxQueueDepth"
+        deprecated_name:
+            - storageEngineWriteMaxQueueDepth
+        default: {expr: "TicketHolder::kDefaultMaxQueueDepth"}
+        validator: {gte: 0}
+        redact: false
+
+    executionControlWriteLowPriorityMaxQueueDepth:
+        description: >-
+            Controls the maximum number of write low priority transactions waiting in queue for a thread to be free.
+            Setting this number to 0 will not allow any transaction above the max concurrency amount.
+            Reducing this value will only affect new enqueued write transactions
+        set_at: [startup, runtime]
+        cpp_vartype: Atomic<std::int32_t>
+        cpp_varname: gWriteLowPriorityMaxQueueDepth
+        on_update: "TicketingSystem::LowPrioritySettings::updateWriteMaxQueueDepth"
+        default: {expr: "TicketHolder::kDefaultMaxQueueDepth"}
+        validator: {gte: 0}
+        redact: false
+
+    executionControlConcurrencyAdjustmentAlgorithm:
+        description: >-
+            The algorithm to be used for adjusting the number of concurrent execution control transactions.
+        set_at: [startup, runtime]
+        cpp_vartype: std::string
+        cpp_varname: gConcurrencyAdjustmentAlgorithm
+        on_update: "TicketingSystem::updateConcurrencyAdjustmentAlgorithm"
+        deprecated_name:
+            - storageEngineConcurrencyAdjustmentAlgorithm
+        default: "throughputProbing"
+        validator:
+            callback: TicketingSystem::validateConcurrencyAdjustmentAlgorithm
+        redact: false
+
+    executionControlDeprioritizationGate:
+        description: >-
+            Global gate for enabling deprioritization in the ticketing system. When true, feature-specific
+            deprioritization controls (such as heuristic and background task deprioritization) are
+            permitted to take effect. When false, all deprioritization mechanisms are blocked,
+            regardless of their individual settings.
+        set_at: [startup, runtime]
+        cpp_vartype: AtomicWord<bool>
+        cpp_varname: gDeprioritizationGate
+        on_update: "TicketingSystem::updateDeprioritizationGate"
+        default: false
+        redact: false
+
+    executionControlHeuristicDeprioritization:
+        description: >-
+            Enables a heuristic that will evaluate long-running operations and deprioritize them to
+            the low priority ticket pool.
+        set_at: [startup, runtime]
+        cpp_vartype: AtomicWord<bool>
+        cpp_varname: gHeuristicDeprioritization
+        on_update: "TicketingSystem::updateHeuristicDeprioritization"
+        default: true
+        redact: false
+
+    executionControlBackgroundTasksDeprioritization:
+        description: >-
+            This controls whether background tasks (defined as index builds, range deletions, and
+            TTL deletions) are automatically deprioritized to the low-priority pool. If set to false,
+            these tasks will not be automatically deprioritized upon starting. However, they can
+            still be deprioritized later by the heuristic if the operation exceeds the admissions
+            threshold.
+        set_at: [startup, runtime]
+        cpp_vartype: AtomicWord<bool>
+        cpp_varname: gBackgroundTasksDeprioritization
+        on_update: "TicketingSystem::updateBackgroundTasksDeprioritization"
+        default: true
+        redact: false

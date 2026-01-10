@@ -38,21 +38,14 @@
 #include "mongo/bson/oid.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/bson/util/builder.h"
-#include "mongo/db/exec/js_function.h"
-#include "mongo/db/exec/sbe/makeobj_spec.h"
-#include "mongo/db/exec/sbe/size_estimator.h"
-#include "mongo/db/exec/sbe/sort_spec.h"
 #include "mongo/db/exec/sbe/values/bson.h"
 #include "mongo/db/exec/sbe/values/value_builder.h"
-#include "mongo/db/exec/shard_filterer.h"
-#include "mongo/db/fts/fts_matcher.h"
 #include "mongo/db/query/datetime/date_time_support.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/storage/key_string/key_string.h"
 #include "mongo/platform/decimal128.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/bufreader.h"
-#include "mongo/util/pcre.h"
 #include "mongo/util/shared_buffer.h"
 #include "mongo/util/time_support.h"
 
@@ -872,17 +865,17 @@ int RowBase<RowType>::memUsageForSorter() const {
 }
 
 template class RowBase<MaterializedRow>;
-template class RowBase<FixedSizeRow<1>>;
-template class RowBase<FixedSizeRow<2>>;
-template class RowBase<FixedSizeRow<3>>;
+template class RowBase<FixedSizeRow<1 /*N*/>>;
+template class RowBase<FixedSizeRow<2 /*N*/>>;
+template class RowBase<FixedSizeRow<3 /*N*/>>;
 
 
 // This check is needed to ensure that 'std::vector<MaterializedRow>' uses move constructor of
 // 'MaterializedRow' during reallocation. This way, values inside 'MaterializedRow' are not copied
 // during reallocation and references to them remain valid.
 static_assert(std::is_nothrow_move_constructible_v<MaterializedRow>);
-static_assert(std::is_nothrow_move_constructible_v<FixedSizeRow<1>>);
-static_assert(std::is_nothrow_move_constructible_v<FixedSizeRow<2>>);
-static_assert(std::is_nothrow_move_constructible_v<FixedSizeRow<3>>);
+static_assert(std::is_nothrow_move_constructible_v<FixedSizeRow<1 /*N*/>>);
+static_assert(std::is_nothrow_move_constructible_v<FixedSizeRow<2 /*N*/>>);
+static_assert(std::is_nothrow_move_constructible_v<FixedSizeRow<3 /*N*/>>);
 
 }  // namespace mongo::sbe::value

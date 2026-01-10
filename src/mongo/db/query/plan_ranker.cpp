@@ -30,12 +30,10 @@
 
 #include "mongo/db/query/plan_ranker.h"
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/bson/util/builder_fwd.h"
 #include "mongo/db/exec/plan_stats.h"
 #include "mongo/db/query/compiler/physical_model/query_solution/stage_types.h"
-#include "mongo/logv2/log.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
 
@@ -56,7 +54,8 @@ namespace {
 class DefaultPlanScorer final : public PlanScorer<PlanStageStats> {
 protected:
     double calculateProductivity(const PlanStageStats* stats) const final {
-        invariant(stats->common.works != 0);
+        tassert(
+            11321201, "Expected plan stats works to be greater than 0", stats->common.works != 0);
         return static_cast<double>(stats->common.advanced) /
             static_cast<double>(stats->common.works);
     }

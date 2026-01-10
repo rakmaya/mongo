@@ -85,6 +85,7 @@ bazel_evergreen_shutils::compute_local_arg() {
         local_arg+=" --jobs=auto"
     elif [[ "$mode" == "test" && "${task_name:-}" == "unit_tests" ]]; then
         local_arg+=" --config=remote_test"
+        local_arg+=" --test_timeout=660" # Allow extra 60s for coredump on abort
     fi
 
     if bazel_evergreen_shutils::is_ppc64le; then
@@ -229,6 +230,11 @@ bazel_evergreen_shutils::ensure_server_and_print_pid() {
     bazel_evergreen_shutils::print_bazel_server_pid "$BAZEL_BINARY"
 }
 
+bazel_evergreen_shutils::write_last_engflow_link() {
+    engflow_link=$(grep -Eo 'https://[a-zA-Z0-9./?_=-]+' ${last_command_log_path} | grep 'sodalite\.cluster\.engflow\.com' | tail -n 1)
+    echo ${engflow_link} >.engflow_link
+}
+
 # Generic retry wrapper:
 #   $1: attempts
 #   $3: bazel binary
@@ -244,6 +250,9 @@ bazel_evergreen_shutils::retry_bazel_cmd() {
     shift
 
     local timeout_str="$(bazel_evergreen_shutils::timeout_prefix "${evergreen_remote_exec:-}")"
+
+    # Get command log path for usage afterwards
+    last_command_log_path=$(bazel info command_log)
 
     # Everything else is the Bazel subcommand + flags (and possibly redirections/pipes).
     # We *intentionally* keep it as raw words and reassemble to a single string for eval.
@@ -300,18 +309,22 @@ bazel_evergreen_shutils::retry_bazel_cmd() {
             RET=$?
         fi
 
-        # Classify failure & decide on guard for next attempt.
-        [[ $RET -eq 124 ]] && echo "Bazel timed out." >&2
-
         if ! bazel_evergreen_shutils::is_bazel_server_running "$BAZEL_BINARY"; then
             echo "[retry ${i}] Bazel server down (OOM/killed). Enabling OOM guard for next attempt and restarting…" >&2
             use_oom_guard=true
             "$BAZEL_BINARY" shutdown || true
             "$BAZEL_BINARY" info >/dev/null 2>&1 || true
             bazel_evergreen_shutils::print_bazel_server_pid "$BAZEL_BINARY" >&2
-        else
-            echo "Bazel failed (exit=$RET); restarting server before retry…" >&2
+        elif [[ $RET -eq 124 ]]; then
+            echo "Bazel timed out." >&2
             "$BAZEL_BINARY" shutdown || true
+        else
+            if [[ ${RETRY_ON_FAIL:-0} -eq 1 ]]; then
+                echo "Bazel failed (exit=$RET); restarting server before retry..." >&2
+                "$BAZEL_BINARY" shutdown || true
+            else
+                break
+            fi
         fi
 
         sleep 60

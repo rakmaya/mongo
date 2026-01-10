@@ -59,7 +59,7 @@ namespace ident {
 // The size storer and catalog have hardcoded idents as we need to be able to open them before we
 // can look up idents in the catalog.
 constexpr inline StringData kSizeStorer = "sizeStorer"_sd;
-constexpr inline StringData kMbdCatalog = "_mdb_catalog"_sd;
+constexpr inline StringData kMdbCatalog = "_mdb_catalog"_sd;
 
 /**
  * By default, a storage engine table is uniquely identified by an 'ident' that comes in 1 of 4
@@ -146,6 +146,13 @@ bool validateTag(StringData uniqueTag);
  * additional restrictions (e.g. on Windows) or the maximum path length being exceeded.
  */
 bool isValidIdent(StringData ident);
+
+/**
+ * Returns the directory component of the ident, which is the prefix before the last '/'.
+ * Returns an empty string when the ident has no directory component.
+ * Supplying an ill-formed ident will trigger a uassert.
+ */
+StringData getDirectory(StringData ident);
 
 /**
  * When idents are generated with 'directoryPerDB', the name of the database is encoded within the

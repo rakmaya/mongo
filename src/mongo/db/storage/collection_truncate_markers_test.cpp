@@ -33,9 +33,9 @@
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/client.h"
 #include "mongo/db/curop.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
 #include "mongo/db/service_context_d_test_fixture.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
 #include "mongo/db/storage/storage_engine_test_fixture.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/idl/server_parameter_test_controller.h"
@@ -131,7 +131,7 @@ public:
                         int dataLength,
                         int numElements,
                         Timestamp timestampToUse) {
-        AutoGetCollection coll(opCtx, nss, MODE_IX);
+        AutoGetCollection coll(opCtx, nss, MODE_X);
         const auto correctedSize = dataLength - BSON("x" << "").objsize();
         invariant(correctedSize >= 0);
         const auto objToInsert = BSON("x" << std::string(correctedSize, 'a'));
@@ -544,6 +544,8 @@ TEST_F(CollectionMarkersTest, CursorYieldsAndIgnoresNewRecords) {
     size_t seenRecords = 0;
     while (!hasYielded.load()) {
         mockTickSource.advance(Milliseconds(11));
+        // Have a real sleep so that the yield thread has a chance to catch up.
+        opCtx->sleepFor(Milliseconds(1));
         if (iterator->getNext()) {
             ++seenRecords;
         }
@@ -558,4 +560,336 @@ TEST_F(CollectionMarkersTest, CursorYieldsAndIgnoresNewRecords) {
     ASSERT_LT(static_cast<long long>(seenRecords), coll->getRecordStore()->numRecords());
 }
 
+// Test that random cursors will yield periodically. Since random cursors will see records added
+// after they were created due to the yield, we only care that it can continue to sample.
+TEST_F(CollectionMarkersTest, CursorYieldWithRandomCursor) {
+    TickSourceMock mockTickSource;
+    auto collNs = NamespaceString::createNamespaceString_forTest("test", "coll");
+    createPopulatedCollection(collNs);
+
+    auto opCtx = getClient()->makeOperationContext();
+    AutoGetCollection coll(opCtx.get(), collNs, MODE_IS);
+    auto iterator = CollectionTruncateMarkers::makeIterator(
+        opCtx.get(), coll->getRecordStore(), &mockTickSource, Milliseconds(10));
+
+    AtomicWord<bool> hasYielded(false);
+    stdx::thread yieldNotifier([this, &collNs, &hasYielded] {
+        ThreadClient client(getServiceContext()->getService());
+        auto innerOpCtx = cc().makeOperationContext();
+        // We won't be able to acquire the write lock until the read yields.
+        insertElements(
+            innerOpCtx.get(), collNs, /*dataLength=*/100, /*numElements=*/10, Timestamp(1, 0));
+        hasYielded.store(true);
+    });
+
+    ASSERT_FALSE(hasYielded.load());
+
+    while (!hasYielded.load()) {
+        mockTickSource.advance(Milliseconds(11));
+        // Have a real sleep so that the yield thread has a chance to catch up.
+        opCtx->sleepFor(Milliseconds(1));
+        ASSERT(iterator->getNextRandom());
+    }
+    yieldNotifier.join();
+
+    for (int i = 0; i < 1000; i++) {
+        ASSERT(iterator->getNextRandom());
+    }
+}
+
+// Test that yielding handles the collection being truncated from underneath it.
+TEST_F(CollectionMarkersTest, CursorYieldSerialCursorHandlesTruncate) {
+    TickSourceMock mockTickSource;
+    auto collNs = NamespaceString::createNamespaceString_forTest("test", "coll");
+    auto [_, initialRecords] = createPopulatedCollection(collNs);
+
+    auto opCtx = getClient()->makeOperationContext();
+    AutoGetCollection coll(opCtx.get(), collNs, MODE_IS);
+    auto iterator = CollectionTruncateMarkers::makeIterator(
+        opCtx.get(), coll->getRecordStore(), &mockTickSource, Milliseconds(10));
+
+    AtomicWord<bool> hasYielded(false);
+    stdx::thread yieldNotifier([this, &collNs, &hasYielded] {
+        ThreadClient client(getServiceContext()->getService());
+        auto innerOpCtx = cc().makeOperationContext();
+        auto opCtx = innerOpCtx.get();
+
+        // We won't be able to acquire the write lock until the read yields.
+        AutoGetCollection coll(opCtx, collNs, MODE_X);
+        WriteUnitOfWork wuow(opCtx);
+        ASSERT_OK(
+            coll->getRecordStore()->truncate(opCtx, *shard_role_details::getRecoveryUnit(opCtx)));
+        wuow.commit();
+        hasYielded.store(true);
+    });
+
+    ASSERT_FALSE(hasYielded.load());
+
+    size_t seenRecords = 0;
+    while (!hasYielded.load()) {
+        mockTickSource.advance(Milliseconds(11));
+        // Have a real sleep so that the yield thread has a chance to catch up.
+        opCtx->sleepFor(Milliseconds(1));
+        if (iterator->getNext()) {
+            ++seenRecords;
+        }
+    }
+    yieldNotifier.join();
+
+    while (iterator->getNext()) {
+        ++seenRecords;
+    }
+
+    // Since we truncated we won't see later records
+    ASSERT_LT(seenRecords, initialRecords);
+}
+
+// Test that yielding a random cursor handles the collection being truncated from underneath it.
+TEST_F(CollectionMarkersTest, CursorYieldRandomCursorHandlesTruncate) {
+    TickSourceMock mockTickSource;
+    auto collNs = NamespaceString::createNamespaceString_forTest("test", "coll");
+    createPopulatedCollection(collNs);
+
+    auto opCtx = getClient()->makeOperationContext();
+    AutoGetCollection coll(opCtx.get(), collNs, MODE_IS);
+    auto iterator = CollectionTruncateMarkers::makeIterator(
+        opCtx.get(), coll->getRecordStore(), &mockTickSource, Milliseconds(10));
+
+    AtomicWord<bool> hasYielded(false);
+    stdx::thread yieldNotifier([this, &collNs, &hasYielded] {
+        ThreadClient client(getServiceContext()->getService());
+        auto innerOpCtx = cc().makeOperationContext();
+        auto opCtx = innerOpCtx.get();
+
+        // We won't be able to acquire the write lock until the read yields.
+        AutoGetCollection coll(opCtx, collNs, MODE_X);
+        WriteUnitOfWork wuow(opCtx);
+        ASSERT_OK(
+            coll->getRecordStore()->truncate(opCtx, *shard_role_details::getRecoveryUnit(opCtx)));
+        wuow.commit();
+        hasYielded.store(true);
+    });
+
+    // When we truncate underneath the random cursor it will return nullopt.
+    ASSERT_FALSE(hasYielded.load());
+    while (iterator->getNextRandom()) {
+        mockTickSource.advance(Milliseconds(11));
+        // Have a real sleep so that the yield thread has a chance to catch up.
+        opCtx->sleepFor(Milliseconds(1));
+    }
+    ASSERT_TRUE(hasYielded.load());
+    yieldNotifier.join();
+}
+
+// Test that sampling handles the collection being truncated from underneath us.
+TEST_F(CollectionMarkersTest, SamplingWorksWithTruncate) {
+    TickSourceMock mockTickSource;
+    auto collNs = NamespaceString::createNamespaceString_forTest("test", "coll");
+    createPopulatedCollection(collNs);
+
+    auto opCtx = getClient()->makeOperationContext();
+    AutoGetCollection coll(opCtx.get(), collNs, MODE_IS);
+    // 0ms yield interval means sample every next()
+    auto iterator = CollectionTruncateMarkers::makeIterator(
+        opCtx.get(), coll->getRecordStore(), &mockTickSource, {Milliseconds(0)});
+
+    // Synchronize to avoid sampling the collection before the yield thread is ready.
+    stdx::mutex waitingMutex;
+    stdx::unique_lock waitingLock(waitingMutex);
+    stdx::condition_variable waitingCv;
+
+    AtomicWord<bool> hasYielded(false);
+    stdx::thread yieldNotifier([this, &collNs, &hasYielded, &waitingCv, &waitingMutex] {
+        ThreadClient client(getServiceContext()->getService());
+        auto innerOpCtx = cc().makeOperationContext();
+        auto opCtx = innerOpCtx.get();
+
+        {
+            stdx::unique_lock readyLock(waitingMutex);
+        }
+        waitingCv.notify_one();
+
+        // We won't be able to acquire the write lock until the read yields.
+        AutoGetCollection coll(opCtx, collNs, MODE_X);
+        WriteUnitOfWork wuow(opCtx);
+        ASSERT_OK(
+            coll->getRecordStore()->truncate(opCtx, *shard_role_details::getRecoveryUnit(opCtx)));
+        wuow.commit();
+        hasYielded.store(true);
+    });
+
+    waitingCv.wait(waitingLock);
+    opCtx->sleepFor(Milliseconds{1});
+
+    // When we truncate underneath the random cursor it will return nullopt.
+    ASSERT_FALSE(hasYielded.load());
+
+    CollectionTruncateMarkers::createMarkersBySampling(opCtx.get(),
+                                                       *iterator,
+                                                       /*estimatedRecordsPerMarker=*/1,
+                                                       /*estimatedBytesPerMarker=*/1,
+                                                       getIdAndWallTime);
+
+    ASSERT_TRUE(hasYielded.load());
+    yieldNotifier.join();
+}
+
+// Test that scanning handles the collection being truncated from underneath us.
+TEST_F(CollectionMarkersTest, ScanningWorksWithTruncate) {
+    TickSourceMock mockTickSource;
+    auto collNs = NamespaceString::createNamespaceString_forTest("test", "coll");
+    createPopulatedCollection(collNs);
+
+    auto opCtx = getClient()->makeOperationContext();
+    AutoGetCollection coll(opCtx.get(), collNs, MODE_IS);
+    // 0ms yield interval means sample every next()
+    auto iterator = CollectionTruncateMarkers::makeIterator(
+        opCtx.get(), coll->getRecordStore(), &mockTickSource, {Milliseconds(0)});
+
+    // Synchronize to avoid scanning the collection before the yield thread is ready.
+    stdx::mutex waitingMutex;
+    stdx::unique_lock waitingLock(waitingMutex);
+    stdx::condition_variable waitingCv;
+
+    AtomicWord<bool> hasYielded(false);
+    stdx::thread yieldNotifier([this, &collNs, &hasYielded, &waitingCv, &waitingMutex] {
+        ThreadClient client(getServiceContext()->getService());
+        auto innerOpCtx = cc().makeOperationContext();
+        auto opCtx = innerOpCtx.get();
+
+        {
+            stdx::unique_lock readyLock(waitingMutex);
+        }
+        waitingCv.notify_one();
+
+        // We won't be able to acquire the write lock until the read yields.
+        AutoGetCollection coll(opCtx, collNs, MODE_X);
+        WriteUnitOfWork wuow(opCtx);
+        ASSERT_OK(
+            coll->getRecordStore()->truncate(opCtx, *shard_role_details::getRecoveryUnit(opCtx)));
+        wuow.commit();
+        hasYielded.store(true);
+    });
+
+    waitingCv.wait(waitingLock);
+    opCtx->sleepFor(Milliseconds{1});
+
+    // When we truncate underneath the random cursor it will return nullopt.
+    ASSERT_FALSE(hasYielded.load());
+
+    CollectionTruncateMarkers::createMarkersByScanning(
+        opCtx.get(), *iterator, /*estimatedBytesPerMarker=*/1, getIdAndWallTime);
+
+    ASSERT_TRUE(hasYielded.load());
+    yieldNotifier.join();
+}
+
+void checkMarker(const RecordId& expected,
+                 OperationContext* opCtx,
+                 RecordStore& rs,
+                 RecordId pin,
+                 Date_t expiryTime) {
+    auto marker = CollectionTruncateMarkers::newestExpiredRecord(opCtx, rs, pin, expiryTime);
+    // the first three of these are always the same regardless of the record store contents:
+    ASSERT_EQ(0, marker->records);
+    ASSERT_EQ(0, marker->bytes);
+    ASSERT_EQ(expiryTime, marker->wallTime);
+    // this is the assertion that might ever fail, so add some info about the other inputs
+    ASSERT_EQ(expected, marker->lastRecord) << " with expiry=" << expiryTime << " and pin=" << pin;
+}
+
+TEST_F(CollectionMarkersTest, TimeBasedMarkerConstruction) {
+    auto collNs = NamespaceString::createNamespaceString_forTest("test", "coll");
+    auto opCtx = getClient()->makeOperationContext();
+    createCollection(opCtx.get(), collNs);
+    std::vector<RecordIdAndWall> elements;
+    std::vector<RecordId> pins;  // representing one second after each element
+    Date_t wallTime = Date_t::now();
+    // no truncatable record if oplog is empty
+    {
+        AutoGetCollection coll(opCtx.get(), collNs, MODE_IS);
+        ASSERT_FALSE(CollectionTruncateMarkers::newestExpiredRecord(
+            opCtx.get(), *coll->getRecordStore(), RecordId(), wallTime));
+        Timestamp ts(durationCount<Seconds>(wallTime.toDurationSinceEpoch()), 0);
+        ASSERT_FALSE(CollectionTruncateMarkers::newestExpiredRecord(
+            opCtx.get(), *coll->getRecordStore(), RecordId(ts.getSecs(), 0), wallTime));
+    }
+    // for this test we need real sequence numbers
+    {
+        AutoGetCollection coll(opCtx.get(), collNs, MODE_IX);
+        RecordStore& rs = *coll->getRecordStore();
+        const auto insertedData = std::string(50, 'a');
+        WriteUnitOfWork wuow(opCtx.get());
+        for (size_t i = 0; i < 20; ++i) {
+            Timestamp ts(durationCount<Seconds>(wallTime.toDurationSinceEpoch()), 0);
+            RecordId recordId = RecordId(ts.getSecs(), 0);
+            auto recordIdStatus = rs.insertRecord(opCtx.get(),
+                                                  *shard_role_details::getRecoveryUnit(opCtx.get()),
+                                                  recordId,
+                                                  insertedData.data(),
+                                                  insertedData.length(),
+                                                  ts);
+            ASSERT_OK(recordIdStatus);
+            ASSERT_EQ(recordId, recordIdStatus.getValue());
+            elements.emplace_back(recordId, wallTime);
+            pins.emplace_back(RecordId(ts.getSecs() + 1, 0));
+            wallTime += Seconds(2);
+        }
+        wuow.commit();
+    }
+    AutoGetCollection coll(opCtx.get(), collNs, MODE_IS);
+    RecordStore& rs = *coll->getRecordStore();
+    // first, check when expiry time is the limiting factor, with and without pins
+    for (size_t i = 1; i < elements.size(); ++i) {
+        const RecordIdAndWall& element = elements.at(i);
+        RecordId expected = element.recordId;
+        // don't completely empty out the oplog! instead, test that looking up the newest wall time
+        // returns the second-newest recordId.
+        if (expected == elements.back().recordId) {
+            expected = elements[elements.size() - 2].recordId;
+        }
+        // exact match with no pin
+        checkMarker(expected, opCtx.get(), rs, RecordId(), element.wallTime);
+        // in between records with no pin should match older record,
+        // and expiry time newer than newest record should match newest record
+        checkMarker(expected, opCtx.get(), rs, RecordId(), element.wallTime + Seconds(1));
+        // check various pins when the expiry time is the limiting factor
+        // pin equal to expiry is covered below with pin-limited truncation
+        // note that pins require one unpinned entry to be retained, so don't start j equal to i
+        for (size_t j = i + 1; j < elements.size(); ++j) {
+            checkMarker(expected, opCtx.get(), rs, elements.at(j).recordId, element.wallTime);
+            checkMarker(expected, opCtx.get(), rs, pins.at(j), element.wallTime);
+            checkMarker(
+                expected, opCtx.get(), rs, elements.at(j).recordId, element.wallTime + Seconds(1));
+            checkMarker(expected, opCtx.get(), rs, pins.at(j), element.wallTime + Seconds(1));
+        }
+    }
+    // check various expiry times when pin is the limiting factor (or pin and expiry retain equally)
+    for (size_t i = 1; i < elements.size(); ++i) {
+        for (int j = 0; j < 4; ++j) {
+            // don't truncate the mayTruncateUpTo point if the pin is an exact match for an entry
+            checkMarker(elements.at(i - 1).recordId,
+                        opCtx.get(),
+                        rs,
+                        elements.at(i).recordId,
+                        elements.at(i).wallTime + Seconds(j));
+            // leave an entry before the mayTruncateUpTo point if the pin has no exact match
+            checkMarker(elements.at(i - 1).recordId,
+                        opCtx.get(),
+                        rs,
+                        pins.at(i),
+                        elements.at(i).wallTime + Seconds(j));
+        }
+    }
+    // corner cases not covered in the above for loops:
+    // no truncatable record if expiry time is older than oldest record
+    ASSERT_FALSE(CollectionTruncateMarkers::newestExpiredRecord(
+        opCtx.get(), rs, RecordId(), elements.at(0).wallTime - Seconds(1)));
+    // no truncatable record if oplog is all pinned
+    ASSERT_FALSE(CollectionTruncateMarkers::newestExpiredRecord(
+        opCtx.get(), rs, elements.at(0).recordId, wallTime + Seconds(25)));
+    // no truncatable record if all but one oplog entry is pinned, but not as an exact match
+    ASSERT_FALSE(CollectionTruncateMarkers::newestExpiredRecord(
+        opCtx.get(), rs, pins.at(0), wallTime + Seconds(25)));
+}
 }  // namespace mongo

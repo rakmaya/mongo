@@ -40,9 +40,6 @@
 #include "mongo/db/exec/classic/update_stage.h"
 #include "mongo/db/exec/classic/working_set.h"
 #include "mongo/db/exec/plan_stats.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
-#include "mongo/db/local_catalog/shard_role_catalog/shard_filtering_util.h"
 #include "mongo/db/query/compiler/physical_model/query_solution/stage_types.h"
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/query/find_common.h"
@@ -52,6 +49,8 @@
 #include "mongo/db/query/plan_yield_policy_impl.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/shard_catalog/shard_filtering_util.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/exceptions.h"
 #include "mongo/logv2/log.h"
 #include "mongo/platform/compiler.h"
@@ -66,7 +65,6 @@
 #include <utility>
 
 #include <boost/optional/optional.hpp>
-#include <boost/smart_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <fmt/format.h>
 
@@ -86,6 +84,8 @@ const OperationContext::Decoration<boost::optional<repl::OpTime>> clientsLastKno
 // namespace.
 MONGO_FAIL_POINT_DEFINE(planExecutorHangBeforeShouldWaitForInserts);
 
+MONGO_FAIL_POINT_DEFINE(planExecutorHangBeforeLogAndBackoff);
+
 PlanExecutorImpl::PlanExecutorImpl(OperationContext* opCtx,
                                    std::unique_ptr<WorkingSet> ws,
                                    std::unique_ptr<PlanStage> rt,
@@ -97,7 +97,7 @@ PlanExecutorImpl::PlanExecutorImpl(OperationContext* opCtx,
                                    NamespaceString nss,
                                    PlanYieldPolicy::YieldPolicy yieldPolicy,
                                    boost::optional<size_t> cachedPlanHash,
-                                   QueryPlanner::CostBasedRankerResult cbrResult,
+                                   QueryPlanner::PlanRankingResult planRankingResult,
                                    stage_builder::PlanStageToQsnMap planStageQsnMap,
                                    std::vector<std::unique_ptr<PlanStage>> cbrRejectedPlanStages)
     : _opCtx(opCtx),
@@ -108,7 +108,7 @@ PlanExecutorImpl::PlanExecutorImpl(OperationContext* opCtx,
       _root(std::move(rt)),
       _planExplainer(plan_explainer_factory::make(_root.get(),
                                                   cachedPlanHash,
-                                                  std::move(cbrResult),
+                                                  std::move(planRankingResult),
                                                   std::move(planStageQsnMap),
                                                   std::move(cbrRejectedPlanStages))),
       _mustReturnOwnedBson(returnOwnedBson),
@@ -118,13 +118,20 @@ PlanExecutorImpl::PlanExecutorImpl(OperationContext* opCtx,
 
     const bool collectionExists = collection.is_initialized() && collection->exists();
 
+    // Storing an acquisition that doesn't exists will cause the restore procedure to throw if the
+    // collection appears. There is no need to unnecessarily fail a query that is not planning to
+    // access the collection.
+    if (collectionExists) {
+        _collection = collection;
+    }
+
     // If we don't yet have a namespace string, then initialize it from either 'collection' or
     // '_cq'.
     if (_nss.isEmpty()) {
         if (collectionExists) {
             _nss = collection->nss();
         } else {
-            invariant(_cq);
+            tassert(11321318, "canonicalQuery must not be null", _cq);
             if (_cq->getFindCommandRequest().getNamespaceOrUUID().isNamespaceString()) {
                 _nss = _cq->getFindCommandRequest().getNamespaceOrUUID().nss();
             }
@@ -280,23 +287,36 @@ void hangBeforeShouldWaitForInsertsIfFailpointEnabled(PlanExecutorImpl* exec) {
         planExecutorHangBeforeShouldWaitForInserts.pauseWhileSet();
     }
 }
+}  // namespace
+
 
 /**
- * Helper function used to construct lambda passed into yielding logic.
+ *
  */
-void doYield(OperationContext* opCtx) {
+void PlanExecutorImpl::doWaitDuringYield() {
     // If we yielded because we encountered a sharding critical section, wait for the critical
     // section to end before continuing. By waiting for the critical section to be exited we avoid
     // busy spinning immediately and encountering the same critical section again. It is important
     // that this wait happens after having released the lock hierarchy -- otherwise deadlocks could
     // happen, or the very least, locks would be unnecessarily held while waiting.
-    const auto& shardingCriticalSection = planExecutorShardingState(opCtx).criticalSectionFuture;
+    const auto& shardingCriticalSection = planExecutorShardingState(_opCtx).criticalSectionFuture;
     if (shardingCriticalSection) {
-        refresh_util::waitForCriticalSectionToComplete(opCtx, *shardingCriticalSection).ignore();
-        planExecutorShardingState(opCtx).criticalSectionFuture.reset();
+        refresh_util::waitForCriticalSectionToComplete(_opCtx, *shardingCriticalSection).ignore();
+        planExecutorShardingState(_opCtx).criticalSectionFuture.reset();
+    }
+
+    if (_writeConflictsInARowToLog) {
+        if (MONGO_unlikely(planExecutorHangBeforeLogAndBackoff.shouldFail())) {
+            planExecutorHangBeforeLogAndBackoff.pauseWhileSet(_opCtx);
+        }
+        logAndRecordWriteConflictAndBackoff(_opCtx,
+                                            *_writeConflictsInARowToLog,
+                                            "plan execution",
+                                            ""_sd,
+                                            NamespaceStringOrUUID(_nss));
+        _writeConflictsInARowToLog = boost::none;
     }
 }
-}  // namespace
 
 /**
  * This function waits for all oplog entries before the read to become visible. This must be done
@@ -356,7 +376,8 @@ PlanExecutor::ExecState PlanExecutorImpl::_getNextImpl(Document* objOut, RecordI
     }
 
     if (!_stash.empty()) {
-        invariant(objOut && !dlOut);
+        tassert(11321319, "objOut must not be null", objOut);
+        tassert(11321320, "dlOut must be null", !dlOut);
         *objOut = std::move(_stash.front());
         _stash.pop_front();
         return PlanExecutor::ADVANCED;
@@ -372,20 +393,20 @@ PlanExecutor::ExecState PlanExecutorImpl::_getNextImpl(Document* objOut, RecordI
     // capped insert notifier is necessary for the notifierVersion to advance.
     auto notifier = makeNotifier();
 
+    // This callback is used by the yielding code once all storage resources are released.
+    const auto afterSnapshotAndLocksRelinquishedCb = [&]() {
+        doWaitDuringYield();
+    };
+
     for (;;) {
         // These are the conditions which can cause us to yield:
         //   1) The yield policy's timer elapsed, or
         //   2) some stage requested a yield, or
         //   3) we need to yield and retry due to a WriteConflictException.
         // In all cases, the actual yielding happens here.
-
-        const auto whileYieldingFn = [&]() {
-            doYield(_opCtx);
-        };
-
         if (_yieldPolicy->shouldYieldOrInterrupt(_opCtx)) {
             uassertStatusOK(_yieldPolicy->yieldOrInterrupt(_opCtx,
-                                                           whileYieldingFn,
+                                                           afterSnapshotAndLocksRelinquishedCb,
                                                            RestoreContext::RestoreType::kYield,
                                                            _afterSnapshotAbandonFn));
         }
@@ -471,7 +492,7 @@ BSONObj makeBsonWithMetadata(Document& doc, WorkingSetMember* member) {
 std::unique_ptr<insert_listener::Notifier> PlanExecutorImpl::makeNotifier() {
     if (insert_listener::shouldListenForInserts(_opCtx, _cq.get())) {
         // We always construct the insert_listener::Notifier for awaitData cursors.
-        return insert_listener::getCappedInsertNotifier(_opCtx, _nss, _yieldPolicy.get());
+        return insert_listener::getCappedInsertNotifier(_opCtx, _collection, _yieldPolicy.get());
     }
     return nullptr;
 }
@@ -509,18 +530,27 @@ void PlanExecutorImpl::_handleNeedYield(size_t& writeConflictsInARow,
         }
 
         writeConflictsInARow++;
-        logAndRecordWriteConflictAndBackoff(
-            _opCtx, writeConflictsInARow, "plan execution", ""_sd, NamespaceStringOrUUID(_nss));
+
+        // Set this member variable to indicate that when we yield, after resources are
+        // relinquished, we should log and backoff.
+        _writeConflictsInARowToLog = writeConflictsInARow;
     }
 
     // Yield next time through the loop.
-    invariant(_yieldPolicy->canAutoYield());
+    tassert(
+        11321321,
+        fmt::format(
+            "Invalid call to PlanExecutorImpl::_handleNeedYield() without auto-yielding policy {}",
+            PlanYieldPolicy::serializeYieldPolicy(_yieldPolicy->getPolicy())),
+        _yieldPolicy->canAutoYield());
     _yieldPolicy->forceYield();
 }
 
 bool PlanExecutorImpl::_handleEOFAndExit(PlanStage::StageState code,
                                          std::unique_ptr<insert_listener::Notifier>& notifier) {
-    invariant(PlanStage::IS_EOF == code);
+    tassert(11321322,
+            fmt::format("Expected code to be IS_EOF, but found {}", PlanStage::stateStr(code)),
+            PlanStage::IS_EOF == code);
     hangBeforeShouldWaitForInsertsIfFailpointEnabled(this);
 
     // The !notifier check is necessary because shouldWaitForInserts can return 'true' when
@@ -547,8 +577,8 @@ size_t PlanExecutorImpl::getNextBatch(size_t batchSize, AppendBSONObjFn append) 
     const bool includeMetadata = _expCtx && _expCtx->getNeedsMerge();
     const bool hasAppendFn = static_cast<bool>(append);
 
-    const auto whileYieldingFn = [opCtx = _opCtx]() {
-        return doYield(opCtx);
+    const auto whileYieldingFn = [this]() {
+        return doWaitDuringYield();
     };
     auto notifier = makeNotifier();
 
@@ -655,8 +685,12 @@ void PlanExecutorImpl::dispose(OperationContext* opCtx) {
 }
 
 long long PlanExecutorImpl::executeCount() {
-    invariant(_root->stageType() == StageType::STAGE_COUNT ||
-              _root->stageType() == StageType::STAGE_RECORD_STORE_FAST_COUNT);
+    tassert(
+        11321323,
+        fmt::format("Invalid call to PlanExecutorImpl::executeCount() on non-countlike stage {}",
+                    static_cast<int>(_root->stageType())),
+        _root->stageType() == StageType::STAGE_COUNT ||
+            _root->stageType() == StageType::STAGE_RECORD_STORE_FAST_COUNT);
 
     // Iterate until EOF, returning no data.
     int numResults = getNextBatch(std::numeric_limits<int64_t>::max(), nullptr);
@@ -784,7 +818,11 @@ BatchedDeleteStats PlanExecutorImpl::getBatchedDeleteStats() {
         return BatchedDeleteStats();
     }
 
-    invariant(_root->stageType() == StageType::STAGE_BATCHED_DELETE);
+    tassert(11321324,
+            fmt::format("Invalid call to PlanExecutorImpl::getBatchedDeleteStats() on an executor "
+                        "with the root stage {}",
+                        static_cast<int>(_root->stageType())),
+            _root->stageType() == StageType::STAGE_BATCHED_DELETE);
 
     // If the collection exists, we expect the root of the plan tree to be a batched delete stage.
     // Note: findAndModify is incompatible with the batched delete stage so no need to handle
@@ -826,14 +864,19 @@ PlanExecutor::LockPolicy PlanExecutorImpl::lockPolicy() const {
 }
 
 const PlanExplainer& PlanExecutorImpl::getPlanExplainer() const {
-    invariant(_planExplainer);
+    tassert(11321325,
+            "Invalid call PlanExecutorImpl::getPlanExplainer() with null _planExplainer",
+            _planExplainer);
     return *_planExplainer;
 }
 
 MultiPlanStage* PlanExecutorImpl::getMultiPlanStage() const {
-    PlanStage* ps = getStageByType(_root.get(), StageType::STAGE_MULTI_PLAN);
-    invariant(ps == nullptr || ps->stageType() == StageType::STAGE_MULTI_PLAN);
-    return static_cast<MultiPlanStage*>(ps);
+    if (PlanStage* ps = getStageByType(_root.get(), StageType::STAGE_MULTI_PLAN)) {
+        auto* mps = dynamic_cast<MultiPlanStage*>(ps);
+        tassert(11321326, "PlanStage* could not be converted to a MultiPlanStage*", mps);
+        return mps;
+    }
+    return nullptr;
 }
 
 }  // namespace mongo

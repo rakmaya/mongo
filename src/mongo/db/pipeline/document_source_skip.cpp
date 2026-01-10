@@ -53,10 +53,10 @@ DocumentSourceSkip::DocumentSourceSkip(const intrusive_ptr<ExpressionContext>& p
                                        long long nToSkip)
     : DocumentSource(kStageName, pExpCtx), _nToSkip(nToSkip) {}
 
-REGISTER_DOCUMENT_SOURCE(skip,
-                         LiteParsedDocumentSourceDefault::parse,
-                         DocumentSourceSkip::createFromBson,
-                         AllowedWithApiStrict::kAlways);
+REGISTER_LITE_PARSED_DOCUMENT_SOURCE(skip, SkipLiteParsed::parse, AllowedWithApiStrict::kAlways);
+
+REGISTER_DOCUMENT_SOURCE_WITH_STAGE_PARAMS_DEFAULT(skip, DocumentSourceSkip, SkipStageParams);
+
 ALLOCATE_DOCUMENT_SOURCE_ID(skip, DocumentSourceSkip::id)
 
 constexpr StringData DocumentSourceSkip::kStageName;
@@ -69,9 +69,9 @@ intrusive_ptr<DocumentSource> DocumentSourceSkip::optimize() {
     return _nToSkip == 0 ? nullptr : this;
 }
 
-DocumentSourceContainer::iterator DocumentSourceSkip::doOptimizeAt(
+DocumentSourceContainer::iterator DocumentSourceSkip::optimizeAt(
     DocumentSourceContainer::iterator itr, DocumentSourceContainer* container) {
-    invariant(*itr == this);
+    tassert(11282962, "Expecting DocumentSource iterator pointing to this stage", *itr == this);
 
     if (std::next(itr) == container->end()) {
         return container->end();

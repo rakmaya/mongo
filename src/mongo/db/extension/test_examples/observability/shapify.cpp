@@ -32,7 +32,7 @@
 #include "mongo/db/extension/sdk/aggregation_stage.h"
 #include "mongo/db/extension/sdk/extension_factory.h"
 #include "mongo/db/extension/sdk/query_shape_opts_handle.h"
-#include "mongo/db/extension/sdk/test_extension_util.h"
+#include "mongo/db/extension/sdk/tests/transform_test_stages.h"
 
 namespace sdk = mongo::extension::sdk;
 using namespace mongo;
@@ -48,59 +48,25 @@ using namespace mongo;
  * - Field names prefixed with "obj_" -> traverse sub object and serialize each field
  * - Default -> literal
  */
-static constexpr std::string kShapifyStageName = "$shapify";
-
-class ShapifyLogicalStage : public sdk::LogicalAggStage {
+class ShapifyParseNode
+    : public sdk::TestParseNode<sdk::shared_test_stages::TransformAggStageAstNode> {
 public:
-    ShapifyLogicalStage(BSONObj input) : _input(input) {}
+    ShapifyParseNode(const BSONObj& input) : ShapifyParseNode("$shapify", input) {}
 
-    BSONObj serialize() const override {
-        return BSON(kShapifyStageName << _input);
-    }
-
-    BSONObj explain(::MongoExtensionExplainVerbosity verbosity) const override {
-        return BSON(kShapifyStageName << _input);
-    }
-
-private:
-    BSONObj _input;
-};
-
-class ShapifyAstNode : public sdk::AggStageAstNode {
-public:
-    ShapifyAstNode(BSONObj input) : _input(input) {}
-
-    std::unique_ptr<sdk::LogicalAggStage> bind() const override {
-        return std::make_unique<ShapifyLogicalStage>(_input);
-    }
-
-private:
-    BSONObj _input;
-};
-
-class ShapifyParseNode : public sdk::AggStageParseNode {
-public:
-    ShapifyParseNode(BSONObj input) : sdk::AggStageParseNode(kShapifyStageName), _input(input) {}
-
-    size_t getExpandedSize() const override {
-        return 1;
-    }
-
-    std::vector<sdk::VariantNode> expand() const override {
-        std::vector<sdk::VariantNode> expanded;
-        expanded.reserve(getExpandedSize());
-        expanded.emplace_back(
-            new sdk::ExtensionAggStageAstNode(std::make_unique<ShapifyAstNode>(_input)));
-        return expanded;
-    }
+    ShapifyParseNode(std::string_view stageName, const BSONObj& input)
+        : sdk::TestParseNode<sdk::shared_test_stages::TransformAggStageAstNode>(stageName, input) {}
 
     BSONObj getQueryShape(const ::MongoExtensionHostQueryShapeOpts* ctx) const override {
         sdk::QueryShapeOptsHandle ctxHandle(ctx);
         BSONObjBuilder builder;
 
-        buildQueryShape(ctxHandle, _input, builder);
+        buildQueryShape(ctxHandle, _arguments, builder);
 
-        return BSON(kShapifyStageName << builder.obj());
+        return BSON(_name << builder.obj());
+    }
+
+    std::unique_ptr<sdk::AggStageParseNode> clone() const override {
+        return std::make_unique<ShapifyParseNode>(getName(), _arguments);
     }
 
 private:
@@ -110,54 +76,78 @@ private:
         for (const auto& elt : input) {
             const auto& fieldName = elt.fieldName();
             if (str::startsWith(fieldName, "obj_")) {
-                userAssert(11173600,
-                           (str::stream()
-                            << "obj field must be of type object, but found type " << elt.type()),
-                           elt.type() == BSONType::object);
+                sdk_uassert(11173600,
+                            (str::stream()
+                             << "obj field must be of type object, but found type " << elt.type()),
+                            elt.type() == BSONType::object);
 
                 BSONObjBuilder subobjBuilder = builder.subobjStart(fieldName);
                 buildQueryShape(ctxHandle, elt.Obj(), subobjBuilder);
             } else if (str::startsWith(fieldName, "path_")) {
-                userAssert(11173601,
-                           (str::stream()
-                            << "path field must be of type string, but found type " << elt.type()),
-                           elt.type() == BSONType::string);
+                sdk_uassert(11173601,
+                            (str::stream()
+                             << "path field must be of type string, but found type " << elt.type()),
+                            elt.type() == BSONType::string);
 
-                builder.append(fieldName, ctxHandle.serializeFieldPath(elt.String()));
+                builder.append(fieldName, ctxHandle->serializeFieldPath(elt.String()));
             } else if (str::startsWith(fieldName, "ident_")) {
-                userAssert(11173602,
-                           (str::stream()
-                            << "ident field must be of type string, but found type " << elt.type()),
-                           elt.type() == BSONType::string);
+                sdk_uassert(11173602,
+                            (str::stream() << "ident field must be of type string, but found type "
+                                           << elt.type()),
+                            elt.type() == BSONType::string);
 
-                builder.append(fieldName, ctxHandle.serializeIdentifier(elt.String()));
+                builder.append(fieldName, ctxHandle->serializeIdentifier(elt.String()));
             } else {
-                ctxHandle.appendLiteral(builder, fieldName, elt);
+                ctxHandle->appendLiteral(builder, fieldName, elt);
             }
         }
     }
-
-    BSONObj _input;
 };
 
-class ShapifyStageDescriptor : public sdk::AggStageDescriptor {
+/**
+ * Extension desugar stage with a non-default query shape implementation. Syntax:
+ *
+ * {$shapifyDesugar: {random object>}}
+ *
+ * ShapifyDesugar will expand into multiple $shapify stages for query shape testing purposes.
+ */
+class ShapifyDesugarParseNode
+    : public sdk::TestParseNode<sdk::shared_test_stages::TransformAggStageAstNode> {
 public:
-    static inline const std::string kStageName = "$shapify";
+    ShapifyDesugarParseNode(std::string_view stageName, const BSONObj& input)
+        : sdk::TestParseNode<sdk::shared_test_stages::TransformAggStageAstNode>(stageName, input) {}
 
-    ShapifyStageDescriptor()
-        : sdk::AggStageDescriptor(kStageName, MongoExtensionAggStageType::kNoOp) {}
+    size_t getExpandedSize() const override {
+        return 3;
+    }
 
-    std::unique_ptr<sdk::AggStageParseNode> parse(mongo::BSONObj stageBson) const override {
-        sdk::validateStageDefinition(stageBson, kStageName);
+    std::vector<mongo::extension::VariantNodeHandle> expand() const override {
+        std::vector<mongo::extension::VariantNodeHandle> expanded;
+        expanded.reserve(getExpandedSize());
+        BSONObj shapifySpec = BSON("int" << 1 << "ident_name" << "Alice");
+        expanded.emplace_back(
+            new sdk::ExtensionAggStageParseNode(std::make_unique<ShapifyParseNode>(shapifySpec)));
+        expanded.emplace_back(
+            new sdk::ExtensionAggStageParseNode(std::make_unique<ShapifyParseNode>(shapifySpec)));
+        expanded.emplace_back(
+            new sdk::ExtensionAggStageParseNode(std::make_unique<ShapifyParseNode>(shapifySpec)));
+        return expanded;
+    }
 
-        return std::make_unique<ShapifyParseNode>(stageBson[kStageName].Obj().getOwned());
+    std::unique_ptr<sdk::AggStageParseNode> clone() const override {
+        return std::make_unique<ShapifyDesugarParseNode>(getName(), _arguments);
     }
 };
+
+using ShapifyStageDescriptor = sdk::TestStageDescriptor<"$shapify", ShapifyParseNode>;
+using ShapifyDesugarStageDescriptor =
+    sdk::TestStageDescriptor<"$shapifyDesugar", ShapifyDesugarParseNode>;
 
 class ShapifyExtension : public sdk::Extension {
 public:
     void initialize(const sdk::HostPortalHandle& portal) override {
         _registerStage<ShapifyStageDescriptor>(portal);
+        _registerStage<ShapifyDesugarStageDescriptor>(portal);
     }
 };
 

@@ -37,6 +37,7 @@
 #include "mongo/db/pipeline/document_source_sort.h"
 #include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/expression_context.h"
+#include "mongo/util/modules.h"
 
 #include <vector>
 
@@ -46,11 +47,13 @@
 
 namespace mongo {
 
+DEFINE_LITE_PARSED_STAGE_DEFAULT_DERIVED(Group);
+
 /**
  * This class represents hash based group implementation that stores all groups until source is
  * depleted and only then starts outputing documents.
  */
-class DocumentSourceGroup final : public DocumentSourceGroupBase {
+class MONGO_MOD_NEEDS_REPLACEMENT DocumentSourceGroup final : public DocumentSourceGroupBase {
 public:
     static constexpr StringData kStageName = "$group"_sd;
 
@@ -84,8 +87,8 @@ public:
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
         boost::optional<int64_t> maxMemoryUsageBytes);
 
-    DocumentSourceContainer::iterator doOptimizeAt(DocumentSourceContainer::iterator itr,
-                                                   DocumentSourceContainer* container) override;
+    DocumentSourceContainer::iterator optimizeAt(DocumentSourceContainer::iterator itr,
+                                                 DocumentSourceContainer* container);
 
     // The $sort/$group with $first/$last is rewritten to use $top/$bottom in $group so that $sort
     // is absorbed into $group. Currently this rewrite is only invoked from time-series.

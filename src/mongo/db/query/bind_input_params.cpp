@@ -348,7 +348,7 @@ class MatchExpressionParameterBindingWalker {
 public:
     MatchExpressionParameterBindingWalker(MatchExpressionParameterBindingVisitor* visitor)
         : _visitor{visitor} {
-        invariant(_visitor);
+        tassert(11320900, "visitor must not be null", _visitor);
     }
 
     void preVisit(const MatchExpression* expr) {
@@ -476,12 +476,12 @@ public:
         }
 
         auto accessor = _data.env->getAccessor(it->second);
-        auto [type, value] = accessor->copyOrMoveValue();
-        const auto valueType = type;  // a workaround for a compiler bug
+        sbe::value::TagValueOwned val = accessor->copyOrMoveValue();
         tassert(8415201,
-                str::stream() << "Unexpected value type: " << valueType,
-                type == sbe::value::TypeTags::jsFunction);
-        expr->setPredicate(std::unique_ptr<JsFunction>(sbe::value::bitcastTo<JsFunction*>(value)));
+                str::stream() << "Unexpected value type: " << val.tag(),
+                val.tag() == sbe::value::TypeTags::jsFunction);
+        expr->setPredicate(std::unique_ptr<JsFunction>(
+            sbe::value::bitcastTo<JsFunction*>(val.releaseToRaw().second)));
     }
 
 private:
@@ -494,7 +494,7 @@ private:
 class WhereMatchExpressionWalker {
 public:
     explicit WhereMatchExpressionWalker(WhereMatchExpressionVisitor* visitor) : _visitor{visitor} {
-        invariant(_visitor);
+        tassert(11320901, "visitor must not be null", _visitor);
     }
 
     void preVisit(MatchExpression* expr) {

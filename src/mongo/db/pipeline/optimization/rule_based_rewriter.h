@@ -31,7 +31,6 @@
 
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/pipeline.h"
-#include "mongo/db/pipeline/visitors/document_source_visitor_registry.h"
 #include "mongo/db/query/compiler/rewrites/rule_based_rewriter.h"
 #include "mongo/util/modules.h"
 
@@ -47,17 +46,71 @@ namespace mongo::rule_based_rewrites::pipeline {
  *                OPTIMIZE_RULE(DocumentSourceMatch),
  *                {"SOME_OTHER_RULE", precondition, transform, 1.0});
  */
-#define REGISTER_RULES(DS, ...)                                                                  \
-    const ServiceContext::ConstructorActionRegisterer documentSourcePrereqsRegisterer_##DS{      \
-        "PipelineOptimizationContext" #DS, [](ServiceContext* service) {                         \
-            registration_detail::enforceUniqueRuleNames(service, {__VA_ARGS__});                 \
-            auto& registry = getDocumentSourceVisitorRegistry(service);                          \
-            registry.registerVisitorFunc<registration_detail::RuleRegisteringVisitorCtx, DS>(    \
-                [](DocumentSourceVisitorContextBase* ctx, const DocumentSource&) {               \
-                    static_cast<registration_detail::RuleRegisteringVisitorCtx*>(ctx)->addRules( \
-                        {__VA_ARGS__});                                                          \
-                });                                                                              \
-        }};
+#define REGISTER_RULES(DS, ...) REGISTER_RULES_WITH_FEATURE_FLAG(DS, nullptr, __VA_ARGS__)
+
+/**
+ * Macro for registering rules gated by a feature flag. Example usage:
+ *
+ * REGISTER_RULES_WITH_FEATURE_FLAG(DocumentSourceMatch,
+ *                                  featureFlagFoo,
+ *                                  OPTIMIZE_AT_RULE(DocumentSourceMatch),
+ *                                  OPTIMIZE_RULE(DocumentSourceMatch),
+ *                                  {"SOME_OTHER_RULE", precondition, transform, 1.0});
+ */
+#define REGISTER_RULES_WITH_FEATURE_FLAG(DS, featureFlag, ...)                    \
+    const ServiceContext::ConstructorActionRegisterer _REGISTERER_NAME_CAT(       \
+        documentSourcePrereqsRegisterer_##DS##_, __LINE__) {                      \
+        "PipelineOptimizationContext" #DS _REGISTERER_NAME_STR(__LINE__),         \
+            [](ServiceContext* serviceCtx) {                                      \
+                _REGISTER_RULES_HELPER(DS, serviceCtx, featureFlag, __VA_ARGS__); \
+            }                                                                     \
+    }
+
+#define _REGISTERER_NAME_CAT2(a, b) a##b
+#define _REGISTERER_NAME_CAT(a, b) _REGISTERER_NAME_CAT2(a, b)
+
+#define _REGISTERER_NAME_STR2(s) #s
+#define _REGISTERER_NAME_STR(s) _REGISTERER_NAME_STR2(s)
+
+#define _REGISTER_RULES_HELPER(DS, serviceCtx, featureFlag, ...)                         \
+    namespace rbr = rule_based_rewrites::pipeline;                                       \
+    /* Require 'featureFlag' to be a constexpr. */                                       \
+    constexpr FeatureFlag* constFeatureFlag{featureFlag};                                \
+    /* This non-constexpr variable works around a bug in GCC when 'featureFlag' is null. \
+     */                                                                                  \
+    FeatureFlag* featureFlagValue{constFeatureFlag};                                     \
+    rbr::registration_detail::registerRules<DS>(serviceCtx, {__VA_ARGS__}, featureFlagValue);
+
+/**
+ * Helper for defining a rule that calls optimizeAt() for a given document source.
+ */
+#define OPTIMIZE_AT_RULE(DS)                                   \
+    {                                                          \
+        .name = "OPTIMIZE_AT_" #DS,                            \
+        .precondition = rbr::alwaysTrue,                       \
+        .transform = rbr::Transforms::optimizeAtWrapper<DS>,   \
+        .priority = rbr::kDefaultOptimizeAtPriority,           \
+        .tags = rbr::PipelineRewriteContext::Tags::Reordering, \
+    }
+
+/**
+ * Helper for defining a rule that calls optimize() for a given document source.
+ */
+#define OPTIMIZE_IN_PLACE_RULE(DS)                          \
+    {                                                       \
+        .name = "OPTIMIZE_IN_PLACE_" #DS,                   \
+        .precondition = rbr::alwaysTrue,                    \
+        .transform = rbr::Transforms::optimizeWrapper<DS>,  \
+        .priority = rbr::kDefaultOptimizeInPlacePriority,   \
+        .tags = rbr::PipelineRewriteContext::Tags::InPlace, \
+    }
+
+// For high priority rules that e.g. attempt to push a $match as early as possible.
+constexpr double kDefaultPushdownPriority = 100.0;
+// For rules that e.g. attempt to swap with or absorb an adjacent stage.
+constexpr double kDefaultOptimizeAtPriority = 10.0;
+// For rules that optimize a stage in place.
+constexpr double kDefaultOptimizeInPlacePriority = 1.0;
 
 /**
  * Provides methods for walking and modifying a pipeline. Treats the pipeline as a linked list. Uses
@@ -65,13 +118,21 @@ namespace mongo::rule_based_rewrites::pipeline {
  */
 class PipelineRewriteContext : public RewriteContext<PipelineRewriteContext, DocumentSource> {
 public:
+    enum Tags : TagSet {
+        None = 0,
+        // Rules that optimize the internals of a stage in place but never touch adjacent stages.
+        InPlace = 1 << 0,
+        // Rules that may e.g. reorder, combine or remove stages.
+        Reordering = 1 << 1,
+    };
+
     PipelineRewriteContext(Pipeline& pipeline)
-        : _container(pipeline.getSources()),
-          _itr(_container.begin()),
-          _oldItr(_itr),
-          _oldDocSource(_itr->get()),
-          _registry(getDocumentSourceVisitorRegistry(
-              pipeline.getContext()->getOperationContext()->getServiceContext())) {}
+        : PipelineRewriteContext(*pipeline.getContext(), pipeline.getSources()) {}
+
+    PipelineRewriteContext(ExpressionContext& expCtx,
+                           DocumentSourceContainer& container,
+                           boost::optional<DocumentSourceContainer::iterator> startingPos = {})
+        : _container(container), _itr(startingPos.value_or(_container.begin())), _expCtx(expCtx) {}
 
     bool hasMore() const final {
         return _itr != _container.end();
@@ -86,14 +147,6 @@ public:
 
     void advance() final;
     void enqueueRules() final;
-
-    /**
-     * Returns true if the current stage has changed position or been replaced by another stage.
-     * Used to decide if previously applied rules could be reapplied.
-     */
-    bool didChangePosition() const {
-        return !hasMore() || _itr != _oldItr || _oldDocSource != _itr->get();
-    }
 
     template <size_t N>
     bool hasAtLeastNPrevStages() const {
@@ -133,12 +186,10 @@ public:
 private:
     DocumentSourceContainer& _container;
     DocumentSourceContainer::iterator _itr;
-    DocumentSourceContainer::iterator _oldItr;
-    DocumentSource* _oldDocSource;
 
-    const DocumentSourceVisitorRegistry& _registry;
+    ExpressionContext& _expCtx;
 
-    friend struct CommonTransforms;
+    friend struct Transforms;
 };
 
 using PipelineRewriteRule = Rule<PipelineRewriteContext>;
@@ -148,13 +199,21 @@ using PipelineRewriteEngine = RewriteEngine<PipelineRewriteContext>;
  * Provides a set of common transformations that can be used either directly as transforms or inside
  * transforms to manipulate the pipeline.
  */
-struct CommonTransforms {
+struct Transforms {
     static bool swapStageWithPrev(PipelineRewriteContext& ctx);
     static bool swapStageWithNext(PipelineRewriteContext& ctx);
     static bool insertBefore(PipelineRewriteContext& ctx, DocumentSource& d);
     static bool insertAfter(PipelineRewriteContext& ctx, DocumentSource& d);
-    static bool erase(PipelineRewriteContext& ctx);
+    static bool eraseCurrent(PipelineRewriteContext& ctx);
     static bool eraseNext(PipelineRewriteContext& ctx);
+
+    /**
+     * Pushes 'pushdownPart' before the previous stage. Assumes that 'ctx.current()' is the match
+     * we're pushing down.
+     */
+    static bool partialPushdown(PipelineRewriteContext& ctx,
+                                boost::intrusive_ptr<DocumentSource> pushdownPart,
+                                boost::intrusive_ptr<DocumentSource> remainingPart);
     /**
      * Convenience for "sentinel" rules that detect conditions and queue other rules, but may not
      * result in other transformations.
@@ -162,41 +221,77 @@ struct CommonTransforms {
     static inline bool noop(PipelineRewriteContext&) {
         return false;
     }
+
+    template <typename DS>
+    static bool optimizeWrapper(PipelineRewriteContext& ctx) {
+        if (auto result = ctx.currentAs<DS>().optimize()) {
+            *ctx._itr = std::move(result);
+            return false;
+        }
+
+        // If the current stage optimized to null, remove it and move on to the next one. Note that
+        // we can advance here only because we know that in-place optimizations are the last rules
+        // to be applied. If that changes in the future, we must not advance here. The advantage of
+        // advancing is that we don't end up redundantly re-attempting rules that have already been
+        // applied to the previous stage.
+        eraseCurrent(ctx);
+        if (ctx.hasMore()) {
+            ctx.advance();
+        }
+        return true;
+    }
+
+    template <typename DS>
+    static bool optimizeAtWrapper(PipelineRewriteContext& ctx) {
+        const auto getAdjacentStages = [&](DocumentSourceContainer::iterator itr) {
+            auto prev = itr == ctx._container.begin() ? nullptr : *std::prev(itr);
+            auto curr = itr == ctx._container.end() ? nullptr : *itr;
+            auto next = !curr || std::next(itr) == ctx._container.end() ? nullptr : *std::next(itr);
+            return std::make_tuple(std::move(prev), std::move(curr), std::move(next));
+        };
+
+        auto stagesBefore = getAdjacentStages(ctx._itr);
+        auto resultItr = ctx.currentAs<DS>().optimizeAt(ctx._itr, &ctx._container);
+        // If nothing changed, resultItr points to the next position.
+        auto stagesAfter = getAdjacentStages(
+            resultItr == ctx._container.begin() ? resultItr : std::prev(resultItr));
+
+        // Try to detect if optimizeAt() did anything. Normally, std::next() indicates that no
+        // optimizations were performed. However, it's also possible that the current (or some
+        // other) stage was completely erased, which means comparisons involving the erased
+        // iterators would be undefined behavior.
+        if (stagesBefore == stagesAfter &&
+            (resultItr == ctx._container.end() || resultItr == std::next(ctx._itr))) {
+            // We know that optimizeAt() didn't do anything. Current position may still have been
+            // erased (and re-inserted) by optimizeAt(), so we need to re-set it just in case.
+            ctx._itr = std::prev(resultItr);
+            return false;
+        }
+
+        ctx._itr = resultItr;
+        return true;
+    }
 };
 
 inline bool alwaysTrue(PipelineRewriteContext&) {
     return true;
 }
 
-// TODO(SERVER-110107): Remove maybe_unused once these have real usages.
-[[maybe_unused]] static auto swapStageWithPrev = CommonTransforms::swapStageWithPrev;
-[[maybe_unused]] static auto swapStageWithNext = CommonTransforms::swapStageWithNext;
-[[maybe_unused]] static auto insertBefore = CommonTransforms::insertBefore;
-[[maybe_unused]] static auto insertAfter = CommonTransforms::insertAfter;
-[[maybe_unused]] static auto erase = CommonTransforms::erase;
-[[maybe_unused]] static auto eraseNext = CommonTransforms::eraseNext;
-[[maybe_unused]] static auto noop = CommonTransforms::noop;
-
 namespace registration_detail {
-/**
- * Helper for queueing rules using the document source visitor registry.
- */
-class RuleRegisteringVisitorCtx : public DocumentSourceVisitorContextBase {
-public:
-    RuleRegisteringVisitorCtx(PipelineRewriteContext& ctx) : _ctx(ctx) {}
 
-    void addRules(std::vector<Rule<PipelineRewriteContext>> rules) {
-        _ctx.addRules(std::move(rules));
-    }
+void registerRules(ServiceContext* serviceCtx,
+                   std::type_index key,
+                   std::vector<Rule<PipelineRewriteContext>> rules,
+                   FeatureFlag* featureFlag = nullptr);
 
-private:
-    PipelineRewriteContext& _ctx;
-};
+template <std::derived_from<DocumentSource> DS>
+void registerRules(ServiceContext* serviceCtx,
+                   std::vector<Rule<PipelineRewriteContext>> rules,
+                   FeatureFlag* featureFlag = nullptr) {
+    registerRules(serviceCtx, typeid(DS), std::move(rules), featureFlag);
+}
 
-/**
- * Enforces that pipeline rewrite rule names registered under the same service context are unique.
- */
-void enforceUniqueRuleNames(ServiceContext* service,
-                            std::vector<Rule<PipelineRewriteContext>> rules);
+void clearRulesForTest(ServiceContext* serviceCtx);
+
 }  // namespace registration_detail
 }  // namespace mongo::rule_based_rewrites::pipeline

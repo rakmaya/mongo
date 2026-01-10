@@ -34,7 +34,6 @@
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonelement_comparator.h"
-#include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_session.h"
@@ -49,23 +48,6 @@
 #include "mongo/db/database_name.h"
 #include "mongo/db/error_labels.h"
 #include "mongo/db/feature_flag.h"
-#include "mongo/db/global_catalog/type_collection_common_types_gen.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/clustered_collection_options_gen.h"
-#include "mongo/db/local_catalog/clustered_collection_util.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_catalog.h"
-#include "mongo/db/local_catalog/collection_options.h"
-#include "mongo/db/local_catalog/collection_uuid_mismatch.h"
-#include "mongo/db/local_catalog/database.h"
-#include "mongo/db/local_catalog/database_holder.h"
-#include "mongo/db/local_catalog/document_validation.h"
-#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
-#include "mongo/db/local_catalog/lock_manager/exception_util.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
-#include "mongo/db/local_catalog/shard_role_catalog/operation_sharding_state.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/matcher/expression_leaf.h"
 #include "mongo/db/not_primary_error_tracker.h"
@@ -75,6 +57,7 @@
 #include "mongo/db/profile_collection.h"
 #include "mongo/db/profile_settings.h"
 #include "mongo/db/query/canonical_query.h"
+#include "mongo/db/query/client_cursor/collect_query_stats_mongod.h"
 #include "mongo/db/query/collection_index_usage_tracker_decoration.h"
 #include "mongo/db/query/explain.h"
 #include "mongo/db/query/explain_diagnostic_printer.h"
@@ -85,11 +68,13 @@
 #include "mongo/db/query/plan_summary_stats.h"
 #include "mongo/db/query/plan_yield_policy.h"
 #include "mongo/db/query/query_shape/query_shape.h"
+#include "mongo/db/query/query_shape/query_shape_hash.h"
 #include "mongo/db/query/query_shape/shape_helpers.h"
 #include "mongo/db/query/query_shape/update_cmd_shape.h"
 #include "mongo/db/query/query_stats/query_stats.h"
 #include "mongo/db/query/query_stats/update_key.h"
 #include "mongo/db/query/shard_key_diagnostic_printer.h"
+#include "mongo/db/query/write_ops/canonical_update.h"
 #include "mongo/db/query/write_ops/delete_request_gen.h"
 #include "mongo/db/query/write_ops/insert.h"
 #include "mongo/db/query/write_ops/parsed_delete.h"
@@ -99,12 +84,25 @@
 #include "mongo/db/query/write_ops/write_ops.h"
 #include "mongo/db/query/write_ops/write_ops_gen.h"
 #include "mongo/db/query/write_ops/write_ops_retryability.h"
-#include "mongo/db/raw_data_operation.h"
-#include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/s/query_analysis_writer.h"
-#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
+#include "mongo/db/shard_role/lock_manager/d_concurrency.h"
+#include "mongo/db/shard_role/lock_manager/exception_util.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/clustered_collection_util.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/collection_options.h"
+#include "mongo/db/shard_role/shard_catalog/collection_uuid_mismatch.h"
+#include "mongo/db/shard_role/shard_catalog/database.h"
+#include "mongo/db/shard_role/shard_catalog/database_holder.h"
+#include "mongo/db/shard_role/shard_catalog/document_validation.h"
+#include "mongo/db/shard_role/shard_catalog/operation_sharding_state.h"
+#include "mongo/db/shard_role/shard_catalog/raw_data_operation.h"
+#include "mongo/db/shard_role/shard_role.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/sharding_environment/sharding_feature_flags_gen.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/stats/server_write_concern_metrics.h"
@@ -115,9 +113,8 @@
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/timeseries/bucket_catalog/bucket_catalog.h"
 #include "mongo/db/timeseries/bucket_catalog/global_bucket_catalog.h"
-#include "mongo/db/timeseries/bucket_compression_failure.h"
+#include "mongo/db/timeseries/bucket_compression_failure.h"  // IWYU pragma: keep
 #include "mongo/db/timeseries/collection_pre_conditions_util.h"
-#include "mongo/db/timeseries/timeseries_request_util.h"
 #include "mongo/db/timeseries/timeseries_write_util.h"
 #include "mongo/db/timeseries/write_ops/timeseries_write_ops_utils.h"
 #include "mongo/db/transaction/retryable_writes_stats.h"
@@ -160,7 +157,6 @@
 #include <boost/cstdint.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/smart_ptr.hpp>
 #include <fmt/format.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kWrite
@@ -231,7 +227,7 @@ void finishCurOp(OperationContext* opCtx, CurOp* curOp) {
     try {
         curOp->done();
         auto executionTimeMicros = curOp->elapsedTimeExcludingPauses();
-        curOp->debug().additiveMetrics.executionTime = executionTimeMicros;
+        curOp->debug().getAdditiveMetrics().executionTime = executionTimeMicros;
 
         recordCurOpMetrics(opCtx);
         Top::getDecoration(opCtx).record(opCtx,
@@ -466,7 +462,9 @@ bool handleError(OperationContext* opCtx,
             // shard owning the post-image doc. As a result, this update will not show up in the
             // OpObserver as an update.
             auto wouldChangeOwningShardInfo = ex.extraInfo<WouldChangeOwningShardInfo>();
-            invariant(wouldChangeOwningShardInfo);
+            tassert(11052012,
+                    "Expected extraInfo of type WouldChangeOwningShardInfo",
+                    wouldChangeOwningShardInfo);
 
             analyze_shard_key::QueryAnalysisWriter::get(opCtx)
                 ->addDiff(*sampleId,
@@ -569,13 +567,11 @@ bool insertBatchAndHandleErrors(OperationContext* opCtx,
     boost::optional<CollectionAcquisition> collection;
     auto acquireCollection = [&] {
         while (true) {
-            collection.emplace(mongo::acquireCollection(
+            collection.emplace(preConditions.acquireCollectionAndCheck(
                 opCtx,
                 CollectionAcquisitionRequest::fromOpCtx(
-                    opCtx, nss, AcquisitionPrerequisites::kWrite, preConditions.expectedUUID()),
+                    opCtx, nss, AcquisitionPrerequisites::OperationType::kWrite),
                 fixLockModeForSystemDotViewsChanges(nss, MODE_IX)));
-            timeseries::CollectionPreConditions::checkAcquisitionAgainstPreConditions(
-                opCtx, preConditions, *collection);
             if (collection->exists()) {
                 break;
             }
@@ -596,7 +592,7 @@ bool insertBatchAndHandleErrors(OperationContext* opCtx,
 
         curOp.raiseDbProfileLevel(DatabaseProfileSettings::get(opCtx->getServiceContext())
                                       .getDatabaseProfileLevel(nss.dbName()));
-        assertCanWrite_inlock(opCtx, nss);
+        assertCanWrite_inlock(opCtx, collection->nss());
 
         CurOpFailpointHelpers::waitWhileFailPointEnabled(
             &hangWithLockDuringBatchInsert, opCtx, "hangWithLockDuringBatchInsert");
@@ -626,15 +622,6 @@ bool insertBatchAndHandleErrors(OperationContext* opCtx,
         if (ex.code() == ErrorCodes::Unauthorized) {
             throw;
         }
-        // In a time-series context, this particular CollectionUUIDMismatch is re-thrown differently
-        // because there is already a check for this error higher up, which means this error must
-        // come from the guards installed to enforce that time-series operations are prepared
-        // and committed on the same collection.
-        if (ex.code() == ErrorCodes::CollectionUUIDMismatch &&
-            source == OperationSource::kTimeseriesInsert) {
-            uasserted(9748801, "Collection was changed during insert");
-        }
-
         // We want to fail a write in the scenario where:
         // 1) a collection with the ns that we are inserting to doesn't exist, so we choose to
         // insert into it as normal collection and create it implicitly
@@ -685,7 +672,7 @@ bool insertBatchAndHandleErrors(OperationContext* opCtx,
                 if (source != OperationSource::kTimeseriesInsert) {
                     ServerWriteConcernMetrics::get(opCtx)->recordWriteConcernForInserts(
                         opCtx->getWriteConcern(), batch.size());
-                    curOp.debug().additiveMetrics.incrementNinserted(batch.size());
+                    curOp.debug().getAdditiveMetrics().incrementNinserted(batch.size());
                 }
                 return true;
             }
@@ -720,7 +707,7 @@ bool insertBatchAndHandleErrors(OperationContext* opCtx,
                     result.setN(1);
                     out->results.emplace_back(std::move(result));
                     if (source != OperationSource::kTimeseriesInsert) {
-                        curOp.debug().additiveMetrics.incrementNinserted(1);
+                        curOp.debug().getAdditiveMetrics().incrementNinserted(1);
                     }
                 } catch (...) {
                     // Release the lock following any error if we are not in multi-statement
@@ -752,13 +739,10 @@ UpdateResult performUpdate(OperationContext* opCtx,
                            bool inTransaction,
                            bool remove,
                            bool upsert,
-                           const boost::optional<mongo::UUID>& collectionUUID,
                            boost::optional<BSONObj>& docFound,
                            UpdateRequest* updateRequest,
                            const timeseries::CollectionPreConditions& preConditions,
                            bool isTimeseriesLogicalRequest) {
-    auto nsString = preConditions.getTargetNs(nss);
-
     // TODO SERVER-76583: Remove this check.
     uassert(7314600,
             "Retryable findAndModify on a timeseries is not supported",
@@ -778,13 +762,12 @@ UpdateResult performUpdate(OperationContext* opCtx,
         nss);
 
 
-    auto collection =
-        acquireCollection(opCtx,
-                          CollectionAcquisitionRequest::fromOpCtx(
-                              opCtx, nsString, AcquisitionPrerequisites::kWrite, collectionUUID),
-                          MODE_IX);
-    timeseries::CollectionPreConditions::checkAcquisitionAgainstPreConditions(
-        opCtx, preConditions, collection);
+    auto collection = preConditions.acquireCollectionAndCheck(
+        opCtx,
+        CollectionAcquisitionRequest::fromOpCtx(opCtx, nss, AcquisitionPrerequisites::kWrite),
+        MODE_IX);
+
+    auto nsString = collection.nss();
     auto dbName = nsString.dbName();
     Database* db = [&]() {
         AutoGetDb autoDb(opCtx, dbName, MODE_IX);
@@ -800,7 +783,9 @@ UpdateResult performUpdate(OperationContext* opCtx,
                 ? collection.getShardingDescription().getKeyPattern()
                 : BSONObj()});
 
-    invariant(DatabaseHolder::get(opCtx)->getDb(opCtx, dbName));
+    tassert(11052013,
+            fmt::format("Expected database {} to exist", dbName.toStringForErrorMsg()),
+            DatabaseHolder::get(opCtx)->getDb(opCtx, dbName));
     curOp->raiseDbProfileLevel(
         DatabaseProfileSettings::get(opCtx->getServiceContext()).getDatabaseProfileLevel(dbName));
 
@@ -846,17 +831,34 @@ UpdateResult performUpdate(OperationContext* opCtx,
                                                              updateRequest);
     }
 
-    ParsedUpdate parsedUpdate(opCtx,
-                              updateRequest,
-                              collection.getCollectionPtr(),
-                              false /*forgoOpCounterIncrements*/,
-                              isTimeseriesLogicalRequest);
-    uassertStatusOK(parsedUpdate.parseRequest());
+    auto [collatorToUse, expCtxCollationMatchesDefault] =
+        resolveCollator(opCtx, updateRequest->getCollation(), collection.getCollectionPtr());
+
+    auto expCtx =
+        ExpressionContextBuilder{}
+            .fromRequest(opCtx, *updateRequest)
+            .collator(std::move(collatorToUse))
+            .collationMatchesDefault(expCtxCollationMatchesDefault)
+            .requiresTimeseriesExtendedRangeSupport(
+                isTimeseriesLogicalRequest && collection.getCollectionPtr() &&
+                collection.getCollectionPtr()->getRequiresTimeseriesExtendedRangeSupport())
+            .build();
+
+    auto parsedUpdate = uassertStatusOK(parsed_update_command::parse(
+        expCtx,
+        updateRequest,
+        makeExtensionsCallback<ExtensionsCallbackReal>(opCtx, &updateRequest->getNsString())));
+
+    auto canonicalUpdate = uassertStatusOK(CanonicalUpdate::make(expCtx,
+                                                                 std::move(parsedUpdate),
+                                                                 collection.getCollectionPtr(),
+                                                                 isTimeseriesLogicalRequest));
 
     // Create an RAII object that prints useful information about the ExpressionContext in the case
     // of a tassert or crash.
     ScopedDebugInfo expCtxDiagnostics(
-        "ExpCtxDiagnostics", diagnostic_printers::ExpressionContextPrinter{parsedUpdate.expCtx()});
+        "ExpCtxDiagnostics",
+        diagnostic_printers::ExpressionContextPrinter{canonicalUpdate->expCtx()});
 
     if (auto scoped = failAllUpdates.scoped(); MONGO_unlikely(scoped.isActive())) {
         tassert(9276701,
@@ -866,7 +868,7 @@ UpdateResult performUpdate(OperationContext* opCtx,
     }
 
     const auto exec = uassertStatusOK(
-        getExecutorUpdate(&curOp->debug(), collection, &parsedUpdate, boost::none /* verbosity
+        getExecutorUpdate(&curOp->debug(), collection, canonicalUpdate.get(), boost::none /* verbosity
         */));
     // Capture diagnostics to be logged in the case of a failure.
     ScopedDebugInfo explainDiagnostics("explainDiagnostics",
@@ -879,7 +881,7 @@ UpdateResult performUpdate(OperationContext* opCtx,
 
     if (updateRequest->shouldReturnAnyDocs()) {
         docFound = exec->executeFindAndModify();
-        curOp->debug().additiveMetrics.nreturned = docFound ? 1 : 0;
+        curOp->debug().getAdditiveMetrics().nreturned = docFound ? 1 : 0;
     } else {
         // The 'UpdateResult' object will be obtained later, so discard the return value.
         (void)exec->executeUpdate();
@@ -925,12 +927,9 @@ long long performDelete(OperationContext* opCtx,
                         DeleteRequest* deleteRequest,
                         CurOp* curOp,
                         bool inTransaction,
-                        const boost::optional<mongo::UUID>& collectionUUID,
                         boost::optional<BSONObj>& docFound,
                         const timeseries::CollectionPreConditions& preConditions,
                         bool isTimeseriesLogicalRequest) {
-    auto nsString = preConditions.getTargetNs(nss);
-
     // TODO SERVER-76583: Remove this check.
     uassert(7308305,
             "Retryable findAndModify on a timeseries is not supported",
@@ -944,13 +943,14 @@ long long performDelete(OperationContext* opCtx,
                   "point is disabled");
         });
 
-    const auto collection =
-        acquireCollection(opCtx,
-                          CollectionAcquisitionRequest::fromOpCtx(
-                              opCtx, nsString, AcquisitionPrerequisites::kWrite, collectionUUID),
-                          MODE_IX);
-    timeseries::CollectionPreConditions::checkAcquisitionAgainstPreConditions(
-        opCtx, preConditions, collection);
+    const auto collection = preConditions.acquireCollectionAndCheck(
+        opCtx,
+        CollectionAcquisitionRequest::fromOpCtx(
+            opCtx, nss, AcquisitionPrerequisites::OperationType::kWrite),
+        MODE_IX);
+
+    auto nsString = collection.nss();
+
     // Create an RAII object that prints the collection's shard key in the case of a tassert
     // or crash.
     ScopedDebugInfo shardKeyDiagnostics(
@@ -1013,7 +1013,7 @@ long long performDelete(OperationContext* opCtx,
 
     if (deleteRequest->getReturnDeleted()) {
         docFound = exec->executeFindAndModify();
-        curOp->debug().additiveMetrics.nreturned = docFound ? 1 : 0;
+        curOp->debug().getAdditiveMetrics().nreturned = docFound ? 1 : 0;
     } else {
         // The number of deleted documents will be obtained from the plan executor later, so discard
         // the return value.
@@ -1036,7 +1036,7 @@ long long performDelete(OperationContext* opCtx,
 
     // Fill out OpDebug with the number of deleted docs.
     auto nDeleted = exec->getDeleteResult();
-    curOp->debug().additiveMetrics.ndeleted = nDeleted;
+    curOp->debug().getAdditiveMetrics().ndeleted = nDeleted;
 
     if (curOp->shouldDBProfile()) {
         auto&& explainer = exec->getPlanExplainer();
@@ -1210,7 +1210,7 @@ WriteResult performInserts(
         curOp.setLogicalOp(lk, LogicalOp::opInsert);
         curOp.ensureStarted();
         // Initialize 'ninserted' for the operation if is not yet.
-        curOp.debug().additiveMetrics.incrementNinserted(0);
+        curOp.debug().getAdditiveMetrics().incrementNinserted(0);
     }
 
     uassertStatusOK(userAllowedWriteNS(opCtx, actualNs));
@@ -1329,7 +1329,7 @@ WriteResult performInserts(
             out.results.emplace_back(makeWriteResultForInsertOrDeleteRetry());
         }
     }
-    invariant(batch.empty());
+    tassert(11052014, "Expected empty batch", batch.empty());
 
     return out;
 }
@@ -1341,10 +1341,10 @@ static SingleWriteResult performSingleUpdateOpNoRetry(OperationContext* opCtx,
                                                       OperationSource source,
                                                       CurOp& curOp,
                                                       CollectionAcquisition collection,
-                                                      ParsedUpdate& parsedUpdate,
+                                                      CanonicalUpdate& canonicalUpdate,
                                                       bool* containsDotsAndDollarsField) {
-    auto exec = uassertStatusOK(
-        getExecutorUpdate(&curOp.debug(), collection, &parsedUpdate, boost::none /* verbosity */));
+    auto exec = uassertStatusOK(getExecutorUpdate(
+        &curOp.debug(), collection, &canonicalUpdate, boost::none /* verbosity */));
     // Capture diagnostics to be logged in the case of a failure.
     ScopedDebugInfo explainDiagnostics("explainDiagnostics",
                                        diagnostic_printers::ExplainDiagnosticPrinter{exec.get()});
@@ -1391,10 +1391,20 @@ static SingleWriteResult performSingleUpdateOpNoRetry(OperationContext* opCtx,
         *containsDotsAndDollarsField = true;
     }
 
+    // Collect query stats for the update operation if a QueryStats key was generated during
+    // registration. This ensures that we minimize the overhead of query stats collection for
+    // updates even if it does not have query stats enabled.
+    auto key = std::move(curOp.debug().getQueryStatsInfo().key);
+    if (key) {
+        curOp.setEndOfOpMetrics(0 /* no documents returned */);
+        collectQueryStatsMongod(opCtx, canonicalUpdate.expCtx(), std::move(key));
+    }
+
     return result;
 }
 
 void registerRequestForQueryStats(OperationContext* opCtx,
+                                  const boost::intrusive_ptr<ExpressionContext>& expCtx,
                                   const NamespaceString& ns,
                                   const CollectionAcquisition& collection,
                                   const write_ops::UpdateCommandRequest& wholeOp,
@@ -1406,13 +1416,6 @@ void registerRequestForQueryStats(OperationContext* opCtx,
         return;
     }
 
-    // TODO(SERVER-111930): Support recording query stats for updates with simple ID query
-    // Skip if the parse query is unavailable. This could happen if the query is a simple Id query:
-    // an exact-match query on _id.
-    if (!parsedUpdate.hasParsedQuery()) {
-        return;
-    }
-
     // Skip registering the request with encrypted fields as indicated by the inclusion of
     // encryptionInformation. It is important to do this before canonicalizing and optimizing the
     // query, each of which would alter the query shape.
@@ -1420,39 +1423,57 @@ void registerRequestForQueryStats(OperationContext* opCtx,
         return;
     }
 
-    // Skip unsupported update types.
-    // TODO(SERVER-110343) and TODO(SERVER-110344) Support pipeline and modifier updates.
-    if (parsedUpdate.getRequest()->getUpdateModification().type() !=
-        write_ops::UpdateModification::Type::kReplacement) {
-        return;
+    // Skip unsupported update types, such as delta and transform.
+    auto modType = parsedUpdate.getRequest()->getUpdateModification().type();
+    switch (modType) {
+        case write_ops::UpdateModification::Type::kReplacement:
+        case write_ops::UpdateModification::Type::kModifier:
+        case write_ops::UpdateModification::Type::kPipeline:
+            break;
+        default:
+            return;
+    }
+
+    // TODO(SERVER-113688): Support recording query stats for pipeline updates containing
+    // $_internalApplyOplogUpdate.
+    if (modType == write_ops::UpdateModification::Type::kPipeline) {
+        if (parsedUpdate.getDriver()
+                ->getUpdateExecutor()
+                ->getCheckExistenceForDiffInsertOperations()) {
+            return;
+        }
     }
 
     // Compute QueryShapeHash and record it in CurOp.
     query_shape::DeferredQueryShape deferredShape{[&]() {
         return shape_helpers::tryMakeShape<query_shape::UpdateCmdShape>(
-            wholeOp, parsedUpdate, parsedUpdate.expCtx());
+            wholeOp, parsedUpdate, expCtx);
     }};
 
     // QueryShapeHash(QSH) will be recorded in CurOp, but it is not being used for anything else
     // downstream yet until we support updates in PQS. Using std::ignore to indicate that discarding
     // the returned QSH is intended.
-    std::ignore = CurOp::get(opCtx)->debug().ensureQueryShapeHash(opCtx, [&]() {
-        return shape_helpers::computeQueryShapeHash(
-            parsedUpdate.expCtx(), deferredShape, wholeOp.getNamespace());
-    });
+    std::ignore = CurOp::get(opCtx)->debug().ensureQueryShapeHash(
+        opCtx, [&]() -> boost::optional<query_shape::QueryShapeHash> {
+            // TODO(SERVER-102484): Provide fast path QueryShape and QueryShapeHash computation for
+            // Express queries.
+            if (!parsedUpdate.hasParsedFindCommand()) {
+                return boost::none;
+            }
+            return shape_helpers::computeQueryShapeHash(
+                expCtx, deferredShape, wholeOp.getNamespace());
+        });
 
 
     // Register query stats collection.
     query_stats::registerWriteRequest(opCtx, ns, [&]() {
         uassertStatusOKWithContext(deferredShape->getStatus(), "Failed to compute query shape");
-        return std::make_unique<query_stats::UpdateKey>(parsedUpdate.expCtx(),
+        return std::make_unique<query_stats::UpdateKey>(expCtx,
                                                         wholeOp,
                                                         parsedUpdate.getRequest()->getHint(),
                                                         std::move(deferredShape->getValue()),
                                                         collection.getCollectionType());
     });
-
-    // TODO(SERVER-110348) Support collecting data-bearing node metrics here.
 }
 
 /**
@@ -1479,14 +1500,13 @@ static SingleWriteResult performSingleUpdateOp(
         },
         ns);
     const CollectionAcquisition collection = [&]() {
-        const auto acquisitionRequest = CollectionAcquisitionRequest::fromOpCtx(
-            opCtx, ns, AcquisitionPrerequisites::kWrite, preConditions.expectedUUID());
         while (true) {
             {
-                auto acquisition = acquireCollection(
-                    opCtx, acquisitionRequest, fixLockModeForSystemDotViewsChanges(ns, MODE_IX));
-                timeseries::CollectionPreConditions::checkAcquisitionAgainstPreConditions(
-                    opCtx, preConditions, acquisition);
+                auto acquisition = preConditions.acquireCollectionAndCheck(
+                    opCtx,
+                    CollectionAcquisitionRequest::fromOpCtx(
+                        opCtx, ns, AcquisitionPrerequisites::kWrite),
+                    fixLockModeForSystemDotViewsChanges(ns, MODE_IX));
                 if (acquisition.exists()) {
                     return acquisition;
                 }
@@ -1539,22 +1559,39 @@ static SingleWriteResult performSingleUpdateOp(
         uassertStatusOK(checkIfTransactionOnCappedColl(opCtx, coll));
     }
 
-    ParsedUpdate parsedUpdate(opCtx,
-                              updateRequest,
-                              collection.getCollectionPtr(),
-                              forgoOpCounterIncrements,
-                              updateRequest->source() == OperationSource::kTimeseriesUpdate);
-    uassertStatusOK(parsedUpdate.parseRequest());
+    bool isRequestToTimeseries = updateRequest->source() == OperationSource::kTimeseriesUpdate;
 
-    // Register query shape here once we obtain the ParsedUpdate, before executing the update
-    // command. After parsedUpdate.parseRequest(), the parsed query and the update driver become
+    auto [collatorToUse, expCtxCollationMatchesDefault] =
+        resolveCollator(opCtx, updateRequest->getCollation(), collection.getCollectionPtr());
+
+    auto expCtx =
+        ExpressionContextBuilder{}
+            .fromRequest(opCtx, *updateRequest, forgoOpCounterIncrements)
+            .collator(std::move(collatorToUse))
+            .collationMatchesDefault(expCtxCollationMatchesDefault)
+            .requiresTimeseriesExtendedRangeSupport(
+                isRequestToTimeseries && collection.getCollectionPtr() &&
+                collection.getCollectionPtr()->getRequiresTimeseriesExtendedRangeSupport())
+            .build();
+
+    auto parsedUpdate = uassertStatusOK(parsed_update_command::parse(
+        expCtx,
+        updateRequest,
+        makeExtensionsCallback<ExtensionsCallbackReal>(opCtx, &updateRequest->getNsString())));
+
+    // Register query shape here once we obtain 'parsedUpdate', before executing the update
+    // command. Inside 'parsedUpdate', the parsed preoptimized query and the update driver are
     // available for computing query shape.
-    registerRequestForQueryStats(opCtx, ns, collection, wholeOp, parsedUpdate);
+    registerRequestForQueryStats(opCtx, expCtx, ns, collection, wholeOp, parsedUpdate);
+
+    std::unique_ptr<CanonicalUpdate> canonicalUpdate = uassertStatusOK(CanonicalUpdate::make(
+        expCtx, std::move(parsedUpdate), collection.getCollectionPtr(), isRequestToTimeseries));
 
     // Create an RAII object that prints useful information about the ExpressionContext in the case
     // of a tassert or crash.
     ScopedDebugInfo expCtxDiagnostics(
-        "ExpCtxDiagnostics", diagnostic_printers::ExpressionContextPrinter{parsedUpdate.expCtx()});
+        "ExpCtxDiagnostics",
+        diagnostic_printers::ExpressionContextPrinter{canonicalUpdate->expCtx()});
 
     if (auto scoped = failAllUpdates.scoped(); MONGO_unlikely(scoped.isActive())) {
         tassert(9276702,
@@ -1573,14 +1610,14 @@ static SingleWriteResult performSingleUpdateOp(
                                       .getDatabaseProfileLevel(ns.dbName()));
     }
 
-    assertCanWrite_inlock(opCtx, ns);
+    assertCanWrite_inlock(opCtx, collection.nss());
 
     // No need to call writeConflictRetry() since it does not retry if in a transaction,
     // but calling it can cause WCE to be double counted.
     const auto inTransaction = opCtx->inMultiDocumentTransaction();
     if (updateRequest->getSort().isEmpty() || inTransaction) {
         return performSingleUpdateOpNoRetry(
-            opCtx, source, curOp, collection, parsedUpdate, containsDotsAndDollarsField);
+            opCtx, source, curOp, collection, *canonicalUpdate, containsDotsAndDollarsField);
     } else {
         // Call writeConflictRetry() if we have a sort, since we express the sort with a limit of 1.
         // In the case that the predicate of the currently matching document changes due to a
@@ -1588,7 +1625,7 @@ static SingleWriteResult performSingleUpdateOp(
         // document.
         return writeConflictRetry(opCtx, "update", ns, [&]() -> SingleWriteResult {
             return performSingleUpdateOpNoRetry(
-                opCtx, source, curOp, collection, parsedUpdate, containsDotsAndDollarsField);
+                opCtx, source, curOp, collection, *canonicalUpdate, containsDotsAndDollarsField);
         });
     }
 }
@@ -1668,7 +1705,21 @@ static SingleWriteResult performSingleUpdateOpWithDupKeyRetry(
 
             return ret;
         } catch (ExceptionFor<ErrorCodes::DuplicateKey>& ex) {
-            auto cq = uassertStatusOK(parseWriteQueryToCQ(opCtx, nullptr /* expCtx */, request));
+            // The function shouldRetryDuplicateKeyException() will check the collation from
+            // the collection using 'ex'. So we only need to resolve the collator from the
+            // request and pass it into 'expCtx'.
+            auto requestCollator = [&]() -> std::unique_ptr<CollatorInterface> {
+                if (request.getCollation().isEmpty()) {
+                    return nullptr;
+                }
+                return uassertStatusOK(CollatorFactoryInterface::get(opCtx->getServiceContext())
+                                           ->makeFromBSON(request.getCollation()));
+            }();
+            auto expCtx = ExpressionContextBuilder{}
+                              .fromRequest(opCtx, request)
+                              .collator(std::move(requestCollator))
+                              .build();
+            auto cq = uassertStatusOK(parseWriteQueryToCQ(expCtx.get(), request));
 
             if (!write_ops_exec::shouldRetryDuplicateKeyException(
                     opCtx, request, *cq, *ex.extraInfo<DuplicateKeyErrorInfo>(), retryAttempts)) {
@@ -1681,15 +1732,6 @@ static SingleWriteResult performSingleUpdateOpWithDupKeyRetry(
                           retryAttempts,
                           "Caught DuplicateKey exception during upsert",
                           logAttrs(ns));
-        } catch (const ExceptionFor<ErrorCodes::CollectionUUIDMismatch>&) {
-            // In a time-series context, this particular CollectionUUIDMismatch is re-thrown
-            // differently because there is already a check for this error higher up, which means
-            // this error must come from the guards installed to enforce that time-series operations
-            // are prepared and committed on the same collection.
-            uassert(9748802,
-                    "Collection was changed during insert",
-                    source != OperationSource::kTimeseriesInsert);
-            throw;
         }
     }
 
@@ -1856,13 +1898,26 @@ WriteResult performUpdates(
         auto& parentCurOp = *CurOp::get(opCtx);
         const Command* cmd = parentCurOp.getCommand();
         boost::optional<CurOp> curOp;
+        boost::optional<int32_t> originalOpIndex;
         if (source != OperationSource::kTimeseriesInsert) {
             curOp.emplace(cmd);
             curOp->push(opCtx);
+            originalOpIndex = singleOp.getIncludeQueryStatsMetricsForOpIndex();
+            if (originalOpIndex.has_value()) {
+                curOp->debug().getQueryStatsInfo().metricsRequested = true;
+            }
         }
         ON_BLOCK_EXIT([&] {
             if (curOp) {
                 finishCurOp(opCtx, &*curOp);
+                // The last SingleWriteResult will be for the operation we just executed. If it
+                // succeeded, and metrics were requested, set them now.
+                if (originalOpIndex.has_value() &&
+                    curOp->debug().getQueryStatsInfo().metricsRequested &&
+                    out.results.back().isOK()) {
+                    out.results.back().getValue().setQueryStatsMetrics(write_ops::QueryStatsMetrics(
+                        *originalOpIndex, curOp->debug().getCursorMetrics()));
+                }
             }
         });
 
@@ -2003,12 +2058,10 @@ static SingleWriteResult performSingleDeleteOp(
                   "point is disabled");
         });
 
-    auto acquisitionRequest = CollectionAcquisitionRequest::fromOpCtx(
-        opCtx, ns, AcquisitionPrerequisites::kWrite, preConditions.expectedUUID());
-    const auto collection = acquireCollection(
-        opCtx, acquisitionRequest, fixLockModeForSystemDotViewsChanges(ns, MODE_IX));
-    timeseries::CollectionPreConditions::checkAcquisitionAgainstPreConditions(
-        opCtx, preConditions, collection);
+    const auto collection = preConditions.acquireCollectionAndCheck(
+        opCtx,
+        CollectionAcquisitionRequest::fromOpCtx(opCtx, ns, AcquisitionPrerequisites::kWrite),
+        fixLockModeForSystemDotViewsChanges(ns, MODE_IX));
 
     // Create an RAII object that prints the collection's shard key in the case of a tassert
     // or crash.
@@ -2051,7 +2104,7 @@ static SingleWriteResult performSingleDeleteOp(
                                       .getDatabaseProfileLevel(ns.dbName()));
     }
 
-    assertCanWrite_inlock(opCtx, ns);
+    assertCanWrite_inlock(opCtx, collection.nss());
 
     CurOpFailpointHelpers::waitWhileFailPointEnabled(
         &hangWithLockDuringBatchRemove, opCtx, "hangWithLockDuringBatchRemove");
@@ -2068,7 +2121,7 @@ static SingleWriteResult performSingleDeleteOp(
     }
 
     auto nDeleted = exec->executeDelete();
-    curOp.debug().additiveMetrics.ndeleted = nDeleted;
+    curOp.debug().getAdditiveMetrics().ndeleted = nDeleted;
 
     PlanSummaryStats summary;
     auto&& explainer = exec->getPlanExplainer();
@@ -2226,10 +2279,11 @@ WriteResult performDeletes(
 }
 
 void recordUpdateResultInOpDebug(const UpdateResult& updateResult, OpDebug* opDebug) {
-    invariant(opDebug);
-    opDebug->additiveMetrics.nMatched = updateResult.numMatched;
-    opDebug->additiveMetrics.nModified = updateResult.numDocsModified;
-    opDebug->additiveMetrics.nUpserted = static_cast<long long>(!updateResult.upsertedId.isEmpty());
+    tassert(11052015, "Expected non-null OpDebug pointer", opDebug);
+    opDebug->getAdditiveMetrics().nMatched = updateResult.numMatched;
+    opDebug->getAdditiveMetrics().nModified = updateResult.numDocsModified;
+    opDebug->getAdditiveMetrics().nUpserted =
+        static_cast<long long>(!updateResult.upsertedId.isEmpty());
 }
 
 namespace {
@@ -2289,7 +2343,7 @@ bool shouldRetryDuplicateKeyException(OperationContext* opCtx,
     }
 
     auto matchExpr = cq.getPrimaryMatchExpression();
-    invariant(matchExpr);
+    tassert(11052016, "Expected a match expression", matchExpr);
 
     // In order to be retryable, the update query must contain no expressions other than AND and EQ.
     if (!matchContainsOnlyAndedEqualityNodes(*matchExpr)) {
@@ -2361,14 +2415,19 @@ bool shouldRetryDuplicateKeyException(OperationContext* opCtx,
             }
         }
     }
-    invariant(!keyPatternIter.more());
-    invariant(!keyValueIter.more());
+    tassert(11052017,
+            fmt::format("Expected number of elements in keyPattern {} to match number of elements "
+                        "in keyValue {}",
+                        keyPattern.toString(),
+                        keyValue.toString()),
+            !keyPatternIter.more() && !keyValueIter.more());
 
     return true;
 }
 
 void explainUpdate(OperationContext* opCtx,
                    UpdateRequest& updateRequest,
+                   const write_ops::UpdateCommandRequest* updateOp,
                    bool isTimeseriesViewRequest,
                    const SerializationContext& serializationContext,
                    const BSONObj& command,
@@ -2378,16 +2437,12 @@ void explainUpdate(OperationContext* opCtx,
 
     // Explains of write commands are read-only, but we take write locks so that timing
     // info is more accurate.
-    const auto collection = acquireCollection(
+    const auto collection = preConditions.acquireCollectionAndCheck(
         opCtx,
         CollectionAcquisitionRequest::fromOpCtx(opCtx,
                                                 updateRequest.getNamespaceString(),
-                                                AcquisitionPrerequisites::kWrite,
-                                                preConditions.expectedUUID()),
+                                                AcquisitionPrerequisites::OperationType::kWrite),
         MODE_IX);
-
-    timeseries::CollectionPreConditions::checkAcquisitionAgainstPreConditions(
-        opCtx, preConditions, collection);
 
     if (isTimeseriesViewRequest) {
         timeseries::timeseriesRequestChecks<UpdateRequest>(VersionContext::getDecoration(opCtx),
@@ -2398,15 +2453,40 @@ void explainUpdate(OperationContext* opCtx,
                                                              &updateRequest);
     }
 
-    ParsedUpdate parsedUpdate(opCtx,
-                              &updateRequest,
-                              collection.getCollectionPtr(),
-                              false /* forgoOpCounterIncrements */,
-                              isTimeseriesViewRequest);
-    uassertStatusOK(parsedUpdate.parseRequest());
+    auto [collatorToUse, expCtxCollationMatchesDefault] =
+        resolveCollator(opCtx, updateRequest.getCollation(), collection.getCollectionPtr());
 
-    auto exec = uassertStatusOK(
-        getExecutorUpdate(&CurOp::get(opCtx)->debug(), collection, &parsedUpdate, verbosity));
+    auto expCtx =
+        ExpressionContextBuilder{}
+            .fromRequest(opCtx, updateRequest)
+            .collator(std::move(collatorToUse))
+            .collationMatchesDefault(expCtxCollationMatchesDefault)
+            .requiresTimeseriesExtendedRangeSupport(
+                isTimeseriesViewRequest && collection.getCollectionPtr() &&
+                collection.getCollectionPtr()->getRequiresTimeseriesExtendedRangeSupport())
+            .build();
+
+    auto parsedUpdate = uassertStatusOK(parsed_update_command::parse(
+        expCtx,
+        &updateRequest,
+        makeExtensionsCallback<ExtensionsCallbackReal>(opCtx, &updateRequest.getNsString())));
+
+    // Register query shape here once we obtain 'parsedUpdate', before executing the update
+    // command. Inside 'parsedUpdate', the parsed preoptimized query and the update driver are
+    // available for computing query shape.
+
+    // TODO(SERVER-111843): We only need to compute the query hash for explain, registration is
+    // unnecessary. Clean this up once registerRequestForQueryStats is refactored
+    if (updateOp) {
+        registerRequestForQueryStats(
+            opCtx, expCtx, updateRequest.getNamespaceString(), collection, *updateOp, parsedUpdate);
+    }
+
+    auto canonicalUpdate = uassertStatusOK(CanonicalUpdate::make(
+        expCtx, std::move(parsedUpdate), collection.getCollectionPtr(), isTimeseriesViewRequest));
+
+    auto exec = uassertStatusOK(getExecutorUpdate(
+        &CurOp::get(opCtx)->debug(), collection, canonicalUpdate.get(), verbosity));
     auto bodyBuilder = result->getBodyBuilder();
 
     // Capture diagnostics to be logged in the case of a failure.
@@ -2431,13 +2511,11 @@ void explainDelete(OperationContext* opCtx,
                    rpc::ReplyBuilderInterface* result) {
     // Explains of write commands are read-only, but we take write locks so that timing
     // info is more accurate.
-    const auto collection =
-        acquireCollection(opCtx,
-                          CollectionAcquisitionRequest::fromOpCtx(opCtx,
-                                                                  deleteRequest.getNsString(),
-                                                                  AcquisitionPrerequisites::kWrite,
-                                                                  preConditions.expectedUUID()),
-                          MODE_IX);
+    const auto collection = preConditions.acquireCollectionAndCheck(
+        opCtx,
+        CollectionAcquisitionRequest::fromOpCtx(
+            opCtx, deleteRequest.getNsString(), AcquisitionPrerequisites::OperationType::kWrite),
+        MODE_IX);
 
     if (isTimeseriesViewRequest) {
         timeseries::timeseriesRequestChecks<DeleteRequest>(VersionContext::getDecoration(opCtx),

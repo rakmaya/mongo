@@ -45,6 +45,7 @@
 #include "mongo/db/pipeline/variables.h"
 #include "mongo/db/query/compiler/dependency_analysis/dependencies.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
+#include "mongo/util/modules.h"
 
 #include <memory>
 #include <set>
@@ -54,6 +55,10 @@
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
+
+DECLARE_STAGE_PARAMS_DERIVED_DEFAULT(ChangeStreamUnwindTransaction);
+using ChangeStreamUnwindTransactionLiteParsed =
+    DocumentSourceChangeStreamLiteParsedInternal<ChangeStreamUnwindTransactionStageParams>;
 
 /**
  * This stage keeps track of applyOps oplog entries that represent transactions and "unwinds" them
@@ -105,13 +110,13 @@ public:
         return id;
     }
 
+    DocumentSourceContainer::iterator optimizeAt(DocumentSourceContainer::iterator itr,
+                                                 DocumentSourceContainer* container);
+
 private:
     friend boost::intrusive_ptr<exec::agg::Stage>
     documentSourceChangeStreamUnwindTransactionToStageFn(
         const boost::intrusive_ptr<DocumentSource>& documentSource);
-
-    DocumentSourceContainer::iterator doOptimizeAt(DocumentSourceContainer::iterator itr,
-                                                   DocumentSourceContainer* container) final;
 
     /**
      * Resets the transaction entry filter saved in the '_filter' and '_expression' fields.

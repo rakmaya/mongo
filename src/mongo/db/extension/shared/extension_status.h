@@ -31,13 +31,11 @@
 #include "mongo/db/extension/public/api.h"
 #include "mongo/db/extension/shared/byte_buf_utils.h"
 #include "mongo/db/extension/shared/handle/handle.h"
-#include "mongo/stdx/mutex.h"
 #include "mongo/util/modules.h"
 
 #include <cstddef>
 #include <exception>
 #include <memory>
-#include <mutex>
 #include <string>
 #include <string_view>
 
@@ -96,10 +94,11 @@ private:
         // No-op for ExtensionStatusOK
     }
 
-    static void _extSetReason(::MongoExtensionStatus* status,
-                              MongoExtensionByteView newReason) noexcept {
-        // No-op for ExtensionStatusOK
-    }
+    static ::MongoExtensionStatus* _extSetReason(::MongoExtensionStatus* status,
+                                                 MongoExtensionByteView newReason) noexcept;
+
+    static MongoExtensionStatus* _extClone(const ::MongoExtensionStatus* status,
+                                           ::MongoExtensionStatus** output) noexcept;
 
     static const ::MongoExtensionStatusVTable VTABLE;
     static size_t sInstanceCount;
@@ -157,10 +156,11 @@ private:
         static_cast<ExtensionGenericStatus*>(status)->setCode(newCode);
     }
 
-    static void _extSetReason(::MongoExtensionStatus* status,
-                              MongoExtensionByteView newReason) noexcept {
-        static_cast<ExtensionGenericStatus*>(status)->setReason(byteViewAsStringView(newReason));
-    }
+    static ::MongoExtensionStatus* _extSetReason(::MongoExtensionStatus* status,
+                                                 MongoExtensionByteView newReason) noexcept;
+
+    static MongoExtensionStatus* _extClone(const ::MongoExtensionStatus* status,
+                                           ::MongoExtensionStatus** output) noexcept;
 
     static const ::MongoExtensionStatusVTable VTABLE;
 
@@ -219,11 +219,12 @@ private:
         // and its error code is set at construction time
     }
 
-    static void _extSetReason(::MongoExtensionStatus* status,
-                              MongoExtensionByteView newReason) noexcept {
-        // No-op for ExtensionStatusException because the wrapped exception is immutable
-        // and its error message is set at construction time
-    }
+    static ::MongoExtensionStatus* _extSetReason(::MongoExtensionStatus* status,
+                                                 MongoExtensionByteView newReason) noexcept;
+
+    static MongoExtensionStatus* _extClone(const ::MongoExtensionStatus* status,
+                                           ::MongoExtensionStatus** output) noexcept;
+
     static const ::MongoExtensionStatusVTable VTABLE;
 
     /**
@@ -234,24 +235,31 @@ private:
     std::string _reason;
     std::exception_ptr _exception;
 };
+
+class StatusAPI;
+
+template <>
+struct c_api_to_cpp_api<::MongoExtensionStatus> {
+    using CppApi_t = StatusAPI;
+};
+
+using StatusHandle = OwnedHandle<::MongoExtensionStatus>;
+
 /**
- * StatusHandle is an owned handle wrapper around a MongoExtensionStatus.
+ * StatusAPI is a wrapper around a MongoExtensionStatus.
  *
  * Typically this is a handle around a MongoExtensionStatus allocated by the host whose ownership
  * has been transferred to the extension. Note that this includes assertion exceptions that are
  * allocated by the host but were triggered/conceptually thrown by the extension.
  */
-class StatusHandle : public OwnedHandle<::MongoExtensionStatus> {
+class StatusAPI : public VTableAPI<::MongoExtensionStatus> {
 public:
-    StatusHandle(::MongoExtensionStatus* status) : OwnedHandle<::MongoExtensionStatus>(status) {
-        _assertValidVTable();
-    }
+    StatusAPI(::MongoExtensionStatus* status) : VTableAPI<::MongoExtensionStatus>(status) {}
 
     /**
      * Return a non-zero code associated with `error`.
      */
     int getCode() const {
-        assertValid();
         return vtable().get_code(get());
     }
 
@@ -259,37 +267,72 @@ public:
      * Return a utf-8 string associated with `MongoExtensionStatus`. May be empty.
      */
     std::string_view getReason() const {
-        assertValid();
         return byteViewAsStringView(vtable().get_reason(get()));
     }
 
-protected:
-    void _assertVTableConstraints(const VTable_t& vtable) const override {
+    void setCode(int code);
+
+    void setReason(std::string_view reason);
+
+    StatusHandle clone() const;
+
+    static void assertVTableConstraints(const VTable_t& vtable) {
         tassert(10930105, "HostStatus 'get_code' is null", vtable.get_code != nullptr);
         tassert(10930106, "HostStatus 'get_reason' is null", vtable.get_reason != nullptr);
+        tassert(11186306, "HostStatus 'set_code' is null", vtable.set_code != nullptr);
+        tassert(11186309, "HostStatus 'set_reason' is null", vtable.set_reason != nullptr);
+        tassert(11186310, "HostStatus 'clone' is null", vtable.clone != nullptr);
     };
 };
 
 /**
- * Encompasses a class of exceptions due to lack of resources or conflicting resources. Can be used
- * to conveniently catch all derived exceptions instead of enumerating each of them individually.
+ * ExtensionDBException represents a MongoExtensionStatus reporting an error, rethrown as a C++
+ * exception. When a call is made across the API boundary via the C API, the function must be
+ * invoked using invokeCAndConvertStatusToException, which throws a non-OK MongoExtensionStatus as
+ * an ExtensionDBException wrapping the original returned status.
+ *
+ * We hold on to the original status handle in order to facilitate propagating the status across the
+ * API boundary multiple times if necessary without needing to re-allocate a MongoExtensionStatus.
+ *
+ * Exceptions are generally thrown by value, and are either moved or copied depending on the
+ * platform. Recent Visual Studio versions mandate all exceptions have a copy constructor, while our
+ * supported linux compilers both take advantage of the move semantics. In both these scenarios, it
+ * should be safe to extract the status handle from inside a catch block.
+ *
  */
 class ExtensionDBException final : public DBException {
 public:
     using DBException::DBException;
     ExtensionDBException(StatusHandle extensionStatus)
-        : DBException(error_details::makeStatus(extensionStatus.getCode(),
-                                                std::string(extensionStatus.getReason()))),
+        : DBException(error_details::makeStatus(extensionStatus->getCode(),
+                                                std::string(extensionStatus->getReason()))),
           _extensionStatus(std::move(extensionStatus)) {}
 
+    ExtensionDBException(const ExtensionDBException& other)
+        : DBException(other), _extensionStatus(other._extensionStatus->clone()) {}
+
+    ExtensionDBException(ExtensionDBException&& other)
+        : DBException(std::move(other)),
+          _extensionStatus(std::move(other._extensionStatus)) {}  // NOLINT(bugprone-use-after-move)
+
+    ExtensionDBException& operator=(const ExtensionDBException& other) {
+        DBException::operator=(other);
+        _extensionStatus = other._extensionStatus->clone();
+        return *this;
+    }
+
+    ExtensionDBException& operator=(ExtensionDBException&& other) {
+        DBException::operator=(std::move(other));
+        _extensionStatus = std::move(other._extensionStatus);  // NOLINT(bugprone-use-after-move)
+        return *this;
+    }
+
     StatusHandle extractStatus() {
-        stdx::unique_lock lk(_mutex);
         return std::move(_extensionStatus);
     }
 
 private:
     void defineOnlyInFinalSubclassToPreventSlicing() final {};
-    stdx::mutex _mutex;
     StatusHandle _extensionStatus;
 };
 
@@ -340,8 +383,63 @@ void convertStatusToException(StatusHandle status);
 template <typename Fn>
 void invokeCAndConvertStatusToException(Fn&& fn) {
     StatusHandle status(fn());
-    if (auto code = status.getCode(); MONGO_unlikely(code != MONGO_EXTENSION_STATUS_OK)) {
+    if (auto code = status->getCode(); MONGO_unlikely(code != MONGO_EXTENSION_STATUS_OK)) {
         return convertStatusToException(std::move(status));
     }
+}
+
+inline ::MongoExtensionStatus* ExtensionGenericStatus::_extSetReason(
+    ::MongoExtensionStatus* status, MongoExtensionByteView newReason) noexcept {
+    return wrapCXXAndConvertExceptionToStatus([&]() {
+        static_cast<ExtensionGenericStatus*>(status)->setReason(byteViewAsStringView(newReason));
+    });
+}
+
+inline MongoExtensionStatus* ExtensionGenericStatus::_extClone(
+    const ::MongoExtensionStatus* status, ::MongoExtensionStatus** output) noexcept {
+    return wrapCXXAndConvertExceptionToStatus([&]() {
+        tassert(11186300,
+                "Received invalid output target for ExtensionGenericStatus::clone",
+                output != nullptr);
+        const auto& instance = *static_cast<const ExtensionGenericStatus*>(status);
+        *output = new ExtensionGenericStatus(instance);
+    });
+}
+
+inline ::MongoExtensionStatus* ExtensionStatusOK::_extSetReason(
+    ::MongoExtensionStatus* status, MongoExtensionByteView newReason) noexcept {
+    // Forbidden for ExtensionStatusOK
+    return wrapCXXAndConvertExceptionToStatus(
+        []() { tasserted(11186303, "Calling setReason on ExtensionStatusOK is forbidden!"); });
+}
+
+inline MongoExtensionStatus* ExtensionStatusOK::_extClone(
+    const ::MongoExtensionStatus* status, ::MongoExtensionStatus** output) noexcept {
+    return wrapCXXAndConvertExceptionToStatus([&]() {
+        tassert(11186301,
+                "Received invalid output target for ExtensionStatusOK::clone",
+                output != nullptr);
+        *output = &ExtensionStatusOK::getInstance();
+    });
+}
+
+inline ::MongoExtensionStatus* ExtensionStatusException::_extSetReason(
+    ::MongoExtensionStatus* status, MongoExtensionByteView newReason) noexcept {
+    // Forbidden for ExtensionStatusException because the wrapped exception is immutable
+    // and its error message is set at construction time
+    return wrapCXXAndConvertExceptionToStatus([]() {
+        tasserted(11186304, "Calling setReason on ExtensionStatusException is forbidden!");
+    });
+}
+
+inline MongoExtensionStatus* ExtensionStatusException::_extClone(
+    const ::MongoExtensionStatus* status, ::MongoExtensionStatus** output) noexcept {
+    return wrapCXXAndConvertExceptionToStatus([&]() {
+        tassert(11186302,
+                "Received invalid output target for ExtensionStatusException::clone",
+                output != nullptr);
+        const auto& instance = *static_cast<const ExtensionStatusException*>(status);
+        *output = new ExtensionStatusException(instance);
+    });
 }
 }  // namespace mongo::extension

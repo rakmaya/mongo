@@ -46,30 +46,32 @@ using boost::intrusive_ptr;
 
 DocumentSourceInternalListCollections::DocumentSourceInternalListCollections(
     const boost::intrusive_ptr<ExpressionContext>& pExpCtx)
-    : DocumentSource(kStageNameInternal, pExpCtx) {}
+    : DocumentSource(kStageName, pExpCtx) {}
 
-REGISTER_DOCUMENT_SOURCE(_internalListCollections,
-                         DocumentSourceInternalListCollections::LiteParsed::parse,
-                         DocumentSourceInternalListCollections::createFromBson,
-                         AllowedWithApiStrict::kInternal);
-ALLOCATE_DOCUMENT_SOURCE_ID(_internalListCollections, DocumentSourceInternalListCollections::id)
+REGISTER_LITE_PARSED_DOCUMENT_SOURCE(_internalListCollections,
+                                     DocumentSourceInternalListCollections::LiteParsed::parse,
+                                     AllowedWithApiStrict::kInternal);
+
+REGISTER_DOCUMENT_SOURCE_WITH_STAGE_PARAMS_DEFAULT(_internalListCollections,
+                                                   DocumentSourceInternalListCollections,
+                                                   InternalListCollectionsStageParams);
+
+ALLOCATE_DOCUMENT_SOURCE_ID(_internalListCollections, DocumentSourceInternalListCollections::id);
 
 intrusive_ptr<DocumentSource> DocumentSourceInternalListCollections::createFromBson(
     BSONElement elem, const intrusive_ptr<ExpressionContext>& pExpCtx) {
     uassert(9525805,
-            str::stream() << kStageNameInternal
-                          << " must take a nested empty object but found: " << elem,
+            str::stream() << kStageName << " must take a nested empty object but found: " << elem,
             elem.type() == BSONType::object && elem.embeddedObject().isEmpty());
 
     uassert(9525806,
-            str::stream() << "The " << kStageNameInternal
-                          << " stage must be run against a database",
+            str::stream() << "The " << kStageName << " stage must be run against a database",
             pExpCtx->getNamespaceString().isCollectionlessAggregateNS());
 
     return make_intrusive<DocumentSourceInternalListCollections>(pExpCtx);
 }
 
-DocumentSourceContainer::iterator DocumentSourceInternalListCollections::doOptimizeAt(
+DocumentSourceContainer::iterator DocumentSourceInternalListCollections::optimizeAt(
     DocumentSourceContainer::iterator itr, DocumentSourceContainer* container) {
     tassert(9741503, "The given iterator must be this object.", *itr == this);
 
@@ -112,7 +114,7 @@ DocumentSourceContainer::iterator DocumentSourceInternalListCollections::doOptim
 }
 
 const char* DocumentSourceInternalListCollections::getSourceName() const {
-    return kStageNameInternal.data();
+    return kStageName.data();
 }
 
 void DocumentSourceInternalListCollections::serializeToArray(

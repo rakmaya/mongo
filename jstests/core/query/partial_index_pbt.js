@@ -18,6 +18,8 @@
  * # Runs queries that may return many results, requiring getmores
  * requires_getmore,
  * multiversion_incompatible,
+ * # Time series collections do not support indexing array values in measurement fields.
+ * exclude_from_timeseries_crud_passthrough,
  * ]
  */
 import {createCacheCorrectnessProperty} from "jstests/libs/property_test_helpers/common_properties.js";
@@ -31,7 +33,7 @@ import {isSlowBuild} from "jstests/libs/query/aggregation_pipeline_utils.js";
 import {fc} from "jstests/third_party/fast_check/fc-3.1.0.js";
 
 if (isSlowBuild(db)) {
-    jsTestLog("Exiting early because debug is on, opt is off, or a sanitizer is enabled.");
+    jsTest.log.info("Exiting early because debug is on, opt is off, or a sanitizer is enabled.");
     quit();
 }
 
@@ -83,4 +85,3 @@ const workloadModel = fc
 
 // Test with a regular collection.
 testProperty(correctnessProperty, {controlColl, experimentColl}, workloadModel, numRuns, partialIndexCounterexamples);
-// TODO SERVER-103381 extend this test to use time-series collections.

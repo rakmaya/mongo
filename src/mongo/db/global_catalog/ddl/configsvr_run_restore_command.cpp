@@ -45,9 +45,6 @@
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/global_catalog/ddl/configsvr_run_restore_gen.h"
 #include "mongo/db/global_catalog/known_collections.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_catalog.h"
-#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/find_command.h"
@@ -55,6 +52,9 @@
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_catalog.h"
+#include "mongo/db/shard_role/shard_role.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/logv2/log.h"
@@ -206,7 +206,7 @@ public:
                     acquireCollection(opCtx,
                                       CollectionAcquisitionRequest(
                                           NamespaceString::kConfigsvrRestoreNamespace,
-                                          PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                          PlacementConcern(boost::none, ShardVersion::UNTRACKED()),
                                           repl::ReadConcernArgs::get(opCtx),
                                           AcquisitionPrerequisites::kRead),
                                       MODE_IS);
@@ -249,7 +249,7 @@ public:
                     acquireCollection(opCtx,
                                       CollectionAcquisitionRequest(
                                           nss,
-                                          PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                          PlacementConcern(boost::none, ShardVersion::UNTRACKED()),
                                           repl::ReadConcernArgs::get(opCtx),
                                           AcquisitionPrerequisites::kWrite),
                                       MODE_IX);
@@ -350,7 +350,7 @@ public:
                         opCtx,
                         CollectionAcquisitionRequest(
                             nss,
-                            PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                            PlacementConcern(boost::none, ShardVersion::UNTRACKED()),
                             repl::ReadConcernArgs::get(opCtx),
                             AcquisitionPrerequisites::kWrite),
                         MODE_IX);

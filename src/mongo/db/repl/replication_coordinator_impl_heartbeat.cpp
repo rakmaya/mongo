@@ -43,9 +43,6 @@
 #include "mongo/bson/oid.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands/test_commands_enabled.h"
-#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/repl/delayable_timeout_callback.h"
 #include "mongo/db/repl/heartbeat_response_action.h"
 #include "mongo/db/repl/member_config.h"
@@ -68,6 +65,9 @@
 #include "mongo/db/repl/topology_coordinator.h"
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/session/kill_sessions_local.h"
+#include "mongo/db/shard_role/lock_manager/d_concurrency.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/control/journal_flusher.h"
 #include "mongo/executor/remote_command_request.h"
 #include "mongo/executor/task_executor.h"
@@ -340,7 +340,9 @@ void ReplicationCoordinatorImpl::_handleHeartbeatResponse(
 
         // Arbiters are always expected to report null durable optimes (and wall times).
         // If that is not the case here, make sure to correct these times before ingesting them.
-        auto memberInConfig = _rsConfig.unsafePeek().findMemberByHostAndPort(target);
+        // Use the strict version of findMemberByHostAndPort since heartbeats should always happen
+        // via the maintenance port.
+        auto memberInConfig = _rsConfig.unsafePeek().findMemberByHostAndPort(target, true);
         if ((hbResponse.hasState() && hbResponse.getState().arbiter()) ||
             (_rsConfig.unsafePeek().isInitialized() && memberInConfig &&
              memberInConfig->isArbiter())) {
@@ -414,7 +416,9 @@ void ReplicationCoordinatorImpl::_handleHeartbeatResponse(
         auto remoteState = hbStatusResponse.getValue().getState();
         if (remoteState == MemberState::RS_SECONDARY || remoteState == MemberState::RS_RECOVERING ||
             remoteState == MemberState::RS_ROLLBACK) {
-            const auto mem = _rsConfig.unsafePeek().findMemberByHostAndPort(target);
+            // Use the strict version of findMemberByHostAndPort since heartbeats should always
+            // happen via the maintenance port.
+            const auto mem = _rsConfig.unsafePeek().findMemberByHostAndPort(target, true);
             if (mem && mem->isNewlyAdded()) {
                 const auto memId = mem->getId();
                 const auto configVersion = _rsConfig.unsafePeek().getConfigVersionAndTerm();
@@ -441,6 +445,10 @@ void ReplicationCoordinatorImpl::_handleHeartbeatResponse(
 
     // Abort catchup if we have caught up to the latest known optime after heartbeat refreshing.
     if (_catchupState) {
+        LOGV2(10976700,
+              "Received heartbeat while in catchup state",
+              "requestId"_attr = cbData.request.id,
+              "target"_attr = target);
         _catchupState->signalHeartbeatUpdate(lk);
     }
 
@@ -760,8 +768,11 @@ void ReplicationCoordinatorImpl::_heartbeatReconfigStore(
                 return _selfIndex;
             }
         }
-        return validateConfigForHeartbeatReconfig(
-            _externalState.get(), newConfig, getMyHostAndPort(), cc().getServiceContext());
+        return validateConfigForHeartbeatReconfig(_externalState.get(),
+                                                  newConfig,
+                                                  getMyHostAndPort(),
+                                                  getMyMaintenancePort(),
+                                                  cc().getServiceContext());
     }();
 
     if (myIndex.getStatus() == ErrorCodes::NodeNotFound) {
@@ -1136,7 +1147,7 @@ void ReplicationCoordinatorImpl::_startHeartbeats(WithLock lk) {
         if (i == _selfIndex) {
             continue;
         }
-        auto target = rsc.getMemberAt(i).getHostAndPort();
+        auto target = rsc.getMemberAt(i).getHostAndPortMaintenance();
         _scheduleHeartbeatToTarget(lk, target, now, std::string{rsc.getReplSetName()});
         _topCoord->restartHeartbeat(now, target);
     }

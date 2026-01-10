@@ -79,6 +79,7 @@ class ReplicaSetFixture(interface.ReplFixture, interface._DockerComposeInterface
         load_all_extensions=False,
         router_endpoint_for_mongot: Optional[int] = None,
         disagg_base_config=None,
+        use_maintenance_ports=False,
     ):
         """Initialize ReplicaSetFixture."""
 
@@ -150,6 +151,8 @@ class ReplicaSetFixture(interface.ReplFixture, interface._DockerComposeInterface
         self.mongod_options.setdefault("oplogSize", 511)
 
         self.disagg_base_config = disagg_base_config
+
+        self.use_maintenance_ports = use_maintenance_ports
 
         # The dbpath in mongod_options is used as the dbpath prefix for replica set members and
         # takes precedence over other settings. The ShardedClusterFixture uses this parameter to
@@ -472,23 +475,34 @@ class ReplicaSetFixture(interface.ReplFixture, interface._DockerComposeInterface
 
     def await_ready(self):
         """Wait for replica set to be ready."""
-        self._await_primary()
-        self._await_secondaries()
-        self._await_newly_added_removals()
-        self._await_stable_recovery_timestamp()
+        deadline = time.time() + interface.Fixture.AWAIT_READY_TIMEOUT_SECS
+        self._await_primary(deadline)
+        self._await_secondaries(deadline)
+        self._await_newly_added_removals(deadline)
+        self._await_stable_recovery_timestamp(deadline)
         self._setup_cwrwc_defaults()
         self._await_read_concern_available()
         if self.use_auto_bootstrap_procedure:
             # TODO: Remove this in SERVER-80010.
             self._await_auto_bootstrapped_config_shard()
 
-    def _await_primary(self):
+    def _await_primary(self, deadline=None):
         # Wait for the primary to be elected.
         # Since this method is called at startup we expect the first node to be primary even when
         # self.all_nodes_electable is True.
         primary = self.nodes[0]
         client = primary.mongo_client()
+
+        if deadline is None:
+            deadline = time.time() + interface.Fixture.AWAIT_READY_TIMEOUT_SECS
+
         while True:
+            if time.time() >= deadline:
+                raise self.fixturelib.ServerFailure(
+                    "Timed out after {} seconds waiting for primary on port {} to be elected.".format(
+                        interface.Fixture.AWAIT_READY_TIMEOUT_SECS, primary.port
+                    )
+                )
             self.logger.info("Waiting for primary on port %d to be elected.", primary.port)
             cmd_result = client.admin.command("isMaster")
             if cmd_result["ismaster"]:
@@ -496,7 +510,7 @@ class ReplicaSetFixture(interface.ReplFixture, interface._DockerComposeInterface
             time.sleep(0.1)  # Wait a little bit before trying again.
         self.logger.info("Primary on port %d successfully elected.", primary.port)
 
-    def _await_secondaries(self):
+    def _await_secondaries(self, deadline):
         # Wait for the secondaries to become available.
         # Since this method is called at startup we expect the nodes 1 to n to be secondaries even
         # when self.all_nodes_electable is True.
@@ -507,6 +521,12 @@ class ReplicaSetFixture(interface.ReplFixture, interface._DockerComposeInterface
         for secondary in secondaries:
             client = secondary.mongo_client(read_preference=pymongo.ReadPreference.SECONDARY)
             while True:
+                if time.time() >= deadline:
+                    raise self.fixturelib.ServerFailure(
+                        "Timed out after {} seconds waiting on fixture to be ready. Currently waiting for secondary on port {} to become available.".format(
+                            interface.Fixture.AWAIT_READY_TIMEOUT_SECS, secondary.port
+                        )
+                    )
                 self.logger.info(
                     "Waiting for secondary on port %d to become available.", secondary.port
                 )
@@ -522,7 +542,7 @@ class ReplicaSetFixture(interface.ReplFixture, interface._DockerComposeInterface
                 time.sleep(0.1)  # Wait a little bit before trying again.
             self.logger.info("Secondary on port %d is now available.", secondary.port)
 
-    def _await_stable_recovery_timestamp(self):
+    def _await_stable_recovery_timestamp(self, deadline):
         """
         Awaits stable recovery timestamps on all nodes in the replica set.
 
@@ -560,6 +580,13 @@ class ReplicaSetFixture(interface.ReplFixture, interface._DockerComposeInterface
             client_admin = client["admin"]
 
             while True:
+                if time.time() >= deadline:
+                    raise self.fixturelib.ServerFailure(
+                        "Timed out after {} seconds waiting on fixture to be ready. Currently waiting for node on port {} to have a stable recovery timestamp.".format(
+                            interface.Fixture.AWAIT_READY_TIMEOUT_SECS, node.port
+                        )
+                    )
+
                 status = client_admin.command("replSetGetStatus")
 
                 # The `lastStableRecoveryTimestamp` field contains a stable timestamp guaranteed to
@@ -608,7 +635,7 @@ class ReplicaSetFixture(interface.ReplFixture, interface._DockerComposeInterface
 
         return False
 
-    def _await_newly_added_removals(self):
+    def _await_newly_added_removals(self, deadline):
         """
         Wait for all 'newlyAdded' fields to be removed from the replica set config.
 
@@ -620,6 +647,12 @@ class ReplicaSetFixture(interface.ReplFixture, interface._DockerComposeInterface
         primary = self.get_primary()
         client = interface.build_client(primary, self.auth_options)
         while self._should_await_newly_added_removals_longer(client):
+            if time.time() >= deadline:
+                raise self.fixturelib.ServerFailure(
+                    "Timed out after {} seconds waiting on fixture to be ready. Currently waiting for 'newlyAdded' field removals.".format(
+                        interface.Fixture.AWAIT_READY_TIMEOUT_SECS
+                    )
+                )
             time.sleep(0.1)  # Wait a little bit before trying again.
         self.logger.info("All 'newlyAdded' fields removed")
 
@@ -1133,6 +1166,13 @@ class ReplicaSetFixture(interface.ReplFixture, interface._DockerComposeInterface
             output += self.initial_sync_node.get_node_info()
         return output
 
+    def get_maintenance_ports(self):
+        """Return a list of maintenance ports."""
+        output = []
+        for node in self.nodes:
+            output.append(node.maintenance_port)
+        return output
+
     def get_driver_connection_url(self):
         """Return the driver connection URL."""
         if self.use_replica_set_connection_string:
@@ -1150,6 +1190,143 @@ class ReplicaSetFixture(interface.ReplFixture, interface._DockerComposeInterface
     def write_historic(self, obj):
         """Convert the obj to a record to track history."""
         self.fixturelib.make_historic(obj)
+
+    def internode_validation(self):
+        """
+        Perform internode validation on this replica set using extended validate. Compares the 'all' and 'metadata' hashes of each collection.
+        """
+        self.logger.info("Waiting for all nodes to be caught up")
+        primary_client = interface.build_client(self.get_primary(), self.auth_options)
+
+        # Disable the TTL monitor to avoid inconsistent results from TTL deletes occurring between validate calls.
+        previous_value = primary_client.admin.command({"getParameter": 1, "ttlMonitorEnabled": 1})
+        primary_client.admin.command({"setParameter": 1, "ttlMonitorEnabled": False})
+
+        all_nodes_wc = pymongo.write_concern.WriteConcern(w=len(self.nodes))
+        coll = primary_client["test"]["validate.hook"].with_options(write_concern=all_nodes_wc)
+        res = primary_client.test.command(
+            {
+                "insert": "validate.hook",
+                "documents": [{"a": 1}],
+                "writeConcern": all_nodes_wc.document,
+            }
+        )
+        clusterTime = res["opTime"]["ts"]
+        coll.drop()
+
+        self.logger.info(f"Performing Internode Validation: atClusterTime={clusterTime}")
+
+        # Collections we exclude from the hash comparisons. This is because these collections can contain different document contents for valid reasons (i.e. implicitly replicated, TTL indexes, updated by background threads, etc)
+        excluded_config_collections = [
+            "actionlog",
+            "analyzeShardKeySplitPoints",
+            "cache.collections",
+            "image_collection",
+            "mongos",
+            "rangeDeletions",
+            "sampledQueries",
+            "sampledQueriesDiff",
+            "shards",
+            "system.change_collection",
+            "system.preimages",
+            "system.sessions",
+            "transactions",
+        ]
+
+        # the 'system.profile' collections are unreplicated and should not be compared.
+        excluded_any_db_collections = ["system.profile"]
+
+        base_hashes = {}
+        filter = {"type": "collection"}
+        for node in self.nodes:
+            client = interface.build_client(node, self.auth_options)
+            # Skip validating collections for arbiters.
+            admin_db = client.get_database("admin")
+            ret = admin_db.command("isMaster")
+            if "arbiterOnly" in ret and ret["arbiterOnly"]:
+                self.logger.info("Skipping collection validation on arbiter")
+                continue
+
+            hashes = {}
+            something_set = False
+            for db_name in client.list_database_names():
+                # the 'local' database is unreplicated and should not be compared.
+                if db_name == "local":
+                    continue
+                if db_name not in hashes:
+                    hashes[db_name] = {}
+                db = client.get_database(db_name)
+                for coll in db.list_collections(filter=filter):
+                    coll_name = coll["name"]
+                    # Skip excluded collections which all live in the 'config' database.
+                    if db_name == "config" and coll_name in excluded_config_collections:
+                        continue
+                    if coll_name in excluded_any_db_collections:
+                        continue
+                    # TODO SERVER-114904 Skip collections with names that end with a dot or contain
+                    # double dots. Even though the server allows their creation, db.get_collection()
+                    # below throws an InvalidName error.
+                    if coll_name.endswith(".") or ".." in coll_name:
+                        continue
+                    # Skip collections that contain TTL indexes or TTL options.
+                    indexes = db.get_collection(coll_name).list_indexes()
+                    if any("expireAfterSeconds" in index for index in indexes):
+                        continue
+                    if "expireAfterSeconds" in coll["options"]:
+                        continue
+
+                    validate_cmd = {
+                        "validate": coll_name,
+                        "collHash": True,
+                        "atClusterTime": clusterTime,
+                    }
+                    ret = db.command(validate_cmd, check=False)
+                    if "all" in ret and "metadata" in ret:
+                        something_set = True
+                        hashes[db_name][coll_name] = {
+                            "all": ret["all"],
+                            "metadata": ret["metadata"],
+                        }
+                    elif not self.fcv:
+                        # 'all' and 'metadata' should only not exist when in multiversion suite.
+                        raise RuntimeError(
+                            f"Missing {db_name}.{coll_name} hashes on a node outside of a multiversion suite."
+                        )
+
+            if not base_hashes and something_set:
+                base_hashes = hashes
+            elif something_set:
+                self.logger.info(f"Base Hashes: {base_hashes}")
+                self.logger.info(f"Comparing Hashes: {hashes}")
+                # Compare the sets of hashes
+                for db_name in base_hashes:
+                    # No collection hashes for this DB entry, skipping.
+                    if not base_hashes[db_name]:
+                        continue
+                    if db_name not in hashes:
+                        raise RuntimeError(
+                            f"Missing {db_name} hashes on a node when it was expected to exist."
+                        )
+                    for coll_name in base_hashes[db_name]:
+                        if coll_name not in hashes[db_name]:
+                            raise RuntimeError(
+                                f"Missing {db_name}.{coll_name} hashes on a node when it was expected to exist."
+                            )
+                        base_hash = base_hashes[db_name][coll_name]
+                        comp_hash = hashes[db_name][coll_name]
+                        if base_hash["all"] != comp_hash["all"]:
+                            raise RuntimeError(
+                                f"all hash difference on {db_name}.{coll_name}. {base_hash['all']} vs {comp_hash['all']}"
+                            )
+                        # Metadata hashes can be different on multiversion suites due to removed fields from indexes.
+                        if base_hash["metadata"] != comp_hash["metadata"] and not self.fcv:
+                            raise RuntimeError(
+                                f"metadata hash difference on {db_name}.{coll_name}. {base_hash['metadata']} vs {comp_hash['metadata']}"
+                            )
+
+        # Reset the TTL monitor to its original value.
+        primary_client.admin.command({"setParameter": 1, "ttlMonitorEnabled": previous_value})
+        self.logger.info("Internode Validation Successful")
 
 
 def get_last_optime(client, fixturelib):

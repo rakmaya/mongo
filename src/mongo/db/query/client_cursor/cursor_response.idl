@@ -29,6 +29,7 @@
 # This IDL file describes the BSON format for cursor response object.
 
 global:
+    mod_visibility: public
     cpp_namespace: "mongo"
     cpp_includes:
         - "mongo/db/namespace_string.h"
@@ -86,6 +87,10 @@ structs:
                 description: "Boolean value that is true if the plan came from the plan cache."
                 type: bool
                 stability: unstable
+            planningTimeMicros:
+                description: "Time from the moment a planning request is received to the moment the winning plan is finalized"
+                type: long
+                stability: unstable
             cpuNanos:
                 description: "Amount of CPU time spent by a query operation."
                 type: long
@@ -134,6 +139,26 @@ structs:
                 description: "The number of documents inserted (excluding upserts)."
                 type: long
                 stability: unstable
+            totalTimeQueuedMicros:
+                description: "Total time spent waiting for a ticket."
+                type: long
+                stability: unstable
+                default: 0
+            totalAdmissions:
+                description: "Total number of admissions during the operation."
+                type: long
+                stability: unstable
+                default: 0
+            wasLoadShed:
+                description: "If true, the operation was load shed."
+                type: bool
+                stability: unstable
+                default: false
+            wasDeprioritized:
+                description: "If true, the operation was deprioritized at some point."
+                type: bool
+                stability: unstable
+                default: false
 
     ResponseCursorBase:
         description: "Common fields of initial and subsequent cursor responses."

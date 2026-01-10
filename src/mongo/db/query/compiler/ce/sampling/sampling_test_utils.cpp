@@ -29,9 +29,10 @@
 
 #include "mongo/db/query/compiler/ce/sampling/sampling_test_utils.h"
 
+#include "mongo/db/dbhelpers.h"
 #include "mongo/db/exec/matcher/matcher.h"
-#include "mongo/db/local_catalog/lock_manager/exception_util.h"
 #include "mongo/db/query/compiler/optimizer/index_bounds_builder/index_bounds_builder.h"
+#include "mongo/db/shard_role/lock_manager/exception_util.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
@@ -74,36 +75,24 @@ void initializeSamplingEstimator(DataConfiguration& configuration,
 void SamplingEstimatorTest::insertDocuments(const NamespaceString& nss,
                                             const std::vector<BSONObj> docs,
                                             int batchSize) {
-    std::vector<InsertStatement> inserts{docs.begin(), docs.end()};
-
     const auto coll = acquireCollection(
         operationContext(),
         CollectionAcquisitionRequest(nss,
-                                     PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                     PlacementConcern(boost::none, ShardVersion::UNTRACKED()),
                                      repl::ReadConcernArgs::get(operationContext()),
                                      AcquisitionPrerequisites::kWrite),
         MODE_IX);
-    {
-        size_t currentInsertion = 0;
-        while (currentInsertion < inserts.size()) {
-            WriteUnitOfWork wuow{operationContext()};
+    for (size_t currentInsertion = 0; currentInsertion < docs.size();) {
+        WriteUnitOfWork wuow{operationContext()};
 
-            int insertionsBeforeCommit = 0;
-            while (true) {
-                ASSERT_OK(collection_internal::insertDocument(operationContext(),
-                                                              coll.getCollectionPtr(),
-                                                              inserts[currentInsertion],
-                                                              nullptr /* opDebug */));
-                insertionsBeforeCommit++;
-                currentInsertion++;
-
-                if (insertionsBeforeCommit > batchSize || currentInsertion == inserts.size()) {
-                    insertionsBeforeCommit = 0;
-                    break;
-                }
-            }
-            wuow.commit();
+        int insertionsBeforeCommit = 0;
+        while (insertionsBeforeCommit <= batchSize && currentInsertion < docs.size()) {
+            ASSERT_OK(Helpers::insert(
+                operationContext(), coll.getCollectionPtr(), docs[currentInsertion]));
+            insertionsBeforeCommit++;
+            currentInsertion++;
         }
+        wuow.commit();
     }
 }
 
@@ -123,7 +112,7 @@ void SamplingEstimatorTest::createIndex(const BSONObj& spec) {
     auto coll = acquireCollection(
         operationContext(),
         CollectionAcquisitionRequest(_kTestNss,
-                                     PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                     PlacementConcern(boost::none, ShardVersion::UNTRACKED()),
                                      repl::ReadConcernArgs::get(operationContext()),
                                      AcquisitionPrerequisites::kWrite),
         MODE_X);
@@ -209,21 +198,16 @@ void createCollAndInsertDocuments(OperationContext* opCtx,
         wunit.commit();
     });
 
-    std::vector<InsertStatement> inserts{docs.begin(), docs.end()};
-
     auto coll = acquireCollection(
         opCtx,
         CollectionAcquisitionRequest(nss,
-                                     PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                     PlacementConcern(boost::none, ShardVersion::UNTRACKED()),
                                      repl::ReadConcernArgs::get(opCtx),
                                      AcquisitionPrerequisites::kWrite),
         MODE_IX);
-    {
-        WriteUnitOfWork wuow{opCtx};
-        ASSERT_OK(collection_internal::insertDocuments(
-            opCtx, coll.getCollectionPtr(), inserts.begin(), inserts.end(), nullptr /* opDebug */));
-        wuow.commit();
-    }
+    WriteUnitOfWork wuow{opCtx};
+    ASSERT_OK(Helpers::insert(opCtx, coll.getCollectionPtr(), docs));
+    wuow.commit();
 }
 
 int evaluateMatchExpressionAgainstDataWithLimit(const std::unique_ptr<MatchExpression> expr,
@@ -378,7 +362,7 @@ void printResult(DataConfiguration dataConfig,
     std::vector<std::string> queryValuesHigh;
     std::string matchExpression = "";
     std::vector<double> actualCardinality;
-    std::vector<double> Estimation;
+    std::vector<double> estimation;
     for (auto values : error.queryResults) {
         if (values.low.has_value()) {
             if (values.low->getTag() == sbe::value::TypeTags::StringBig ||
@@ -401,7 +385,7 @@ void printResult(DataConfiguration dataConfig,
             matchExpression = values.matchExpression.get();
         }
         actualCardinality.push_back(values.actualCardinality);
-        Estimation.push_back(values.estimatedCardinality);
+        estimation.push_back(values.estimatedCardinality);
     }
 
     builder << "QueryLow" << queryValuesLow;
@@ -415,10 +399,53 @@ void printResult(DataConfiguration dataConfig,
     builder << "samplingAlgoChunks" << ssSamplingAlgoChunks.str();
     builder << "numberOfChunks" << samplingAlgoAndChunks.second.value_or(0);
     builder << "ActualCardinality" << actualCardinality;
-    builder << "Estimation" << Estimation;
+    builder << "Estimation" << estimation;
+
+    // NDV
+    {
+        BSONObjBuilder fieldNDVBob(builder.subobjStart("fieldNDVs"));
+        for (auto&& [fieldName, errInfo] : error.fieldNDVResults) {
+            BSONObjBuilder subBob(fieldNDVBob.subobjStart(fieldName));
+
+            std::vector<double> actualNDV;
+            std::vector<double> estimatedNDV;
+            for (auto value : errInfo) {
+                actualNDV.push_back((int)value.actualNDV);
+                estimatedNDV.push_back(value.estimatedNDV);
+            }
+            subBob << "actualNDVs" << actualNDV;
+            subBob << "estimatedNDVs" << estimatedNDV;
+        }
+    }
 
     LOGV2(10545501, "Accuracy experiment", ""_attr = builder.obj());
 }
+
+namespace {
+// Generate data according to the provided configuration
+std::vector<BSONObj> getDataBSON(DataConfiguration dataConfig) {
+    std::vector<std::vector<mongo::stats::SBEValue>> allData;
+    generateDataBasedOnConfig(dataConfig, allData);
+    return SamplingEstimatorTest::createDocumentsFromSBEValue(
+        allData, dataConfig.collectionFieldsConfiguration);
+}
+
+// Create a new collection and insert the provided documents.
+MultipleCollectionAccessor createColl(const std::vector<BSONObj>& dataBSON,
+                                      OperationContext* opCtx) {
+    auto nss =
+        NamespaceString::createNamespaceString_forTest("SamplingCeAccuracyTest.TestCollection");
+
+    createCollAndInsertDocuments(opCtx, nss, dataBSON);
+
+    auto acquisition = acquireCollectionOrView(
+        opCtx,
+        CollectionOrViewAcquisitionRequest::fromOpCtx(opCtx, nss, AcquisitionPrerequisites::kWrite),
+        LockMode::MODE_IX);
+    return MultipleCollectionAccessor(
+        acquisition, {}, false /* isAnySecondaryNamespaceAViewOrNotFullyLocal */);
+}
+}  // namespace
 
 void SamplingAccuracyTest::runSamplingEstimatorTestConfiguration(
     DataConfiguration dataConfig,
@@ -427,25 +454,8 @@ void SamplingAccuracyTest::runSamplingEstimatorTestConfiguration(
     const std::vector<std::pair<SamplingEstimatorImpl::SamplingStyle, boost::optional<int>>>
         samplingAlgoAndChunks,
     bool printResults) {
-    // Generate data according to the provided configuration
-    std::vector<std::vector<mongo::stats::SBEValue>> allData;
-    generateDataBasedOnConfig(dataConfig, allData);
-
-    auto nss =
-        NamespaceString::createNamespaceString_forTest("SamplingCeAccuracyTest.TestCollection");
-
-    auto dataBSON = SamplingEstimatorTest::createDocumentsFromSBEValue(
-        allData, dataConfig.collectionFieldsConfiguration);
-
-    createCollAndInsertDocuments(operationContext(), nss, dataBSON);
-
-    auto acquisition =
-        acquireCollectionOrView(operationContext(),
-                                CollectionOrViewAcquisitionRequest::fromOpCtx(
-                                    operationContext(), nss, AcquisitionPrerequisites::kWrite),
-                                LockMode::MODE_IX);
-    auto collection = MultipleCollectionAccessor(
-        acquisition, {}, false /* isAnySecondaryNamespaceAViewOrNotFullyLocal */);
+    auto dataBSON = getDataBSON(dataConfig);
+    const auto collection = createColl(dataBSON, operationContext());
 
     for (auto samplingAlgoAndChunk : samplingAlgoAndChunks) {
         for (auto sampleSize : sampleSizes) {
@@ -455,6 +465,7 @@ void SamplingAccuracyTest::runSamplingEstimatorTestConfiguration(
             SamplingEstimatorImpl samplingEstimator(
                 operationContext(),
                 collection,
+                collection.getMainCollection()->ns(),
                 PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
                 actualSampleSize,
                 samplingAlgoAndChunk.first,
@@ -467,6 +478,55 @@ void SamplingAccuracyTest::runSamplingEstimatorTestConfiguration(
             if (printResults) {
                 printResult(dataConfig, actualSampleSize, queryConfig, samplingAlgoAndChunk, error);
             }
+        }
+    }
+}
+
+void SamplingAccuracyTest::runNDVSamplingEstimatorTestConfiguration(
+    DataConfiguration dataConfig,
+    WorkloadConfiguration queryConfig,
+    int numIters,
+    const std::vector<SampleSizeDef> sampleSizes,
+    const std::vector<std::pair<SamplingEstimatorImpl::SamplingStyle, boost::optional<int>>>
+        samplingAlgoAndChunks) {
+    // Generate data according to the provided configuration
+    const auto dataBSON = getDataBSON(dataConfig);
+    const auto collection = createColl(dataBSON, operationContext());
+
+    for (auto samplingAlgoAndChunk : samplingAlgoAndChunks) {
+        for (auto sampleSize : sampleSizes) {
+            double actualSampleSize = translateSampleDefToActualSampleSize(sampleSize);
+
+            // Calculate estimated & actual NDV for each field.
+            ErrorCalculationSummary summary;
+            for (const auto& qf : queryConfig.queryConfig.queryFields) {
+                const auto& fieldName = qf.fieldName;
+                std::vector<NDVErrorInfo> errors;
+                for (int i = 0; i < numIters; i++) {
+                    // Create sample from the provided collection
+                    SamplingEstimatorImpl samplingEstimator(
+                        operationContext(),
+                        collection,
+                        collection.getMainCollection()->ns(),
+                        PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
+                        actualSampleSize,
+                        samplingAlgoAndChunk.first,
+                        samplingAlgoAndChunk.second,
+                        SamplingEstimatorTest::makeCardinalityEstimate(dataConfig.size));
+                    samplingEstimator.generateSample(ce::NoProjection{});
+
+
+                    auto actualNDV = countNDV({fieldName}, dataBSON);
+                    auto estimatedNDV = samplingEstimator.estimateNDV({fieldName});
+
+                    errors.push_back({.actualNDV = actualNDV,
+                                      .estimatedNDV = fmax(estimatedNDV.toDouble(), 1.0)});
+                }
+
+                summary.fieldNDVResults.insert({fieldName, errors});
+            }
+
+            printResult(dataConfig, actualSampleSize, queryConfig, samplingAlgoAndChunk, summary);
         }
     }
 }
@@ -486,6 +546,7 @@ SamplingEstimatorForTesting SamplingEstimatorTest::createSamplingEstimatorForTes
     SamplingEstimatorForTesting samplingEstimator(
         operationContext(),
         colls,
+        collection.nss(),
         PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
         sampleSize,
         SamplingEstimatorForTesting::SamplingStyle::kRandom,
@@ -522,4 +583,14 @@ IndexBounds getIndexBounds(const QueryConfiguration& queryConfig,
     }
     return bounds;
 }
+
+size_t numberKeysMatch(const IndexBounds& bounds,
+                       const BSONObj& document,
+                       bool skipDuplicateMatches) {
+    size_t count = 0;
+    SamplingEstimatorImpl::forNumberKeysMatch(
+        bounds, {document}, [&](size_t cnt) { count += cnt; }, skipDuplicateMatches);
+    return count;
+}
+
 }  // namespace mongo::ce

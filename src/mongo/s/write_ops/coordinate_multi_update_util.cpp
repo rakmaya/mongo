@@ -30,7 +30,7 @@
 #include "mongo/s/write_ops/coordinate_multi_update_util.h"
 
 #include "mongo/db/generic_argument_util.h"
-#include "mongo/db/global_catalog/router_role_api/cluster_commands_helpers.h"
+#include "mongo/db/router_role/cluster_commands_helpers.h"
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/s/request_types/coordinate_multi_update_gen.h"
 
@@ -154,9 +154,9 @@ BSONObj executeCoordinateMultiUpdate(OperationContext* opCtx,
 
     generic_argument_util::setMajorityWriteConcern(coordinateCommand, &opCtx->getWriteConcern());
 
-    sharding::router::DBPrimaryRouter router(opCtx->getServiceContext(), nss.dbName());
+    sharding::router::DBPrimaryRouter router(opCtx, nss.dbName());
     return router.route(
-        opCtx, "multi update"_sd, [&](OperationContext* opCtx, const CachedDatabaseInfo& dbInfo) {
+        "multi update"_sd, [&](OperationContext* opCtx, const CachedDatabaseInfo& dbInfo) {
             auto response = executeCommandAgainstDatabasePrimaryOnlyAttachingDbVersion(
                 opCtx,
                 DatabaseName::kAdmin,

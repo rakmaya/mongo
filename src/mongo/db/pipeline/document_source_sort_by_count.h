@@ -40,11 +40,15 @@
 
 namespace mongo {
 
+DEFINE_LITE_PARSED_STAGE_DEFAULT_DERIVED(SortByCount);
+
 /**
  * The $sortByCount stage is an alias for a $group stage followed by a $sort stage.
  */
 class DocumentSourceSortByCount final {
 public:
+    static constexpr StringData kStageName = "$sortByCount"_sd;
+
     /**
      * Returns a $group stage followed by a $sort stage.
      */

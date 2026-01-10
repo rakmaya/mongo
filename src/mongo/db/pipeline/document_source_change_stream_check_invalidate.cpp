@@ -39,16 +39,18 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
 
-#include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
-REGISTER_INTERNAL_DOCUMENT_SOURCE(_internalChangeStreamCheckInvalidate,
-                                  LiteParsedDocumentSourceChangeStreamInternal::parse,
-                                  DocumentSourceChangeStreamCheckInvalidate::createFromBson,
-                                  true);
+REGISTER_INTERNAL_LITE_PARSED_DOCUMENT_SOURCE(_internalChangeStreamCheckInvalidate,
+                                              ChangeStreamCheckInvalidateLiteParsed::parse);
+
+REGISTER_DOCUMENT_SOURCE_WITH_STAGE_PARAMS_DEFAULT(_internalChangeStreamCheckInvalidate,
+                                                   DocumentSourceChangeStreamCheckInvalidate,
+                                                   ChangeStreamCheckInvalidateStageParams);
+
 ALLOCATE_DOCUMENT_SOURCE_ID(_internalChangeStreamCheckInvalidate,
                             DocumentSourceChangeStreamCheckInvalidate::id)
 

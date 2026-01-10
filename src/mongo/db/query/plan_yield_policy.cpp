@@ -29,16 +29,15 @@
 
 #include "mongo/db/query/plan_yield_policy.h"
 
-#include "mongo/db/local_catalog/lock_manager/exception_util.h"
-#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/shard_role/lock_manager/exception_util.h"
+#include "mongo/db/shard_role/shard_role.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/yieldable.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/scopeguard.h"
-#include "mongo/util/str.h"
 
 #include <utility>
 
@@ -112,7 +111,7 @@ Status PlanYieldPolicy::yieldOrInterrupt(OperationContext* opCtx,
                                          const std::function<void()>& whileYieldingFn,
                                          RestoreContext::RestoreType restoreType,
                                          const std::function<void()>& afterSnapshotAbandonFn) {
-    invariant(opCtx);
+    tassert(11321328, "opCtx must not be null", opCtx);
     setPreYieldWait.executeIf(
         [&](const BSONObj& data) { sleepFor(Milliseconds(data["waitForMillis"].numberInt())); },
         [&](const BSONObj& config) {
@@ -142,14 +141,14 @@ Status PlanYieldPolicy::yieldOrInterrupt(OperationContext* opCtx,
         try {
             saveState(opCtx);
 
-            boost::optional<ScopeGuard<std::function<void()>>> exitGuard;
-
             // TODO SERVER-103267: Remove setAbandonSnapshotMode() and related.
 
             if (getPolicy() == PlanYieldPolicy::YieldPolicy::WRITE_CONFLICT_RETRY_ONLY) {
                 // This yield policy doesn't release locks, but it does relinquish our storage
                 // snapshot.
-                invariant(!opCtx->isLockFreeReadsOp());
+                tassert(11321329,
+                        "Invalid use of YieldPolicy::WRITE_CONFLICT_RETRY_ONLY on lock free reads",
+                        !opCtx->isLockFreeReadsOp());
                 shard_role_details::getRecoveryUnit(opCtx)->abandonSnapshot();
                 if (afterSnapshotAbandonFn) {
                     afterSnapshotAbandonFn();
@@ -189,7 +188,10 @@ void PlanYieldPolicy::performYield(OperationContext* opCtx,
     //   * Release lock manager locks.
     //   * Reacquire lock manager locks.
     //   * Restore 'yieldable'.
-    invariant(_policy == YieldPolicy::YIELD_AUTO || _policy == YieldPolicy::YIELD_MANUAL);
+    tassert(11321330,
+            fmt::format("Unexpected yield policy {} during performYield()",
+                        serializeYieldPolicy(_policy)),
+            canReleaseLocksDuringExecution());
 
     // If we are here, the caller has guaranteed locks are not recursively held. This is a top level
     // operation and we can safely clear the 'yieldable' state before unlocking and then
@@ -241,7 +243,10 @@ void PlanYieldPolicy::performYieldWithAcquisitions(OperationContext* opCtx,
     //   * Check for interrupt if the yield policy requires.
     //   * Yield the acquired TransactionResources
     //   * Restore the yielded TransactionResources
-    invariant(_policy == YieldPolicy::YIELD_AUTO || _policy == YieldPolicy::YIELD_MANUAL);
+    tassert(1321331,
+            fmt::format("Unexpected yield policy {} during performYield()",
+                        serializeYieldPolicy(_policy)),
+            canReleaseLocksDuringExecution());
 
     // Remove stale CollectionPtr references from the acquisitions.
     auto preparedForYieldToken = prepareForYieldingTransactionResources(opCtx);

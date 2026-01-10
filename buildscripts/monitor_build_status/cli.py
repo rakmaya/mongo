@@ -118,7 +118,7 @@ class MonitorBuildStatusOrchestrator:
     def _get_issue_counts_status(
         self, scope_name: str, issue_report: IssueReport, notification_config: NotificationsConfig
     ) -> Tuple[str, Dict[str, List[float]]]:
-        now = datetime.utcnow().replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
         percentages: Dict[str, List[float]] = {}
 
         headers = [scope_name, "Hot Issues", "Cold Issues"]
@@ -214,7 +214,9 @@ class MonitorBuildStatusOrchestrator:
             )
 
         for assigned_team in sorted(list(issue_report.team_reports.keys())):
-            team_thresholds = notification_config.thresholds.team
+            team_thresholds = self.code_lockdown_config.get_team_thresholds(
+                assigned_team, notification_config.thresholds.team
+            )
             team_slack_tags = self.code_lockdown_config.get_team_slack_tags(assigned_team)
             _process_thresholds(
                 f"[Team] {assigned_team}",

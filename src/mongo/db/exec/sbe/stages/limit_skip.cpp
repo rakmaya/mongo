@@ -139,8 +139,8 @@ const SpecificStats* LimitSkipStage::getSpecificStats() const {
     return &_specificStats;
 }
 
-std::vector<DebugPrinter::Block> LimitSkipStage::debugPrint() const {
-    auto ret = PlanStage::debugPrint();
+void LimitSkipStage::doDebugPrint(std::vector<DebugPrinter::Block>& ret,
+                                  DebugPrintInfo& debugPrintInfo) const {
     if (_limitExpr) {
         DebugPrinter::addBlocks(ret, _limitExpr->debugPrint());
     } else {
@@ -152,9 +152,12 @@ std::vector<DebugPrinter::Block> LimitSkipStage::debugPrint() const {
 
     DebugPrinter::addNewLine(ret);
 
-    DebugPrinter::addBlocks(ret, _children[0]->debugPrint());
+    if (debugPrintInfo.printBytecode) {
+        PlanStage::debugPrintBytecode(ret, _limitCode, "LIMIT" /*title*/);
+        PlanStage::debugPrintBytecode(ret, _skipCode, "SKIP" /*title*/);
+    }
 
-    return ret;
+    DebugPrinter::addBlocks(ret, _children[0]->debugPrint(debugPrintInfo));
 }
 
 size_t LimitSkipStage::estimateCompileTimeSize() const {
@@ -171,12 +174,11 @@ boost::optional<int64_t> LimitSkipStage::_runLimitOrSkipCode(const vm::CodeFragm
         return boost::none;
     }
 
-    auto [owned, tag, val] = _bytecode.run(code);
-    value::ValueGuard guard{owned, tag, val};
+    value::TagValueMaybeOwned res = _bytecode.run(code);
     tassert(8349200,
             "Expect limit or skip code to return an int64",
-            tag == value::TypeTags::NumberInt64);
-    return value::bitcastTo<int64_t>(val);
+            res.tag() == value::TypeTags::NumberInt64);
+    return value::bitcastTo<int64_t>(res.value());
 }
 
 }  // namespace mongo::sbe

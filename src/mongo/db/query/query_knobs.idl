@@ -27,7 +27,7 @@
 #
 
 imports:
-    - "mongo/db/cluster_parameters/cluster_server_parameter.idl"
+    - "mongo/db/topology/cluster_parameters/cluster_server_parameter.idl"
 
 global:
     cpp_namespace: "mongo"
@@ -36,6 +36,7 @@ global:
         - "mongo/db/query/query_knob_expressions.h"
         - "mongo/db/query/query_stats/query_stats_on_parameter_change.h"
         - "mongo/platform/atomic_word.h"
+    mod_visibility: public
 
 enums:
     QueryFrameworkControl:
@@ -64,6 +65,15 @@ enums:
             kHeuristicCE: "heuristicCE"
             kMultiPlanning: "multiPlanning"
 
+    # TODO SERVER-111770. Finalise values and names.
+    QueryPlanRankingStrategyForAutomaticQueryPlanRankerMode:
+        description: "Enum for possible values for QueryPlanRankingStrategyForAutomaticQueryPlanRankerMode."
+        type: string
+        values:
+            kCBRForNoMultiplanningResults: "CBRForNoMultiplanningResults"
+            kCBRCostBasedRankerChoice: "CBRCostBasedRankerChoice"
+            kHistogramCEWithHeuristicFallback: "HistogramCEWithHeuristicFallback"
+
     SamplingCEMethod:
         description: "Enum for supported sampling methods."
         type: string
@@ -86,6 +96,21 @@ enums:
             kAlways: "always"
             kNever: "never"
             kInDebug: "inDebug"
+
+    JoinReorderMode:
+        description: "Enum for possible values for JoinReorderMode."
+        type: string
+        values:
+            kBottomUp: "bottomUp"
+            kRandom: "random"
+
+    JoinPlanTreeShape:
+        description: "Enum for possible join plan shapes."
+        type: string
+        values:
+            kLeftDeep: "leftDeep"
+            kRightDeep: "rightDeep"
+            kZigZag: "zigZag"
 
 structs:
     InternalQueryCutoffForSampleFromRandomCursorStorage:
@@ -111,7 +136,7 @@ structs:
             enabled:
                 description: "Whether $vectorSearch supports 'returnStoredSource: true' or not."
                 type: bool
-                default: false
+                default: true
 
 server_parameters:
     #
@@ -362,10 +387,10 @@ server_parameters:
     #
 
     internalPipelineLengthLimit:
-        description: "The maximum length allowed for an an aggregation pipeline."
-        set_at: [startup]
+        description: "The maximum length allowed for an aggregation pipeline."
+        set_at: [startup, runtime]
         cpp_varname: "internalPipelineLengthLimit"
-        cpp_vartype: int
+        cpp_vartype: AtomicWord<int>
         default:
             expr: "defaultInternalPipelineLengthLimit()"
         validator:
@@ -373,7 +398,7 @@ server_parameters:
         redact: false
 
     internalMaxSubPipelineViewDepth:
-        description: "The maximum length allowed for an an aggregation sub-pipeline view."
+        description: "The maximum length allowed for an aggregation sub-pipeline view."
         set_at: [startup, runtime]
         cpp_varname: "internalMaxSubPipelineViewDepth"
         cpp_vartype: AtomicWord<long long>
@@ -488,9 +513,9 @@ server_parameters:
         description: >-
             Forces planner to use multiplanning even if there is only one solution present.
             Used for testing to increase multiplanning and replanning test coverage.
-        set_at: startup
+        set_at: [startup, runtime]
         cpp_varname: "internalQueryPlannerUseMultiplannerForSingleSolutions"
-        cpp_vartype: bool
+        cpp_vartype: AtomicWord<bool>
         default: false
         redact: false
 
@@ -520,6 +545,77 @@ server_parameters:
         on_update: plan_cache_util::clearSbeCacheOnParameterChange
         redact: false
 
+    internalRandomJoinReorderDefaultToHashJoin:
+        description: "Change the default join algorithm produced from random reorderer from NestedLoopJoin to HashJoin."
+        set_at: [startup, runtime]
+        cpp_varname: "internalRandomJoinReorderDefaultToHashJoin"
+        cpp_vartype: AtomicWord<bool>
+        default: false
+        on_update: plan_cache_util::clearSbeCacheOnParameterChange
+        redact: false
+
+    internalJoinReorderMode:
+        description: "Picks which method is used to reorder joins (when enabled)."
+        set_at: [startup, runtime]
+        cpp_class:
+            name: JoinReorderMode
+            data: synchronized_value<JoinReorderModeEnum>
+        default:
+            expr: JoinReorderModeEnum::kBottomUp
+        redact: false
+
+    internalJoinPlanTreeShape:
+        description: "Picks which tree shape to use for bottom-up join enumeration (when enabled)."
+        set_at: [startup, runtime]
+        cpp_class:
+            name: JoinPlanTreeShape
+            data: synchronized_value<JoinPlanTreeShapeEnum>
+        default:
+            expr: JoinPlanTreeShapeEnum::kZigZag
+        redact: false
+
+    internalMaxNodesInJoinGraph:
+        description: >-
+            The maximum number of nodes (1 for base collection + number of $lookup-$unwind pairs)
+            allowed for join optimization. Any $lookup-$unwind pairs exceeding this limit will not
+            be included in the join optimization and will be executed in the original order as 
+            specifified in the aggregation pipeline.
+        set_at: [startup, runtime]
+        cpp_varname: internalMaxNodesInJoinGraph
+        cpp_vartype: AtomicWord<int>
+        default: 10
+        validator:
+            gt: 1
+            lte: 64
+        redact: false
+
+    internalMaxEdgesInJoinGraph:
+        description: >-
+            The maximum number of edges considered for join optimization. Any edges exceeding this
+            limit will not be included in the join optimization and will be executed in the original
+            order as specifified in the aggregation pipeline.
+        set_at: [startup, runtime]
+        cpp_varname: internalMaxEdgesInJoinGraph
+        cpp_vartype: AtomicWord<int>
+        default: 256
+        validator:
+            gt: 0
+            lte: 4096
+        redact: false
+
+    internalMaxNumberNodesConsideredForImplicitEdges:
+        description: >-
+            The maximum number of nodes allowed in a connected component to be used for
+            implicit edge finding.
+        set_at: [startup, runtime]
+        cpp_varname: internalMaxNumberNodesConsideredForImplicitEdges
+        cpp_vartype: AtomicWord<int>
+        default: 4
+        validator:
+            gte: 0
+            lte: 10
+        redact: false
+
     internalQueryMaxPipelineRewrites:
         description: "Maximum number of pipeline rewrite rules to apply"
         set_at: [startup, runtime]
@@ -538,6 +634,27 @@ server_parameters:
         cpp_vartype: AtomicWord<int>
         default: 44
         on_update: plan_cache_util::clearSbeCacheOnParameterChange
+        redact: false
+
+    internalMaxGroupAccumulatorsInSbe:
+        description: >-
+            A $group stage will prefer to run in the Classic engine over SBE when it has more
+            accumulators than this maximum. The limit does not apply for $group on a time-series
+            collection or for pipelines forced to use SBE by featureFlagSbeFull.
+        set_at: [startup, runtime]
+        cpp_vartype: "AtomicWord<long long>"
+        cpp_varname: gInternalMaxGroupAccumulatorsInSbe
+        default: 16
+        validator:
+            gte: 0
+        redact: false
+
+    internalEnableJoinEnumerationHJOrderPruning:
+        description: "Whether or not to prune un-promising HJ orders during join plan enumeration"
+        set_at: [startup, runtime]
+        cpp_varname: "internalEnableJoinEnumerationHJOrderPruning"
+        cpp_vartype: AtomicWord<bool>
+        default: true
         redact: false
 
     #
@@ -1106,7 +1223,7 @@ server_parameters:
             If true, the explain results include 'executionTimeMicros' and
             'executionTimeNanos' fields to represent the execution time of each execution stage in
             microseconds and in nanoseconds
-        set_at: [startup]
+        set_at: [startup, runtime]
         cpp_varname: "internalMeasureQueryExecutionTimeInNanoseconds"
         cpp_vartype: AtomicWord<bool>
         default: false
@@ -1119,17 +1236,6 @@ server_parameters:
         cpp_vartype: AtomicWord<bool>
         default:
             expr: false
-        redact: false
-
-    # TODO SERVER-68341 Remove this query knob after tenancy is supported in the sharded cluster.
-    internalChangeStreamUseTenantIdForTesting:
-        description: >-
-            If true, then change streams will operate upon an internal tenant id for testing
-            purposes if the actual tenant is not provided.
-        set_at: [startup]
-        cpp_varname: "internalChangeStreamUseTenantIdForTesting"
-        cpp_vartype: AtomicWord<bool>
-        default: false
         redact: false
 
     minAllocationToShardsPollPeriodSecs:
@@ -1170,6 +1276,7 @@ server_parameters:
             If true, then ExclusionProjectionExecutor won't use fast path implementation. This
             is needed for the generational fuzzers that are sensitive to field order and other corner cases
             when switching from Document to BSONObj.
+        # This is a test-only knob and doesn't need to be set at runtime.
         set_at: [startup]
         cpp_varname: "internalQueryDisableExclusionProjectionFastPath"
         cpp_vartype: bool
@@ -1265,16 +1372,42 @@ server_parameters:
 
     internalQueryGlobalProfilingFilter:
         description: "Enables the setProfilingFilterGlobally command."
-        set_at: [startup]
+        set_at: [startup, runtime]
         cpp_varname: internalQueryGlobalProfilingFilter
         cpp_vartype: AtomicWord<bool>
         default: false
         redact: false
 
+    internalQueryGlobalProfilingLockDeadlineMs:
+        description: >-
+            A number of milliseconds to wait for a lock acquisition to perform writes to the
+            system.profile collection.
+        set_at: [startup, runtime]
+        cpp_varname: internalQueryGlobalProfilingLockDeadlineMs
+        cpp_vartype: AtomicWord<int>
+        default: 1
+        redact: false
+        validator:
+            gte: 0
+
+    internalProfilingMaxAbandonedWritesPerSecondPerDb:
+        description: >-
+            If there are at least this many lock timeouts when trying to profile, we will skip all
+            future profiling for a given database. Lasts until profiling is manually re-enabled. The
+            value can be zero, in which case even a single lock timeout will disable profiling for
+            the db.
+        set_at: [startup, runtime]
+        cpp_varname: internalProfilingMaxAbandonedWritesPerSecondPerDb
+        cpp_vartype: AtomicWord<int>
+        default: 1000
+        redact: false
+        validator:
+            gte: 0
+
     internalQueryAggMulticastTimeoutMS:
         description: "Timeout in MS for requests to shard servers when aggregations are sent to all shard servers"
-        set_at: [startup]
-        cpp_vartype: int
+        set_at: [startup, runtime]
+        cpp_vartype: AtomicWord<int>
         cpp_varname: internalQueryAggMulticastTimeoutMS
         default: 60000
         validator:
@@ -1283,8 +1416,8 @@ server_parameters:
 
     internalQueryAggMulticastMaxConcurrency:
         description: "Max number of concurrent requests when aggregations are sent to all shard servers"
-        set_at: startup
-        cpp_vartype: int
+        set_at: [startup, runtime]
+        cpp_vartype: AtomicWord<int>
         cpp_varname: internalQueryAggMulticastMaxConcurrency
         default: 100
         validator:
@@ -1393,6 +1526,14 @@ server_parameters:
         cpp_varname: internalQueryMaximumNumberOfMintermsInSimplifier
         cpp_vartype: AtomicWord<int>
         default: 1000
+        redact: false
+
+    internalQueryMaxNumPrimeImplicants:
+        description: "Threshold capping number of prime implicants generated by Petrick's method."
+        set_at: [startup, runtime]
+        cpp_varname: internalQueryMaxNumPrimeImplicants
+        cpp_vartype: AtomicWord<int>
+        default: 10000
         redact: false
 
     internalQueryMaxSizeFactorToSimplify:
@@ -1533,6 +1674,17 @@ server_parameters:
             expr: QueryPlanRankerModeEnum::kMultiPlanning
         redact: false
 
+    # TODO SERVER-111770. Finalise names.
+    automaticCEPlanRankingStrategy:
+        description: "Controls the plan ranking strategy to use when automaticCE is selected as planRankerMode"
+        set_at: [startup, runtime]
+        cpp_class:
+            name: QueryPlanRankingStrategyForAutomaticQueryPlanRankerMode
+            data: synchronized_value<QueryPlanRankingStrategyForAutomaticQueryPlanRankerModeEnum>
+        default:
+            expr: QueryPlanRankingStrategyForAutomaticQueryPlanRankerModeEnum::kHistogramCEWithHeuristicFallback
+        redact: false
+
     samplingConfidenceInterval:
         description: >-
             Define target confidence interval for sampling cardinality estimates used for
@@ -1569,7 +1721,7 @@ server_parameters:
             name: SamplingCEMethod
             data: synchronized_value<SamplingCEMethodEnum>
         default:
-            expr: SamplingCEMethodEnum::kRandom
+            expr: SamplingCEMethodEnum::kChunk
         redact: false
 
     internalQueryNumChunksForChunkBasedSampling:
@@ -1599,12 +1751,30 @@ server_parameters:
         default: false
         redact: false
 
-    internalQueryUnifiedWriteExecutor:
-        description: "Boolean flag to use the unified write executor."
+    internalQueryNumWorksPerPlanForMPEstimation:
+        description: >-
+            Number of works per plan that the cost-based plan ranker choice should do to evaluate
+            the cost of multi-planning.
         set_at: [startup, runtime]
-        cpp_varname: "internalQueryUnifiedWriteExecutor"
-        cpp_vartype: AtomicWord<bool>
-        default: false
+        cpp_varname: "internalQueryNumWorksPerPlanForMPEstimation"
+        cpp_vartype: AtomicWord<int>
+        default: 384
+        validator:
+            gt: 100
+            lt: 10000
+        redact: false
+
+    internalQueryMinRequiredImprovementRatioForCostBasedRankerChoice:
+        description: >-
+            The minimum ratio by which the cost of CBR should be better than the remaining
+            multi-planning cost while choosing between them during AutomaticCE.
+        set_at: [startup, runtime]
+        cpp_varname: "internalQueryMinRequiredImprovementRatioForCostBasedRankerChoice"
+        cpp_vartype: AtomicWord<double>
+        default: 2.0
+        validator:
+            gte: 1.0
+            lte: 10.0
         redact: false
 
     internalQueryGetMoreMaxCursorPinRetryAttempts:
@@ -1688,14 +1858,17 @@ server_parameters:
         redact: false
 
     internalQueryPermitMatchSwappingForComplexRenames:
-        description:
-            "When enabled, the system assumes that a projection like a:'$b.c' is a renaming
+        description: >-
+            Caution! This knob is used in production and must not be removed before consulting with
+            the QO team.
+
+            When enabled, the system assumes that a projection like a:'$b.c' is a renaming
             operation. In the absence of this flag, it is possible for 'b' to be an array -- in
             which case this projection does not just rename the field but reshapes the structure
             of the document. This should be used with caution, as it will cause an incorrect rewrite
             for queries that actually wish to perform this reshaping operation. The rewrite is
             limited to field paths of length 2; a projection like a:'$b.c.d' is always treated as a
-            reshaping operation."
+            reshaping operation.
         set_at: [startup, runtime]
         cpp_varname: "internalQueryPermitMatchSwappingForComplexRenames"
         cpp_vartype: AtomicWord<bool>
@@ -1718,6 +1891,27 @@ server_parameters:
         cpp_varname: bypassRankFusionFCVGate
         cpp_vartype: bool
         default: false
+        redact: false
+
+    internalQueryMergeMinInsertAttempts:
+        description: >-
+            When $merge stage is using a insert with backup strategy, a minimal number of insert
+            attempts before it can switch to update permamently.
+        set_at: [startup, runtime]
+        cpp_varname: internalQueryMergeMinInsertAttempts
+        cpp_vartype: AtomicWord<long long>
+        default: 1000
+        redact: false
+
+    internalQueryMergeMaxInsertErrorRate:
+        description: >-
+            When $merge stage is using a insert with backup strategy, a max allowed insert error
+            rate. If insert error rate is higher, than the stage will use update without trying
+            insert first.
+        set_at: [startup, runtime]
+        cpp_varname: internalQueryMergeMaxInsertErrorRate
+        cpp_vartype: AtomicWord<double>
+        default: 0.7
         redact: false
 # Note for adding additional query knobs:
 #

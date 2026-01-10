@@ -51,6 +51,7 @@
 #include "mongo/db/storage/temporary_record_store.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/stdx/mutex.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/uuid.h"
 
 #include <cstddef>
@@ -109,6 +110,8 @@ public:
 
     Timestamp getBackupCheckpointTimestamp() override;
 
+    BSONObj getStatus(OperationContext* opCtx) const override;
+
     Status disableIncrementalBackup() override;
 
     StatusWith<std::unique_ptr<StreamingCursor>> beginNonBlockingBackup(
@@ -157,8 +160,6 @@ public:
     void setInitialDataTimestamp(Timestamp initialDataTimestamp) override;
 
     Timestamp getInitialDataTimestamp() const override;
-
-    void setOldestTimestampFromStable() override;
 
     void setOldestTimestamp(Timestamp newOldestTimestamp, bool force) override;
 
@@ -240,7 +241,11 @@ public:
 
     void closeMDBCatalog(OperationContext* opCtx) final;
 
-    TimestampMonitor* getTimestampMonitor() const {
+    bool isMDBCatalogOpen() const final {
+        return _catalog != nullptr;
+    }
+
+    TimestampMonitor* getTimestampMonitor() const override {
         return _timestampMonitor.get();
     }
 
@@ -347,14 +352,13 @@ private:
     void _onMinOfCheckpointAndOldestTimestampChanged(OperationContext* opCtx,
                                                      const Timestamp& timestamp);
 
-    class RemoveDBChange;
-
     // Main KVEngine instance used for all user tables.
     // This must be the first member so it is destroyed last.
     std::unique_ptr<KVEngine> _engine;
 
     // KVEngine instance that is used for creating SpillTables.
     std::unique_ptr<KVEngine> _spillEngine;
+    Atomic<long long> _spillTableDropRetries{0};
 
     const StorageEngineOptions _options;
 

@@ -35,7 +35,6 @@
 #include "mongo/db/field_ref.h"
 #include "mongo/db/index/wildcard_key_generator.h"
 #include "mongo/db/index_names.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/collation/collator_interface_mock.h"
@@ -45,6 +44,8 @@
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/query_planner_params.h"
 #include "mongo/db/query/query_planner_test_fixture.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog_entry_mock.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/unittest/death_test.h"
 #include "mongo/unittest/unittest.h"
@@ -96,6 +97,17 @@ protected:
 
         _proj = WildcardKeyGenerator::createProjectionExecutor(keyPattern, wildcardProjection);
 
+        IndexSpec spec;
+        spec.version(1).name(kIndexName).addKeys(keyPattern);
+        auto descriptor = IndexDescriptor(IndexNames::WILDCARD, spec.toBSON());
+        auto mockIndexCatalogEntry = std::make_shared<IndexCatalogEntryMock>(nullptr,
+                                                                             nullptr,
+                                                                             "" /* ident */,
+                                                                             std::move(descriptor),
+                                                                             false /* isFrozen */,
+                                                                             partialFilterExpr,
+                                                                             collator);
+
         params.mainCollectionInfo.indexes.push_back({std::move(keyPattern),
                                                      IndexType::INDEX_WILDCARD,
                                                      IndexConfig::kLatestIndexVersion,
@@ -105,10 +117,9 @@ protected:
                                                      false,  // sparse
                                                      false,  // unique
                                                      IndexEntry::Identifier{indexName},
-                                                     partialFilterExpr,
                                                      std::move(infoObj),
-                                                     collator,
-                                                     _proj.get_ptr()});
+                                                     _proj.get_ptr(),
+                                                     std::move(mockIndexCatalogEntry)});
     }
 
     boost::optional<WildcardProjection> _proj;
@@ -118,7 +129,8 @@ protected:
 // General planning tests.
 //
 
-DEATH_TEST_F(QueryPlannerWildcardTest,
+using QueryPlannerWildcardTestDeathTest = QueryPlannerWildcardTest;
+DEATH_TEST_F(QueryPlannerWildcardTestDeathTest,
              CannotExpandPreExpandedWildcardIndexEntry,
              "Tripwire assertion") {
     addWildcardIndex(BSON("$**" << 1));

@@ -93,6 +93,7 @@ namespace mongo {
 
 // Generated symbols for JS files
 namespace JSFiles {
+extern const JSFile stringdiff;
 extern const JSFile types;
 extern const JSFile assert;
 extern const JSFile assert_global;
@@ -366,9 +367,13 @@ void MozJSImplScope::_gcCallback(JSContext* rt,
     LOGV2_INFO(22787,
                "MozJS GC heap stats",
                "phase"_attr = (status == JSGC_BEGIN ? "prologue" : "epilogue"),
-               "reason"_attr = reason,
+               "reason"_attr = ExplainGCReason(reason),
                "total"_attr = mongo::sm::get_total_bytes(),
-               "limit"_attr = mongo::sm::get_max_bytes());
+               "limit"_attr = mongo::sm::get_max_bytes(),
+               "gc total"_attr = js::GetGCHeapUsage(rt),
+               "gc bytes"_attr = JS_GetGCParameter(rt, JSGC_BYTES),
+               "gc total chunks"_attr = JS_GetGCParameter(rt, JSGC_TOTAL_CHUNKS),
+               "gc unused chunks"_attr = JS_GetGCParameter(rt, JSGC_UNUSED_CHUNKS));
 }
 
 #if __has_feature(address_sanitizer)
@@ -440,7 +445,13 @@ MozJSImplScope::MozRuntime::MozRuntime(const MozJSScriptEngine* engine,
                       "JavaScript may not be able to initialize with a heap limit less than 10MB.");
     }
     size_t mallocMemoryLimit = 1024ul * 1024 * jsHeapLimit;
-    mongo::sm::reset(mallocMemoryLimit);
+
+    /*
+     * Flag to disable newer memory tracking logic that accounts for mmap-ed memory
+     */
+    const auto useLegacyMemoryTracking = engine->getJSUseLegacyMemoryTracking();
+
+    mongo::sm::reset(mallocMemoryLimit, !useLegacyMemoryTracking);
 
     {
         stdx::unique_lock<stdx::mutex> lk(gRuntimeCreationMutex);
@@ -589,6 +600,7 @@ MozJSImplScope::MozJSImplScope(MozJSScriptEngine* engine, boost::optional<int> j
 
         JS_FireOnNewGlobalObject(_context, _global);
 
+        execSetup(JSFiles::stringdiff);
         execSetup(JSFiles::assert);
         execSetup(JSFiles::assert_global);
         execSetup(JSFiles::types);

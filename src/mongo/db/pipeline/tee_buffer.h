@@ -35,10 +35,10 @@
 #include "mongo/db/query/stage_memory_limit_knobs/knobs.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/util/intrusive_counter.h"
+#include "mongo/util/modules.h"
 
 #include <algorithm>
 #include <cstddef>
-#include <memory>
 #include <vector>
 
 #include <boost/intrusive_ptr.hpp>

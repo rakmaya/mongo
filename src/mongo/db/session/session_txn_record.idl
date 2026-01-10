@@ -91,3 +91,7 @@ structs:
                 type: DurableTxnState
                 optional: true # Retryable writes do not have a state field.
                 description: "The state of the most recent durable transaction on the session"
+            affectedNamespaces:
+                description: "List of namespaces, affected by the transaction. Only written for prepared transactions"
+                type: array<namespacestring>
+                optional: true

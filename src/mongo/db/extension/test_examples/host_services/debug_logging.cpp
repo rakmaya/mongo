@@ -29,8 +29,8 @@
 
 #include "mongo/db/extension/sdk/aggregation_stage.h"
 #include "mongo/db/extension/sdk/extension_factory.h"
-#include "mongo/db/extension/sdk/test_extension_factory.h"
-#include "mongo/db/extension/sdk/test_extension_util.h"
+#include "mongo/db/extension/sdk/log_util.h"
+#include "mongo/db/extension/sdk/tests/transform_test_stages.h"
 
 namespace sdk = mongo::extension::sdk;
 
@@ -41,42 +41,53 @@ namespace sdk = mongo::extension::sdk;
  * stage will never assert on unexpected input but instead will log lines depending on
  * the level provided and the server's log level.
  */
-DEFAULT_LOGICAL_AST_PARSE(DebugLog, "$debugLog");
-
 class DebugLogStageDescriptor : public sdk::AggStageDescriptor {
 public:
-    static inline const std::string kStageName = std::string(DebugLogStageName);
+    static inline const std::string kStageName = std::string("$debugLog");
     static inline const std::string kDebugLogLevelField = "level";
+    static inline const std::string kAttributesField = "attrs";
 
-    DebugLogStageDescriptor()
-        : sdk::AggStageDescriptor(kStageName, MongoExtensionAggStageType::kNoOp) {}
+    DebugLogStageDescriptor() : sdk::AggStageDescriptor(kStageName) {}
 
     std::unique_ptr<sdk::AggStageParseNode> parse(mongo::BSONObj stageBson) const override {
-        sdk::validateStageDefinition(stageBson, kStageName);
+        auto bsonSpec = sdk::validateStageDefinition(stageBson, kStageName);
 
-        userAssert(11134101,
-                   "Failed to parse " + kStageName + ", expected non-empty object",
-                   !stageBson.getField(kStageName).Obj().isEmpty());
+        sdk_uassert(11134101,
+                    "Failed to parse " + kStageName + ", expected non-empty object",
+                    !bsonSpec.isEmpty());
 
-        mongo::BSONObj bsonSpec = stageBson.getField(kStageName).Obj();
-        userAssert(11134102,
-                   kStageName + " stage missing or invalid " + kDebugLogLevelField + " field.",
-                   bsonSpec.hasElement(kDebugLogLevelField) &&
-                       bsonSpec.getField(kDebugLogLevelField).isNumber());
+        sdk_uassert(11134102,
+                    kStageName + " stage missing or invalid " + kDebugLogLevelField + " field",
+                    bsonSpec.hasElement(kDebugLogLevelField) &&
+                        bsonSpec.getField(kDebugLogLevelField).isNumber());
 
         int level = bsonSpec.getIntField(kDebugLogLevelField);
-        sdk::HostServicesHandle::getHostServices()->logDebug("Test log message", 11134100, level);
 
-        return std::make_unique<DebugLogParseNode>(stageBson);
+        // This tests the functionality of the shouldLog host service.
+        if (sdk::HostServicesAPI::getInstance()->getLogger()->shouldLog(
+                ::MongoExtensionLogSeverity(level), ::MongoExtensionLogType::kDebug)) {
+            sdk::sdk_log("Log level is enough", 11134101, ::MongoExtensionLogSeverity::kWarning);
+        } else {
+            sdk::sdk_log(
+                "Log level is not enough", 11134102, ::MongoExtensionLogSeverity::kWarning);
+        }
+
+        std::vector<mongo::extension::sdk::ExtensionLogAttribute> attrs;
+        if (bsonSpec.hasElement(kAttributesField)) {
+            auto attrsSpec = bsonSpec.getObjectField(kAttributesField);
+            for (const auto& field : attrsSpec.getFieldNames<std::set<std::string>>()) {
+                attrs.emplace_back(mongo::extension::sdk::ExtensionLogAttribute{
+                    field, std::string(attrsSpec.getStringField(field))});
+            }
+        }
+
+        sdk::sdk_logDebug("Test log message", 11134100, level, attrs);
+
+        return std::make_unique<sdk::shared_test_stages::TransformAggStageParseNode>(kStageName,
+                                                                                     bsonSpec);
     }
 };
 
-class DebugLogExtension : public sdk::Extension {
-public:
-    void initialize(const sdk::HostPortalHandle& portal) override {
-        _registerStage<DebugLogStageDescriptor>(portal);
-    }
-};
-
+DEFAULT_EXTENSION(DebugLog);
 REGISTER_EXTENSION(DebugLogExtension)
 DEFINE_GET_EXTENSION()

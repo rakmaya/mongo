@@ -52,10 +52,14 @@ using boost::intrusive_ptr;
 using std::string;
 using std::vector;
 
-REGISTER_DOCUMENT_SOURCE(bucketAuto,
-                         LiteParsedDocumentSourceDefault::parse,
-                         DocumentSourceBucketAuto::createFromBson,
-                         AllowedWithApiStrict::kAlways);
+REGISTER_LITE_PARSED_DOCUMENT_SOURCE(bucketAuto,
+                                     BucketAutoLiteParsed::parse,
+                                     AllowedWithApiStrict::kAlways);
+
+REGISTER_DOCUMENT_SOURCE_WITH_STAGE_PARAMS_DEFAULT(bucketAuto,
+                                                   DocumentSourceBucketAuto,
+                                                   BucketAutoStageParams);
+
 ALLOCATE_DOCUMENT_SOURCE_ID(bucketAuto, DocumentSourceBucketAuto::id)
 
 namespace {
@@ -188,7 +192,7 @@ DocumentSourceBucketAuto::DocumentSourceBucketAuto(
       _groupByExpression(groupByExpression),
       _granularityRounder(granularityRounder),
       _nBuckets(numBuckets) {
-    invariant(!accumulationStatements.empty());
+    tassert(11294810, "Missing accumulationStatements", !accumulationStatements.empty());
     _accumulatedFields->reserve(accumulationStatements.size());
     for (auto&& accumulationStatement : accumulationStatements) {
         _accumulatedFields->push_back(accumulationStatement);

@@ -32,19 +32,20 @@
 #include "mongo/base/status_with.h"
 #include "mongo/db/commands/query_cmd/bulk_write_crud_op.h"
 #include "mongo/db/feature_flag.h"
-#include "mongo/db/global_catalog/router_role_api/collection_routing_info_targeter.h"
-#include "mongo/db/global_catalog/shard_key_pattern_query_util.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/pipeline/variables.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/db/query/write_ops/write_ops.h"
 #include "mongo/db/query/write_ops/write_ops_parsers.h"
+#include "mongo/db/router_role/collection_routing_info_targeter.h"
 #include "mongo/db/s/analyze_shard_key_util.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/s/analyze_shard_key_common_gen.h"
+#include "mongo/s/query/exec/target_write_op.h"
+#include "mongo/s/query/shard_key_pattern_query_util.h"
 #include "mongo/util/intrusive_counter.h"
 
 #include <memory>
@@ -262,14 +263,12 @@ void WriteDistributionMetricsCalculator::_addUpdateQuery(
         // the filter.
         auto isReplacementUpdate =
             !upsert && updateMod.type() == write_ops::UpdateModification::Type::kReplacement;
-        auto isExactIdQuery = [&] {
-            return CollectionRoutingInfoTargeter::isExactIdQuery(
-                opCtx, ns, filter, collation, _getChunkManager());
-        };
+        const auto& cm = _getChunkManager();
 
         // Currently, targeting by replacement document is only done when the query targets an exact
         // id value.
-        if (isReplacementUpdate && isExactIdQuery()) {
+        if (isReplacementUpdate &&
+            isExactIdQuery(opCtx, ns, filter, collation, cm.isSharded(), cm.getDefaultCollator())) {
             auto filter =
                 _getShardKeyPattern().extractShardKeyFromDoc(updateMod.getUpdateReplacement());
             info = _getTargetingInfoForQuery(

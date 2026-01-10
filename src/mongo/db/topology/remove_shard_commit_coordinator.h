@@ -34,9 +34,10 @@
 #include "mongo/db/global_catalog/ddl/sharding_ddl_coordinator.h"
 #include "mongo/db/global_catalog/ddl/sharding_ddl_coordinator_service.h"
 #include "mongo/db/topology/remove_shard_commit_coordinator_document_gen.h"
+#include "mongo/util/modules.h"
 
 namespace mongo {
-class RemoveShardCommitCoordinator final
+class MONGO_MOD_PARENT_PRIVATE RemoveShardCommitCoordinator final
     : public RecoverableShardingDDLCoordinator<RemoveShardCommitCoordinatorDocument,
                                                RemoveShardCommitCoordinatorPhaseEnum> {
 public:
@@ -98,7 +99,6 @@ private:
     // Allows ddl operations to resume in the cluster.
     void _resumeDDLOperations(OperationContext* opCtx);
 
-    // TODO (SERVER-99433) Remove once replica set endpoint is fully discontinued.
     // Updates the "hasTwoOrMoreShard" cluster cardinality parameter if this shard removal leaves
     // only one shard in the cluster and the coordinator was started with the parameter
     // `shouldUpdateClusterCardinality` set to true.

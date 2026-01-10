@@ -55,6 +55,7 @@ function runCommandAndCheckError(testCase) {
     const res = st.getDB(dbName).runCommand(testCase.cmdObj);
     assert.commandFailedWithCode(res, testCase.errorCode);
 
+    // TODO SERVER-114994 findAndModify support in UWE.
     // FindAndModify is not a batch command, thus will not have a writeErrors field.
     if (!testCase.cmdObj.findAndModify) {
         res.writeErrors.forEach((writeError) => {

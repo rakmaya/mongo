@@ -42,11 +42,12 @@
 #include "mongo/transport/service_entry_point.h"
 #include "mongo/unittest/log_test.h"
 #include "mongo/util/clock_source_mock.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/tick_source_mock.h"
 
-namespace mongo {
+namespace MONGO_MOD_PUBLIC mongo {
 
-class ServiceEntryPointTestFixture : public ServiceContextTest {
+class MONGO_MOD_OPEN ServiceEntryPointTestFixture : public ServiceContextTest {
 public:
     ServiceEntryPointTestFixture()
         : ServiceContextTest(std::make_unique<ScopedGlobalServiceContextForTest>(
@@ -98,7 +99,7 @@ public:
     void testCommandMaxTimeMS();
     void testOpCtxInterrupt(bool deferHandling);
     void testReadConcernClientUnspecifiedNoDefault();
-    void testReadConcernClientUnspecifiedWithDefault(bool expectClusterDefault);
+    void testReadConcernClientUnspecifiedWithDefault();
     void testReadConcernClientSuppliedLevelNotAllowed(bool exceptionLogged);
     void testReadConcernClientSuppliedAllowed();
     void testReadConcernExtractedOnException();
@@ -106,7 +107,7 @@ public:
     void testExhaustCommandNextInvocationSet();
     void testWriteConcernClientSpecified();
     void testWriteConcernClientUnspecifiedNoDefault();
-    void testWriteConcernClientUnspecifiedWithDefault(bool expectClusterDefault);
+    void testWriteConcernClientUnspecifiedWithDefault();
 
 #ifdef MONGO_CONFIG_OTEL
     void testTelemetryContextDeserializedFromRequest();
@@ -349,4 +350,4 @@ public:
     }
 };
 
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUBLIC mongo

@@ -17,16 +17,12 @@ mongo_cc_library(
     srcs = [
         "bench.cpp",
     ],
-    hdrs = [
-        "bench.h",
-    ],
     deps = [
         "//src/mongo:base",
         "//src/mongo/client:clientdriver_minimal",
-        "//src/mongo/db/session:logical_session_id",  # TODO(SERVER-93876): Remove.
         "//src/mongo/scripting:bson_template_evaluator",
         "//src/mongo/util:pcre_util",
-        "//src/mongo/util:pcre_wrapper",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/util:pcre_wrapper",
     ],
 )
 
@@ -34,9 +30,6 @@ mongo_cc_library(
     name = "program_runner",
     srcs = [
         "program_runner.cpp",
-    ],
-    hdrs = [
-        "program_runner.h",
     ],
     deps = [
         "//src/mongo:base",
@@ -50,9 +43,6 @@ mongo_cc_library(
     srcs = [
         "linenoise_utf8.cpp",
     ],
-    hdrs = [
-        "linenoise_utf8.h",
-    ],
     deps = [
         "//src/mongo:base",
     ],
@@ -62,9 +52,6 @@ mongo_cc_library(
     name = "shell_options_storage",
     srcs = [
         "shell_options_storage.cpp",
-    ],
-    hdrs = [
-        "shell_options.h",
     ],
     copts = select({
         "@platforms//os:windows": [
@@ -122,13 +109,10 @@ mongo_cc_library(
         "kms.cpp",
         "kms_local.cpp",
     ],
-    hdrs = [
-        "kms.h",
-    ],
     deps = [
         ":kms_idl",
         "//src/mongo:base",
-        "//src/mongo/base:secure_allocator",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/base:secure_allocator",
         "//src/mongo/crypto:aead_encryption",
         "//src/mongo/db/commands:test_commands_enabled",
     ],
@@ -144,35 +128,25 @@ mongo_cc_library(
         "shell_utils_extended.cpp",
         "shell_utils_launcher.cpp",
     ],
-    hdrs = [
-        "named_pipe_test_helper.h",
-        "shell_options.h",
-        "shell_utils.h",
-        "shell_utils_extended.h",
-        "shell_utils_launcher.h",
-        "//src/mongo/bson:bson_bin_util.h",
-        "//src/mongo/bson:bsonobj_comparator.h",
-        "//src/mongo/transport:message_compressor_options_client_gen",
-    ],
     deps = [
         ":benchrun",
-        ":program_runner",  # TODO(SERVER-93876): Remove.
+        ":program_runner",
         ":shell_options_storage",
-        "//src/mongo/base:environment_buffer",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/base:environment_buffer",
         "//src/mongo/bson/column",
         "//src/mongo/client:clientdriver_network",
-        "//src/mongo/db:mongohasher",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/db:mongohasher",
         "//src/mongo/db:traffic_reader",
-        "//src/mongo/db/auth:security_token_auth",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/db/auth:security_token_auth",
         "//src/mongo/db/query/collation:collator_icu",
         "//src/mongo/db/query/virtual_collection",
         "//src/mongo/replay:mongor_lib",
         "//src/mongo/scripting",
-        "//src/mongo/transport:message_compressor",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/transport:message_compressor",
         "//src/mongo/transport/named_pipe",
         "//src/mongo/unittest:golden_test_base",
         "//src/mongo/util:buildinfo",
-        "//src/mongo/util:icu",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/util:icu",
         "//src/mongo/util:password",
         "//src/mongo/util:signal_handlers",
     ],
@@ -188,7 +162,7 @@ mongo_cc_library(
         "//conditions:default": ["@platforms//:incompatible"],
     }),
     deps = [
-        ":kms",  # TODO(SERVER-93876): Remove.
+        ":kms",
         ":shell_utils",
     ],
 )
@@ -197,9 +171,6 @@ mongo_cc_library(
     name = "encrypted_dbclient",
     srcs = [
         "encrypted_dbclient_base.cpp",
-    ],
-    hdrs = [
-        "encrypted_dbclient_base.h",
     ],
     copts = select({
         "@platforms//os:windows": [
@@ -216,11 +187,11 @@ mongo_cc_library(
     deps = [
         ":kms",
         "//src/mongo/client:clientdriver_minimal",
-        "//src/mongo/crypto:aead_encryption",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/crypto:aead_encryption",
         "//src/mongo/crypto:encrypted_field_config",
         "//src/mongo/crypto:fle_crypto",
         "//src/mongo/crypto:fle_fields",
-        "//src/mongo/crypto:symmetric_crypto",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/crypto:symmetric_crypto",
         "//src/mongo/db:query_expressions",
         "//src/mongo/db/query/compiler/parsers/matcher/schema:json_schema_parser",
         "//src/mongo/scripting",
@@ -234,10 +205,6 @@ mongo_cc_library(
     srcs = [
         "linenoise.cpp",
         "mk_wcwidth.cpp",
-    ],
-    hdrs = [
-        "linenoise.h",
-        "mk_wcwidth.h",
     ],
     deps = [
         ":linenoise_utf8",
@@ -261,7 +228,7 @@ render_template(
     output = "error_codes.js",
     python_libs = [
         dependency(
-            "cheetah3",
+            "ct3",
             group = "compile",
         ),
         dependency(
@@ -287,11 +254,14 @@ MONGOJS_CPP_JSFILES = [
     "explainable.js",
     "explainable_global.js",
     "mongo.js",
+    "multi_router.js",
+    "multi_router_global.js",
     "prelude.js",
     "query.js",
     "query_global.js",
     "session.js",
     "session_global.js",
+    "stringdiff.js",
     "types.js",
     "utils.js",
     "utils_global.js",
@@ -353,9 +323,6 @@ mongo_cc_library(
     srcs = [
         "mongojs.cpp",
     ],
-    header_deps = [
-        "//src/mongo/db/op_observer:op_observer",
-    ],
     deps = [
         "//src/mongo:base",
     ],
@@ -365,12 +332,12 @@ mongo_cc_library(
     name = "shell_options_register",
     srcs = [
         "shell_options_gen",
-    ] + select({
-        "//bazel/config:build_grpc_enabled": ["shell_options_grpc_gen"],
-        "//conditions:default": {},
-    }),
-    hdrs = [
-        "shell_utils.h",
+    ],
+    srcs_select = [
+        {
+            "//bazel/config:build_grpc_enabled": ["shell_options_grpc_gen"],
+            "//conditions:default": [],
+        },
     ],
     deps = [
         "shell_options_storage",
@@ -394,14 +361,14 @@ mongo_cc_library(
         # please add that library here, as a private library dependency.
         "//src/mongo/client:clientdriver_network",
         "//src/mongo/client:connection_string",
-        "//src/mongo/db/local_catalog:index_key_validate",
+        "//src/mongo/db:index_key_validate",
         "//src/mongo/db:mongohasher",
         "//src/mongo/db/pipeline:change_stream_error_extra_info",
         "//src/mongo/db/query:command_request_response",
         "//src/mongo/db/query:query_request",
-        "//src/mongo/db/s:remove_shard_exception",
+        "//src/mongo/db/topology:remove_shard_exception",
         "//src/mongo/db:server_base",
-        "//src/mongo/db:service_context_non_d",
+        "//src/mongo/db/shard_role:service_context_non_d",
         "//src/mongo/db/session:logical_session_id_helpers",
         "//src/mongo/db/storage:duplicate_key_error_info",
         "//src/mongo/db/timeseries:bucket_compression_failure",
@@ -452,9 +419,6 @@ mongo_cc_library(
     name = "mongo_main",
     srcs = [
         "mongo_main.cpp",
-    ],
-    hdrs = [
-        "mongo_main.h",
     ],
     target_compatible_with = select({
         "//bazel/config:js_engine_mozjs": [],
@@ -541,10 +505,11 @@ mongo_cc_unit_test(
         "program_runner_test.cpp",
         "shell_options_test.cpp",
         "shell_utils_test.cpp",
-    ] + select({
+    ],
+    srcs_select = [{
         "//bazel/config:ssl_enabled": ["kms_test.cpp"],
         "//conditions:default": [],
-    }),
+    }],
     tags = ["mongo_unittest_fifth_group"],
     deps = ["shell_test_dependencies"],
 )

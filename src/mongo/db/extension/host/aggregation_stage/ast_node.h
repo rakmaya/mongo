@@ -143,6 +143,16 @@ private:
                                         .firstElementFieldNameStringData());
     }
 
+    static ::MongoExtensionStatus* _hostGetProperties(
+        const ::MongoExtensionAggStageAstNode* astNode,
+        ::MongoExtensionByteBuf** properties) noexcept {
+        return wrapCXXAndConvertExceptionToStatus([]() {
+            tasserted(11347801,
+                      "_hostGetProperties should not be called. Ensure that astNode is "
+                      "extension-allocated, not host-allocated.");
+        });
+    }
+
     static ::MongoExtensionStatus* _hostBind(
         const ::MongoExtensionAggStageAstNode* astNode,
         ::MongoExtensionLogicalAggStage** logicalStage) noexcept {
@@ -153,8 +163,25 @@ private:
         });
     }
 
-    static constexpr ::MongoExtensionAggStageAstNodeVTable VTABLE{
-        .destroy = &_hostDestroy, .get_name = &_hostGetName, .bind = &_hostBind};
+    static ::MongoExtensionStatus* _hostClone(const ::MongoExtensionAggStageAstNode* astNode,
+                                              ::MongoExtensionAggStageAstNode** output) noexcept {
+        return wrapCXXAndConvertExceptionToStatus([&]() {
+            auto* hostAstNode = static_cast<const HostAggStageAstNode*>(astNode);
+            auto spec = hostAstNode->getIdLookupSpec();
+            auto clonedLiteParsed =
+                std::make_unique<DocumentSourceInternalSearchIdLookUp::LiteParsed>(
+                    spec.firstElement(), spec);
+            auto clonedAstNode = std::make_unique<AggStageAstNode>(std::move(clonedLiteParsed));
+            *output = new HostAggStageAstNode(std::move(clonedAstNode));
+        });
+    }
+
+    static constexpr ::MongoExtensionAggStageAstNodeVTable VTABLE{.destroy = &_hostDestroy,
+                                                                  .get_name = &_hostGetName,
+                                                                  .get_properties =
+                                                                      &_hostGetProperties,
+                                                                  .bind = &_hostBind,
+                                                                  .clone = &_hostClone};
 
     std::unique_ptr<AggStageAstNode> _astNode;
 };

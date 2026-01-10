@@ -52,7 +52,7 @@ const expectedSampledQueryDocs = [];
 // Make each write below have a unique filter and use that to look up the corresponding
 // config.sampledQueries document later.
 
-{
+(function runUpdates() {
     // Perform some updates.
     assert.commandWorked(
         mongosColl.insert([
@@ -66,31 +66,53 @@ const expectedSampledQueryDocs = [];
         ]),
     );
 
+    const collation = QuerySamplingUtil.generateRandomCollation();
+    const letField = {var1: {$literal: 1}};
+    // When UWE is enabled, shards receive bulkWrite commands instead, so the test expectation changes accordingly.
     const cmdName = "update";
-
-    const updateOp0 = {
+    const singleUpdate0 = {
         q: {x: 1},
         u: {$mul: {y: 10}, $set: {"z.$[element]": 10}},
         arrayFilters: [{"element": {$gte: 1}}],
         multi: false,
         upsert: false,
-        collation: QuerySamplingUtil.generateRandomCollation(),
+        collation,
     };
+    const bulkUpdateOp0 = {
+        update: 0,
+        filter: {x: 1},
+        updateMods: {$mul: {y: 10}, $set: {"z.$[element]": 10}},
+        arrayFilters: [{"element": {$gte: 1}}],
+        multi: false,
+        upsert: false,
+        collation,
+    };
+    const updateOp0Filter = {"cmd.updates.0.q": singleUpdate0.q};
+    const cmdObj0 = {update: collName, updates: [singleUpdate0], let: letField};
     const diff0 = {y: "u", z: "u"};
     const shardNames0 = [st.rs1.name];
 
-    const updateOp1 = {
+    const singleUpdateOp1 = {
         q: {x: {$gte: 2}},
         u: [{$set: {y: 20, w: 200}}],
         c: {var0: 1},
         multi: true,
     };
+    const bulkUpdateOp1 = {
+        update: 0,
+        filter: {x: {$gte: 2}},
+        updateMods: [{$set: {y: 20, w: 200}}],
+        constants: {var0: 1},
+        multi: true,
+    };
+    const updateOp1Filter = {"cmd.updates.0.q": singleUpdateOp1.q};
+    const cmdObj1 = {update: collName, updates: [singleUpdateOp1], let: letField};
     const diff1 = {y: "u", w: "i"};
     const shardNames1 = [st.rs1.name, st.rs2.name];
 
     const originalCmdObj0 = {
         update: collName,
-        updates: [updateOp0, updateOp1],
+        updates: [singleUpdate0, singleUpdateOp1],
         let: {var1: 1},
     };
 
@@ -105,16 +127,16 @@ const expectedSampledQueryDocs = [];
     assert.neq(mongosColl.findOne({x: 1002, y: 20, z: [2], w: 200}), null);
 
     expectedSampledQueryDocs.push({
-        filter: {"cmd.updates.0.q": updateOp0.q},
+        filter: updateOp0Filter,
         cmdName: cmdName,
-        cmdObj: Object.assign({}, originalCmdObj0, {updates: [updateOp0], let: {var1: {$literal: 1}}}),
+        cmdObj: cmdObj0,
         diff: diff0,
         shardNames: shardNames0,
     });
     expectedSampledQueryDocs.push({
-        filter: {"cmd.updates.0.q": updateOp1.q},
+        filter: updateOp1Filter,
         cmdName: cmdName,
-        cmdObj: Object.assign({}, originalCmdObj0, {updates: [updateOp1], let: {var1: {$literal: 1}}}),
+        cmdObj: cmdObj1,
         diff: diff1,
         shardNames: shardNames1,
     });
@@ -131,7 +153,7 @@ const expectedSampledQueryDocs = [];
 
     // This is a WouldChangeOwningShard update. It causes the document to move from shard0 to
     // shard1.
-    const updateOp2 = {
+    const singleUpdateOp2 = {
         q: {x: -1},
         u: {$inc: {x: 1000}, $set: {v: -1}},
         multi: false,
@@ -142,7 +164,7 @@ const expectedSampledQueryDocs = [];
 
     const originalCmdObj1 = {
         update: collName,
-        updates: [updateOp2],
+        updates: [singleUpdateOp2],
         let: {var1: 1},
     };
 
@@ -152,15 +174,15 @@ const expectedSampledQueryDocs = [];
     assert.neq(mongosColl.findOne({x: 999, y: -1, z: [-1], v: -1}), null);
 
     expectedSampledQueryDocs.push({
-        filter: {"cmd.updates.0.q": updateOp2.q},
+        filter: {"cmd.updates.0.q": singleUpdateOp2.q},
         cmdName: cmdName,
-        cmdObj: Object.assign({}, originalCmdObj1, {updates: [updateOp2], let: {var1: {$literal: 1}}}),
+        cmdObj: Object.assign({}, originalCmdObj1, {updates: [singleUpdateOp2], let: letField}),
         diff: diff2,
         shardNames: shardNames2,
     });
-}
+})();
 
-{
+(function runDeletes() {
     // Perform some deletes.
     assert.commandWorked(
         mongosColl.insert([
@@ -172,19 +194,30 @@ const expectedSampledQueryDocs = [];
         ]),
     );
 
+    const collation = QuerySamplingUtil.generateRandomCollation();
+    // When UWE is enabled, shards receive bulkWrite commands instead, so the test expectation changes accordingly.
     const cmdName = "delete";
-
-    const deleteOp0 = {
+    const singleDeleteOp0 = {
         q: {x: 3},
         limit: 1,
-        collation: QuerySamplingUtil.generateRandomCollation(),
+        collation,
     };
+    const bulkDeleteOp0 = {
+        filter: {x: 3},
+        multi: false,
+        collation,
+    };
+    const deleteOp0Filter = {"cmd.deletes.0.q": singleDeleteOp0.q};
+    const cmdObj0 = {delete: collName, deletes: [singleDeleteOp0]};
     const shardNames0 = [st.rs1.name];
 
-    const deleteOp1 = {q: {x: {$gte: 4}}, limit: 0};
+    const singleDeleteOp1 = {q: {x: {$gte: 4}}, limit: 0};
+    const bulkDeleteOp1 = {filter: {x: {$gte: 4}}, multi: true};
+    const deleteOp1Filter = {"cmd.deletes.0.q": singleDeleteOp1.q};
+    const cmdObj1 = {delete: collName, deletes: [singleDeleteOp1]};
     const shardNames1 = [st.rs1.name, st.rs2.name];
 
-    const originalCmdObj = {delete: collName, deletes: [deleteOp0, deleteOp1]};
+    const originalCmdObj = {delete: collName, deletes: [singleDeleteOp0, singleDeleteOp1]};
 
     // Use a transaction, otherwise deleteOp1 would get routed to all shards.
     const session = st.s.startSession();
@@ -196,15 +229,15 @@ const expectedSampledQueryDocs = [];
     assert.eq(mongosColl.findOne({x: 4}), null);
 
     expectedSampledQueryDocs.push({
-        filter: {"cmd.deletes.0.q": deleteOp0.q},
+        filter: deleteOp0Filter,
         cmdName: cmdName,
-        cmdObj: Object.assign({}, originalCmdObj, {deletes: [deleteOp0]}),
+        cmdObj: cmdObj0,
         shardNames: shardNames0,
     });
     expectedSampledQueryDocs.push({
-        filter: {"cmd.deletes.0.q": deleteOp1.q},
+        filter: deleteOp1Filter,
         cmdName: cmdName,
-        cmdObj: Object.assign({}, originalCmdObj, {deletes: [deleteOp1]}),
+        cmdObj: cmdObj1,
         shardNames: shardNames1,
     });
 
@@ -213,9 +246,9 @@ const expectedSampledQueryDocs = [];
     assert.commandWorked(
         mongosDB.runCommand({explain: {delete: collName, deletes: [{q: {x: {$gte: 401}}, limit: 0}]}}),
     );
-}
+})();
 
-{
+(function runFindAndModify() {
     // Perform some findAndModify.
     assert.commandWorked(
         mongosColl.insert([
@@ -282,7 +315,7 @@ const expectedSampledQueryDocs = [];
         diff: diff1,
         shardNames: shardNames1,
     });
-}
+})();
 
 const cmdNames = ["update", "delete", "findAndModify"];
 QuerySamplingUtil.assertSoonSampledQueryDocumentsAcrossShards(

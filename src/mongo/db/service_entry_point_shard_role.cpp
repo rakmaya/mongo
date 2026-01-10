@@ -34,28 +34,24 @@
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/client/read_preference.h"
 #include "mongo/db/admission/ingress_admission_context.h"
 #include "mongo/db/admission/ingress_admission_control_gen.h"
 #include "mongo/db/admission/ingress_admission_controller.h"
 #include "mongo/db/api_parameters.h"
-#include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_contract.h"
 #include "mongo/db/auth/authorization_contract_guard.h"
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/ldap_cumulative_operation_stats.h"
 #include "mongo/db/auth/ldap_operation_stats.h"
-#include "mongo/db/auth/resource_pattern.h"
 #include "mongo/db/auth/security_token_authentication_guard.h"
-#include "mongo/db/auth/user_acquisition_stats.h"
 #include "mongo/db/auth/validated_tenancy_scope.h"
 #include "mongo/db/client.h"
-#include "mongo/db/cluster_parameters/sharding_cluster_parameters_gen.h"
 #include "mongo/db/command_can_run_here.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/commands/fsync.h"
 #include "mongo/db/commands/server_status/server_status_metric.h"
 #include "mongo/db/commands/txn_cmds_gen.h"
 #include "mongo/db/curop.h"
@@ -64,16 +60,9 @@
 #include "mongo/db/database_name.h"
 #include "mongo/db/default_max_time_ms_cluster_parameter.h"
 #include "mongo/db/error_labels.h"
-#include "mongo/db/exec/mutable_bson/document.h"
 #include "mongo/db/feature_flag.h"
 #include "mongo/db/generic_argument_util.h"
-#include "mongo/db/global_catalog/catalog_cache/shard_cannot_refresh_due_to_locks_held_exception.h"
 #include "mongo/db/initialize_operation_session_info.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_catalog.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
-#include "mongo/db/local_catalog/shard_role_catalog/operation_sharding_state.h"
 #include "mongo/db/logical_time.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/not_primary_error_tracker.h"
@@ -94,17 +83,22 @@
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/replication_state_transition_lock_guard.h"
 #include "mongo/db/request_execution_context.h"
+#include "mongo/db/rss/replicated_storage_service.h"
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/server_parameter.h"
-#include "mongo/db/server_parameter_with_storage.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/service_entry_point_shard_role_helpers.h"
 #include "mongo/db/session/logical_session_id_gen.h"
 #include "mongo/db/session/session_catalog.h"
 #include "mongo/db/session/session_catalog_mongod.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/operation_sharding_state.h"
+#include "mongo/db/shard_role/shard_role_loop.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/sharding_environment/shard_id.h"
-#include "mongo/db/sharding_environment/sharding_feature_flags_gen.h"
 #include "mongo/db/sharding_environment/sharding_initialization_waiter.h"
 #include "mongo/db/sharding_environment/sharding_statistics.h"
 #include "mongo/db/stats/api_version_metrics.h"
@@ -113,27 +107,26 @@
 #include "mongo/db/stats/server_read_concern_metrics.h"
 #include "mongo/db/stats/top.h"
 #include "mongo/db/tenant_id.h"
+#include "mongo/db/topology/cluster_parameters/sharding_cluster_parameters_gen.h"
 #include "mongo/db/topology/cluster_role.h"
 #include "mongo/db/topology/sharding_state.h"
+#include "mongo/db/topology/vector_clock/vector_clock.h"
 #include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/db/transaction_validation.h"
 #include "mongo/db/validate_api_parameters.h"
-#include "mongo/db/vector_clock/vector_clock.h"
-#include "mongo/db/versioning_protocol/chunk_version.h"
 #include "mongo/db/versioning_protocol/database_version.h"
 #include "mongo/db/versioning_protocol/shard_version.h"
-#include "mongo/db/versioning_protocol/stale_exception.h"
 #include "mongo/db/write_concern.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/logv2/log.h"
 #include "mongo/otel/telemetry_context_holder.h"
-#include "mongo/otel/telemetry_context_serialization.h"
+#include "mongo/otel/traces/span/span.h"
+#include "mongo/otel/traces/telemetry_context_serialization.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/rpc/check_allowed_op_query_cmd.h"
 #include "mongo/rpc/factory.h"
 #include "mongo/rpc/message.h"
 #include "mongo/rpc/metadata.h"
-#include "mongo/rpc/metadata/audit_user_attrs.h"
 #include "mongo/rpc/metadata/client_metadata.h"
 #include "mongo/rpc/metadata/impersonated_client_session.h"
 #include "mongo/rpc/op_msg.h"
@@ -141,39 +134,27 @@
 #include "mongo/rpc/reply_builder_interface.h"
 #include "mongo/rpc/topology_version_gen.h"
 #include "mongo/s/analyze_shard_key_role.h"
-#include "mongo/s/query/exec/document_source_merge_cursors.h"
 #include "mongo/s/query_analysis_sampler.h"
 #include "mongo/s/transaction_router.h"
 #include "mongo/s/would_change_owning_shard_exception.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/transport/hello_metrics.h"
-#include "mongo/transport/service_executor.h"
-#include "mongo/transport/session.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/clock_source.h"
 #include "mongo/util/concurrency/admission_context.h"
 #include "mongo/util/concurrency/ticketholder.h"
-#include "mongo/util/database_name_util.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/future_impl.h"
-#include "mongo/util/future_util.h"
 #include "mongo/util/namespace_string_util.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/serialization_context.h"
-#include "mongo/util/str.h"
-#include "mongo/util/string_map.h"
 #include "mongo/util/testing_proctor.h"
 #include "mongo/util/time_support.h"
 
 #include <algorithm>
-#include <cstddef>
-#include <cstdint>
-#include <mutex>
 #include <string>
-#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -189,7 +170,6 @@
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
-
 namespace mongo {
 
 MONGO_FAIL_POINT_DEFINE(respondWithNotPrimaryInCommandDispatch);
@@ -203,6 +183,7 @@ MONGO_FAIL_POINT_DEFINE(hangAfterSessionCheckOut);
 MONGO_FAIL_POINT_DEFINE(hangBeforeSettingTxnInterruptFlag);
 MONGO_FAIL_POINT_DEFINE(hangAfterCheckingWritabilityForMultiDocumentTransactions);
 MONGO_FAIL_POINT_DEFINE(failWithErrorCodeAfterSessionCheckOut);
+MONGO_FAIL_POINT_DEFINE(failIngressRequestRateLimiting);
 
 // Tracks the number of times a legacy unacknowledged write failed due to
 // not primary error resulted in network disconnection.
@@ -515,7 +496,7 @@ public:
         _admissionTicket = boost::none;
 
         // Perform authorization verification checks in test environments.
-        _performAuthorizationVerificationChecks(status);
+        _performAuthorizationVerificationChecks(_execContext.getOpCtx(), status);
 
         if (MONGO_unlikely(!status.isOK()))
             _handleFailure(std::move(status));
@@ -643,11 +624,6 @@ private:
     // Executes the parsed command against the database.
     void _commandExec();
 
-    // Takes a command execution error (or write error), attempts to perform metadata refresh and
-    // return true in case the refresh was executed, false in case no refresh was executed and an
-    // error status if the refresh failed.
-    StatusWith<bool> _refreshIfNeeded(const Status& execError);
-
     // Takes a command execution error (or write error), checks if the problem was that sharding is
     // not yet initialized, and waits for initialization if so. Returns true in the case that we
     // waited for sharding initialization and false otherwise.
@@ -666,7 +642,7 @@ private:
                                                           bool startOrContinueTransaction);
 
     // Performs authorization verification checks in test environments.
-    void _performAuthorizationVerificationChecks(const Status& status);
+    void _performAuthorizationVerificationChecks(OperationContext* opCtx, const Status& status);
 
     const HandleRequest::ExecutionContext& _execContext;
     AuthorizationContractGuard _contractGuard;
@@ -681,9 +657,6 @@ private:
     boost::optional<RunCommandOpTimes> _runCommandOpTimes;
     boost::optional<rpc::ImpersonatedClientSessionGuard> _clientSessionGuard;
     boost::optional<auth::SecurityTokenAuthenticationGuard> _tokenAuthorizationSessionGuard;
-    bool _refreshedDatabase = false;
-    bool _refreshedCollection = false;
-    int _refreshedCatalogCacheAttempts = 0;
     bool _awaitedShardingInitialization = false;
     bool _cannotRetry = false;
 
@@ -983,7 +956,8 @@ void CheckoutSessionAndInvokeCommand::_checkOutSession() {
                     opCtx,
                     {*sessionOptions.getTxnNumber(), sessionOptions.getTxnRetryCounter()},
                     sessionOptions.getAutocommit(),
-                    transactionAction);
+                    transactionAction,
+                    sessionOptions.getTransactionRuntimeContext());
                 beganOrContinuedTxn = true;
             } catch (const ExceptionFor<ErrorCodes::PreparedTransactionInProgress>&) {
                 auto prevTxnExitedPrepare = txnParticipant.onExitPrepare();
@@ -1235,16 +1209,21 @@ void RunCommandImpl::_epilogue() {
                 requestMatchesComment;
         });
 
-    service_entry_point_shard_role_helpers::waitForLinearizableReadConcern(opCtx);
+    if (repl::ReadConcernArgs::get(opCtx).getLevel() ==
+        repl::ReadConcernLevel::kLinearizableReadConcern) {
+        uassertStatusOK(mongo::waitForLinearizableReadConcern(opCtx, Milliseconds::zero()));
+    }
 
-    // Wait for data to satisfy the read concern level, if necessary.
-    service_entry_point_shard_role_helpers::waitForSpeculativeMajorityReadConcern(opCtx);
+    if (auto speculativeReadInfo = repl::SpeculativeMajorityReadInfo::get(opCtx);
+        speculativeReadInfo.isSpeculativeRead()) {
+        uassertStatusOK(mongo::waitForSpeculativeMajorityReadConcern(opCtx, speculativeReadInfo));
+    }
 
     {
         auto body = replyBuilder->getBodyBuilder();
         auto status = CommandHelpers::extractOrAppendOkAndGetStatus(body);
         _ok = status.isOK();
-        service_entry_point_shard_role_helpers::attachCurOpErrInfo(opCtx, status);
+        CurOp::get(opCtx)->debug().errInfo = status;
 
         boost::optional<ErrorCodes::Error> code =
             _ok ? boost::none : boost::optional<ErrorCodes::Error>(status.code());
@@ -1252,6 +1231,8 @@ void RunCommandImpl::_epilogue() {
         auto response = body.asTempObj();
         if (auto wcErrElement = response["writeConcernError"]; !wcErrElement.eoo()) {
             wcCode = ErrorCodes::Error(wcErrElement["code"].numberInt());
+            CurOp::get(opCtx)->debug().writeConcernError.emplace(
+                response.getObjectField("writeConcernError").getOwned());
         }
         appendErrorLabelsAndTopologyVersion(opCtx,
                                             &body,
@@ -1480,14 +1461,16 @@ StatusWith<repl::ReadConcernArgs> ExecCommandDatabase::_extractReadConcern(
                                 "internalClient connection {}",
                                 redact(_execContext.getRequest().body.toString())),
                     readConcernArgs.isSpecified());
-        } else if (serverGlobalParams.clusterRole.has(ClusterRole::ShardServer) ||
-                   serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
-            if (!readConcernArgs.isSpecified()) {
-                // TODO: Disabled until after SERVER-44539, to avoid log spam.
-                // LOGV2(21954, "Missing readConcern on {command}", "Missing readConcern "
-                // "for command", "command"_attr = _invocation->definition()->getName());
-            }
         } else {
+            if ((serverGlobalParams.clusterRole.has(ClusterRole::ShardServer) ||
+                 serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) &&
+                !readConcernArgs.isSpecified()) {
+                // TODO: Disabled until after SERVER-44539, to avoid log spam.
+                // LOGV2(21954,
+                //       "Missing readConcern for command",
+                //       "command"_attr = _invocation->definition()->getName());
+            }
+
             // A member in a regular replica set.  Since these servers receive client queries, in
             // this context empty RC (ie. readConcern: {}) means the same as if absent/unspecified,
             // which is to apply the CWRWC defaults if present.  This means we just test isEmpty(),
@@ -1634,10 +1617,10 @@ void ExecCommandDatabase::_initiateCommand() {
     }
 
     if (auto& traceCtx = genericArgs.getTraceCtx()) {
-        auto telemetryCtx = otel::TelemetryContextSerializer::fromBSON(*traceCtx);
+        auto telemetryCtx = otel::traces::TelemetryContextSerializer::fromBSON(*traceCtx);
         if (telemetryCtx) {
-            auto& telemetryCtxHolder = otel::TelemetryContextHolder::get(opCtx);
-            telemetryCtxHolder.set(telemetryCtx);
+            auto& telemetryCtxHolder = otel::TelemetryContextHolder::getDecoration(opCtx);
+            telemetryCtxHolder.setTelemetryContext(telemetryCtx);
         }
     }
 
@@ -1654,6 +1637,29 @@ void ExecCommandDatabase::_initiateCommand() {
     _invocation->checkAuthorization(opCtx, _execContext.getRequest());
 
     boost::optional<rss::consensus::WriteIntentGuard> writeGuard;
+    auto& rss = rss::ReplicatedStorageService::get(opCtx->getServiceContext());
+
+    // On DSC, we block writes to local collections.
+    // We block transactions to local collections in case part of the transaction is a write for
+    // future proofing.
+    if (dbName == DatabaseName::kLocal &&
+        !rss.getPersistenceProvider().supportsLocalCollections()) {
+        bool commandIsWrite = (command->getReadWriteType() == Command::ReadWriteType::kWrite ||
+                               command->getReadWriteType() == Command::ReadWriteType::kTransaction);
+        uassert(ErrorCodes::IllegalOperation,
+                "Not allowed to write to 'local' database",
+                !commandIsWrite);
+
+        bool commandIsCreateCollection = command->getName() == "create";
+        uassert(ErrorCodes::IllegalOperation,
+                "Not allowed to create 'local' collections",
+                !commandIsCreateCollection);
+
+        bool commandIsCreateIndex = command->getName() == "createIndexes";
+        uassert(ErrorCodes::IllegalOperation,
+                "Not allowed to create indexes on 'local' collections",
+                !commandIsCreateIndex);
+    }
 
     if (!opCtx->getClient()->isInDirectClient() &&
         !MONGO_unlikely(skipCheckingForNotPrimaryInCommandDispatch.shouldFail())) {
@@ -1685,7 +1691,14 @@ void ExecCommandDatabase::_initiateCommand() {
             uassert(ErrorCodes::NotWritablePrimary, msg, canRunHere);
         }
 
+        // If we are the primary of a replSet which does not allow writes for targeted db
+        // and command is not permitted to run on "recovering" replica set secondary,
+        // we must assert repl states for safety.
+        // We filter out localDb since reads to localDb - regardless of write permissions -
+        // should still be allowed through. Previous conditional checks authorize
+        // write permissions to localDb depending on repl coordinator settings,
         if (!command->maintenanceOk() && replCoord->getSettings().isReplSet() &&
+            dbName != DatabaseName::kLocal &&
             !replCoord->canAcceptWritesForDatabase_UNSAFE(opCtx, dbName) &&
             !replCoord->getMemberState().secondary()) {
 
@@ -1772,7 +1785,57 @@ void ExecCommandDatabase::_initiateCommand() {
         }
     }
 
+    // TODO(SERVER-114130): Move those condition inside the gIngressAdmissionControlEnabled scope.
     const auto isProcessInternalCommand = isProcessInternalClient(*opCtx->getClient());
+    const auto isExemptFromAdmissionControl = isProcessInternalCommand ||
+        !_invocation->isSubjectToIngressAdmissionControl() ||
+        IngressAdmissionContext::get(opCtx).isHoldingTicket();
+
+    failIngressRequestRateLimiting.executeIf(
+        [&](const BSONObj& data) {
+            // TODO(SERVER-114130): Remove error label override when moving to the ingress
+            // request rate limiter.
+            BSONArrayBuilder arrayBuilder;
+            arrayBuilder.append(ErrorLabel::kSystemOverloadedError);
+            arrayBuilder.append(ErrorLabel::kRetryableError);
+            arrayBuilder.append(ErrorLabel::kNoWritesPerformed);
+            auto& errorLabels = errorLabelsOverride(opCtx);
+            invariant(!errorLabels);
+            errorLabels.emplace(arrayBuilder.arr());
+
+            // We simulate a request being rejected by the rate limiter.
+            uasserted(ErrorCodes::IngressRequestRateLimitExceeded,
+                      "Rejection from the 'failIngressRequestRateLimiting' fail point");
+        },
+        [&](const BSONObj& data) {
+            // Because we don't have a maintenance port yet, we must only simulate the rate limiter
+            // on non critical operations.
+            // TODO(SERVER-114130): Move this fail point to the ingress request rate limiter and
+            // remove this condition.
+            if (isExemptFromAdmissionControl) {
+                return false;
+            }
+
+            // Because we don't have a maintenance port yet, we must only simulate the rate limiter
+            // on requests directly coming from mongod and mongos. As the maintenance port is
+            // implemented, background checks and heatbeat won't interfere with rate-limiting
+            // behavior.
+            // TODO(SERVER-114130): Move this fail point to the ingress request rate limiter and
+            // remove this condition.
+            auto clientMetadata = ClientMetadata::get(opCtx->getClient());
+            if (clientMetadata) {
+                auto document = clientMetadata->getDocument();
+                auto clientName = clientMetadata->getApplicationName();
+                auto isFromMongoExecutable =
+                    clientName.ends_with("mongos") || clientName.ends_with("mongod");
+
+                if (!isFromMongoExecutable) {
+                    return false;
+                }
+            }
+
+            return true;
+        });
 
     if (gIngressAdmissionControlEnabled.load()) {
         // The way ingress admission works, one ticket should cover all the work for the operation.
@@ -1780,8 +1843,7 @@ void ExecCommandDatabase::_initiateCommand() {
         // of the subsequent admissions of the same operation (e.g. via DBDirectClient) should be
         // exempt from ingress admission control.
         boost::optional<ScopedAdmissionPriority<IngressAdmissionContext>> admissionPriority;
-        if (isProcessInternalCommand || !_invocation->isSubjectToIngressAdmissionControl() ||
-            IngressAdmissionContext::get(opCtx).isHoldingTicket()) {
+        if (isExemptFromAdmissionControl) {
             admissionPriority.emplace(opCtx, AdmissionContext::Priority::kExempt);
         }
         auto& admissionController = IngressAdmissionController::get(opCtx);
@@ -1882,6 +1944,12 @@ void ExecCommandDatabase::_initiateCommand() {
 void ExecCommandDatabase::_commandExec() {
     auto opCtx = _execContext.getOpCtx();
 
+    // We do not want to create a span for every incoming command, we only want a span when
+    // $traceCtx is specified on the command so we call Span::startIfExistingTraceParent instead of
+    // Span::start.
+    auto otelSpan =
+        otel::traces::Span::startIfExistingTraceParent(opCtx, _execContext.getCommand()->getName());
+
     // If this command should start a new transaction, waitForReadConcern will be invoked
     // after invoking the TransactionParticipant, which will determine whether a transaction
     // is being started or continued.
@@ -1889,171 +1957,86 @@ void ExecCommandDatabase::_commandExec() {
         service_entry_point_shard_role_helpers::waitForReadConcern(
             opCtx, getInvocation(), _execContext.getRequest());
     }
-    service_entry_point_shard_role_helpers::setPrepareConflictBehaviorForReadConcern(
-        opCtx, getInvocation());
 
-    _extraFieldsBuilder.resetToEmpty();
-    _execContext.getReplyBuilder()->reset();
+    shard_role_loop::RetryContext shardRetryCtx;
+    while (true) {
+        service_entry_point_shard_role_helpers::setPrepareConflictBehaviorForReadConcern(
+            opCtx, getInvocation());
 
-    try {
-        // TODO (SERVER-90204) Replace with a more accurate check of whether the command is coming
-        // from a router.
-        if (OperationShardingState::isComingFromRouter(opCtx)) {
-            ShardingState::get(opCtx)->assertCanAcceptShardedCommands();
+        _extraFieldsBuilder.resetToEmpty();
+        _execContext.getReplyBuilder()->reset();
+
+        try {
+            // TODO (SERVER-90204) Replace with a more accurate check of whether the command is
+            // coming from a router.
+            if (OperationShardingState::isComingFromRouter(opCtx)) {
+                ShardingState::get(opCtx)->assertCanAcceptShardedCommands();
+            }
+            _runCommandOpTimes.emplace(opCtx);
+            if (getInvocation()->supportsWriteConcern() ||
+                getInvocation()->definition()->getLogicalOp() == LogicalOp::opGetMore) {
+                // getMore operations inherit a WriteConcern from their originating cursor. For
+                // example, if the originating command was an aggregate with a $out and batchSize:0.
+                // Note that if the command only performed reads then we will not need to wait at
+                // all.
+                RunCommandAndWaitForWriteConcern runner(this);
+                runner.run();
+            } else {
+                RunCommandImpl runner(this);
+                runner.run();
+            }
+        } catch (DBException& ex) {
+            // If the command has failed, there is no need to look for write errors at the oss.
+            OperationShardingState::get(opCtx).resetShardingOperationFailedStatus();
+
+            const auto staleExceptionIsRetryable =
+                shard_role_loop::handleStaleError(opCtx, ex.toStatus(), shardRetryCtx);
+
+            if (staleExceptionIsRetryable ==
+                shard_role_loop::CanRetry::NO_BECAUSE_EXHAUSTED_RETRIES) {
+                ex.addContext("Exhausted maximum number of shard metadata recovery attempts");
+            }
+
+            const bool waitedForInitialized = _awaitShardingInitializedIfNeeded(ex.toStatus());
+
+            const bool errorMayBeRetried =
+                staleExceptionIsRetryable == shard_role_loop::CanRetry::YES || waitedForInitialized;
+
+            if (errorMayBeRetried && canRetryCommand(ex.toStatus())) {
+                _resetLockerStateAfterShardingUpdate(opCtx);
+                continue;  // Retry
+            }
+
+            // Cannot retry. Fail the command.
+            throw;
         }
-        _runCommandOpTimes.emplace(opCtx);
-        if (getInvocation()->supportsWriteConcern() ||
-            getInvocation()->definition()->getLogicalOp() == LogicalOp::opGetMore) {
-            // getMore operations inherit a WriteConcern from their originating cursor. For example,
-            // if the originating command was an aggregate with a $out and batchSize: 0. Note that
-            // if the command only performed reads then we will not need to wait at all.
-            RunCommandAndWaitForWriteConcern runner(this);
-            runner.run();
-        } else {
-            RunCommandImpl runner(this);
-            runner.run();
-        }
-    } catch (const DBException& ex) {
-        // If the command has failed, there is no need to look for write errors at the oss.
-        OperationShardingState::get(opCtx).resetShardingOperationFailedStatus();
-
-        const auto metadataRefreshStatus = _refreshIfNeeded(ex.toStatus());
-        const auto refreshed = uassertStatusOK(metadataRefreshStatus);
-
-        const auto waitedForInitialized = _awaitShardingInitializedIfNeeded(ex.toStatus());
-
-        if ((refreshed || waitedForInitialized) && canRetryCommand(ex.toStatus())) {
-            _resetLockerStateAfterShardingUpdate(opCtx);
-            _commandExec();
-            return;
-        }
-
-        throw;
+        break;
     }
 
     // Regardless if the command has succeeded, it needs to check if the operation sharding state
     // has some stale config errors to be handled before returning to the router.
     if (auto writeError = OperationShardingState::get(opCtx).resetShardingOperationFailedStatus()) {
-        const auto metadataRefreshStatus = _refreshIfNeeded(*writeError);
-        if (!metadataRefreshStatus.isOK() &&
-            ErrorCodes::isInterruption(metadataRefreshStatus.getStatus())) {
-            uassertStatusOK(metadataRefreshStatus);
+        try {
+            shard_role_loop::handleStaleError(opCtx, *writeError, shardRetryCtx);
+        } catch (ExceptionFor<ErrorCategory::Interruption>& ex) {
+            ex.addContext("interruption while recovering sharding metadata upon write error");
+            throw;
+        } catch (const DBException&) {
+            // Ignore other exceptions. We don't want to destroy the top-level command status.
         }
     }
-}
-
-StatusWith<bool> ExecCommandDatabase::_refreshIfNeeded(const Status& execError) {
-    auto opCtx = _execContext.getOpCtx();
-
-    tassert(8462308, "Expected to find an error in the status of the command", !execError.isOK());
-
-    if (execError == ErrorCodes::StaleConfig) {
-        ShardingStatistics::get(opCtx).countStaleConfigErrors.addAndFetch(1);
-    }
-
-    if (opCtx->getClient()->isInDirectClient()) {
-        return false;
-    }
-
-    if (execError == ErrorCodes::StaleDbVersion && !_refreshedDatabase) {
-        const auto staleInfo = execError.extraInfo<StaleDbRoutingVersion>();
-        tassert(8462303, "StaleDbVersion must have extraInfo", staleInfo);
-        const auto stableLocalVersion =
-            !staleInfo->getCriticalSectionSignal() && staleInfo->getVersionWanted();
-
-        if (stableLocalVersion && staleInfo->getVersionReceived() < staleInfo->getVersionWanted()) {
-            // The shard is recovered and the router is staler than the shard, so we cannot retry
-            // locally.
-            return false;
-        }
-
-        const auto refreshStatus =
-            service_entry_point_shard_role_helpers::refreshDatabase(opCtx, *staleInfo);
-        if (refreshStatus.isOK()) {
-            _refreshedDatabase = true;
-            return true;
-        } else {
-            LOGV2_WARNING(
-                8462300,
-                "Failed to refresh database metadata cache while handling StaleDbVersion exception",
-                "error"_attr = redact(refreshStatus));
-            return refreshStatus;
-        }
-    } else if (execError == ErrorCodes::StaleConfig && !_refreshedCollection) {
-        const auto staleInfo = execError.extraInfo<StaleConfigInfo>();
-        tassert(8462304, "StaleConfig must have extraInfo", staleInfo);
-        const auto inCriticalSection = staleInfo->getCriticalSectionSignal().has_value();
-        const auto stableLocalVersion = !inCriticalSection && staleInfo->getVersionWanted();
-
-        if (stableLocalVersion &&
-            ShardVersion::isPlacementVersionIgnored(staleInfo->getVersionReceived())) {
-            // Shard is recovered, but the router didn't sent a shard version, therefore we just
-            // need to tell the router how much it needs to advance to (getVersionWanted).
-            return false;
-        }
-
-        if (stableLocalVersion &&
-            (staleInfo->getVersionReceived().placementVersion() <=>
-             staleInfo->getVersionWanted()->placementVersion()) == std::partial_ordering::less) {
-            // Shard is recovered and the router is staler than the shard.
-            return false;
-        }
-
-        if (inCriticalSection) {
-            service_entry_point_shard_role_helpers::handleReshardingCriticalSectionMetrics(
-                opCtx, *staleInfo);
-        }
-
-        const auto refreshStatus =
-            service_entry_point_shard_role_helpers::refreshCollection(opCtx, *staleInfo);
-
-        // Fail the direct shard operation so that a RetryableWriteError label can be returned and
-        // the write can be retried by the driver.
-        const auto fromRouter = OperationShardingState::isComingFromRouter(opCtx);
-        if (opCtx->isRetryableWrite() && !fromRouter) {
-            return false;
-        }
-
-        if (refreshStatus.isOK()) {
-            _refreshedCollection = true;
-            return true;
-        } else {
-            LOGV2_WARNING(
-                8462301,
-                "Failed to refresh collection metadata cache while handling StaleConfig exception",
-                "error"_attr = redact(refreshStatus));
-            return refreshStatus;
-        }
-    } else if (execError == ErrorCodes::ShardCannotRefreshDueToLocksHeld &&
-               _refreshedCatalogCacheAttempts < 10) {
-        const auto refreshInfo = execError.extraInfo<ShardCannotRefreshDueToLocksHeldInfo>();
-        tassert(8462305, "ShardCannotRefreshDueToLocksHeld must have extraInfo", refreshInfo);
-        invariant(!shard_role_details::getLocker(opCtx)->isLocked());
-
-        const auto refreshStatus =
-            service_entry_point_shard_role_helpers::refreshCatalogCache(opCtx, *refreshInfo);
-        _refreshedCatalogCacheAttempts++;
-        if (refreshStatus.isOK()) {
-            return true;
-        } else {
-            LOGV2_WARNING(8462302,
-                          "Failed to refresh catalog cache while handling "
-                          "ShardCannotRefreshDueToLocksHeld exception",
-                          "error"_attr = redact(refreshStatus));
-            return refreshStatus;
-        }
-    }
-
-    return false;
 }
 
 bool ExecCommandDatabase::_awaitShardingInitializedIfNeeded(const Status& status) {
     auto opCtx = _execContext.getOpCtx();
 
-    // If this node hasn't even been started with --shardsvr then there is no chance sharding can
-    // be initialized so there is no point waiting.
-    // TODO (SERVER-103081): non-shardsvr nodes should not receive the ShardingStateNotInitialized
-    // error.
+    // The ShardingStateNotInitialized error can occur under two scenarios:
+    // 1. This node has nothing to do with sharding, but some command has been run which is
+    // intended only to be run in sharding scenarios
+    // 2. This node was recently added to a sharded cluster and we might need to do wait for
+    // initialization to finish before doing whatever we were trying to do
+    // If this node was not even started with --shardsvr, then we must be in the first situation
+    // and so there is no reason to wait for anything.
     if (opCtx->getClient()->isInDirectClient() ||
         !serverGlobalParams.clusterRole.has(ClusterRole::ShardServer)) {
         return false;
@@ -2079,14 +2062,6 @@ bool ExecCommandDatabase::canRetryCommand(const Status& execError) {
         return false;
     }
 
-    if (execError == ErrorCodes::StaleDbVersion) {
-        const auto staleInfo = execError.extraInfo<StaleDbRoutingVersion>();
-        tassert(8462306, "StaleDbVersion must have extraInfo", staleInfo);
-        const auto inCriticalSection = staleInfo->getCriticalSectionSignal().has_value();
-
-        return !inCriticalSection;
-    }
-
     if (execError == ErrorCodes::ShardingStateNotInitialized) {
         // We can retry commands with attached shard versions because we know that the check for
         // sharding initialization happened before anything else. For other commands (ie. those
@@ -2097,17 +2072,9 @@ bool ExecCommandDatabase::canRetryCommand(const Status& execError) {
         return OperationShardingState::isComingFromRouter(opCtx);
     }
 
-    const auto canRetryCmd = _invocation->canRetryOnStaleConfigOrShardCannotRefreshDueToLocksHeld(
-        _execContext.getRequest());
-
-    if (execError == ErrorCodes::StaleConfig) {
-        const auto staleInfo = execError.extraInfo<StaleConfigInfo>();
-        tassert(8462307, "StaleConfig must have extraInfo", staleInfo);
-        const auto inCriticalSection = staleInfo->getCriticalSectionSignal().has_value();
-
-        return !inCriticalSection && canRetryCmd;
-    } else if (execError == ErrorCodes::ShardCannotRefreshDueToLocksHeld) {
-        return canRetryCmd;
+    if (execError == ErrorCodes::StaleDbVersion || execError == ErrorCodes::StaleConfig ||
+        execError == ErrorCodes::ShardCannotRefreshDueToLocksHeld) {
+        return _invocation->canRetryOnStaleShardMetadataError(_execContext.getRequest());
     }
 
     return false;
@@ -2128,6 +2095,8 @@ void ExecCommandDatabase::_handleFailure(Status status) {
     boost::optional<ErrorCodes::Error> wcCode;
     if (response.hasField("writeConcernError")) {
         wcCode = ErrorCodes::Error(response["writeConcernError"]["code"].numberInt());
+        CurOp::get(opCtx)->debug().writeConcernError.emplace(
+            response.getObjectField("writeConcernError").getOwned());
     }
     appendErrorLabelsAndTopologyVersion(opCtx,
                                         &_extraFieldsBuilder,
@@ -2178,7 +2147,8 @@ void ExecCommandDatabase::_handleFailure(Status status) {
     }
 }
 
-void ExecCommandDatabase::_performAuthorizationVerificationChecks(const Status& status) {
+void ExecCommandDatabase::_performAuthorizationVerificationChecks(OperationContext* opCtx,
+                                                                  const Status& status) {
     if (MONGO_likely(!TestingProctor::instance().isEnabled() ||
                      _execContext.client().isInDirectClient())) {
         return;
@@ -2193,7 +2163,9 @@ void ExecCommandDatabase::_performAuthorizationVerificationChecks(const Status& 
     // opted out. Note: Commands may exit early or auth may be disabled.
     auto authManager = AuthorizationManager::get(_execContext.getOpCtx()->getService());
     if (status.isOK() && authManager->isAuthEnabled() &&
-        gFeatureFlagMandatoryAuthzChecks.isEnabled() &&
+        gFeatureFlagMandatoryAuthzChecks.isEnabledUseLatestFCVWhenUninitialized(
+            VersionContext::getDecoration(opCtx),
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot()) &&
         _execContext.getCommand()->requiresAuthzChecks()) {
 
         invariant(authzSession->getAuthorizationContract().isPermissionChecked(),
@@ -2437,7 +2409,7 @@ void HandleRequest::completeOperation(DbResponse& response) {
             LOGV2_DEBUG(21970, 1, "Note: not profiling because of recursive read lock");
         } else if (executionContext.client().isInDirectClient()) {
             LOGV2_DEBUG(21971, 1, "Note: not profiling because we are in DBDirectClient");
-        } else if (service_entry_point_shard_role_helpers::lockedForWriting()) {
+        } else if (lockedForWriting()) {
             LOGV2_DEBUG(21972, 1, "Note: not profiling because doing fsync+lock");
         } else if (opCtx->readOnly()) {
             LOGV2_DEBUG(21973, 1, "Note: not profiling because server is read-only");

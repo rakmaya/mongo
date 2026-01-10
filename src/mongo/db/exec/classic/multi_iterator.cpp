@@ -29,9 +29,9 @@
 
 #include "mongo/db/exec/classic/multi_iterator.h"
 
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/query/plan_executor_impl.h"
 #include "mongo/db/record_id.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/record_data.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/util/assert_util.h"
@@ -74,7 +74,9 @@ PlanStage::StageState MultiIteratorStage::doWork(WorkingSetID* out) {
         [&] {
             // yieldHandler
             // If _advance throws a WCE we shouldn't have moved.
-            invariant(!_iterators.empty());
+            tassert(11051638,
+                    "Expecting iterators not to advance in case of write conflict",
+                    !_iterators.empty());
             *out = WorkingSet::INVALID_ID;
         });
 

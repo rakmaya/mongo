@@ -32,6 +32,7 @@
 #include "mongo/stdx/thread.h"
 #include "mongo/util/concurrency/thread_pool_interface.h"
 #include "mongo/util/duration.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/out_of_line_executor.h"
 #include "mongo/util/time_support.h"
 
@@ -40,7 +41,7 @@
 #include <memory>
 #include <string>
 
-namespace mongo {
+namespace MONGO_MOD_PUB mongo {
 
 /**
  * A configurable thread pool, for general use.
@@ -107,8 +108,11 @@ public:
 
         /**
          * If callable, called after joining each retired thread.
-         * Since there could be multiple calls to this function in a single critical section,
-         * avoid complex logic in the callback.
+         * These joins happen when a thread completes a task, and there is no more work in the
+         * thread pool. That is, they will be done by a single thread (the function does not need to
+         * be thread safe unless it will also be called in other places).
+         * Since there could be multiple calls to this function in a single critical section, avoid
+         * complex logic in the callback.
          */
         std::function<void(const stdx::thread&)> onJoinRetiredThread;
     };
@@ -175,9 +179,23 @@ public:
      */
     Stats getStats() const;
 
+    /**
+     * Set the minimum number of threads for this ThreadPool.
+     * Calling this method will spin up new threads if the new minimum is greater than the current
+     * number of threads.
+     */
+    void setMinThreads(size_t minThreads);
+
+    /**
+     * Set the maximum number of threads for this ThreadPool.
+     * Calling this method will cause threads to be reaped once they finish their tasks if more than
+     * the maximum are running.
+     */
+    void setMaxThreads(size_t maxThreads);
+
 private:
     class Impl;
     std::unique_ptr<Impl> _impl;
 };
 
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUB mongo

@@ -111,16 +111,37 @@ export class MockOCSPServer {
             args.push("--issuer_hash_algorithm=" + this.issuer_hash_algorithm);
         }
 
-        clearRawMongoProgramOutput();
+        const MAX_ATTEMPTS = 10;
+        let backoff_ms = 1000;
+        let portInUse = false;
+        for (let attempts = 0; attempts < MAX_ATTEMPTS; attempts++) {
+            clearRawMongoProgramOutput();
 
-        this.pid = _startMongoProgram({args: args});
-        assert(checkProgram(this.pid).alive);
+            const pid = _startMongoProgram({args: args});
+            assert(checkProgram(pid).alive);
 
-        assert.soon(function () {
-            // Change this line if the OCSP endpoint changes
-            return rawMongoProgramOutput(".*").search("Launching debugserver on port 8100") !== -1;
-        });
+            portInUse = false;
+            assert.soon(function () {
+                // Change this line if the OCSP endpoint changes
+                let output = rawMongoProgramOutput(".*");
+                portInUse = output.search("Address already in use") !== -1;
+                return portInUse || output.search("Running on http") !== -1;
+            });
 
+            if (!portInUse) {
+                this.pid = pid;
+                break;
+            }
+
+            assert.soon(function () {
+                return !checkProgram(pid).alive;
+            });
+            print(`Retrying OCSP mock responder startup after ${backoff_ms / 1000} seconds.`);
+            sleep(backoff_ms);
+            backoff_ms *= 2;
+        }
+
+        assert(!portInUse);
         sleep(2000);
     }
 
@@ -152,6 +173,18 @@ export class MockOCSPServer {
         } else {
             const kSIGINT = 2;
             stopMongoProgramByPid(this.pid, kSIGINT);
+
+            for (let i = 0; i < 50; i++) {
+                if (!checkProgram(this.pid).alive) {
+                    print("Mock OCSP Server stop complete");
+                    return;
+                }
+                sleep(100);
+            }
+
+            // Mock could be caught in a hang, force terminate it
+            const kSIGKILL = 9;
+            stopMongoProgramByPid(this.pid, kSIGKILL);
         }
 
         print("Mock OCSP Server stop complete");

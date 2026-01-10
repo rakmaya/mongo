@@ -34,14 +34,14 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/crypto/encryption_fields_gen.h"
 #include "mongo/db/dbdirectclient.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/catalog_test_fixture.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/index_catalog.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/repl/storage_interface.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_test_fixture.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
 #include "mongo/unittest/unittest.h"
@@ -112,7 +112,7 @@ TEST_F(ShardKeyIndexUtilTest, SimpleKeyPattern) {
         findShardKeyPrefixedIndex(opCtx(), coll(), BSON("x" << 1), true /* requireSingleKey */);
 
     ASSERT_TRUE(index);
-    ASSERT_EQ("x", index->descriptor()->indexName());
+    ASSERT_EQ("x", index->indexEntry()->descriptor()->indexName());
 }
 
 TEST_F(ShardKeyIndexUtilTest, HashedKeyPattern) {
@@ -130,7 +130,7 @@ TEST_F(ShardKeyIndexUtilTest, HashedKeyPattern) {
         opCtx(), coll(), BSON("x" << "hashed"), true /* requireSingleKey */);
 
     ASSERT_TRUE(index);
-    ASSERT_EQ("xhashed", index->descriptor()->indexName());
+    ASSERT_EQ("xhashed", index->indexEntry()->descriptor()->indexName());
 }
 
 TEST_F(ShardKeyIndexUtilTest, PrefixKeyPattern) {
@@ -145,7 +145,7 @@ TEST_F(ShardKeyIndexUtilTest, PrefixKeyPattern) {
         opCtx(), coll(), BSON("x" << 1 << "y" << 1), true /* requireSingleKey */);
 
     ASSERT_TRUE(index);
-    ASSERT_EQ("xyz", index->descriptor()->indexName());
+    ASSERT_EQ("xyz", index->indexEntry()->descriptor()->indexName());
 }
 
 TEST_F(ShardKeyIndexUtilTest, ExcludesIncompatibleIndexes) {
@@ -181,7 +181,7 @@ TEST_F(ShardKeyIndexUtilTest, ExcludesIncompatibleIndexes) {
             findShardKeyPrefixedIndex(opCtx(), coll(), BSON("x" << 1), true /* requireSingleKey */);
 
         ASSERT_TRUE(index);
-        ASSERT_EQ("x", index->descriptor()->indexName());
+        ASSERT_EQ("x", index->indexEntry()->descriptor()->indexName());
     }
 }
 
@@ -225,7 +225,7 @@ TEST_F(ShardKeyIndexUtilTest, IncludesMultiKeyIfSingleKeyNotRequired) {
         findShardKeyPrefixedIndex(opCtx(), coll(), BSON("x" << 1), false /* requireSingleKey */);
 
     ASSERT_TRUE(index);
-    ASSERT_EQ("x", index->descriptor()->indexName());
+    ASSERT_EQ("x", index->indexEntry()->descriptor()->indexName());
 }
 
 TEST_F(ShardKeyIndexUtilTest, LastShardIndexWithSingleCandidate) {

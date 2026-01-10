@@ -199,9 +199,8 @@ const SpecificStats* UnionStage::getSpecificStats() const {
     return nullptr;
 }
 
-std::vector<DebugPrinter::Block> UnionStage::debugPrint() const {
-    auto ret = PlanStage::debugPrint();
-
+void UnionStage::doDebugPrint(std::vector<DebugPrinter::Block>& ret,
+                              DebugPrintInfo& debugPrintInfo) const {
     ret.emplace_back(DebugPrinter::Block("[`"));
     for (size_t idx = 0; idx < _outputVals.size(); idx++) {
         if (idx) {
@@ -225,12 +224,10 @@ std::vector<DebugPrinter::Block> UnionStage::debugPrint() const {
         ret.emplace_back(DebugPrinter::Block("`]"));
 
         ret.emplace_back(DebugPrinter::Block::cmdIncIndent);
-        DebugPrinter::addBlocks(ret, _children[childNum]->debugPrint());
+        DebugPrinter::addBlocks(ret, _children[childNum]->debugPrint(debugPrintInfo));
         ret.emplace_back(DebugPrinter::Block::cmdDecIndent);
     }
     ret.emplace_back(DebugPrinter::Block::cmdDecIndent);
-
-    return ret;
 }
 
 size_t UnionStage::estimateCompileTimeSize() const {

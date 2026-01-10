@@ -40,6 +40,7 @@
 #include "mongo/db/pipeline/aggregation_context_fixture.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_mock.h"
+#include "mongo/db/pipeline/pipeline_factory.h"
 #include "mongo/db/pipeline/process_interface/standalone_process_interface.h"
 #include "mongo/db/query/plan_summary_stats_visitor.h"
 #include "mongo/db/service_context_d_test_fixture.h"
@@ -139,7 +140,8 @@ TEST_F(DocumentSourceSetWindowFieldsTest, SuccessfullyParsesOnceFeatureFlagEnabl
         {$_internalSetWindowFields: {partitionBy: '$state', sortBy: {city: 1}, output: {mySum:
         {$sum: '$pop', window: {documents: [-10, 0]}}}}})");
     // By default, the unit test will have the feature flag enabled.
-    auto pipeline = Pipeline::parse(std::vector<BSONObj>({spec}), getExpCtx());
+    auto pipeline = pipeline_factory::makePipeline(
+        std::vector<BSONObj>({spec}), getExpCtx(), pipeline_factory::kOptionsMinimal);
     ASSERT_BSONOBJ_EQ(pipeline->serializeToBson()[0], spec);
 }
 
@@ -338,7 +340,7 @@ TEST_F(DocumentSourceSetWindowFieldsTest, OptimizationRemovesRedundantSortStage)
 
     // We only care about optimizing the setWindowFields stage.
     itr = std::next(itr);
-    itr = (*itr).get()->optimizeAt(itr, &pipeline);
+    itr = checked_cast<DocumentSourceInternalSetWindowFields&>(**itr).optimizeAt(itr, &pipeline);
 
     // We should have removed the redundant sort. This optimization works because the preceding and
     // succeeding sorts are the same, and setWindowFields does not change document order.

@@ -44,8 +44,8 @@
 #include "mongo/db/update/update_node.h"
 #include "mongo/db/update/update_node_visitor.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
 
-#include <limits>
 #include <memory>
 #include <vector>
 
@@ -94,7 +94,7 @@ private:
         return "$push";
     }
 
-    BSONObj operatorValue() const final;
+    BSONObj operatorValue(const SerializationOptions& opts) const final;
 
     // A helper for performPush().
     static ModifyResult insertElementsWithPosition(mutablebson::Element* array,

@@ -30,12 +30,8 @@
 #include "mongo/db/query/compiler/stats/stats_cache_loader.h"
 
 #include "mongo/base/string_data.h"
-#include "mongo/db/collection_crud/collection_write_path.h"
+#include "mongo/db/dbhelpers.h"
 #include "mongo/db/exec/sbe/values/value.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/database.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/query/compiler/stats/ce_histogram.h"
 #include "mongo/db/query/compiler/stats/max_diff.h"
@@ -44,6 +40,10 @@
 #include "mongo/db/query/compiler/stats/stats_cache_loader_test_fixture.h"
 #include "mongo/db/query/compiler/stats/value_utils.h"
 #include "mongo/db/repl/oplog.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/database.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/future.h"
@@ -71,7 +71,7 @@ void StatsCacheLoaderTest::createStatsCollection(NamespaceString nss) {
     auto coll = acquireCollection(
         operationContext(),
         CollectionAcquisitionRequest(nss,
-                                     PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                     PlacementConcern(boost::none, ShardVersion::UNTRACKED()),
                                      repl::ReadConcernArgs::get(operationContext()),
                                      AcquisitionPrerequisites::kWrite),
         MODE_IX);
@@ -124,14 +124,13 @@ TEST_F(StatsCacheLoaderTest, VerifyStatsLoadsScalar) {
     auto coll = acquireCollection(
         operationContext(),
         CollectionAcquisitionRequest(statsNss,
-                                     PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                     PlacementConcern(boost::none, ShardVersion::UNTRACKED()),
                                      repl::ReadConcernArgs::get(operationContext()),
                                      AcquisitionPrerequisites::kWrite),
         MODE_IX);
     {
         WriteUnitOfWork wuow(operationContext());
-        ASSERT_OK(collection_internal::insertDocument(
-            operationContext(), coll.getCollectionPtr(), InsertStatement(serialized), nullptr));
+        ASSERT_OK(Helpers::insert(operationContext(), coll.getCollectionPtr(), serialized));
         wuow.commit();
     }
 
@@ -199,14 +198,13 @@ TEST_F(StatsCacheLoaderTest, VerifyStatsLoadsArray) {
     auto coll = acquireCollection(
         operationContext(),
         CollectionAcquisitionRequest(statsNss,
-                                     PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                     PlacementConcern(boost::none, ShardVersion::UNTRACKED()),
                                      repl::ReadConcernArgs::get(operationContext()),
                                      AcquisitionPrerequisites::kWrite),
         MODE_IX);
     {
         WriteUnitOfWork wuow(operationContext());
-        ASSERT_OK(collection_internal::insertDocument(
-            operationContext(), coll.getCollectionPtr(), InsertStatement(serialized), nullptr));
+        ASSERT_OK(Helpers::insert(operationContext(), coll.getCollectionPtr(), serialized));
         wuow.commit();
     }
 

@@ -31,13 +31,13 @@
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/oid.h"
 #include "mongo/db/client.h"
 #include "mongo/db/collection_crud/collection_write_path.h"
 #include "mongo/db/curop.h"
+#include "mongo/db/dbhelpers.h"
 #include "mongo/db/exec/classic/collection_scan.h"
 #include "mongo/db/exec/classic/count.h"
 #include "mongo/db/exec/classic/index_scan.h"
@@ -45,14 +45,6 @@
 #include "mongo/db/exec/classic/working_set.h"
 #include "mongo/db/exec/collection_scan_common.h"
 #include "mongo/db/exec/plan_stats.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/database.h"
-#include "mongo/db/local_catalog/db_raii.h"
-#include "mongo/db/local_catalog/index_catalog.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
-#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
@@ -60,11 +52,16 @@
 #include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/query/compiler/parsers/matcher/expression_parser.h"
 #include "mongo/db/query/count_command_gen.h"
-#include "mongo/db/query/plan_executor.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/logical_session_id.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/database.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/record_data.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/recovery_unit.h"
@@ -73,16 +70,13 @@
 #include "mongo/dbtests/dbtests.h"  // IWYU pragma: keep
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/intrusive_counter.h"
 
-#include <cstdint>
 #include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include <boost/cstdint.hpp>
-#include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
@@ -121,7 +115,7 @@ public:
         _coll = acquireCollection(
             &_opCtx,
             CollectionAcquisitionRequest(nss(),
-                                         PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                         PlacementConcern(boost::none, ShardVersion::UNTRACKED()),
                                          repl::ReadConcernArgs::get(&_opCtx),
                                          AcquisitionPrerequisites::kWrite),
             MODE_IX);
@@ -155,18 +149,13 @@ public:
 
     void insert(const BSONObj& doc) {
         WriteUnitOfWork wunit(&_opCtx);
-        OpDebug* const nullOpDebug = nullptr;
-        collection_internal::insertDocument(
-            &_opCtx, _coll->getCollectionPtr(), InsertStatement(doc), nullOpDebug)
-            .transitional_ignore();
+        Helpers::insert(&_opCtx, _coll->getCollectionPtr(), doc).transitional_ignore();
         wunit.commit();
     }
 
     void remove(const RecordId& recordId) {
         WriteUnitOfWork wunit(&_opCtx);
-        OpDebug* const nullOpDebug = nullptr;
-        collection_internal::deleteDocument(
-            &_opCtx, _coll->getCollectionPtr(), kUninitializedStmtId, recordId, nullOpDebug);
+        Helpers::deleteByRid(&_opCtx, *_coll, recordId);
         wunit.commit();
     }
 
@@ -255,14 +244,14 @@ public:
 
     IndexScan* createIndexScan(MatchExpression* expr, WorkingSet* ws) {
         const IndexCatalog* catalog = _coll->getCollectionPtr()->getIndexCatalog();
-        std::vector<const IndexDescriptor*> indexes;
+        std::vector<const IndexCatalogEntry*> indexes;
         catalog->findIndexesByKeyPattern(
             &_opCtx, BSON("x" << 1), IndexCatalog::InclusionPolicy::kReady, &indexes);
         ASSERT_EQ(indexes.size(), 1U);
-        auto descriptor = indexes[0];
+        auto entry = indexes[0];
 
         // We are not testing indexing here so use maximal bounds
-        IndexScanParams params(&_opCtx, _coll->getCollectionPtr(), descriptor);
+        IndexScanParams params(&_opCtx, _coll->getCollectionPtr(), entry);
         params.bounds.isSimpleRange = true;
         params.bounds.startKey = BSON("" << 0);
         params.bounds.endKey = BSON("" << kDocuments + 1);

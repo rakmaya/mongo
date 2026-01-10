@@ -42,14 +42,14 @@
 #include "mongo/db/generic_argument_util.h"
 #include "mongo/db/global_catalog/chunk_manager.h"
 #include "mongo/db/global_catalog/ddl/cluster_ddl.h"
-#include "mongo/db/global_catalog/router_role_api/cluster_commands_helpers.h"
-#include "mongo/db/global_catalog/router_role_api/collection_routing_info_targeter.h"
 #include "mongo/db/internal_transactions_feature_flag_gen.h"
 #include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/query/write_ops/write_ops_parsers.h"
-#include "mongo/db/raw_data_operation.h"
+#include "mongo/db/router_role/cluster_commands_helpers.h"
+#include "mongo/db/router_role/collection_routing_info_targeter.h"
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
+#include "mongo/db/shard_role/shard_catalog/raw_data_operation.h"
 #include "mongo/db/sharding_environment/client/num_hosts_targeted_metrics.h"
 #include "mongo/db/sharding_environment/client/shard.h"
 #include "mongo/db/sharding_environment/grid.h"
@@ -96,6 +96,51 @@ MONGO_FAIL_POINT_DEFINE(hangAfterThrowWouldChangeOwningShardRetryableWrite);
 namespace {
 
 using QuerySamplingOptions = OperationContext::QuerySamplingOptions;
+
+std::pair<NamespaceString, BSONObj> translateRequestForTimeseriesIfNeeded(
+    OperationContext* opCtx,
+    RoutingContext& originalRoutingCtx,
+    const NamespaceString& originalNss,
+    const BatchedCommandRequest& req,
+    const CollectionRoutingInfoTargeter& targeter) {
+    auto translatedReqBSON = req.toBSON();
+    auto translatedNss = originalNss;
+    auto& unusedRoutingCtx = performTimeseriesTranslationAccordingToRoutingInfo(
+        opCtx,
+        originalNss,
+        targeter,
+        originalRoutingCtx,
+        [&](const NamespaceString& bucketsNss) {
+            translatedNss = bucketsNss;
+
+            switch (req.getBatchType()) {
+                case BatchedCommandRequest::BatchType_Insert:
+                    translatedReqBSON =
+                        rewriteCommandForRawDataOperation<write_ops::InsertCommandRequest>(
+                            translatedReqBSON, translatedNss.coll());
+                    break;
+                case BatchedCommandRequest::BatchType_Update:
+                    translatedReqBSON =
+                        rewriteCommandForRawDataOperation<write_ops::UpdateCommandRequest>(
+                            translatedReqBSON, translatedNss.coll());
+                    break;
+                case BatchedCommandRequest::BatchType_Delete:
+                    translatedReqBSON =
+                        rewriteCommandForRawDataOperation<write_ops::DeleteCommandRequest>(
+                            translatedReqBSON, translatedNss.coll());
+                    break;
+                default:
+                    MONGO_UNREACHABLE_TASSERT(10370603);
+            }
+
+            translatedReqBSON = translatedReqBSON.addFields(
+                BSON(write_ops::WriteCommandRequestBase::kIsTimeseriesNamespaceFieldName << true));
+        },
+        /* translateLogicalCmd = */ true);
+    unusedRoutingCtx.skipValidation();
+    return {std::move(translatedNss), std::move(translatedReqBSON)};
+}
+
 
 void batchErrorToNotPrimaryErrorTracker(const BatchedCommandRequest& request,
                                         const BatchedCommandResponse& response,
@@ -505,43 +550,18 @@ bool ClusterWriteCmd::runExplainWithoutShardKey(OperationContext* opCtx,
         return false;
     }
 
-    sharding::router::CollectionRouter router{opCtx->getServiceContext(), originalNss};
-    return router.routeWithRoutingContext(
-        opCtx,
-        "explain write"_sd,
-        [&](OperationContext* opCtx, RoutingContext& originalRoutingCtx) {
-            auto translatedReqBSON = req.toBSON();
-            auto translatedNss = originalNss;
-            const auto targeter = CollectionRoutingInfoTargeter(opCtx, originalNss);
-            auto& unusedRoutingCtx = translateNssForRawDataAccordingToRoutingInfo(
-                opCtx,
-                originalNss,
-                targeter,
-                originalRoutingCtx,
-                [&](const NamespaceString& bucketsNss) {
-                    translatedNss = bucketsNss;
-                    switch (req.getBatchType()) {
-                        case BatchedCommandRequest::BatchType_Insert:
-                            translatedReqBSON =
-                                rewriteCommandForRawDataOperation<write_ops::InsertCommandRequest>(
-                                    translatedReqBSON, translatedNss.coll());
-                            break;
-                        case BatchedCommandRequest::BatchType_Update:
-                            translatedReqBSON =
-                                rewriteCommandForRawDataOperation<write_ops::UpdateCommandRequest>(
-                                    translatedReqBSON, translatedNss.coll());
-                            break;
-                        case BatchedCommandRequest::BatchType_Delete:
-                            translatedReqBSON =
-                                rewriteCommandForRawDataOperation<write_ops::DeleteCommandRequest>(
-                                    translatedReqBSON, translatedNss.coll());
-                            break;
-                        default:
-                            MONGO_UNREACHABLE_TASSERT(10370603);
-                    }
-                });
-            unusedRoutingCtx.skipValidation();
+    sharding::router::CollectionRouter router(opCtx, originalNss);
 
+    // Implicitly create the db if it doesn't exist. There is no way right now to return an
+    // explain on a sharded cluster if the database doesn't exist.
+    // TODO (SERVER-108882) Stop creating the db once explain can be executed when th db
+    // doesn't exist.
+    router.createDbImplicitlyOnRoute();
+    return router.routeWithRoutingContext(
+        "explain write"_sd, [&](OperationContext* opCtx, RoutingContext& originalRoutingCtx) {
+            const auto targeter = CollectionRoutingInfoTargeter(opCtx, originalNss);
+            auto [translatedNss, translatedReqBSON] = translateRequestForTimeseriesIfNeeded(
+                opCtx, originalRoutingCtx, originalNss, req, targeter);
             if (!write_without_shard_key::useTwoPhaseProtocol(
                     opCtx,
                     translatedNss,
@@ -565,7 +585,9 @@ bool ClusterWriteCmd::runExplainWithoutShardKey(OperationContext* opCtx,
                     clusterQueryWithoutShardKeyCommand.toBSON(), verbosity);
                 auto opMsg = OpMsgRequestBuilder::create(
                     vts, translatedNss.dbName(), explainClusterQueryWithoutShardKeyCmd);
-                return CommandHelpers::runCommandDirectly(opCtx, opMsg).getOwned();
+                auto res = CommandHelpers::runCommandDirectly(opCtx, opMsg);
+                uassertStatusOK(getStatusFromCommandResult(res));
+                return res.getOwned();
             }();
 
             // Since 'explain' does not return the results of the query, we do not have an _id
@@ -573,7 +595,7 @@ bool ClusterWriteCmd::runExplainWithoutShardKey(OperationContext* opCtx,
             // document 'Write Phase'.
             auto clusterWriteWithoutShardKeyExplainRes = [&] {
                 ClusterWriteWithoutShardKey clusterWriteWithoutShardKeyCommand(
-                    ClusterExplain::wrapAsExplain(req.toBSON(), verbosity),
+                    ClusterExplain::wrapAsExplain(translatedReqBSON, verbosity),
                     std::string{
                         clusterQueryWithoutShardKeyExplainRes.getStringField("targetShardId")},
                     write_without_shard_key::targetDocForExplain);
@@ -582,12 +604,16 @@ bool ClusterWriteCmd::runExplainWithoutShardKey(OperationContext* opCtx,
 
                 auto opMsg = OpMsgRequestBuilder::create(
                     vts, translatedNss.dbName(), explainClusterWriteWithoutShardKeyCmd);
-                return CommandHelpers::runCommandDirectly(opCtx, opMsg).getOwned();
+                auto res = CommandHelpers::runCommandDirectly(opCtx, opMsg);
+                uassertStatusOK(getStatusFromCommandResult(res));
+                return res.getOwned();
             }();
 
-            auto output = write_without_shard_key::generateExplainResponseForTwoPhaseWriteProtocol(
-                clusterQueryWithoutShardKeyExplainRes, clusterWriteWithoutShardKeyExplainRes);
-            result->appendElementsUnique(output);
+            result->append("command", req.toBSON());
+            write_without_shard_key::generateExplainResponseForTwoPhaseWriteProtocol(
+                *result,
+                clusterQueryWithoutShardKeyExplainRes,
+                clusterWriteWithoutShardKeyExplainRes);
             return true;
         });
 }
@@ -607,101 +633,47 @@ void ClusterWriteCmd::executeWriteOpExplain(OperationContext* opCtx,
     const NamespaceString originalNss = req ? req->getNS() : batchedRequest.getNS();
     auto requestPtr = req ? req.get() : &batchedRequest;
     auto bodyBuilder = result->getBodyBuilder();
-    const auto originalRequestBSON = req ? req->toBSON() : requestObj;
 
-    const size_t kMaxDatabaseCreationAttempts = 3;
-    size_t attempts = 1;
-    while (true) {
-        try {
-            // Implicitly create the db if it doesn't exist. There is no way right now to return an
-            // explain on a sharded cluster if the database doesn't exist.
-            // TODO (SERVER-108882) Stop creating the db once explain can be executed when th db
-            // doesn't exist.
-            cluster::createDatabase(opCtx, originalNss.dbName());
-
-            // If we aren't running an explain for updateOne or deleteOne without shard key,
-            // continue and run the original explain path.
-            if (runExplainWithoutShardKey(
-                    opCtx, batchedRequest, originalNss, verbosity, &bodyBuilder)) {
-                return;
-            }
-
-            sharding::router::CollectionRouter router{opCtx->getServiceContext(), originalNss};
-            router.routeWithRoutingContext(
-                opCtx,
-                "explain write"_sd,
-                [&](OperationContext* opCtx, RoutingContext& originalRoutingCtx) {
-                    auto translatedReqBSON = originalRequestBSON;
-                    auto translatedNss = originalNss;
-                    const auto targeter = CollectionRoutingInfoTargeter(opCtx, originalNss);
-
-                    auto& unusedRoutingCtx = translateNssForRawDataAccordingToRoutingInfo(
-                        opCtx,
-                        originalNss,
-                        targeter,
-                        originalRoutingCtx,
-                        [&](const NamespaceString& bucketsNss) {
-                            translatedNss = bucketsNss;
-                            switch (batchedRequest.getBatchType()) {
-                                case BatchedCommandRequest::BatchType_Insert:
-                                    translatedReqBSON = rewriteCommandForRawDataOperation<
-                                        write_ops::InsertCommandRequest>(originalRequestBSON,
-                                                                         translatedNss.coll());
-                                    break;
-                                case BatchedCommandRequest::BatchType_Update:
-                                    translatedReqBSON = rewriteCommandForRawDataOperation<
-                                        write_ops::UpdateCommandRequest>(originalRequestBSON,
-                                                                         translatedNss.coll());
-                                    break;
-                                case BatchedCommandRequest::BatchType_Delete:
-                                    translatedReqBSON = rewriteCommandForRawDataOperation<
-                                        write_ops::DeleteCommandRequest>(originalRequestBSON,
-                                                                         translatedNss.coll());
-                                    break;
-                            }
-                        });
-                    unusedRoutingCtx.skipValidation();
-
-                    const auto explainCmd =
-                        ClusterExplain::wrapAsExplain(translatedReqBSON, verbosity);
-
-                    // We will time how long it takes to run the commands on the shards.
-                    Timer timer;
-
-                    // Target the command to the shards based on the singleton batch item.
-                    BatchItemRef targetingBatchItem(requestPtr, 0);
-                    std::vector<AsyncRequestsSender::Response> shardResponses;
-                    commandOpWrite(opCtx,
-                                   translatedNss,
-                                   explainCmd,
-                                   std::move(targetingBatchItem),
-                                   targeter,
-                                   &shardResponses);
-                    uassertStatusOK(ClusterExplain::buildExplainResult(
-                        makeBlankExpressionContext(opCtx, translatedNss),
-                        shardResponses,
-                        ClusterExplain::kWriteOnShards,
-                        timer.millis(),
-                        originalRequestBSON,
-                        &bodyBuilder));
-                });
-            break;
-        } catch (const ExceptionFor<ErrorCodes::NamespaceNotFound>&) {
-            LOGV2_INFO(10370602,
-                       "Failed initialization of routing info because the database has been "
-                       "concurrently dropped",
-                       logAttrs(originalNss.dbName()),
-                       "attemptNumber"_attr = attempts,
-                       "maxAttempts"_attr = kMaxDatabaseCreationAttempts);
-
-            if (++attempts >= kMaxDatabaseCreationAttempts) {
-                // The maximum number of attempts has been reached, so the procedure fails as it
-                // could be a logical error. At this point, it is unlikely that the error is caused
-                // by concurrent drop database operations.
-                throw;
-            }
-        }
+    // If we aren't running an explain for updateOne or deleteOne without shard key,
+    // continue and run the original explain path.
+    if (runExplainWithoutShardKey(opCtx, batchedRequest, originalNss, verbosity, &bodyBuilder)) {
+        return;
     }
+
+    sharding::router::CollectionRouter router(opCtx, originalNss);
+
+    // Implicitly create the db if it doesn't exist. There is no way right now to return an
+    // explain on a sharded cluster if the database doesn't exist.
+    // TODO (SERVER-108882) Stop creating the db once explain can be executed when th db
+    // doesn't exist.
+    router.createDbImplicitlyOnRoute();
+    router.routeWithRoutingContext(
+        "explain write"_sd, [&](OperationContext* opCtx, RoutingContext& originalRoutingCtx) {
+            const auto targeter = CollectionRoutingInfoTargeter(opCtx, originalNss);
+            auto [translatedNss, translatedReqBSON] = translateRequestForTimeseriesIfNeeded(
+                opCtx, originalRoutingCtx, originalNss, *requestPtr, targeter);
+            const auto explainCmd = ClusterExplain::wrapAsExplain(translatedReqBSON, verbosity);
+
+            // We will time how long it takes to run the commands on the shards.
+            Timer timer;
+
+            // Target the command to the shards based on the singleton batch item.
+            BatchItemRef targetingBatchItem(requestPtr, 0);
+            std::vector<AsyncRequestsSender::Response> shardResponses;
+            commandOpWrite(opCtx,
+                           translatedNss,
+                           explainCmd,
+                           std::move(targetingBatchItem),
+                           targeter,
+                           &shardResponses);
+            uassertStatusOK(
+                ClusterExplain::buildExplainResult(makeBlankExpressionContext(opCtx, translatedNss),
+                                                   shardResponses,
+                                                   ClusterExplain::kWriteOnShards,
+                                                   timer.millis(),
+                                                   requestObj,
+                                                   &bodyBuilder));
+        });
 }
 
 bool ClusterWriteCmd::InvocationBase::runImpl(OperationContext* opCtx,
@@ -748,7 +720,7 @@ bool ClusterWriteCmd::InvocationBase::runImpl(OperationContext* opCtx,
             for (size_t i = 0; i < numAttempts; ++i) {
                 serviceOpCounters(opCtx).gotInsert();
             }
-            debug.additiveMetrics.ninserted = response.getN();
+            debug.getAdditiveMetrics().ninserted = response.getN();
             break;
         case BatchedCommandRequest::BatchType_Update:
             for (size_t i = 0; i < numAttempts; ++i) {
@@ -757,12 +729,13 @@ bool ClusterWriteCmd::InvocationBase::runImpl(OperationContext* opCtx,
 
             // The response.getN() count is the sum of documents matched and upserted.
             if (response.isUpsertDetailsSet()) {
-                debug.additiveMetrics.nMatched = response.getN() - response.sizeUpsertDetails();
-                debug.additiveMetrics.nUpserted = response.sizeUpsertDetails();
+                debug.getAdditiveMetrics().nMatched =
+                    response.getN() - response.sizeUpsertDetails();
+                debug.getAdditiveMetrics().nUpserted = response.sizeUpsertDetails();
             } else {
-                debug.additiveMetrics.nMatched = response.getN();
+                debug.getAdditiveMetrics().nMatched = response.getN();
             }
-            debug.additiveMetrics.nModified = response.getNModified();
+            debug.getAdditiveMetrics().nModified = response.getNModified();
 
             for (auto&& update : _batchedRequest.getUpdateRequest().getUpdates()) {
                 incrementUpdateMetrics(update.getU(),
@@ -775,7 +748,7 @@ bool ClusterWriteCmd::InvocationBase::runImpl(OperationContext* opCtx,
             for (size_t i = 0; i < numAttempts; ++i) {
                 serviceOpCounters(opCtx).gotDelete();
             }
-            debug.additiveMetrics.ndeleted = response.getN();
+            debug.getAdditiveMetrics().ndeleted = response.getN();
             break;
     }
 

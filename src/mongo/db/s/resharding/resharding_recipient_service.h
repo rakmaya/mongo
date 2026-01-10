@@ -39,6 +39,7 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/process_interface/mongo_process_interface.h"
 #include "mongo/db/repl/primary_only_service.h"
+#include "mongo/db/s/primary_only_service_helpers/cancel_state.h"
 #include "mongo/db/s/resharding/recipient_document_gen.h"
 #include "mongo/db/s/resharding/resharding_change_streams_monitor.h"
 #include "mongo/db/s/resharding/resharding_data_replication.h"
@@ -49,6 +50,8 @@
 #include "mongo/db/service_context.h"
 #include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/executor/scoped_task_executor.h"
+#include "mongo/otel/telemetry_context.h"
+#include "mongo/otel/traces/span/span.h"
 #include "mongo/s/resharding/common_types_gen.h"
 #include "mongo/s/resharding/type_collection_fields_gen.h"
 #include "mongo/stdx/mutex.h"
@@ -58,6 +61,7 @@
 #include "mongo/util/duration.h"
 #include "mongo/util/future.h"
 #include "mongo/util/future_impl.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/time_support.h"
 
 #include <cstdint>
@@ -71,7 +75,7 @@
 
 namespace mongo {
 
-class ReshardingRecipientService : public repl::PrimaryOnlyService {
+class MONGO_MOD_PUBLIC ReshardingRecipientService : public repl::PrimaryOnlyService {
 public:
     static constexpr StringData kServiceName = "ReshardingRecipientService"_sd;
 
@@ -79,32 +83,32 @@ public:
         : PrimaryOnlyService(serviceContext), _serviceContext(serviceContext) {}
     ~ReshardingRecipientService() override = default;
 
-    class RecipientStateMachine;
+    class MONGO_MOD_PRIVATE RecipientStateMachine;
 
-    class RecipientStateMachineExternalState;
+    class MONGO_MOD_PRIVATE RecipientStateMachineExternalState;
 
-    StringData getServiceName() const override {
+    MONGO_MOD_PRIVATE StringData getServiceName() const override {
         return kServiceName;
     }
 
-    NamespaceString getStateDocumentsNS() const override {
+    MONGO_MOD_PRIVATE NamespaceString getStateDocumentsNS() const override {
         return NamespaceString::kRecipientReshardingOperationsNamespace;
     }
 
-    ThreadPool::Limits getThreadPoolLimits() const override;
+    MONGO_MOD_PRIVATE ThreadPool::Limits getThreadPoolLimits() const override;
 
     // The service implemented its own conflict check before this method was added.
-    void checkIfConflictsWithOtherInstances(
+    MONGO_MOD_PRIVATE void checkIfConflictsWithOtherInstances(
         OperationContext* opCtx,
         BSONObj initialState,
         const std::vector<const repl::PrimaryOnlyService::Instance*>& existingInstances) override {
     };
 
-    std::shared_ptr<repl::PrimaryOnlyService::Instance> constructInstance(
+    MONGO_MOD_PRIVATE std::shared_ptr<repl::PrimaryOnlyService::Instance> constructInstance(
         BSONObj initialState) override;
 
-    inline std::vector<std::shared_ptr<PrimaryOnlyService::Instance>> getAllReshardingInstances(
-        OperationContext* opCtx) {
+    MONGO_MOD_PRIVATE inline std::vector<std::shared_ptr<PrimaryOnlyService::Instance>>
+    getAllReshardingInstances(OperationContext* opCtx) {
         return getAllInstances(opCtx);
     }
 
@@ -151,7 +155,7 @@ public:
      */
     ExecutorFuture<void> _runUntilStrictConsistencyOrErrored(
         const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
-        const CancellationToken& abortToken);
+        std::shared_ptr<otel::TelemetryContext> telemetryCtx);
 
     /**
      * Notifies the coordinator if the recipient is in kStrictConsistency or kError and waits for
@@ -159,17 +163,14 @@ public:
      * canceled (failure or stepdown).
      */
     ExecutorFuture<void> _notifyCoordinatorAndAwaitDecision(
-        const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
-        const CancellationToken& abortToken);
+        const std::shared_ptr<executor::ScopedTaskExecutor>& executor);
 
     /**
      * Finishes the work left remaining on the recipient after the coordinator persists its decision
      * to abort or complete resharding.
      */
     ExecutorFuture<void> _finishReshardingOperation(
-        const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
-        const CancellationToken& stepdownToken,
-        bool aborted);
+        const std::shared_ptr<executor::ScopedTaskExecutor>& executor);
 
     SemiFuture<void> run(std::shared_ptr<executor::ScopedTaskExecutor> executor,
                          const CancellationToken& token) noexcept override;
@@ -180,6 +181,14 @@ public:
      * Makes the recipient prepare for the critical section.
      */
     void prepareForCriticalSection();
+
+    /**
+     * Returns a Future fulfilled once the recipient locally updates its state to
+     * RecipientStateEnum::kApplying or RecipientStateEnum::kError.
+     */
+    SharedSemiFuture<void> awaitInApplyingOrError() const {
+        return _inApplyingOrError.getFuture();
+    }
 
     /**
      * Returns a Future fulfilled once the recipient locally persists its final state before the
@@ -236,6 +245,12 @@ public:
                                     const ReshardingRecipientDocument& recipientDoc);
 
     /**
+     * Indicates that the coordinator has engaged the critical section. Unblocks the
+     * _coordinatorHasEngagedCriticalSection promise.
+     */
+    void onCriticalSectionStarted();
+
+    /**
      * Indicates that the coordinator has persisted a decision. Unblocks the
      * _coordinatorHasDecisionPersisted promise.
      */
@@ -275,13 +290,11 @@ private:
      * The work inside this function must be run regardless of any work on _scopedExecutor ever
      * running.
      */
-    ExecutorFuture<void> _runMandatoryCleanup(Status status,
-                                              const CancellationToken& stepdownToken);
+    ExecutorFuture<void> _runMandatoryCleanup(Status status);
 
     // The following functions correspond to the actions to take at a particular recipient state.
     ExecutorFuture<void> _awaitAllDonorsPreparedToDonateThenTransitionToCreatingCollection(
         const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
-        const CancellationToken& abortToken,
         const CancelableOperationContextFactory& factory);
 
     void _createTemporaryReshardingCollectionThenTransitionToCloning(
@@ -289,25 +302,21 @@ private:
 
     ExecutorFuture<void> _cloneThenTransitionToBuildingIndex(
         const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
-        const CancellationToken& abortToken,
         const CancelableOperationContextFactory& factory);
 
     ExecutorFuture<void> _buildIndexThenTransitionToApplying(
         const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
-        const CancellationToken& abortToken,
         const CancelableOperationContextFactory& factory);
 
     ExecutorFuture<void> _awaitAllDonorsBlockingWritesThenTransitionToStrictConsistency(
         const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
-        const CancellationToken& abortToken,
         const CancelableOperationContextFactory& factory);
 
     void _writeStrictConsistencyOplog(const CancelableOperationContextFactory& factory);
 
     void _renameTemporaryReshardingCollection(const CancelableOperationContextFactory& factory);
 
-    void _cleanupReshardingCollections(bool aborted,
-                                       const CancelableOperationContextFactory& factory);
+    void _cleanupReshardingCollections(const CancelableOperationContextFactory& factory);
 
     // Transitions the on-disk and in-memory state to 'newState'.
     void _transitionState(RecipientStateEnum newState,
@@ -328,7 +337,7 @@ private:
 
     void _transitionToError(Status abortReason, const CancelableOperationContextFactory& factory);
 
-    void _transitionToDone(bool aborted, const CancelableOperationContextFactory& factory);
+    void _transitionToDone(const CancelableOperationContextFactory& factory);
 
     BSONObj _makeQueryForCoordinatorUpdate(const ShardId& shardId, RecipientStateEnum newState);
 
@@ -348,32 +357,27 @@ private:
                                   const CancelableOperationContextFactory& factory);
 
     // Removes the local recipient document from disk.
-    void _removeRecipientDocument(bool aborted, const CancelableOperationContextFactory& factory);
+    void _removeRecipientDocument(const CancelableOperationContextFactory& factory);
 
     void _ensureDataReplicationStarted(
         OperationContext* opCtx,
         const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
-        const CancellationToken& abortToken,
         const CancelableOperationContextFactory& factory);
 
     void _createAndStartChangeStreamsMonitor(
         const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
-        const CancellationToken& abortToken,
         const CancelableOperationContextFactory& factory);
 
     ExecutorFuture<void> _awaitChangeStreamsMonitorCompleted(
         const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
-        const CancellationToken& abortToken,
         const CancelableOperationContextFactory& factory);
 
     ExecutorFuture<void> _startMetrics(
-        const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
-        const CancellationToken& abortToken);
+        const std::shared_ptr<executor::ScopedTaskExecutor>& executor);
 
     // Restore metrics using the persisted metrics after stepping up.
     ExecutorFuture<void> _restoreMetricsWithRetry(
-        const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
-        const CancellationToken& abortToken);
+        const std::shared_ptr<executor::ScopedTaskExecutor>& executor);
     void _restoreMetrics(const CancelableOperationContextFactory& factory);
 
     void _initializeShardApplierMetrics(
@@ -383,10 +387,8 @@ private:
 
     void _updateContextMetrics(OperationContext* opCtx);
 
-    // Initializes the _abortSource and generates a token from it to return back the caller.
-    //
-    // Should only be called once per lifetime.
-    CancellationToken _initAbortSource(const CancellationToken& stepdownToken);
+    // Initializes the _cancelState. Note: Should only be called once per lifetime.
+    void _initCancelState(const CancellationToken& stepdownToken);
 
     // Get indexesToBuild and indexesBuilt from the index catalog, then save them in _metrics
     void _tryFetchBuildIndexMetrics(OperationContext* opCtx);
@@ -396,6 +398,13 @@ private:
     boost::optional<CloningMetrics> _tryFetchCloningMetrics(OperationContext* opCtx);
 
     void _fulfillPromisesOnStepup(boost::optional<mongo::ReshardingRecipientMetrics> metrics);
+
+    /**
+     * Creates a new span with the resharding UUID set as an attribute.
+     */
+    otel::traces::Span _startSpan(std::shared_ptr<otel::TelemetryContext> telemetryCtx,
+                                  const std::string& spanName,
+                                  bool keepSpan = false);
 
     // The primary-only service instance corresponding to the recipient instance. Not owned.
     const ReshardingRecipientService* const _recipientService;
@@ -416,6 +425,9 @@ private:
     // Set to true if this recipient should skip cloning documents because it is not going to own
     // any chunks for the collection after resharding.
     const bool _skipCloning;
+    // Set to true if this recipient should skip building indexes because it is not going to own any
+    // chunks for the collection after resharding.
+    const bool _skipBuildingIndexes;
     // Set to true if this recipient should store the count of oplog entries fetched in a progress
     // document and use this count instead of the fast count to recover metrics upon recovery
     const bool _storeOplogFetcherProgress;
@@ -452,11 +464,12 @@ private:
     // Protects the state below
     stdx::mutex _mutex;
 
+    // Manages abort state and provides cancellation tokens for async operations. Initialized in
+    // _initCancelState().
+    std::unique_ptr<primary_only_service_helpers::CancelState> _cancelState;
+
     std::unique_ptr<ReshardingDataReplicationInterface> _dataReplication;
     std::shared_ptr<ReshardingChangeStreamsMonitor> _changeStreamsMonitor;
-
-    // Canceled when there is an unrecoverable error or stepdown.
-    boost::optional<CancellationSource> _abortSource;
 
     // The identifier associated to the recoverable critical section.
     const BSONObj _critSecReason;
@@ -471,8 +484,10 @@ private:
     // ascending order, such that the first promise below will be the first promise fulfilled.
     SharedPromise<CloneDetails> _allDonorsPreparedToDonate;
 
+    SharedPromise<void> _inApplyingOrError;
     SharedPromise<void> _inStrictConsistencyOrError;
 
+    SharedPromise<void> _coordinatorHasEngagedCriticalSection;
     SharedPromise<void> _coordinatorHasDecisionPersisted;
 
     SharedPromise<void> _completionPromise;

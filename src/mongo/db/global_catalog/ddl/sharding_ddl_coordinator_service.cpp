@@ -36,14 +36,13 @@
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/client/dbclient_cursor.h"
+#include "mongo/db/cleanup_structured_encryption_data_coordinator.h"
 #include "mongo/db/client.h"
-#include "mongo/db/cluster_parameters/sharding_cluster_parameters_gen.h"
 #include "mongo/db/commands/feature_compatibility_version.h"
+#include "mongo/db/compact_structured_encryption_data_coordinator.h"
 #include "mongo/db/dbdirectclient.h"
-#include "mongo/db/global_catalog/ddl/cleanup_structured_encryption_data_coordinator.h"
 #include "mongo/db/global_catalog/ddl/clone_authoritative_metadata_coordinator.h"
 #include "mongo/db/global_catalog/ddl/collmod_coordinator.h"
-#include "mongo/db/global_catalog/ddl/compact_structured_encryption_data_coordinator.h"
 #include "mongo/db/global_catalog/ddl/convert_to_capped_coordinator.h"
 #include "mongo/db/global_catalog/ddl/create_collection_coordinator.h"
 #include "mongo/db/global_catalog/ddl/create_database_coordinator.h"
@@ -55,16 +54,17 @@
 #include "mongo/db/global_catalog/ddl/move_primary_coordinator.h"
 #include "mongo/db/global_catalog/ddl/refine_collection_shard_key_coordinator.h"
 #include "mongo/db/global_catalog/ddl/rename_collection_coordinator.h"
-#include "mongo/db/global_catalog/ddl/reshard_collection_coordinator.h"
 #include "mongo/db/global_catalog/ddl/set_allow_migrations_coordinator.h"
 #include "mongo/db/global_catalog/ddl/sharding_ddl_coordinator.h"
 #include "mongo/db/global_catalog/ddl/untrack_unsplittable_collection_coordinator.h"
-#include "mongo/db/local_catalog/shard_role_catalog/database_sharding_state.h"
-#include "mongo/db/local_catalog/shard_role_catalog/operation_sharding_state.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/s/forwardable_operation_metadata.h"
+#include "mongo/db/s/resharding/reshard_collection_coordinator.h"
+#include "mongo/db/shard_role/shard_catalog/database_sharding_state.h"
+#include "mongo/db/shard_role/shard_catalog/operation_sharding_state.h"
 #include "mongo/db/sharding_environment/sharding_feature_flags_gen.h"
 #include "mongo/db/topology/add_shard_coordinator.h"
+#include "mongo/db/topology/cluster_parameters/sharding_cluster_parameters_gen.h"
 #include "mongo/db/topology/remove_shard_commit_coordinator.h"
 #include "mongo/db/version_context.h"
 #include "mongo/logv2/log.h"
@@ -410,8 +410,8 @@ ShardingDDLCoordinatorService::getOrCreateInstance(OperationContext* opCtx,
     ForwardableOperationMetadata forwardableOpMetadata(opCtx);
     // We currently only propagate the Operation FCV for DDL operations.
     // Moreover, DDL operations cannot be nested. Therefore, the VersionContext
-    // shouldn't have been initialized yet.
-    invariant(!VersionContext::getDecoration(opCtx).isInitialized());
+    // shouldn't have an OFCV yet.
+    invariant(!VersionContext::getDecoration(opCtx).hasOperationFCV());
     if (feature_flags::gSnapshotFCVInDDLCoordinators.isEnabled(kVersionContextIgnored_UNSAFE,
                                                                fcv)) {
         forwardableOpMetadata.setVersionContext(VersionContext{fcv});

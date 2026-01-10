@@ -30,6 +30,7 @@
 #pragma once
 
 #include "mongo/db/pipeline/field_path.h"
+#include "mongo/util/modules.h"
 
 #include <cstdint>
 
@@ -47,6 +48,10 @@ using EdgeId = uint16_t;
 /** Resolved Path's identifier.
  */
 using PathId = uint16_t;
+
+/** Join Predicate's unique identifier.
+ */
+using PredicateId = uint16_t;
 
 struct ResolvedPath {
     NodeId nodeId;

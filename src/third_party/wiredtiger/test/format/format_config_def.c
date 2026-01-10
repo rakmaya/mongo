@@ -38,9 +38,6 @@ CONFIG configuration_list[] = {{"assert.read_timestamp", "assert read_timestamp"
 
   {"block_cache.size", "block cache size (MB)", 0x0, 1, 100, 100 * 1024, V_GLOBAL_BLOCK_CACHE_SIZE},
 
-  {"btree.bitcnt", "fixed-length column-store object size (number of bits)", C_TABLE | C_TYPE_FIX,
-    1, 8, 8, V_TABLE_BTREE_BITCNT},
-
   {"btree.compression", "data compression (off | lz4 | snappy | zlib | zstd)",
     C_IGNORE | C_STRING | C_TABLE, 0, 0, 0, V_TABLE_BTREE_COMPRESSION},
 
@@ -180,6 +177,9 @@ CONFIG configuration_list[] = {{"assert.read_timestamp", "assert read_timestamp"
   {"disagg.multi", "configure multiple nodes (leader & followers) for disaggregated storage",
     C_IGNORE | C_BOOL, 0, 0, 0, V_GLOBAL_DISAGG_MULTI},
 
+  {"disagg.multi_validation", "have multiple nodes compare database content for equality",
+    C_IGNORE | C_BOOL, 0, 0, 0, V_GLOBAL_DISAGG_MULTI_VALIDATION},
+
   {"disagg.enabled", "configure disaggregated storage", C_IGNORE | C_BOOL | C_TABLE | C_TYPE_ROW, 0,
     0, 0, V_TABLE_DISAGG_ENABLED},
 
@@ -191,6 +191,9 @@ CONFIG configuration_list[] = {{"assert.read_timestamp", "assert read_timestamp"
 
   {"disagg.page_log", "configure page log for disaggregated storage (off | palm | palite)",
     C_IGNORE | C_STRING, 0, 0, 0, V_GLOBAL_DISAGG_PAGE_LOG},
+
+  {"disagg.key_provider", "configure a key provider for disaggregated storage", C_BOOL, 100, 0, 0,
+    V_GLOBAL_DISAGG_KEY_PROVIDER},
 
   {"disagg.page_log.verbose", "set page log verbosity (default=WT_VERBOSE_INFO)", C_IGNORE, 0, 0,
     WT_VERBOSE_DEBUG_5, V_GLOBAL_DISAGG_PAGE_LOG_VERBOSE},
@@ -342,7 +345,7 @@ CONFIG configuration_list[] = {{"assert.read_timestamp", "assert read_timestamp"
 
   {"runs.timer", "run time (minutes)", C_IGNORE, 0, 0, UINT_MAX, V_GLOBAL_RUNS_TIMER},
 
-  {"runs.type", "object type (fix | row | var)", C_IGNORE | C_STRING | C_TABLE, 0, 0, 0,
+  {"runs.type", "object type (row | var)", C_IGNORE | C_STRING | C_TABLE, 0, 0, 0,
     V_TABLE_RUNS_TYPE},
 
   {"runs.verify_failure_dump", "configure page dump on repeatable read error", C_BOOL | C_IGNORE, 0,

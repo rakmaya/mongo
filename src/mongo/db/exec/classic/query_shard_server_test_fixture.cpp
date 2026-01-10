@@ -29,7 +29,7 @@
 
 #include "mongo/db/exec/classic/query_shard_server_test_fixture.h"
 
-#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_runtime.h"
+#include "mongo/db/shard_role/shard_catalog/collection_sharding_runtime.h"
 
 namespace mongo {
 namespace {
@@ -109,12 +109,12 @@ void QueryShardServerTestFixture::insertDocs(const std::vector<BSONObj>& docs) {
     }
 }
 
-const IndexDescriptor& QueryShardServerTestFixture::getIndexDescriptor(const CollectionPtr& coll,
-                                                                       StringData indexName) {
+const IndexCatalogEntry& QueryShardServerTestFixture::getIndexEntry(const CollectionPtr& coll,
+                                                                    StringData indexName) {
     auto* opCtx = operationContext();
-    const auto* idxDesc = coll->getIndexCatalog()->findIndexByName(opCtx, indexName);
-    ASSERT_NE(idxDesc, nullptr);
-    return *idxDesc;
+    const auto* entry = coll->getIndexCatalog()->findIndexByName(opCtx, indexName);
+    ASSERT_NE(entry, nullptr);
+    return *entry;
 }
 
 CollectionMetadata QueryShardServerTestFixture::prepareTestData(
@@ -146,7 +146,7 @@ CollectionMetadata QueryShardServerTestFixture::prepareTestData(
                                            true,
                                            _chunks);
 
-    ChunkManager cm(makeStandaloneRoutingTableHistory(std::move(rt)), boost::none);
+    CurrentChunkManager cm(makeStandaloneRoutingTableHistory(std::move(rt)));
     ASSERT_EQ(_chunks.size(), cm.numChunks());
 
     {

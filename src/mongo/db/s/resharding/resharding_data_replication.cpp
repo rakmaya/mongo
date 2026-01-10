@@ -38,9 +38,7 @@
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/global_catalog/shard_key_pattern.h"
-#include "mongo/db/local_catalog/collection_options.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
+#include "mongo/db/pipeline/process_interface/mongo_process_interface_factory.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/s/resharding/resharding_collection_cloner.h"
@@ -53,6 +51,9 @@
 #include "mongo/db/s/resharding/resharding_server_parameters_gen.h"
 #include "mongo/db/s/resharding/resharding_txn_cloner.h"
 #include "mongo/db/s/resharding/resharding_util.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/collection_options.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/executor/network_interface_factory.h"
 #include "mongo/executor/thread_pool_task_executor.h"
 #include "mongo/idl/idl_parser.h"
@@ -264,7 +265,10 @@ std::vector<std::unique_ptr<ReshardingOplogApplier>> ReshardingDataReplication::
             // in progress_applier. Otherwise, it starts at minFetchTimestamp, which corresponds to
             // {clusterTime: minFetchTimestamp, ts: minFetchTimestamp} as a resume token value.
             std::make_unique<ReshardingDonorOplogIterator>(
-                oplogBufferNss, std::move(idToResumeFrom), oplogFetchers[i].get()),
+                std::make_unique<ReshardingDonorOplogPipeline>(
+                    oplogBufferNss, std::make_unique<MongoProcessInterfaceFactoryImpl>()),
+                std::move(idToResumeFrom),
+                oplogFetchers[i].get()),
             resharding::data_copy::isCollectionCapped(opCtx, metadata.getTempReshardingNss())));
     }
 
@@ -550,7 +554,7 @@ ReshardingDonorOplogId ReshardingDataReplication::getOplogFetcherResumeId(
     const auto coll = acquireCollection(
         opCtx,
         CollectionAcquisitionRequest{oplogBufferNss,
-                                     PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                     PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
                                      repl::ReadConcernArgs::get(opCtx),
                                      AcquisitionPrerequisites::kRead},
         MODE_IS);

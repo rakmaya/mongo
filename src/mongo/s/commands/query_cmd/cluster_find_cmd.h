@@ -34,9 +34,6 @@
 #include "mongo/db/auth/validated_tenancy_scope.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/fle_crud.h"
-#include "mongo/db/global_catalog/router_role_api/cluster_commands_helpers.h"
-#include "mongo/db/global_catalog/router_role_api/collection_routing_info_targeter.h"
-#include "mongo/db/global_catalog/router_role_api/router_role.h"
 #include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/pipeline/expression_context_diagnostic_printer.h"
 #include "mongo/db/pipeline/query_request_conversion.h"
@@ -51,8 +48,11 @@
 #include "mongo/db/query/query_stats/query_stats.h"
 #include "mongo/db/query/shard_key_diagnostic_printer.h"
 #include "mongo/db/query/util/cluster_find_util.h"
-#include "mongo/db/raw_data_operation.h"
+#include "mongo/db/router_role/cluster_commands_helpers.h"
+#include "mongo/db/router_role/collection_routing_info_targeter.h"
+#include "mongo/db/router_role/router_role.h"
 #include "mongo/db/server_feature_flags_gen.h"
+#include "mongo/db/shard_role/shard_catalog/raw_data_operation.h"
 #include "mongo/db/timeseries/timeseries_request_util.h"
 #include "mongo/db/views/resolved_view.h"
 #include "mongo/idl/generic_argument_gen.h"
@@ -61,6 +61,8 @@
 #include "mongo/s/commands/query_cmd/cluster_explain.h"
 #include "mongo/s/query/planner/cluster_aggregate.h"
 #include "mongo/s/query/planner/cluster_find.h"
+#include "mongo/s/query/shard_targeting_helpers.h"
+#include "mongo/util/modules.h"
 
 #include <boost/optional.hpp>
 
@@ -86,6 +88,10 @@ inline std::unique_ptr<FindCommandRequest> parseCmdObjectToFindCommandRequest(
     uassert(7746900,
             "BSON field 'querySettings' is an unknown field",
             !findCommand->getQuerySettings().has_value());
+
+    uassert(10742703,
+            "BSON field 'originalQueryShapeHash' is an unknown field",
+            !findCommand->getOriginalQueryShapeHash().has_value());
 
     uassert(ErrorCodes::InvalidNamespace,
             "Cannot specify UUID to a mongos.",
@@ -206,7 +212,7 @@ public:
             Impl::checkCanExplainHere(opCtx);
 
             auto curOp = CurOp::get(opCtx);
-            curOp->debug().queryStatsInfo.disableForSubqueryExecution = true;
+            curOp->debug().getQueryStatsInfo().disableForSubqueryExecution = true;
 
             setReadConcern(opCtx);
             doFLERewriteIfNeeded(opCtx);
@@ -222,7 +228,7 @@ public:
                 auto cmdRequest = std::make_unique<FindCommandRequest>(*_cmdRequest);
                 bool cmdShouldBeTranslatedForRawData = false;
                 const auto targeter = CollectionRoutingInfoTargeter(opCtx, ns());
-                auto& routingCtx = translateNssForRawDataAccordingToRoutingInfo(
+                auto& routingCtx = performTimeseriesTranslationAccordingToRoutingInfo(
                     opCtx,
                     ns(),
                     targeter,
@@ -338,8 +344,8 @@ public:
             };
 
             try {
-                sharding::router::CollectionRouter router{opCtx->getServiceContext(), ns()};
-                router.routeWithRoutingContext(opCtx, "explain find"_sd, findBodyFn);
+                sharding::router::CollectionRouter router(opCtx, ns());
+                router.routeWithRoutingContext("explain find"_sd, findBodyFn);
 
             } catch (const ExceptionFor<ErrorCodes::NamespaceNotFound>&) {
                 auto bodyBuilder = result->getBodyBuilder();

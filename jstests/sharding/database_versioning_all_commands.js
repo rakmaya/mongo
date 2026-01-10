@@ -134,27 +134,45 @@ function testCommandAfterMovePrimary(testCase, connection, st, dbName, collName)
     assert.commandWorked(st.s0.adminCommand({flushRouterConfig: 1}));
     assertMatchingDatabaseVersion(st.s0, dbName, dbVersionBefore);
 
-    if (!FeatureFlagUtil.isPresentAndEnabled(primaryShardBefore, "ShardAuthoritativeDbMetadataCRUD")) {
+    if (!isAuthoritativeShardsEnabled(primaryShardBefore)) {
         assert.commandWorked(primaryShardBefore.adminCommand({_flushDatabaseCacheUpdates: dbName}));
     }
-    if (!FeatureFlagUtil.isPresentAndEnabled(primaryShardAfter, "ShardAuthoritativeDbMetadataCRUD")) {
+    if (!isAuthoritativeShardsEnabled(primaryShardAfter)) {
         assert.commandWorked(primaryShardAfter.adminCommand({_flushDatabaseCacheUpdates: dbName}));
     }
 
     assertMatchingDatabaseVersion(primaryShardBefore, dbName, dbVersionBefore);
-    assertMatchingDatabaseVersion(primaryShardAfter, dbName, dbVersionBefore);
+    // With authoritative shards, only the primary shard has the database version. Non-primary
+    // shards should not have the database metadata.
+    if (isAuthoritativeShardsEnabled(primaryShardAfter)) {
+        assertMatchingDatabaseVersion(primaryShardAfter, dbName, {});
+    } else {
+        assertMatchingDatabaseVersion(primaryShardAfter, dbName, dbVersionBefore);
+    }
 
     // Run movePrimary through the second mongos.
     assert.commandWorked(st.s1.adminCommand({movePrimary: dbName, to: primaryShardAfter.name}));
 
     const dbVersionAfter = st.s1.getDB("config").getCollection("databases").findOne({_id: dbName}).version;
 
-    // After the movePrimary, both old and new primary shards should have cleared the dbVersion.
+    // After the movePrimary, the old primary shard should have cleared/removed the dbVersion.
     assertMatchingDatabaseVersion(st.s0, dbName, dbVersionBefore);
     assertMatchingDatabaseVersion(primaryShardBefore, dbName, {});
-    assertMatchingDatabaseVersion(primaryShardAfter, dbName, {});
+    // With authoritative shards, the new primary should have the new version immediately after
+    // movePrimary since the DDL populates the shard catalog.
+    if (isAuthoritativeShardsEnabled(primaryShardAfter)) {
+        assertMatchingDatabaseVersion(primaryShardAfter, dbName, dbVersionAfter);
+    } else {
+        assertMatchingDatabaseVersion(primaryShardAfter, dbName, {});
+    }
 
     const command = testCase.command(dbName, collName, dbVersionBefore, dbVersionAfter);
+    let targetConnection = connection;
+    if (testCase.runOnNewPrimaryShard) {
+        targetConnection = primaryShardAfter;
+    } else if (testCase.runOnOldPrimaryShard) {
+        targetConnection = primaryShardBefore;
+    }
     jsTest.log(
         "testing command " +
             tojson(command) +
@@ -163,11 +181,13 @@ function testCommandAfterMovePrimary(testCase, connection, st, dbName, collName)
             ", database version before: " +
             tojson(dbVersionBefore) +
             ", primary shard after: " +
-            primaryShardAfter,
+            primaryShardAfter +
+            ", target connection: " +
+            targetConnection,
     );
 
     // Run the test case's command.
-    const res = connection.getDB(testCase.runsAgainstAdminDb ? "admin" : dbName).runCommand(command);
+    const res = targetConnection.getDB(testCase.runsAgainstAdminDb ? "admin" : dbName).runCommand(command);
     if (testCase.expectedFailureCode) {
         assert.commandFailedWithCode(res, testCase.expectedFailureCode);
     } else {
@@ -178,26 +198,31 @@ function testCommandAfterMovePrimary(testCase, connection, st, dbName, collName)
     // updated
     if (connection === st.s0 || connection === st.s1 || connection === st.s) {
         if (testCase.sendsDbVersion) {
-            // If the command participates in database versioning, all nodes should now know the new
-            // dbVersion:
-            // 1. The mongos should have sent the stale dbVersion to the old primary shard
-            // 2. The old primary shard should have returned StaleDbVersion and refreshed
-            // 3. Which should have caused the mongos to refresh and retry against the new primary
-            // shard
-            // 4. The new primary shard should have returned StaleDbVersion and refreshed
-            // 5. Which should have caused the mongos to refresh and retry again, this time
-            // succeeding.
+            // If the command participates in database versioning:
+            // - The mongos and the new primary shard should now know the new dbVersion.
+            // - With authoritative shards, the old primary shard no longer has any version
+            //   (metadata was removed by movePrimary DDL).
+            // - Without authoritative shards, the old primary shard refreshes to the new version.
             assertMatchingDatabaseVersion(st.s0, dbName, dbVersionAfter);
-            assertMatchingDatabaseVersion(primaryShardBefore, dbName, dbVersionAfter);
+            if (isAuthoritativeShardsEnabled(primaryShardBefore)) {
+                assertMatchingDatabaseVersion(primaryShardBefore, dbName, {});
+            } else {
+                assertMatchingDatabaseVersion(primaryShardBefore, dbName, dbVersionAfter);
+            }
             assertMatchingDatabaseVersion(primaryShardAfter, dbName, dbVersionAfter);
         } else {
             // If the command does not participate in database versioning:
-            // 1. The mongos should have targeted the old primary shard but not attached a dbVersion
-            // 2. The old primary shard should have returned an ok response
-            // 3. Both old and new primary shards should have cleared the dbVersion
+            // - The mongos should have targeted the old primary shard but not attached a dbVersion.
+            // - The old primary shard should have cleared/removed its dbVersion.
+            // - With authoritative shards, the new primary has the version (DDL populated it).
+            // - Without authoritative shards, the new primary shard should have cleared its version.
             assertMatchingDatabaseVersion(st.s0, dbName, dbVersionBefore);
             assertMatchingDatabaseVersion(primaryShardBefore, dbName, {});
-            assertMatchingDatabaseVersion(primaryShardAfter, dbName, {});
+            if (isAuthoritativeShardsEnabled(primaryShardAfter)) {
+                assertMatchingDatabaseVersion(primaryShardAfter, dbName, dbVersionAfter);
+            } else {
+                assertMatchingDatabaseVersion(primaryShardAfter, dbName, {});
+            }
         }
     }
 
@@ -221,6 +246,7 @@ function testCommandAfterDropRecreateDatabase(testCase, connection, st) {
     // Ensure the router and primary shard know the dbVersion before the drop/recreate database.
     assertMatchingDatabaseVersion(st.s0, dbName, dbVersionBefore);
     assertMatchingDatabaseVersion(primaryShardBefore, dbName, dbVersionBefore);
+    // Non-primary shard should not have the database version.
     assertMatchingDatabaseVersion(primaryShardAfter, dbName, {});
 
     // Drop and recreate the database through the second mongos.
@@ -237,11 +263,21 @@ function testCommandAfterDropRecreateDatabase(testCase, connection, st) {
     }
 
     // The only change after the drop/recreate database should be that the old primary shard should
-    // have cleared its dbVersion.
+    // have cleared its dbVersion. With authoritative shards, the new primary should already have
+    // the new version.
     assertMatchingDatabaseVersion(st.s0, dbName, dbVersionBefore);
     assertMatchingDatabaseVersion(primaryShardBefore, dbName, {});
+    if (isAuthoritativeShardsEnabled(primaryShardAfter)) {
+        assertMatchingDatabaseVersion(primaryShardAfter, dbName, dbVersionAfter);
+    }
 
     const command = testCase.command(dbName, collName, dbVersionBefore, dbVersionAfter);
+    let targetConnection = connection;
+    if (testCase.runOnNewPrimaryShard) {
+        targetConnection = primaryShardAfter;
+    } else if (testCase.runOnOldPrimaryShard) {
+        targetConnection = primaryShardBefore;
+    }
     jsTest.log(
         "testing command " +
             tojson(command) +
@@ -250,11 +286,13 @@ function testCommandAfterDropRecreateDatabase(testCase, connection, st) {
             ", database version before: " +
             tojson(dbVersionBefore) +
             ", primary shard after: " +
-            primaryShardAfter,
+            primaryShardAfter +
+            ", target connection: " +
+            targetConnection,
     );
 
     // Run the test case's command.
-    const res = connection.getDB(testCase.runsAgainstAdminDb ? "admin" : dbName).runCommand(command);
+    const res = targetConnection.getDB(testCase.runsAgainstAdminDb ? "admin" : dbName).runCommand(command);
     if (testCase.expectedFailureCode) {
         assert.commandFailedWithCode(res, testCase.expectedFailureCode);
     } else {
@@ -265,25 +303,28 @@ function testCommandAfterDropRecreateDatabase(testCase, connection, st) {
     // updated
     if (connection === st.s0 || connection === st.s1 || connection === st.s) {
         if (testCase.sendsDbVersion) {
-            // If the command participates in database versioning all nodes should now know the new
-            // dbVersion:
-            // 1. The mongos should have sent the stale dbVersion to the old primary shard
-            // 2. The old primary shard should have returned StaleDbVersion and refreshed
-            // 3. Which should have caused the mongos to refresh and retry against the new primary
-            // shard
-            // 4. The new primary shard should have returned StaleDbVersion and refreshed
-            // 5. Which should have caused the mongos to refresh and retry again, this time
-            // succeeding.
+            // If the command participates in database versioning:
+            // - The mongos and the new primary shard should now know the new dbVersion.
+            // - With authoritative shards, the old primary shard no longer has any version
+            //   (metadata was removed by dropDatabase).
+            // - Without authoritative shards, the old primary shard refreshes to the new version.
             assertMatchingDatabaseVersion(st.s0, dbName, dbVersionAfter);
-            assertMatchingDatabaseVersion(primaryShardBefore, dbName, dbVersionAfter);
+            if (isAuthoritativeShardsEnabled(primaryShardBefore)) {
+                assertMatchingDatabaseVersion(primaryShardBefore, dbName, {});
+            } else {
+                assertMatchingDatabaseVersion(primaryShardBefore, dbName, dbVersionAfter);
+            }
             assertMatchingDatabaseVersion(primaryShardAfter, dbName, dbVersionAfter);
         } else {
-            // If the command does not participate in database versioning, none of the nodes' view
-            // of the dbVersion should have changed:
-            // 1. The mongos should have targeted the old primary shard but not attached a dbVersion
-            // 2. The old primary shard should have returned an ok response
+            // If the command does not participate in database versioning:
+            // - The mongos should have targeted the old primary shard but not attached a dbVersion.
+            // - The old primary shard should have cleared/removed its dbVersion.
+            // - With authoritative shards, the new primary has the version (DDL populated it).
             assertMatchingDatabaseVersion(st.s0, dbName, dbVersionBefore);
             assertMatchingDatabaseVersion(primaryShardBefore, dbName, {});
+            if (isAuthoritativeShardsEnabled(primaryShardAfter)) {
+                assertMatchingDatabaseVersion(primaryShardAfter, dbName, dbVersionAfter);
+            }
         }
     }
 
@@ -310,6 +351,7 @@ const allTestCases = {
         _dropMirrorMaestroConnections: {skip: "not on a user database", conditional: true},
         abortMoveCollection: {skip: "always targets the config server"},
         abortReshardCollection: {skip: "always targets the config server"},
+        abortRewriteCollection: {skip: "always targets the config server"},
         abortTransaction: {skip: "unversioned and uses special targetting rules"},
         abortUnshardCollection: {skip: "always targets the config server"},
         addShard: {skip: "not on a user database"},
@@ -537,6 +579,7 @@ const allTestCases = {
         echo: {skip: "does not forward command to primary shard"},
         enableSharding: {skip: "does not forward command to primary shard"},
         endSessions: {skip: "goes through the cluster write path"},
+        eseRotateActiveKEK: {skip: "executes locally on mongos (not sent to any remote node)", conditional: true},
         explain: {skip: "already tested by each CRUD command through the 'explain' field"},
         features: {skip: "executes locally on mongos (not sent to any remote node)"},
         filemd5: {
@@ -585,6 +628,10 @@ const allTestCases = {
         getDatabaseVersion: {skip: "executes locally on mongos (not sent to any remote node)"},
         getDefaultRWConcern: {skip: "executes locally on mongos (not sent to any remote node)"},
         getDiagnosticData: {skip: "executes locally on mongos (not sent to any remote node)"},
+        getESERotateActiveKEKStatus: {
+            skip: "executes locally on mongos (not sent to any remote node)",
+            conditional: true,
+        },
         getTransitionToDedicatedConfigServerStatus: {skip: "not on a user database"},
         getLog: {skip: "executes locally on mongos (not sent to any remote node)"},
         getMore: {skip: "requires a previously established cursor"},
@@ -738,6 +785,15 @@ const allTestCases = {
         },
         profile: {skip: "not supported in mongos"},
         reapLogicalSessionCacheNow: {skip: "is a no-op on mongos"},
+        recreateRangeDeletionTasks: {
+            run: {
+                sendsDbVersion: true,
+                explicitlyCreateCollection: true,
+                command: function (dbName, collName) {
+                    return {recreateRangeDeletionTasks: collName, skipEmptyRanges: true};
+                },
+            },
+        },
         refineCollectionShardKey: {skip: "not on a user database"},
         refreshLogicalSessionCacheNow: {skip: "goes through the cluster write path"},
         refreshSessions: {skip: "executes locally on mongos (not sent to any remote node)"},
@@ -773,6 +829,7 @@ const allTestCases = {
         revokePrivilegesFromRole: {skip: "always targets the config server"},
         revokeRolesFromRole: {skip: "always targets the config server"},
         revokeRolesFromUser: {skip: "always targets the config server"},
+        rewriteCollection: {skip: "requires sharded collection"},
         rolesInfo: {skip: "always targets the config server"},
         rotateCertificates: {skip: "executes locally on mongos (not sent to any remote node)"},
         rotateFTDC: {skip: "executes locally on mongos (not sent to any remote node)"},
@@ -1005,6 +1062,8 @@ const allTestCases = {
         _shardsvrMoveRange: {skip: "TODO"},
         _shardsvrNotifyShardingEvent: {skip: "TODO"},
         _shardsvrParticipantBlock: {skip: "TODO"},
+        _shardsvrRecreateRangeDeletionTasks: {skip: "TODO"},
+        _shardsvrRecreateRangeDeletionTasksParticipant: {skip: "TODO"},
         _shardsvrRefineCollectionShardKey: {skip: "TODO"},
         _shardsvrRenameCollection: {skip: "TODO"},
         _shardsvrRenameCollectionParticipant: {skip: "TODO"},
@@ -1012,6 +1071,21 @@ const allTestCases = {
         _shardsvrRenameIndexMetadata: {skip: "TODO"},
         _shardsvrReshardCollection: {skip: "TODO"},
         _shardsvrReshardRecipientClone: {skip: "TODO"},
+        _shardsvrReshardRecipientCriticalSectionStarted: {
+            run: {
+                sendsDbVersion: false,
+                runsAgainstAdminDb: true,
+                command: function (dbName, collName) {
+                    return {
+                        _shardsvrReshardRecipientCriticalSectionStarted: UUID(),
+                    };
+                },
+                // When the resharding recipient state machine does not exist, we throw
+                // NotWritablePrimary under the assumption that the request was delayed and the
+                // node is no longer the primary.
+                expectedFailureCode: ErrorCodes.NotWritablePrimary,
+            },
+        },
         _shardsvrReshardingDonorFetchFinalCollectionStats: {skip: "TODO"},
         _shardsvrReshardingDonorStartChangeStreamsMonitor: {skip: "TODO"},
         _shardsvrReshardingOperationTime: {skip: "TODO"},
@@ -1026,6 +1100,8 @@ const allTestCases = {
                             databaseVersion: dbVersionAfter,
                         };
                     },
+                    // Send to new primary with correct version - should succeed.
+                    runOnNewPrimaryShard: true,
                 },
                 {
                     runsAgainstAdminDb: false,
@@ -1036,6 +1112,21 @@ const allTestCases = {
                             databaseVersion: dbVersionBefore,
                         };
                     },
+                    // Send to old primary with old version - should fail with StaleDbVersion.
+                    runOnOldPrimaryShard: true,
+                    expectedFailureCode: ErrorCodes.StaleDbVersion,
+                },
+                {
+                    runsAgainstAdminDb: false,
+                    command: function (dbName, collName, dbVersionBefore, dbVersionAfter) {
+                        return {
+                            _shardsvrResolveView: 1,
+                            nss: `${dbName}.${collName}`,
+                            databaseVersion: dbVersionBefore,
+                        };
+                    },
+                    // Send to new primary with stale version - should fail with StaleDbVersion.
+                    runOnNewPrimaryShard: true,
                     expectedFailureCode: ErrorCodes.StaleDbVersion,
                 },
             ],
@@ -1110,6 +1201,7 @@ const allTestCases = {
         dropUser: {skip: "TODO"},
         echo: {skip: "TODO"},
         endSessions: {skip: "TODO"},
+        eseRotateActiveKEK: {skip: "TODO", conditional: true},
         explain: {skip: "TODO"},
         exportCollection: {skip: "TODO", conditional: true},
         features: {skip: "TODO"},
@@ -1126,6 +1218,7 @@ const allTestCases = {
         getDatabaseVersion: {skip: "TODO"},
         getDefaultRWConcern: {skip: "TODO"},
         getDiagnosticData: {skip: "TODO"},
+        getESERotateActiveKEKStatus: {skip: "TODO", conditional: true},
         getLog: {skip: "TODO"},
         getMore: {skip: "TODO"},
         getParameter: {skip: "TODO"},
@@ -1267,30 +1360,17 @@ const allTestCases = {
     },
 };
 
-// TODO (SERVER-101777): This test makes a lot of assumptions about database versions stored in
-// shards that are not the primary shard. Hence we turn off all shardAuthoritative feature flags.
-const shardOptions = (() => {
-    if (Boolean(jsTest.options().useRandomBinVersionsWithinReplicaSet) || Boolean(TestData.multiversionBinVersion)) {
-        return {};
-    }
-    return {
-        setParameter: {
-            featureFlagShardAuthoritativeDbMetadataDDL: false,
-            featureFlagShardAuthoritativeDbMetadataCRUD: false,
-            featureFlagShardAuthoritativeCollMetadata: false,
-        },
-    };
-})();
 const st = new ShardingTest({
     shards: 2,
     mongos: 2,
-    other: {
-        configOptions: shardOptions,
-        rsOptions: shardOptions,
-    },
 });
 
-const doTest = (connection, testCases, commandsAddedSinceLastLTS, commandsRemovedSinceLastLTS) => {
+// Helper function to check if authoritative database shards feature is enabled.
+function isAuthoritativeShardsEnabled(conn) {
+    return FeatureFlagUtil.isPresentAndEnabled(conn, "ShardAuthoritativeDbMetadataCRUD");
+}
+
+const doTest = (connection, testCases, commandsAddedSinceLastLTS, commandsRemovedSinceLastLTS, isMongodTest) => {
     const listCommandsRes = connection.adminCommand({listCommands: 1});
     assert.commandWorked(listCommandsRes);
     print("--------------------------------------------");
@@ -1338,6 +1418,34 @@ const doTest = (connection, testCases, commandsAddedSinceLastLTS, commandsRemove
         }
     })();
 
+    // Set of commands that are supported on all shards (used only for mongod tests).
+    const commandsSupportedOnAllMongod = (() => {
+        if (!isMongodTest) {
+            return new Set();
+        }
+
+        const shards = [st.shard0, st.shard1];
+
+        // Initialize the intersection with the first shard's commands
+        const firstRes = shards[0].getDB("admin").runCommand({listCommands: 1});
+        assert.commandWorked(firstRes);
+        const validCommands = new Set(Object.keys(firstRes.commands));
+
+        // Filter against remaining shards
+        for (let i = 1; i < shards.length; i++) {
+            const res = shards[i].getDB("admin").runCommand({listCommands: 1});
+            assert.commandWorked(res);
+
+            for (const cmd of validCommands) {
+                if (!res.commands.hasOwnProperty(cmd)) {
+                    validCommands.delete(cmd);
+                }
+            }
+        }
+
+        return validCommands;
+    })();
+
     (() => {
         // Test that commands that send databaseVersion are subjected to the databaseVersion
         // check when the primary shard for the database has moved and the database no longer
@@ -1354,6 +1462,15 @@ const doTest = (connection, testCases, commandsAddedSinceLastLTS, commandsRemove
             const testCase = testCases[command];
             if (testCase.skip || (isMultiversion && testCase.skipMultiversion)) {
                 print("skipping " + command + ": " + testCase.skip);
+                continue;
+            }
+
+            if (isMultiversion && isMongodTest && !commandsSupportedOnAllMongod.has(command)) {
+                assert(
+                    commandsAddedToMongodSinceLastLTS.includes(command),
+                    "did not expect " + command + " to not be supported on all shards",
+                );
+                print("skipping " + command + ": not supported on all shards");
                 continue;
             }
 
@@ -1401,6 +1518,15 @@ const doTest = (connection, testCases, commandsAddedSinceLastLTS, commandsRemove
                 continue;
             }
 
+            if (isMultiversion && isMongodTest && !commandsSupportedOnAllMongod.has(command)) {
+                assert(
+                    commandsAddedToMongodSinceLastLTS.includes(command),
+                    "did not expect " + command + " to not be supported on all shards",
+                );
+                print("skipping " + command + ": not supported on all shards");
+                continue;
+            }
+
             for (const test of toArray(testCase.run)) {
                 testCommandAfterMovePrimary(test, connection, st, dbName, collName);
             }
@@ -1424,6 +1550,15 @@ const doTest = (connection, testCases, commandsAddedSinceLastLTS, commandsRemove
                 continue;
             }
 
+            if (isMultiversion && isMongodTest && !commandsSupportedOnAllMongod.has(command)) {
+                assert(
+                    commandsAddedToMongodSinceLastLTS.includes(command),
+                    "did not expect " + command + " to not be supported on all shards",
+                );
+                print("skipping " + command + ": not supported on all shards");
+                continue;
+            }
+
             for (const test of toArray(testCase.run)) {
                 testCommandAfterDropRecreateDatabase(test, connection, st);
             }
@@ -1436,12 +1571,19 @@ const doTest = (connection, testCases, commandsAddedSinceLastLTS, commandsRemove
     })();
 };
 
-doTest(st.s, allTestCases.mongos, commandsAddedToMongosSinceLastLTS, commandsRemovedFromMongosSinceLastLTS);
+doTest(
+    st.s,
+    allTestCases.mongos,
+    commandsAddedToMongosSinceLastLTS,
+    commandsRemovedFromMongosSinceLastLTS,
+    false /* isMongodTest */,
+);
 doTest(
     st.rs0.getPrimary(),
     allTestCases.mongod,
     commandsAddedToMongodSinceLastLTS,
     commandsRemovedFromMongodSinceLastLTS,
+    true /* isMongodTest */,
 );
 
 st.stop();

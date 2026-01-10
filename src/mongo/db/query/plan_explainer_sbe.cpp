@@ -36,7 +36,6 @@
 #include "mongo/db/exec/sbe/stages/plan_stats.h"
 #include "mongo/db/fts/fts_query_impl.h"
 #include "mongo/db/index/multikey_paths.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/pipeline/field_path.h"
 #include "mongo/db/query/compiler/logical_model/projection/projection.h"
@@ -51,6 +50,7 @@
 #include "mongo/db/query/plan_summary_stats_visitor.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/record_id_bound.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/util/duration.h"
@@ -77,7 +77,12 @@ namespace {
  *         { 'a' : 'foo' }, { 'b' : 'bar' }
  */
 BSONObj replaceBSONFieldNames(const BSONObj& replace, const BSONObj& fieldNames) {
-    invariant(replace.nFields() == fieldNames.nFields());
+    tassert(
+        11321411,
+        fmt::format("'replace' and 'fieldNames' must have the same number of fields, but {} != {}",
+                    replace.nFields(),
+                    fieldNames.nFields()),
+        replace.nFields() == fieldNames.nFields());
 
     BSONObjBuilder bob;
     auto iter = fieldNames.begin();
@@ -201,7 +206,9 @@ PlanExplainer::PlanStatsDetails buildPlanStatsDetails(
     const boost::optional<BSONObj>& queryParams,
     const boost::optional<BSONArray>& remotePlanInfo,
     ExplainOptions::Verbosity verbosity,
-    bool isCached) {
+    bool isCached,
+    bool printBytecode,
+    bool usedJoinOpt = false) {
     BSONObjBuilder bob;
 
     if (verbosity >= ExplainOptions::Verbosity::kExecStats) {
@@ -235,6 +242,12 @@ PlanExplainer::PlanStatsDetails buildPlanStatsDetails(
     }
 
     plan.append("isCached", isCached);
+    // Only include information about join optimization in explain output if the relevant knob is
+    // enabled.
+    if (internalEnableJoinOptimization.load()) {
+        plan.append("usedJoinOptimization", usedJoinOpt);
+    }
+
     plan.append("queryPlan", bob.obj());
 
     int explainThresholdBytes = internalQueryExplainSizeThresholdBytes.loadRelaxed();
@@ -243,8 +256,10 @@ PlanExplainer::PlanStatsDetails buildPlanStatsDetails(
         plan.append("warning", "slotBasedPlan exceeded BSON size limit for explain");
     } else {
         BSONObj execPlanDebugInfo = PlanExplainerSBEBase::buildExecPlanDebugInfo(
-            sbePlanStageRoot, sbePlanStageData, explainThresholdBytes - plan.len() /*lengthCap*/
-        );
+            sbePlanStageRoot,
+            sbePlanStageData,
+            explainThresholdBytes - plan.len() /*lengthCap*/,
+            printBytecode);
         if (plan.len() + execPlanDebugInfo.objsize() > explainThresholdBytes) {
             plan.append("warning", "slotBasedPlan exceeded BSON size limit for explain");
         } else {
@@ -282,6 +297,9 @@ void statsToBSON(const QuerySolutionNode* node,
     switch (node->getType()) {
         case STAGE_COLLSCAN: {
             auto csn = static_cast<const CollectionScanNode*>(node);
+            bob->append(
+                "nss",
+                NamespaceStringUtil::serialize(csn->nss, SerializationContext::stateDefault()));
             bob->append("direction", csn->direction > 0 ? "forward" : "backward");
             if (csn->minRecord) {
                 csn->minRecord->appendToBSONAs(bob, "minRecord");
@@ -293,7 +311,9 @@ void statsToBSON(const QuerySolutionNode* node,
         }
         case STAGE_COUNT_SCAN: {
             auto csn = static_cast<const CountScanNode*>(node);
-
+            bob->append(
+                "nss",
+                NamespaceStringUtil::serialize(csn->nss, SerializationContext::stateDefault()));
             bob->append("keyPattern", csn->index.keyPattern);
             bob->append("indexName", csn->index.identifier.catalogName);
             auto collation =
@@ -321,6 +341,9 @@ void statsToBSON(const QuerySolutionNode* node,
         }
         case STAGE_GEO_NEAR_2D: {
             auto geo2d = static_cast<const GeoNear2DNode*>(node);
+            bob->append(
+                "nss",
+                NamespaceStringUtil::serialize(geo2d->nss, SerializationContext::stateDefault()));
             bob->append("keyPattern", geo2d->index.keyPattern);
             bob->append("indexName", geo2d->index.identifier.catalogName);
             bob->append("indexVersion", geo2d->index.version);
@@ -328,6 +351,9 @@ void statsToBSON(const QuerySolutionNode* node,
         }
         case STAGE_GEO_NEAR_2DSPHERE: {
             auto geo2dsphere = static_cast<const GeoNear2DSphereNode*>(node);
+            bob->append("nss",
+                        NamespaceStringUtil::serialize(geo2dsphere->nss,
+                                                       SerializationContext::stateDefault()));
             bob->append("keyPattern", geo2dsphere->index.keyPattern);
             bob->append("indexName", geo2dsphere->index.identifier.catalogName);
             bob->append("indexVersion", geo2dsphere->index.version);
@@ -335,7 +361,9 @@ void statsToBSON(const QuerySolutionNode* node,
         }
         case STAGE_IXSCAN: {
             auto ixn = static_cast<const IndexScanNode*>(node);
-
+            bob->append(
+                "nss",
+                NamespaceStringUtil::serialize(ixn->nss, SerializationContext::stateDefault()));
             bob->append("keyPattern", ixn->index.keyPattern);
             bob->append("indexName", ixn->index.identifier.catalogName);
             auto collation =
@@ -399,11 +427,13 @@ void statsToBSON(const QuerySolutionNode* node,
         }
         case STAGE_TEXT_MATCH: {
             auto tn = static_cast<const TextMatchNode*>(node);
-
+            bob->append(
+                "nss",
+                NamespaceStringUtil::serialize(tn->nss, SerializationContext::stateDefault()));
             bob->append("indexPrefix", tn->indexPrefix);
             bob->append("indexName", tn->index.identifier.catalogName);
             auto ftsQuery = dynamic_cast<fts::FTSQueryImpl*>(tn->ftsQuery.get());
-            invariant(ftsQuery);
+            tassert(11321412, "Invalid dynamic cast to fts::FTSQueryImpl", ftsQuery);
             bob->append("parsedTextQuery", ftsQuery->toBSON());
             bob->append("textIndexVersion", tn->index.version);
             break;
@@ -475,6 +505,9 @@ void statsToBSON(const QuerySolutionNode* node,
         }
         case STAGE_SEARCH: {
             auto sn = static_cast<const SearchNode*>(node);
+            bob->append(
+                "nss",
+                NamespaceStringUtil::serialize(sn->nss, SerializationContext::stateDefault()));
             bob->append("isSearchMeta", sn->isSearchMeta);
             bob->appendNumber("remoteCursorId", static_cast<long long>(sn->remoteCursorId));
             bob->append("searchQuery", sn->searchQuery);
@@ -483,6 +516,13 @@ void statsToBSON(const QuerySolutionNode* node,
         case STAGE_EOF: {
             auto eofn = static_cast<const EofNode*>(node);
             bob->append("type", eof_node::typeStr(eofn->type));
+            break;
+        }
+        case STAGE_FETCH: {
+            auto fn = static_cast<const FetchNode*>(node);
+            bob->append(
+                "nss",
+                NamespaceStringUtil::serialize(fn->nss, SerializationContext::stateDefault()));
             break;
         }
         case STAGE_HASH_JOIN_EMBEDDING_NODE:
@@ -503,6 +543,28 @@ void statsToBSON(const QuerySolutionNode* node,
                 }
                 bob->append("joinPredicates", bab.arr());
             }
+            break;
+        }
+        case STAGE_INDEX_PROBE_NODE: {
+            auto ipn = static_cast<const IndexProbeNode*>(node);
+            bob->append(
+                "nss",
+                NamespaceStringUtil::serialize(ipn->nss, SerializationContext::stateDefault()));
+            bob->append("keyPattern", ipn->index.keyPattern);
+            bob->append("indexName", ipn->index.identifier.catalogName);
+            auto collation =
+                ipn->index.infoObj.getObjectField(IndexDescriptor::kCollationFieldName);
+            if (!collation.isEmpty()) {
+                bob->append("collation", collation);
+            }
+            bob->appendBool("isMultiKey", ipn->index.multikey);
+            if (!ipn->index.multikeyPaths.empty()) {
+                appendMultikeyPaths(ipn->index.keyPattern, ipn->index.multikeyPaths, bob);
+            }
+            bob->appendBool("isUnique", ipn->index.unique);
+            bob->appendBool("isSparse", ipn->index.sparse);
+            bob->appendBool("isPartial", ipn->index.filterExpr != nullptr);
+            bob->append("indexVersion", static_cast<int>(ipn->index.version));
             break;
         }
         default:
@@ -541,12 +603,14 @@ PlanExplainerSBEBase::PlanExplainerSBEBase(
     bool isCachedPlan,
     boost::optional<size_t> cachedPlanHash,
     std::shared_ptr<const plan_cache_debug_info::DebugInfoSBE> debugInfo,
-    RemoteExplainVector* remoteExplains)
+    RemoteExplainVector* remoteExplains,
+    bool usedJoinOpt)
     : PlanExplainer{solution},
       _root{root},
       _rootData{data},
       _isMultiPlan{isMultiPlan},
       _isFromPlanCache{isCachedPlan},
+      _usedJoinOpt{usedJoinOpt},
       _cachedPlanHash{cachedPlanHash},
       _debugInfo{debugInfo},
       _remoteExplains{remoteExplains} {
@@ -627,7 +691,27 @@ PlanExplainer::PlanStatsDetails PlanExplainerSBEBase::getWinningPlanStats(
                                  boost::none /* queryParams */,
                                  buildRemotePlanInfo(),
                                  verbosity,
-                                 matchesCachedPlan());
+                                 matchesCachedPlan(),
+                                 false /*printBytecode*/);
+}
+
+PlanExplainer::PlanStatsDetails PlanExplainerSBEBase::getWinningPlanStatsQueryPlanner(
+    bool printBytecode) const {
+    tassert(10629901, "encountered unexpected nullptr for root PlanStage", _root);
+    auto stats = _root->getStats(true /* includeDebugInfo  */);
+    tassert(10629902, "encountered unexpected nullptr for PlanStageStats", stats);
+
+    return buildPlanStatsDetails(_solution,
+                                 *stats,
+                                 _root,
+                                 _rootData,
+                                 boost::none /* planSummary */,
+                                 boost::none /* queryParams */,
+                                 buildRemotePlanInfo(),
+                                 ExplainOptions::Verbosity::kQueryPlanner,
+                                 matchesCachedPlan(),
+                                 printBytecode,
+                                 _usedJoinOpt);
 }
 
 boost::optional<BSONArray> PlanExplainerSBEBase::buildRemotePlanInfo() const {
@@ -650,7 +734,8 @@ PlanExplainerClassicRuntimePlannerForSBE::PlanExplainerClassicRuntimePlannerForS
     boost::optional<size_t> cachedPlanHash,
     std::shared_ptr<const plan_cache_debug_info::DebugInfoSBE> debugInfo,
     std::unique_ptr<PlanStage> classicRuntimePlannerStage,
-    RemoteExplainVector* remoteExplains)
+    RemoteExplainVector* remoteExplains,
+    bool usedJoinOpt)
     : PlanExplainerSBEBase{root,
                            data,
                            solution,
@@ -658,13 +743,19 @@ PlanExplainerClassicRuntimePlannerForSBE::PlanExplainerClassicRuntimePlannerForS
                            isCachedPlan,
                            cachedPlanHash,
                            std::move(debugInfo),
-                           remoteExplains},
+                           remoteExplains,
+                           usedJoinOpt},
       _classicRuntimePlannerStage{std::move(classicRuntimePlannerStage)},
       _classicRuntimePlannerExplainer{
           _classicRuntimePlannerStage  // If there were no multi-planning, this will be nullptr.
               ? plan_explainer_factory::make(_classicRuntimePlannerStage.get(), cachedPlanHash)
               : nullptr} {
     if (_classicRuntimePlannerExplainer) {
+        // 'solution' is always non-null when 'classicRuntimePlannerStage' is non-null
+        // (MultiPlanner::makeExecutor() invariant).
+        tassert(11619100,
+                "Expected non-null QuerySolution when classic runtime planner explainer exists",
+                _solution);
         _classicRuntimePlannerExplainer->updateEnumeratorExplainInfo(
             _solution->_enumeratorExplainInfo);
     }

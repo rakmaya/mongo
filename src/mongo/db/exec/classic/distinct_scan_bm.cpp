@@ -37,9 +37,10 @@
 #include "mongo/db/exec/classic/query_shard_server_test_fixture.h"
 #include "mongo/db/exec/shard_filterer_impl.h"
 #include "mongo/db/global_catalog/type_chunk.h"
-#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
-#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_state.h"
 #include "mongo/db/query/compiler/optimizer/index_bounds_builder/index_bounds_builder.h"
+#include "mongo/db/shard_role/shard_catalog/collection_sharding_state.h"
+#include "mongo/db/shard_role/shard_catalog/operation_sharding_state.h"
+#include "mongo/db/shard_role/shard_role.h"
 #include "mongo/db/versioning_protocol/shard_version_factory.h"
 #include "mongo/unittest/benchmark_util.h"
 #include "mongo/util/assert_util.h"
@@ -141,7 +142,7 @@ enum ShardFilteringStrategy { NoShardFilter, ShardFilter };
 
 class ShardFilteringDistinctScanPerfTestFixture : public QueryShardServerTestFixture {
 public:
-    void _doTest() final { /* Unused. */ }
+    void TestBody() override {}
 
     struct DistinctScanParamsForTest {
         // Collection & sharding set-up.
@@ -181,7 +182,7 @@ public:
             CollectionAcquisitionRequest::fromOpCtx(opCtx, ns, AcquisitionPrerequisites::kRead),
             MODE_IS);
         const CollectionPtr& collPtr = _coll->getCollectionPtr();
-        const auto& idxDesc = getIndexDescriptor(collPtr, "some_index");
+        const auto& idxDesc = getIndexEntry(collPtr, "some_index");
 
         // Set-up DistinctParams for a full distinct scan on the first field in the index.
         _params = DistinctParams{opCtx, collPtr, &idxDesc};

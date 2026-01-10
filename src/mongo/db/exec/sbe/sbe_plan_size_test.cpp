@@ -36,7 +36,7 @@
 #include "mongo/db/exec/sbe/stages/branch.h"
 #include "mongo/db/exec/sbe/stages/bson_scan.h"
 #include "mongo/db/exec/sbe/stages/co_scan.h"
-#include "mongo/db/exec/sbe/stages/exchange.h"
+#include "mongo/db/exec/sbe/stages/fetch.h"
 #include "mongo/db/exec/sbe/stages/filter.h"
 #include "mongo/db/exec/sbe/stages/hash_agg.h"
 #include "mongo/db/exec/sbe/stages/hash_agg_accumulator.h"
@@ -50,7 +50,6 @@
 #include "mongo/db/exec/sbe/stages/scan.h"
 #include "mongo/db/exec/sbe/stages/sort.h"
 #include "mongo/db/exec/sbe/stages/sorted_merge.h"
-#include "mongo/db/exec/sbe/stages/spool.h"
 #include "mongo/db/exec/sbe/stages/stages.h"
 #include "mongo/db/exec/sbe/stages/union.h"
 #include "mongo/db/exec/sbe/stages/unique.h"
@@ -60,12 +59,10 @@
 #include "mongo/db/query/compiler/physical_model/query_solution/stage_types.h"
 #include "mongo/db/storage/key_string/key_string.h"
 #include "mongo/unittest/unittest.h"
-#include "mongo/util/id_generator.h"
 #include "mongo/util/uuid.h"
 
 #include <cstddef>
 #include <cstdint>
-#include <limits>
 #include <memory>
 #include <string>
 #include <utility>
@@ -132,12 +129,6 @@ TEST_F(PlanSizeTest, BsonScan) {
 
 TEST_F(PlanSizeTest, CoScan) {
     auto stage = makeS<CoScanStage>(kEmptyPlanNodeId);
-    assertPlanSize(*stage);
-}
-
-TEST_F(PlanSizeTest, Exchange) {
-    auto stage = makeS<ExchangeConsumer>(
-        mockS(), 1, makeSV(), ExchangePolicy::broadcast, nullptr, mockE(), kEmptyPlanNodeId);
     assertPlanSize(*stage);
 }
 
@@ -276,32 +267,12 @@ TEST_F(PlanSizeTest, Scan) {
                                        generateSlotId() /* indexKeyPatternSlot */,
                                        std::vector<std::string>{"field"} /* scanFieldNames */,
                                        mockSV() /* scanFieldSlots */,
-                                       generateSlotId() /* seekRecordIdSlot */,
                                        generateSlotId() /* minRecordIdSlot */,
                                        generateSlotId() /* maxRecordIdSlot */,
                                        true /* forward */,
                                        nullptr /* yieldPolicy */,
                                        kEmptyPlanNodeId /* nodeId */,
-                                       ScanCallbacks());
-    assertPlanSize(*stage);
-}
-
-TEST_F(PlanSizeTest, ParallelScan) {
-    auto collUuid = UUID::parse("00000000-0000-0000-0000-000000000000").getValue();
-    auto stage =
-        makeS<sbe::ParallelScanStage>(collUuid,
-                                      DatabaseName(),
-                                      generateSlotId() /* recordSlot */,
-                                      generateSlotId() /* recordIdSlot */,
-                                      generateSlotId() /* snapshotIdSlot */,
-                                      generateSlotId() /* indexIdSlot */,
-                                      generateSlotId() /* indexKeySlot */,
-                                      generateSlotId() /* indexKeyPatternSlot */,
-                                      std::vector<std::string>{"field"} /* scanFieldNames */,
-                                      mockSV() /* scanFieldSlots */,
-                                      nullptr /* yieldPolicy */,
-                                      kEmptyPlanNodeId /* nodeId */,
-                                      ScanCallbacks());
+                                       nullptr /* scanOpenCallback */);
     assertPlanSize(*stage);
 }
 
@@ -342,18 +313,6 @@ TEST_F(PlanSizeTest, SortedMerge) {
     assertPlanSize(*stage);
 }
 
-TEST_F(PlanSizeTest, SpoolLazyProducer) {
-    auto stage = makeS<SpoolLazyProducerStage>(
-        mockS(), 1, mockSV(), nullptr /* yieldPolicy */, kEmptyPlanNodeId);
-    assertPlanSize(*stage);
-}
-
-TEST_F(PlanSizeTest, SpoolConsumer) {
-    auto stage =
-        makeS<SpoolConsumerStage<true>>(1, mockSV(), nullptr /* yieldPolicy */, kEmptyPlanNodeId);
-    assertPlanSize(*stage);
-}
-
 TEST_F(PlanSizeTest, Union) {
     auto scanStages = makeSs(mockS(), mockS());
     std::vector<value::SlotVector> scanInputVals{mockSV(), mockSV()};
@@ -370,6 +329,23 @@ TEST_F(PlanSizeTest, Unique) {
 TEST_F(PlanSizeTest, Unwind) {
     auto stage = makeS<UnwindStage>(
         mockS(), generateSlotId(), generateSlotId(), generateSlotId(), false, kEmptyPlanNodeId);
+    assertPlanSize(*stage);
+}
+
+TEST_F(PlanSizeTest, Fetch) {
+    auto collUuid = UUID::parse("00000000-0000-0000-0000-000000000000").getValue();
+    auto fetchState = std::make_shared<FetchStageState>(generateSlotId(),
+                                                        generateSlotId(),
+                                                        generateSlotId(),
+                                                        generateSlotId(),
+                                                        generateSlotId(),
+                                                        generateSlotId(),
+                                                        generateSlotId(),
+                                                        StringListSet({}),
+                                                        value::SlotVector(),
+                                                        FetchCallbacks());
+    auto stage = makeS<FetchStage>(
+        mockS(), collUuid, DatabaseName(), fetchState, nullptr, kEmptyPlanNodeId, true);
     assertPlanSize(*stage);
 }
 }  // namespace mongo::sbe

@@ -32,12 +32,12 @@
 #include "mongo/bson/oid.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/global_catalog/type_chunk.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_catalog/collection_metadata.h"
-#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_runtime.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/collection_metadata.h"
+#include "mongo/db/shard_role/shard_catalog/collection_sharding_runtime.h"
 #include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/db/topology/sharding_state.h"
 #include "mongo/db/versioning_protocol/chunk_version.h"
@@ -84,10 +84,12 @@ CollectionMetadata checkCollectionIdentity(OperationContext* opCtx,
             optMetadata);
 
     auto metadata = *optMetadata;
+    const auto placementVersion = metadata.getShardPlacementVersion();
+    const auto shardVersion = ShardVersionFactory::make(metadata);
 
     uassert(StaleConfigInfo(nss,
                             ShardVersionPlacementIgnored() /* receivedVersion */,
-                            ShardVersion::UNSHARDED() /* wantedVersion */,
+                            shardVersion /* wantedVersion */,
                             shardId),
             str::stream() << "Collection " << nss.toStringForErrorMsg() << " is not sharded",
             metadata.isSharded());
@@ -96,8 +98,6 @@ CollectionMetadata checkCollectionIdentity(OperationContext* opCtx,
             "The collection was not found locally even though it is marked as sharded.",
             collection);
 
-    const auto placementVersion = metadata.getShardPlacementVersion();
-    const auto shardVersion = ShardVersionFactory::make(metadata);
 
     uassert(StaleConfigInfo(nss,
                             ShardVersionPlacementIgnored() /* receivedVersion */,

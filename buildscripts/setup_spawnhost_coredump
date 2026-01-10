@@ -60,6 +60,14 @@ if [ -f $ARTIFACTS_SCRIPT ]; then
     $python $ARTIFACTS_SCRIPT
 fi
 
+# Download the failed test archive created by resmoke_tests if needed since it is
+# not in the dependency chain.
+BAZEL_TEST_OUTPUTS=$(find /data/mci -name '*test.outputs__outputs.zip' 2>/dev/null)
+DOWNLOAD_SCRIPT="${SRC_DIR}/evergreen/spawnhost/download_test_binaries.py"
+if [[ -f $DOWNLOAD_SCRIPT && -n $BAZEL_TEST_OUTPUTS ]]; then
+    $python $DOWNLOAD_SCRIPT
+fi
+
 RBE_SYSROOT_SCRIPT="${SRC_DIR}/buildscripts/create_rbe_sysroot.py"
 if [[ -f "${RBE_SYSROOT_SCRIPT}" ]]; then
     echo "Setting up RBE sysroot for unit test debugging..."
@@ -211,6 +219,7 @@ fi' >> .bash_profile
     mkdir -p /data/debug
     ln -s /data/debug .
     cd debug
+    mkdir -p bin lib
 
     # As the name suggests, pretty printers. Primarily for boost::optional<T>
     git clone https://github.com/mongodb-forks/Boost-Pretty-Printer.git --branch mongodb-stable &
@@ -241,13 +250,13 @@ fi' >> .bash_profile
     else
         archive_fail "debug"
     fi
-
-    UNITTEST_ARCHIVE=$(ls /data/mci/artifacts-*unit_test*/mongo-unittests-*.tgz 2>/dev/null)
-    if [[ -n $UNITTEST_ARCHIVE ]]; then
-        tar --wildcards --strip-components=0 -xzf $UNITTEST_ARCHIVE 'bin/*' &
-        tar --wildcards -xzf $UNITTEST_ARCHIVE 'lib/*' &
+    
+    TEST_ARCHIVE=$(ls /data/mci/artifacts-*/mongo-*tests-*.tgz 2>/dev/null)
+    if [[ -n $TEST_ARCHIVE ]]; then
+        tar --wildcards --strip-components=0 -xzf $TEST_ARCHIVE 'bin/*' &
+        tar --wildcards -xzf $TEST_ARCHIVE 'lib/*' &
     else
-        archive_fail "unit_test"
+        archive_fail "tests"
     fi
 
     BENCHMARK_ARCHIVE=$(ls /data/mci/artifacts-*compile_upload_benchmarks/benchmarks-*.tgz 2>/dev/null)
@@ -284,6 +293,18 @@ fi' >> .bash_profile
         mv ${COREDUMP_ARCHIVE} ${COREDUMP_ARCHIVE_TARGET}
         gunzip ${COREDUMP_ARCHIVE_TARGET}/${COREDUMP_ARCHIVE_BASENAME}
     done
+
+    # logic for core dumps from a bazel test's undeclared outputs
+    if [[ -n $BAZEL_TEST_OUTPUTS ]]; then
+        find /data/mci -name '*test.outputs__outputs.zip' | while read -r zip; do
+            output_dir=$(dirname "$zip")/test.outputs
+            mkdir -p "$output_dir"
+            unzip -o -q "$zip" -d "$output_dir"
+            find "$output_dir" -name '*.core' | while read core; do
+                mv "$core" "$COREDUMP_ARCHIVE_TARGET"
+            done
+        done
+    fi
 
     if [[ -z $(ls ${COREDUMP_ARCHIVE_TARGET}/dump* 2>/dev/null) ]]; then
         archive_fail "coredump"
@@ -405,5 +426,6 @@ fi
 # to error.
 if [[ -n "${slack_user}" ]]; then
     "$evg_binary_pathname" --config "$evg_credentials_pathname" notify slack -t "@$slack_user" -m "$slack_message"
+    "$evg_binary_pathname" --config "$evg_credentials_pathname" notify slack -t "@$slack_user" -m "If you run into segfaults starting up gdb, please add -nx to your gdb command."
     "$evg_binary_pathname" --config "$evg_credentials_pathname" notify slack -t "@$slack_user" -m "If you run into unresolved system library symbols when debugging unit tests, please add -ex 'set sysroot $HOME_DIR/rbe_sysroot/' to your gdb command."
 fi

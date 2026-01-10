@@ -46,10 +46,13 @@
 
 namespace mongo {
 
-REGISTER_INTERNAL_DOCUMENT_SOURCE(_internalReshardingOwnershipMatch,
-                                  LiteParsedDocumentSourceInternal::parse,
-                                  DocumentSourceReshardingOwnershipMatch::createFromBson,
-                                  true);
+REGISTER_INTERNAL_LITE_PARSED_DOCUMENT_SOURCE(_internalReshardingOwnershipMatch,
+                                              ReshardingOwnershipMatchLiteParsed::parse);
+
+REGISTER_DOCUMENT_SOURCE_WITH_STAGE_PARAMS_DEFAULT(_internalReshardingOwnershipMatch,
+                                                   DocumentSourceReshardingOwnershipMatch,
+                                                   ReshardingOwnershipMatchStageParams);
+
 ALLOCATE_DOCUMENT_SOURCE_ID(_internalReshardingOwnershipMatch,
                             DocumentSourceReshardingOwnershipMatch::id)
 

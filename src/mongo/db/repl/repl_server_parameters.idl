@@ -34,6 +34,7 @@ global:
     cpp_includes:
         - "mongo/client/read_preference.h"
         - "mongo/client/read_preference_validators.h"
+        - "mongo/db/repl/repl_worker_pool_thread_count.h"
 
 imports:
     - "mongo/db/basic_types.idl"
@@ -76,9 +77,11 @@ server_parameters:
         redact: false
 
     initialSyncOplogFetcherBatchSize:
-        description: The batchSize to use for the find/getMore queries called by the OplogFetcher
-        set_at: startup
-        cpp_vartype: int
+        description: >-
+            The batchSize to use for the find/getMore queries called by the OplogFetcher. If set
+            at runtime, this value will be used for the next initial sync attempt.
+        set_at: [startup, runtime]
+        cpp_vartype: AtomicWord<int>
         cpp_varname: initialSyncOplogFetcherBatchSize
         # 16MB max batch size / 12 byte min doc size * 10 (for good measure) =
         #     defaultBatchSize to use.
@@ -151,8 +154,8 @@ server_parameters:
         description: >-
             Whether to use the "exhaust cursor" feature when fetching oplog entries from the sync
             source.
-        set_at: startup
-        cpp_vartype: bool
+        set_at: [startup, runtime]
+        cpp_vartype: AtomicWord<bool>
         cpp_varname: oplogFetcherUsesExhaust
         default: true
         redact: false
@@ -161,8 +164,8 @@ server_parameters:
         description: >-
             How long, in milliseconds, to wait for more data when an oplog application batch is
             not full.
-        set_at: startup
-        cpp_vartype: int
+        set_at: [startup, runtime]
+        cpp_vartype: AtomicWord<int>
         cpp_varname: oplogBatchDelayMillis
         default: 0
         validator:
@@ -172,8 +175,8 @@ server_parameters:
     # From bgsync.cpp
     bgSyncOplogFetcherBatchSize:
         description: The batchSize to use for the find/getMore queries called by the OplogFetcher
-        set_at: startup
-        cpp_vartype: int
+        set_at: [startup, runtime]
+        cpp_vartype: AtomicWord<int>
         cpp_varname: bgSyncOplogFetcherBatchSize
         # 16MB max batch size / 12 byte min doc size * 10 (for good measure) =
         #     defaultBatchSize to use.
@@ -219,8 +222,8 @@ server_parameters:
 
     collectionClonerUsesExhaust:
         description: Whether to use the "exhaust cursor" feature when retrieving collection data.
-        set_at: startup
-        cpp_vartype: bool
+        set_at: [startup, runtime]
+        cpp_vartype: AtomicWord<bool>
         cpp_varname: collectionClonerUsesExhaust
         default: true
         redact: false
@@ -230,8 +233,8 @@ server_parameters:
         description: >-
             Limit for the number of bytes of data inserted per storage transaction
             (WriteUnitOfWork) by collectionBulkLoader during initial sync collection cloning
-        set_at: startup
-        cpp_vartype: int
+        set_at: [startup, runtime]
+        cpp_vartype: AtomicWord<int>
         cpp_varname: collectionBulkLoaderBatchSizeInBytes
         default:
             expr: 256 * 1024
@@ -243,8 +246,8 @@ server_parameters:
             The batch size (number of documents) to use for the queries in the
             CollectionCloner. Default of '0' means the limit is the number of documents
             that will fit in a single BSON object.
-        set_at: startup
-        cpp_vartype: int
+        set_at: [startup, runtime]
+        cpp_vartype: AtomicWord<int>
         cpp_varname: collectionClonerBatchSize
         default: 0
         validator:
@@ -283,29 +286,6 @@ server_parameters:
         default: 10
         validator:
             gte: 0
-        redact: false
-
-    # From oplog_applier.cpp
-    replWriterThreadCount:
-        description: The number of threads in the thread pool used to apply the oplog
-        set_at: startup
-        cpp_vartype: int
-        cpp_varname: replWriterThreadCount
-        default: 16
-        validator:
-            gte: 1
-            lte: 256
-        redact: false
-
-    replWriterMinThreadCount:
-        description: The minimum number of threads in the thread pool used to apply the oplog
-        set_at: startup
-        cpp_vartype: int
-        cpp_varname: replWriterMinThreadCount
-        default: 0
-        validator:
-            gte: 0
-            lte: 256
         redact: false
 
     replBatchLimitOperations:
@@ -363,8 +343,8 @@ server_parameters:
 
     replElectionTimeoutOffsetLimitFraction:
         description: ""
-        set_at: startup
-        cpp_vartype: double
+        set_at: [startup, runtime]
+        cpp_vartype: AtomicWord<double>
         cpp_varname: replElectionTimeoutOffsetLimitFraction
         default: 0.15
         validator:
@@ -389,7 +369,7 @@ server_parameters:
         description: >-
             Number of seconds to add to the `find` and `getMore` timeouts for oplog fetching to
             calculate the network timeout for the requests.
-        set_at: [startup]
+        set_at: [startup, runtime]
         cpp_vartype: AtomicWord<int>
         cpp_varname: oplogNetworkTimeoutBufferSeconds
         default: 5
@@ -401,8 +381,8 @@ server_parameters:
         description: >-
             Whether or not secondary oplog application enforces (by fassert) consistency
             constraints that apply if an oplog entry is to be applied exactly once and in order.
-        set_at: startup
-        cpp_vartype: bool
+        set_at: [startup, runtime]
+        cpp_vartype: AtomicWord<bool>
         cpp_varname: oplogApplicationEnforcesSteadyStateConstraints
         default: false
         redact: false
@@ -454,7 +434,7 @@ server_parameters:
             When enabled, allows a node to override the cluster-wide chainingAllowed setting.
             If chaining is disabled in the replica set, enabling this parameter allows the node
             to chain regardless.
-        set_at: [startup]
+        set_at: [startup, runtime]
         cpp_vartype: AtomicWord<bool>
         cpp_varname: enableOverrideClusterChainingSetting
         default: false
@@ -464,8 +444,8 @@ server_parameters:
         description: >-
             If true, disable check for IP addresses in split horizon configurations. As per the
             definition of SNI laid out in RFC6066, literal IP addresses are not allowed as server names.
-        set_at: startup
-        cpp_vartype: bool
+        set_at: [startup, runtime]
+        cpp_vartype: AtomicWord<bool>
         cpp_varname: disableSplitHorizonIPCheck
         default: false
         redact: false
@@ -519,8 +499,8 @@ server_parameters:
         description: >-
             Specifies the max lag in seconds between the syncing node and the sync source to mark
             the file copy based initial sync done successfully.
-        set_at: startup
-        cpp_vartype: int
+        set_at: [startup, runtime]
+        cpp_vartype: AtomicWord<int>
         cpp_varname: fileBasedInitialSyncMaxLagSec
         default:
             expr: 5 * 60
@@ -533,8 +513,8 @@ server_parameters:
             Specifies the max number of cycles that file copy based initial sync runs trying to
             clone updates while the lag between the syncing node and the sync source is higher than 
             fileBasedInitialSyncMaxLagSec.
-        set_at: startup
-        cpp_vartype: int
+        set_at: [startup, runtime]
+        cpp_vartype: AtomicWord<int>
         cpp_varname: fileBasedInitialSyncMaxCyclesWithoutProgress
         default: 3
         validator:
@@ -545,8 +525,8 @@ server_parameters:
         description: >-
             Period of time, in milliseconds, syncing node may wait for the sync source to have the
             full oplog history up to the backup point in time.
-        set_at: startup
-        cpp_vartype: int
+        set_at: [startup, runtime]
+        cpp_vartype: AtomicWord<int>
         cpp_varname: fileBasedInitialSyncExtendCursorTimeoutMS
         default:
             expr: 180 * 1000
@@ -642,17 +622,6 @@ server_parameters:
         default: 500
         validator:
             gte: 0
-        redact: false
-
-    disableTransitionFromLatestToLastContinuous:
-        description: >-
-            Prohibits downgrading from latest FCV to last continuous FCV. Disabled by default.
-            Test-only.
-        test_only: true
-        set_at: startup
-        cpp_vartype: bool
-        cpp_varname: disableTransitionFromLatestToLastContinuous
-        default: true
         redact: false
 
     unsupportedSyncSource:
@@ -767,7 +736,7 @@ feature_flags:
         default: true
         version: 8.0
         fcv_gated: true
-        fcv_context_unaware: true
+        check_against_fcv: legacy_fcv_snapshot_only
 
     featureFlagReduceMajorityWriteLatency:
         description: When enabled, Secondaries acknowledge writes as durable after an oplog entry is written durably to disk, without waiting for it to be applied.
@@ -792,3 +761,12 @@ feature_flags:
         cpp_varname: feature_flags::gFeatureFlagUpgradingToDowngrading
         default: true
         fcv_gated: false
+
+    # TODO (SERVER-112863): Remove this feature flag once 9.0 becomes last LTS.
+    featureFlagReplicationUsageOfMaintenancePort:
+        description:
+            When enabled, allows replica set configuration with and internal replication usage of
+            the dedicated maintenance port.
+        cpp_varname: feature_flags::gFeatureFlagReplicationUsageOfMaintenancePort
+        default: false
+        fcv_gated: true

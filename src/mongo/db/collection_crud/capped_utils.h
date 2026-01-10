@@ -29,15 +29,15 @@
 
 #pragma once
 
-#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
+#include "mongo/db/shard_role/shard_role.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/uuid.h"
 
 #include <boost/optional/optional.hpp>
 
+MONGO_MOD_PUBLIC;
+
 namespace mongo {
-class Database;
-class NamespaceString;
-class OperationContext;
 
 /**
  * Clones the collection "shortFrom" to the capped collection "shortTo" with a size of "size".

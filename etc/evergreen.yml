@@ -63,6 +63,7 @@ include:
   - filename: etc/evergreen_yml_components/tasks/compile_tasks_shared.yml
   - filename: etc/evergreen_yml_components/tasks/misc_tasks.yml
   - filename: etc/evergreen_yml_components/tasks/release_tasks.yml
+  - filename: etc/evergreen_yml_components/tasks/devcontainer_tasks.yml
 
   - filename: etc/evergreen_yml_components/variants/misc/task_generation.yml
   - filename: etc/evergreen_yml_components/variants/misc/misc.yml
@@ -107,19 +108,16 @@ parameters:
 
 commit_queue_aliases:
   - variant: "commit-queue"
-    task: "^(bazel_.*|run_.*|unit_test.*|compile_.*|lint_.*|jsCore|check_for_noexcept|version_gen_validation|validate_commit_message|resmoke_validation_tests|buildscripts_test)$"
+    task: "^(bazel_.*|run_.*|unit_test.*|compile_.*|lint_.*|resmoke_tests|check_for_noexcept|version_gen_validation|validate_commit_message|resmoke_validation_tests|buildscripts_test)$"
     variant_tags: []
     task_tags: []
   - variant: "^(amazon-linux2023-arm64-static-compile|linux-x86-dynamic-compile-required)$"
     variant_tags: []
     task_tags: ["clang_tidy"]
-  - variant: "^(al2023-arm64-sep-benchmark)$"
-    variant_tags: []
-    task_tags: ["benchmarks_sep"]
 
 github_pr_aliases:
   - variant: "commit-queue"
-    task: "^(bazel_.*|run_.*|unit_test.*|compile_.*|lint_.*|jsCore|check_for_noexcept|version_gen_validation|validate_commit_message|resmoke_validation_tests|buildscripts_test)$"
+    task: "^(bazel_.*|run_.*|unit_test.*|compile_.*|lint_.*|resmoke_tests|check_for_noexcept|version_gen_validation|validate_commit_message|resmoke_validation_tests|buildscripts_test)$"
     variant_tags: []
     task_tags: []
   - variant: "^(amazon-linux2023-arm64-static-compile|linux-x86-dynamic-compile-required)$"
@@ -172,3 +170,7 @@ patch_aliases:
   - alias: cluster_scalability
     variant_tags: ["cluster_scalability_only"]
     task_tags: ["cluster_scalability_only"]
+  - alias: blocking-emergency-atlas-release-tasks
+    description: "Run variants that would potentially block an emergency release"
+    variant_tags: ["emergency_release"]
+    task: ".*"

@@ -48,9 +48,6 @@
 #include "mongo/db/commands/feature_compatibility_version.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/exec/document_value/value.h"
-#include "mongo/db/global_catalog/catalog_cache/catalog_cache.h"
-#include "mongo/db/global_catalog/router_role_api/cluster_commands_helpers.h"
-#include "mongo/db/global_catalog/router_role_api/collection_uuid_mismatch.h"
 #include "mongo/db/logical_time.h"
 #include "mongo/db/memory_tracking/operation_memory_usage_tracker.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
@@ -69,7 +66,11 @@
 #include "mongo/db/query/find_common.h"
 #include "mongo/db/query/query_stats/query_stats.h"
 #include "mongo/db/repl/read_concern_args.h"
+#include "mongo/db/router_role/cluster_commands_helpers.h"
+#include "mongo/db/router_role/collection_uuid_mismatch.h"
+#include "mongo/db/router_role/routing_cache/catalog_cache.h"
 #include "mongo/db/session/logical_session_id_gen.h"
+#include "mongo/db/shard_role/shard_catalog/raw_data_operation.h"
 #include "mongo/db/sharding_environment/client/shard.h"
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/sharding_environment/shard_id.h"
@@ -353,6 +354,21 @@ BSONObj createCommandForMergingShard(Document serializedCommand,
         }
     }
 
+    auto rawData = mergeCmd.peek()[(GenericArguments::kRawDataFieldName)];
+    auto isRawOpCtx = isRawDataOperation(mergeCtx->getOperationContext());
+    tassert(11346800,
+            "Trying to send a non-rawData command from a rawData operation",
+            rawData.missing() || rawData.coerceToBool() || !isRawOpCtx);
+
+    // TODO(SERVER-108928): 'rawData' should be declared as should_forward_to_shards: true
+    // The merge command preserves the 'rawData' field from the original pipeline command, which
+    // leads to 'rawData' being attached twice to the network request. That's why we remove it from
+    // the command here. Only if sending a 'rawData' command from a non-'rawData' operation, we must
+    // keep it for it to be included in the outgoing network request.
+    if (!rawData.missing() && (!rawData.coerceToBool() || isRawOpCtx)) {
+        mergeCmd.remove(GenericArguments::kRawDataFieldName);
+    }
+
     // Attach the IGNORED chunk version to the command. On the shard, this will skip the actual
     // version check but will nonetheless mark the operation as versioned.
     auto mergeCmdObj = appendShardVersion(mergeCmd.freeze().toBson(),
@@ -581,11 +597,11 @@ BSONObj establishMergingMongosCursor(OperationContext* opCtx,
     // the cursor from its opCtx.
     opDebug.nShards = std::max(opDebug.nShards, nShards);
     opDebug.cursorExhausted = exhausted;
-    opDebug.additiveMetrics.nBatches = 1;
+    opDebug.getAdditiveMetrics().nBatches = 1;
     CurOp::get(opCtx)->setEndOfOpMetrics(responseBuilder.numDocs());
 
     if (exhausted) {
-        opDebug.additiveMetrics.aggregateDataBearingNodeMetrics(ccc->takeRemoteMetrics());
+        opDebug.getAdditiveMetrics().aggregateDataBearingNodeMetrics(ccc->takeRemoteMetrics());
         collectQueryStatsMongos(opCtx, ccc->takeKey());
     } else {
         collectQueryStatsMongos(opCtx, ccc);
@@ -1074,7 +1090,8 @@ Status runPipelineOnSpecificShardOnly(const boost::intrusive_ptr<ExpressionConte
     if (explain) {
         // If this was an explain, then we get back an explain result object rather than a cursor.
         result = response.swResponse.getValue().data;
-        collectQueryStatsMongos(opCtx, std::move(CurOp::get(opCtx)->debug().queryStatsInfo.key));
+        collectQueryStatsMongos(opCtx,
+                                std::move(CurOp::get(opCtx)->debug().getQueryStatsInfo().key));
     } else {
         result = uassertStatusOK(storePossibleCursor(
             opCtx,

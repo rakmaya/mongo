@@ -34,9 +34,11 @@
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/rss/persistence_provider.h"
 #include "mongo/db/storage/compact_options.h"
+#include "mongo/db/storage/prepared_transactions_iterator.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/sorted_data_interface.h"
 #include "mongo/db/storage/storage_engine.h"
+#include "mongo/util/modules.h"
 
 #include <memory>
 #include <string>
@@ -49,7 +51,7 @@ class OperationContext;
 class RecoveryUnit;
 class SnapshotManager;
 
-class KVEngine {
+class MONGO_MOD_OPEN KVEngine {
 public:
     using IdentKey = std::variant<std::span<const char>, int64_t>;
 
@@ -133,6 +135,7 @@ public:
      * Creates a 'RecordStore' and generated from the provided 'options'.
      */
     virtual Status createRecordStore(const rss::PersistenceProvider&,
+                                     RecoveryUnit& ru,
                                      const NamespaceString& nss,
                                      StringData ident,
                                      const RecordStore::Options& options) = 0;
@@ -149,7 +152,8 @@ public:
      * Similar to createRecordStore but this imports from an existing table with the provided ident
      * instead of creating a new one.
      */
-    virtual Status importRecordStore(StringData ident,
+    virtual Status importRecordStore(RecoveryUnit& ru,
+                                     StringData ident,
                                      const BSONObj& storageMetadata,
                                      bool panicOnCorruptWtMetadata,
                                      bool repair) {
@@ -266,10 +270,11 @@ public:
      * it still exists when recovered.
      */
     virtual Status recoverOrphanedIdent(const rss::PersistenceProvider& provider,
+                                        RecoveryUnit& ru,
                                         const NamespaceString& nss,
                                         StringData ident,
                                         const RecordStore::Options& recordStoreOptions) {
-        auto status = createRecordStore(provider, nss, ident, recordStoreOptions);
+        auto status = createRecordStore(provider, ru, nss, ident, recordStoreOptions);
         if (status.isOK()) {
             return {ErrorCodes::DataModifiedByRepair, "Orphan recovery created a new record store"};
         }
@@ -416,11 +421,6 @@ public:
     virtual Timestamp getInitialDataTimestamp() const {
         return Timestamp();
     }
-
-    /**
-     * See `StorageEngine::setOldestTimestampFromStable`
-     */
-    virtual void setOldestTimestampFromStable() {}
 
     /**
      * See `StorageEngine::setOldestActiveTransactionTimestampCallback`
@@ -639,6 +639,16 @@ public:
      */
     virtual bool hasOngoingLiveRestore() {
         return false;
+    }
+
+    /**
+     * Returns an iterator that yields the prepared_id of unclaimed prepared transactions that exist
+     * in the checkpoint on startup recovery. Callers can use these prepared_ids to reclaim the
+     * prepared transactions through the storage engine.
+     */
+    virtual std::unique_ptr<PreparedTransactionsIterator>
+    getUnclaimedPreparedTransactionsForStartupRecovery(OperationContext* opCtx) const {
+        MONGO_UNREACHABLE;
     }
 };
 }  // namespace mongo

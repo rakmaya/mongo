@@ -33,6 +33,7 @@
 #include "mongo/db/database_name.h"
 #include "mongo/util/database_name_util.h"
 #include "mongo/util/serialization_context.h"
+#include "mongo/util/str.h"
 #include "mongo/util/uuid.h"
 
 namespace mongo {
@@ -297,9 +298,20 @@ bool validateTag(StringData uniqueTag) {
 
 bool isValidIdent(StringData ident) {
     // These internal idents do not follow the normal scheme
-    if (ident == kSizeStorer || ident == kMbdCatalog)
+    if (ident == kSizeStorer || ident == kMdbCatalog)
         return true;
     return parseIdent(ident).has_value();
+}
+
+StringData getDirectory(StringData ident) {
+    uassert(11558900,
+            str::stream() << "Invalid ident supplied to getDirectory: " << ident,
+            isValidIdent(ident));
+    auto pos = ident.rfind('/');
+    if (pos == StringData::npos) {
+        return ""_sd;
+    }
+    return ident.substr(0, pos);
 }
 
 std::string createDBNamePathComponent(const DatabaseName& dbName) {

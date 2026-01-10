@@ -38,18 +38,18 @@
 #include "mongo/db/commands.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/generic_argument_util.h"
-#include "mongo/db/global_catalog/catalog_cache/catalog_cache.h"
 #include "mongo/db/global_catalog/ddl/sharded_ddl_commands_gen.h"
-#include "mongo/db/global_catalog/router_role_api/cluster_commands_helpers.h"
 #include "mongo/db/global_catalog/sharding_catalog_client.h"
 #include "mongo/db/global_catalog/type_collection.h"
-#include "mongo/db/local_catalog/shard_role_api/resource_yielder.h"
 #include "mongo/db/repl/read_concern_level.h"
+#include "mongo/db/router_role/cluster_commands_helpers.h"
+#include "mongo/db/router_role/routing_cache/catalog_cache.h"
 #include "mongo/db/s/resharding/resharding_coordinator.h"
 #include "mongo/db/s/resharding/resharding_data_copy_util.h"
 #include "mongo/db/s/resharding/resharding_donor_recipient_common.h"
 #include "mongo/db/s/resharding/resharding_util.h"
 #include "mongo/db/server_options.h"
+#include "mongo/db/shard_role/resource_yielder.h"
 #include "mongo/db/sharding_environment/client/shard.h"
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/sharding_environment/shard_id.h"
@@ -243,7 +243,7 @@ void ReshardingCoordinatorCleaner::_doClean(OperationContext* opCtx,
 }
 
 void ReshardingCoordinatorCleaner::_abortMachine(ReshardingCoordinator& machine) {
-    machine.abort();
+    machine.abort({resharding::kUserAbortReason, resharding::AbortType::kAbortWithQuiesce});
 }
 
 void ReshardingCoordinatorCleaner::_cleanOnParticipantShards(
@@ -285,10 +285,8 @@ void ReshardingCoordinatorCleaner::_dropTemporaryReshardingCollection(
     generic_argument_util::setMajorityWriteConcern(dropCollectionCommand,
                                                    &opCtx->getWriteConcern());
 
-    sharding::router::DBPrimaryRouter router(opCtx->getServiceContext(),
-                                             tempReshardingNss.dbName());
-    router.route(opCtx,
-                 "dropTemporaryReshardingCollection"_sd,
+    sharding::router::DBPrimaryRouter router(opCtx, tempReshardingNss.dbName());
+    router.route("dropTemporaryReshardingCollection"_sd,
                  [&](OperationContext* opCtx, const CachedDatabaseInfo& dbInfo) {
                      auto cmdResponse = executeCommandAgainstDatabasePrimaryOnlyAttachingDbVersion(
                          opCtx,

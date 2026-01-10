@@ -29,8 +29,8 @@
 
 #include "mongo/db/storage/record_store_base.h"
 
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 
 namespace mongo {
 namespace {
@@ -135,9 +135,10 @@ StatusWith<RecordData> RecordStoreBase::updateWithDamages(OperationContext* opCt
                                                           const RecordId& id,
                                                           const RecordData& data,
                                                           const char* damageSource,
-                                                          const DamageVector& damages) {
+                                                          const DamageVector& damages,
+                                                          const SeekableRecordCursor* cursor) {
     validateWriteAllowed(opCtx);
-    return _updateWithDamages(opCtx, ru, id, data, damageSource, damages);
+    return _updateWithDamages(opCtx, ru, id, data, damageSource, damages, cursor);
 }
 
 Status RecordStoreBase::truncate(OperationContext* opCtx, RecoveryUnit& ru) {

@@ -37,7 +37,7 @@ core:
     - src/mongo/platform/
     - src/mongo/stdx/
     - src/mongo/util/
-    - src/mongo/db/local_catalog/util/partitioned*
+    - src/mongo/db/partitioned*
     - src/mongo/db/crud_bm.cpp
     - src/mongo/db/field_parser[._]*
     - src/mongo/db/generic_argument_util.*
@@ -47,7 +47,6 @@ core:
     - src/mongo/db/request_execution_context.h
     - src/mongo/db/server_lifecycle_monitor[._]*
     - src/mongo/db/service_entry_point_bm_fixture.h
-    - src/mongo/db/service_entry_point_rs_endpoint.*
     - src/mongo/db/startup_warnings*
     - src/mongo/db/thread_client_test.cpp
     - src/mongo/db/throw_hook_impl[._]*
@@ -60,6 +59,7 @@ core:
     - src/mongo/executor/task_executor[._]*
     - src/mongo/executor/thread_pool[._]*
     - src/mongo/db/exec/scoped_timer*
+    - src/mongo/db/stats/counter_ops.h
 
 core.bson:
   files:
@@ -71,6 +71,8 @@ core.bson:
     - src/mongo/db/hasher* # TODO move to bson/ or at least rename to be less generic
 
 core.idl:
+  meta:
+    fully_marked: true
   files:
     - src/mongo/idl/
     - src/mongo/db/basic_types.*
@@ -85,6 +87,7 @@ core.service:
     - src/mongo/db/dbdirectclient[._]*
     - src/mongo/dbtests/directclienttests.cpp
     - src/mongo/db/feature_flag*
+    - src/mongo/db/ifr_flag_retry_info*
     - src/mongo/db/error_labels*
     - src/mongo/db/server_feature_flags.idl
     - src/mongo/db/windows_options.idl
@@ -93,6 +96,7 @@ core.service:
     - src/mongo/db/commands/test_deprecation_command.cpp
     - src/mongo/db/s/forwardable_operation_metadata*
     - src/mongo/embedded
+    - src/mongo/db/logical_time.*
 
 # stuff that is part of a *specific* mongo server (eg mongos, mongod)
 core.servers:
@@ -108,12 +112,13 @@ core.servers:
     - src/mongo/db/service_context_d_test_fixture.*
     - src/mongo/db/global_settings*
     - src/mongo/db/mongod_options_sharding*
-    - src/mongo/db/replica_set_endpoint*
     - src/mongo/s/mongos.cpp
     - src/mongo/s/mongos_main.*
     - src/mongo/s/mongos_options*
 
 core.commands:
+  meta:
+    fully_marked: true
   files:
     - src/mongo/db/commands/async_command_execution_test.cpp
     - src/mongo/db/commands/buildinfo_common.*
@@ -128,7 +133,7 @@ core.commands:
     - src/mongo/db/commands/shutdown.*
     - src/mongo/db/commands/shutdown_d.cpp
     - src/mongo/db/commands/sleep_command.cpp
-    - src/mongo/db/commands/test_commands[._]*
+    - src/mongo/db/commands/test_commands_enabled*
     - src/mongo/db/commands/generic.*
     - src/mongo/db/commands/generic_servers.*
     - src/mongo/db/commands/parameters.*
@@ -147,6 +152,7 @@ clang_tidy_checks:
   meta:
     slack: server-programmability
     jira: Server Programmability
+    fully_marked: true
   files:
     - src/mongo/tools/mongo_tidy_checks/
 
@@ -174,7 +180,6 @@ query:
     - src/mongo/db/commands/profile*
     - src/mongo/db/commands/sysprofile*
     - src/mongo/db/commands/query_cmd/
-    - src/mongo/db/commands/server_status*
     - src/mongo/db/commands/set_profiling_*
     - src/mongo/db/commands/shardsvr_resolve_view_command*
     - src/mongo/db/commands/top_command*
@@ -226,8 +231,10 @@ query:
     - src/mongo/replay
     - src/mongo/scripting/
     - src/mongo/s/commands/query_cmd
-    - src/mongo/s/shard_targeting_helpers*
     - src/mongo/s/query/planner
+    - src/mongo/s/query/shard_key_pattern_query_util*
+    - src/mongo/s/query/shard_targeting_collation_helpers*
+    - src/mongo/s/query/shard_targeting_helpers*
     - src/mongo/db/namespace_spec.idl # only used by query
     - src/mongo/s/commands/*document_shard_key_*
     - src/mongo/util/safe_num*
@@ -248,145 +255,100 @@ query:
     - src/mongo/db/s/shardsvr_resolve_view_command_test.cpp
     - src/mongo/dbtests/commandtests.cpp
     - src/mongo/s/would_change_owning_shard_exception*
-    - src/mongo/db/op_observer/fallback_op_observer*
 
 catalog_and_routing:
   meta:
     description: >-
-      Core catalog and routing machinery, shared among local_catalog, global_catalog and
-      routing_and_topology modules.
+      Core catalog and routing machinery, shared among shard_role, router_role, global_catalog and
+      topology modules.
     slack: server-catalog-and-routing
     jira: Catalog and Routing
+    fully_marked: true
   files:
     - src/mongo/db/sharding_environment/**
+    - src/mongo/db/versioning_protocol/**
     - src/mongo/db/persistent_task_store*
     - src/mongo/db/local_executor*
     - src/mongo/db/rs_local_client*
-
-catalog_and_routing.local_catalog:
-  meta:
-    description: >-
-      This module represents the logical parts of a database/collection that are constrained to a
-      single shard's replica set. They provide clean APIs that higher-order modules use, for
-      instance, to build replica set and distributed DDL operations, but the module only concerns
-      themselves with the shard-local view and has no bearing on the global catalog.
-    slack: server-catalog-and-routing
-    jira: Catalog and Routing
-  files:
-    # The files below are grouped by the logical component/library that they (should) represent in
-    # the ideal state of the codebase.
-
-    # base: Fundamental, stateless value types that are used throughout the codebase (MongoS and MongoD).
     - src/mongo/db/database_name[._]*
     - src/mongo/db/namespace_string[._]*
+    - src/mongo/db/stats/system_buckets_metrics*
     - src/mongo/util/namespace_string[._]*
     - src/mongo/util/database_name[._]*
 
-    # lock_manager:
-    - src/mongo/db/local_catalog/lock_manager/*
-
-    # shard_role_api: The public Shard Role API that the rest of the teams use to build the shard
-    # side of distributed date applications.
-    - src/mongo/db/local_catalog/shard_role_api/*
+catalog_and_routing.shard_role:
+  meta:
+    description: >-
+      This module represents the logical parts of a database/collection that are constrained to a
+      single replica set, or to an individual shard in the context of a sharded cluster. They
+      provide APIs that higher-order modules use, for instance, to build distributed DDL operations,
+      but the module only concerns itself with the local (replica-set or shard) view and has no
+      bearing on the global catalog.
+    slack: server-catalog-and-routing
+    jira: Catalog and Routing
+    fully_marked: true
+  files:
+    - src/mongo/db/shard_role/**
     - src/mongo/db/service_entry_point_shard_role[._]*
-
-    # shard_role_catalog: Implementation detail of the public Shard Role API that contains the parts
-    # of the catalog that are projected on the Config Server and managed through the non-authoritative
-    # model.
-    - src/mongo/db/local_catalog/shard_role_catalog/*
-
-    # local_catalog: Implementation detail of the public Shard Role API that contains the parts of
-    # the catalog that are not projected on the Config Server.
-    - src/mongo/db/local_catalog/*
-    - src/mongo/db/raw_data_operation*
-
-    # local_catalog_ddl: The shard-local primitives that are used to build replica set DDLs.
-    - src/mongo/db/local_catalog/ddl/*
 
 catalog_and_routing.global_catalog:
   meta:
     description: >-
-      This module contains the global catalog, the commands exposed to external users and the
-      interfaces exposed to internal users (other modules) to run DDL operations, both for sharded
-      clusters and replica sets. Being more specific, for replica sets the DDL module contains the
-      entire DDL operation, excluding the shard-local function to support the DDL, which is in the
-      shard_local_catalog module. For sharded clusters, the DDL module contains everything,
-      including the cluster commit protocol.
+      This module contains the parts of the distributed catalog from the Config Server, the commands
+      exposed to external users and the interfaces exposed to internal users (other modules) to run
+      sharded DDL operations. For sharded clusters, the DDL module contains everything, including
+      the cluster commit protocol.
     slack: server-catalog-and-routing
     jira: Catalog and Routing
+    fully_marked: true
   files:
-    # The files below are grouped by the logical component/library that they (should) represent in
-    # the ideal state of the codebase.
+    - src/mongo/db/global_catalog/**
 
-    - src/mongo/db/global_catalog/*
-
-    # global_catalog_ddl: The public DDL API that the rest of the teams use to build distributed DDLs.
-    - src/mongo/db/global_catalog/ddl/*
-
-    # metadata consistency checkers
-    - src/mongo/db/global_catalog/metadata_consistency_validation/*
-
-catalog_and_routing.routing_and_topology:
+catalog_and_routing.router_role:
   meta:
     description: >-
-      This module contains the topology of the cluster, including the operations to promote a
-      replica set to sharded cluster, demote a sharded cluster to replica set and to add/remove to
-      a sharded cluster. Apart from that, it also owns the Router Role, including protocols and
-      interfaces that ensure queries are routed to the correct subset of shards and that the entire
-      distributed operation executes with the correct consistency level.
+      This module contains protocols and interfaces that ensure queries are routed to the correct
+      subset of shards and that the entire distributed operation executes with the correct
+      consistency level.
     slack: server-catalog-and-routing
     jira: Catalog and Routing
+    fully_marked: true
   files:
-    - src/mongo/db/topology/*
-
-    # shard versioning protocol
-    - src/mongo/db/versioning_protocol/*
-
-    # vector_clock:
-    - src/mongo/db/vector_clock/*
-
-    # router_role_api:
-    - src/mongo/db/global_catalog/router_role_api/*
+    - src/mongo/db/router_role/**
     - src/mongo/s/service_entry_point_router_role[._]*
     - src/mongo/s/commands/strategy*
 
-    # catalog_cache:
-    - src/mongo/db/global_catalog/catalog_cache/*
+catalog_and_routing.topology:
+  meta:
+    description: >-
+      This module contains the topology of the cluster, including the operations to promote a
+      replica set to sharded cluster, demote a sharded cluster to replica set, to add/remove a shard
+      to a sharded cluster and protocol for ensuring distributed operation executes with the correct
+      consistency level.
+    slack: server-catalog-and-routing
+    jira: Catalog and Routing
+    fully_marked: true
+  files:
+    - src/mongo/db/topology/**
 
     # FCV:
     - src/mongo/db/version_context*
     - src/mongo/s/commands/cluster_set_feature_compatibility_version_cmd.cpp
 
-    # cluster_server_parameters: Cluster server parameters are a special type of server parameter that
-    # are stored in the config server and are replicated to all shards. They are used to control
-    # the behavior of the cluster as a whole, rather than individual shards.
-    - src/mongo/db/cluster_parameters/*
-
-    # config shard
-    - src/mongo/db/catalog_shard_feature_flag.idl
-    - src/mongo/db/s/config/*transition*dedicated_config*
-    - src/mongo/s/commands/*transition*dedicated_config*
-    - src/mongo/s/request_types/transition*
-
-    # cluster-wide r/w concern
+    # cluster-wide r/w concern:
     - src/mongo/db/commands/*rwc_defaults*
     - src/mongo/s/commands/cluster_rwc_defaults_commands.cpp
     - src/mongo/s/commands/s_read_write_concern_defaults_server_status.cpp
     - src/mongo/s/read_write_concern_defaults_cache_lookup_mongos*
 
-    # replica_set_endpoint: will be deleted eventually
-    - src/mongo/db/s/replica_set_endpoint*
-
-    # user writes block
-    - src/mongo/db/user_write_block/*
-
-    # change streams
+    # change streams:
     - src/mongo/s/change_streams*
 
 transactions:
   meta:
     slack: server-replication
     jira: Replication
+    fully_marked: true
   files:
     - src/mongo/db/cluster_command_translations.h
     - src/mongo/db/commands/*transaction*
@@ -410,11 +372,13 @@ transactions:
     - src/mongo/db/commands/*session*
     - src/mongo/dbtests/logical_sessions_tests.cpp
     - src/mongo/s/client_transport_observer_mongos*
+    - src/mongo/db/stats/read_preference_metrics.idl
 
 fcv:
   meta:
     slack: server-fcv
     jira: Replication
+    fully_marked: true
   files:
     - src/mongo/db/feature_compatibility*
     - src/mongo/db/commands/feature_compatibility*
@@ -427,6 +391,9 @@ access_control:
     slack: server-security
     jira: Server Security
   files:
+    - src/mongo/client/native_sasl_client_session*
+    - src/mongo/client/sasl_*
+    - src/mongo/client/scram_client_cache*
     - src/mongo/db/auth/
     - src/mongo/db/commands/authentication*
     - src/mongo/db/commands/user_management*
@@ -442,15 +409,18 @@ admission:
   meta:
     slack: server-workload-resilience
     jira: Workload Scheduling
+    fully_marked: true
   files:
     - src/mongo/db/admission/
     - src/mongo/db/flow_control_ticketholder*
     - src/mongo/util/concurrency/admission_context*
+    - src/mongo/util/concurrency/ticketholder*
 
 workload_simulation:
   meta:
     slack: server-workload-resilience
     jira: Workload Scheduling
+    fully_marked: true
   files:
     - src/mongo/tools/workload_simulation/
 
@@ -481,7 +451,7 @@ audit:
     - src/mongo/rpc/metadata/audit*
     - src/mongo/s/client_metadata_propagation_egress_hook*
 
-encrypted_storage_engine:
+storage_engine_api.encrypted_storage_engine:
   meta:
     slack: server-security
     jira: Server Security
@@ -507,7 +477,7 @@ field_level_encryption:
   files:
     - src/mongo/db/commands/fle2_*
     - src/mongo/db/fle_*
-    - src/mongo/db/global_catalog/ddl/*_structured_encryption_*
+    - src/mongo/db/*_structured_encryption_*
     - src/mongo/s/commands/*fle2*
     - src/mongo/db/commands/fle_compact_test.cpp
 
@@ -526,21 +496,26 @@ field_level_encryption.crypt_shared:
   files:
     - src/mongo/db/modules/enterprise/src/fle/lib
 
-causal_consistency:
+catalog_and_routing.topology.causal_consistency:
   meta:
     slack: server-sharding
     jira: Cluster Scalability
+    fully_marked: true
   files:
     - src/mongo/db/keys_collection*
     - src/mongo/db/key_generator*
-    - src/mongo/db/*logical_time*
+    - src/mongo/db/logical_time_*
     - src/mongo/db/time_proof_service*
+    - src/mongo/db/signed_logical_time*
 
 data_movement:
   meta:
     slack: server-sharding
     jira: Cluster Scalability
   files:
+    # data movement commands on mongos
+    - src/mongo/s/commands/data_movement/*
+
     # resharding
     - src/mongo/db/s/*reshard*
     - src/mongo/db/s/config/*reshard*
@@ -562,7 +537,7 @@ data_movement:
     - src/mongo/db/s/migration_chunk*
     - src/mongo/db/s/active_migrations*
     - src/mongo/db/s/random_migration_testing_utils*
-    - src/mongo/db/s/range_delet*
+    - src/mongo/db/s/*range_delet*
     - src/mongo/db/s/chunk*
     - src/mongo/db/s/start_chunk*
     - src/mongo/db/s/*move_range*
@@ -578,7 +553,6 @@ data_movement:
     - src/mongo/s/commands/*move_chunk*
     - src/mongo/s/request_types/auto_split_vector.idl
     - src/mongo/s/request_types/migration_secondary_throttle*
-    - src/mongo/s/request_types/repair_sharded_collection_chunks_history.idl
     - src/mongo/s/request_types/cleanup_orphaned.idl
     - src/mongo/s/migration_blocking_operation/migration_blocking_operation*
 
@@ -598,7 +572,7 @@ data_movement:
     - src/mongo/db/cloner*
 
     # zones
-    - src/mongo/db/global_catalog/ddl/remove_tags.idl
+    - src/mongo/db/s/remove_tags.idl
     - src/mongo/db/s/config/configsvr_remove_tags_command.cpp
     - src/mongo/db/s/config/configsvr_update_zone_key_range_command.cpp
     - src/mongo/s/commands/cluster_update_zone_key_range_cmd.cpp
@@ -608,7 +582,9 @@ observability:
   meta:
     slack: server-networking-observability
     jira: Networking & Observability
+    fully_marked: true
   files:
+    - src/mongo/db/commands/server_status*
     - src/mongo/db/connection_health_metrics_parameter.idl
     - src/mongo/db/not_primary_error_tracker*
     - src/mongo/db/operation_cpu_timer*
@@ -622,14 +598,17 @@ observability.logging:
   meta:
     slack: server-networking-observability
     jira: Networking & Observability
+    fully_marked: true
   files:
     - src/mongo/db/log_process_details*
     - src/mongo/logv2/
+    - src/mongo/util/log_and_backoff*
 
 observability.tracing:
   meta:
     slack: server-networking-observability
     jira: Networking & Observability
+    fully_marked: true
   files:
     - src/mongo/otel/traces/
     - src/mongo/util/tracing_support*
@@ -638,6 +617,7 @@ observability.metrics:
   meta:
     slack: server-networking-observability
     jira: Networking & Observability
+    fully_marked: true
   files:
     - src/mongo/otel/metrics/
 
@@ -645,6 +625,7 @@ observability.ftdc:
   meta:
     slack: server-networking-observability
     jira: Networking & Observability
+    fully_marked: true
   files:
     - src/mongo/db/ftdc/
 
@@ -652,6 +633,7 @@ observability.commands:
   meta:
     slack: server-networking-observability
     jira: Networking & Observability
+    fully_marked: true
   files:
     - src/mongo/db/commands/parse_log_component_settings*
     - src/mongo/db/commands/xray_commands*
@@ -662,6 +644,7 @@ networking:
   meta:
     slack: server-networking-observability
     jira: Networking & Observability
+    fully_marked: true
   files:
     - src/mongo/client/
     - src/mongo/dbtests/clienttests.cpp
@@ -686,6 +669,7 @@ networking.core:
   meta:
     slack: server-networking-observability
     jira: Networking & Observability
+    fully_marked: true
   files:
     - src/mongo/db/dbmessage*
     - src/mongo/db/max_time.h
@@ -704,6 +688,7 @@ networking.commands:
   meta:
     slack: server-networking-observability
     jira: Networking & Observability
+    fully_marked: true
   files:
     - src/mongo/db/commands/command_mirroring_test.cpp
     - src/mongo/db/commands/conn_pool_stats.cpp
@@ -722,6 +707,7 @@ networking.execution:
   meta:
     slack: server-networking-observability
     jira: Networking & Observability
+    fully_marked: true
   files:
     - src/mongo/db/baton*
     - src/mongo/db/default_baton*
@@ -741,6 +727,7 @@ networking.mirrored_reads:
   meta:
     slack: server-networking-observability
     jira: Networking & Observability
+    fully_marked: true
   files:
     - src/mongo/db/mirror*
 
@@ -748,13 +735,23 @@ networking.mongo_bridge:
   meta:
     slack: server-networking-observability
     jira: Networking & Observability
+    fully_marked: true
   files:
     - src/mongo/tools/mongobridge_tool/
 
-timeseries_bucket_catalog: # authoritative: @10gen/server-timeseries-bucket-catalog
+timeseries: # authoritative: @10gen/server-collection-write-path
   meta:
     slack: server-storage-execution
     jira: Storage Execution
+    fully_marked: true
+  files:
+    - src/mongo/db/timeseries # excluding ./bucket_catalog
+
+timeseries.bucket_catalog: # authoritative: @10gen/server-timeseries-bucket-catalog
+  meta:
+    slack: server-storage-execution
+    jira: Storage Execution
+    fully_marked: true
   files:
     - src/mongo/db/timeseries/bucket_catalog
 
@@ -762,15 +759,16 @@ collection_write_path: # authoritative: @10gen/server-collection-write-path
   meta:
     slack: server-storage-execution
     jira: Storage Execution
+    fully_marked: true
   files:
     - src/mongo/db/collection_crud
-    - src/mongo/db/timeseries # excluding ./bucket_catalog
     - src/mongo/db/commands/collection_to_capped*
 
 bsoncolumn: # authoritative: @10gen/server-bsoncolumn
   meta:
     slack: server-storage-execution
     jira: Storage Execution
+    fully_marked: true
   files:
     - src/mongo/bson/column
 
@@ -778,6 +776,7 @@ external_sorter: # authoritative: @10gen/server-external-sorter
   meta:
     slack: server-storage-execution
     jira: Storage Execution
+    fully_marked: true
   files:
     - src/mongo/db/sorter
 
@@ -785,15 +784,15 @@ index_builds: # authoritative: @10gen/server-index-builds
   meta:
     slack: server-storage-execution
     jira: Storage Execution
+    fully_marked: true
   files:
     - src/mongo/db/index_builds
     - src/mongo/db/index/index_access_method*
-    - src/mongo/db/local_catalog/index_key_validate*
-    - src/mongo/db/local_catalog/index_spec_validate*
-    - src/mongo/db/commands/create_indexes*
+    - src/mongo/db/index/preallocated_container_pool*
+    - src/mongo/db/index_key_validate*
+    - src/mongo/db/index_spec_validate*
     - src/mongo/db/commands/set_index_commit_quorum*
     - src/mongo/db/commands/vote*index_build*
-    - src/mongo/dbtests/index_builds/*
     - src/mongo/dbtests/indexupdatetests.cpp
     - src/mongo/s/commands/commit_quorum/cluster_set_index_commit_quorum_cmd.cpp
 
@@ -801,6 +800,7 @@ key_string: # authoritative: @10gen/server-key-string
   meta:
     slack: server-storage-execution
     jira: Storage Execution
+    fully_marked: true
   files:
     - src/mongo/db/storage/key_string
 
@@ -808,6 +808,7 @@ disagg_storage:
   meta:
     slack: disaggregated-storage-mongod
     jira: RSSD
+    fully_marked: true
   files:
     - src/mongo/db/modules/atlas/src/disagg_storage
 
@@ -815,6 +816,7 @@ disagg_storage.encryption:
   meta:
     slack: disagg-security-data-encryption
     jira: Server Security
+    fully_marked: true
   files:
     - src/mongo/db/modules/atlas/src/disagg_storage/encryption
 
@@ -822,6 +824,7 @@ storage_engine_api:
   meta:
     slack: storage-engines-server-integration
     jira: Server Integration
+    fully_marked: true
   files:
     - src/mongo/db/repair*
     - src/mongo/db/storage/wiredtiger
@@ -831,13 +834,16 @@ storage_engine_api:
     - src/mongo/db/storage/record_store*
     - src/mongo/db/storage/recovery_unit*
     - src/mongo/db/storage/sorted_data_interface*
+    - src/mongo/db/storage/container*
     - src/mongo/db/startup_recovery*
     - src/mongo/db/modules/enterprise/src/inmemory
+    - src/mongo/db/modules/enterprise/src/queryable
 
 storage_engine_integration:
   meta:
     slack: server-storage-execution
     jira: Storage Execution
+    fully_marked: true
   files:
     - src/mongo/db/storage # excluding ./key_string, ./wiredtiger, ./devnull, some of ./kv
     - src/mongo/db/record_id*
@@ -845,10 +851,11 @@ storage_engine_integration:
     - src/mongo/db/mongod_options_storage*
     - src/mongo/db/dbhelpers*
     - src/mongo/db/dbcommands.idl
-    - src/mongo/db/local_catalog/import*
-    - src/mongo/db/local_catalog/index_repair*
+    - src/mongo/db/import*
+    - src/mongo/db/index_repair*
     - src/mongo/db/commands/fsync*
     - src/mongo/db/commands/dbcommands*
+    - src/mongo/db/commands/test_commands.*
     - src/mongo/db/commands/resize_oplog*
     - src/mongo/db/op_observer/batched_write*
     - src/mongo/db/stats/storage_stats*
@@ -863,8 +870,9 @@ validate:
   meta:
     slack: storage-engines-server-integration
     jira: Server Integration
+    fully_marked: true
   files:
-    - src/mongo/db/local_catalog/throttle_cursor*
+    - src/mongo/db/throttle_cursor*
     - src/mongo/db/commands/validate.cpp
     - src/mongo/db/validate
     - src/mongo/dbtests/validate_tests.cpp
@@ -875,6 +883,7 @@ dbhash:
   meta:
     slack: storage-engines-server-integration
     jira: Server Integration
+    fully_marked: true
   files:
     - src/mongo/db/commands/dbhash*
 
@@ -882,8 +891,9 @@ compact:
   meta:
     slack: storage-engines-server-integration
     jira: Server Integration
+    fully_marked: true
   files:
-    - src/mongo/db/local_catalog/collection_compact*
+    - src/mongo/db/collection_compact*
     - src/mongo/db/commands/auto_compact*
     - src/mongo/db/commands/compact*
     - src/mongo/db/storage/compact_options*
@@ -893,10 +903,9 @@ dbcheck:
   meta:
     slack: storage-engines-server-integration
     jira: Server Integration
+    fully_marked: true
   files:
-    - src/mongo/db/local_catalog/health_log*
     - src/mongo/db/commands/dbcheck*
-    - src/mongo/db/deferred_writer*
     - src/mongo/dbtests/deferred_writer.cpp
     - src/mongo/db/repl/dbcheck*
 
@@ -904,17 +913,17 @@ server_backup_restore:
   meta:
     slack: storage-engines-server-integration
     jira: Server Integration
+    fully_marked: true
   files:
     - src/mongo/db/modules/enterprise/src/hot_backups
     - src/mongo/db/modules/enterprise/src/live_import
-    - src/mongo/db/modules/enterprise/src/queryable
-    - src/mongo/db/modules/enterprise/src/util/document_source_visitor_registry_enterprise.h
     - src/mongo/db/storage/backup*
 
 cache_pressure:
   meta:
     slack: storage-engines-server-integration
     jira: Server Integration
+    fully_marked: true
   files:
     - src/mongo/db/periodic_runner_cache_pressure_rollback*
 
@@ -922,6 +931,7 @@ ttl: # authoritative: @10gen/server-ttl
   meta:
     slack: server-storage-execution
     jira: Storage Execution
+    fully_marked: true
   files:
     - src/mongo/db/ttl
 
@@ -929,6 +939,7 @@ tracking_allocators: # authoritative: @10gen/server-tracking-allocators
   meta:
     slack: server-storage-execution
     jira: Storage Execution
+    fully_marked: true
   files:
     - src/mongo/util/tracking
 
@@ -967,14 +978,24 @@ installer:
 replicated_storage_service:
   meta:
     slack: server-replication
-    jira: Server Replication
+    jira: Replication
+    fully_marked: true
   files:
     - src/mongo/db/rss
+
+replication.clang_checked:
+  meta:
+    slack: server-replication
+    jira: Replication
+    fully_marked: true
+  files:
+    - src/mongo/db/repl/clang_checked/*
 
 replication.hello:
   meta:
     slack: server-replication
     jira: Replication
+    fully_marked: true
   files:
     - src/mongo/db/repl/hello/
     - src/mongo/db/repl/replication_info.cpp
@@ -983,6 +1004,7 @@ replication.initial_sync:
   meta:
     slack: server-replication
     jira: Replication
+    fully_marked: true
   files:
     - src/mongo/db/modules/enterprise/src/fcbis/
     - src/mongo/db/repl/initial_sync/
@@ -994,12 +1016,13 @@ replication.configs:
   meta:
     slack: server-replication
     jira: Replication
+    fully_marked: true
   files:
     - src/mongo/db/repl/*repl_set_config*
     - src/mongo/db/repl/*member_config*
     - src/mongo/db/repl/*member_data*
     - src/mongo/db/repl/*member_id*
-    - src/mongo/db/repl/repl_server_parameters.idl
+    - src/mongo/db/repl/repl_*server_parameters.idl
     - src/mongo/db/repl/*member_state*
     - src/mongo/db/repl/*repl_settings*
     - src/mongo/db/repl/*repl_set_tag*
@@ -1009,34 +1032,38 @@ replication.oplog:
   meta:
     slack: server-replication
     jira: Replication
+    fully_marked: true
   files:
-    - src/mongo/db/op_observer/op_observer*
-    - src/mongo/db/op_observer/operation_logger*
-    - src/mongo/db/local_catalog/local_oplog_info*
-    - src/mongo/db/commands/oplog*
     - src/mongo/db/commands/apply_ops*
-    - src/mongo/db/repl/*oplog*
-    - src/mongo/db/repl/*noop_writer*
+    - src/mongo/db/commands/oplog*
+    - src/mongo/db/op_observer/op_observer*
+    - src/mongo/db/op_observer/fallback_op_observer*
+    - src/mongo/db/op_observer/operation_logger*
+    - src/mongo/db/repl/*apply_ops*
     - src/mongo/db/repl/*bgsync*
+    - src/mongo/db/repl/*consistency_markers*
+    - src/mongo/db/repl/*get_next_optimes_test*
+    - src/mongo/db/repl/*idempotency_test_fixture*
+    - src/mongo/db/repl/*insert_group*
+    - src/mongo/db/repl/*noop_writer*
+    - src/mongo/db/repl/*oplog*
+    - src/mongo/db/repl/*oplog_visibility_manager*
+    - src/mongo/db/repl/*optime*
+    - src/mongo/db/repl/*reporter*
+    - src/mongo/db/repl/*session_update_tracker*
+    - src/mongo/db/repl/*slotted_timestamp_list*
     - src/mongo/db/repl/*sync_source*
+    - src/mongo/db/repl/apply_container_ops_test.cpp
+    - src/mongo/db/repl/local_oplog_info*
+    - src/mongo/db/repl/repl_worker_pool_thread_count*
     - src/mongo/s/commands/cluster_oplog_note_cmd.cpp
     - src/mongo/s/commands/cluster_repl_set_get_status_cmd.cpp
-    - src/mongo/db/repl/*insert_group*
-    - src/mongo/db/repl/*apply_ops*
-    - src/mongo/db/repl/*oplog_visibility_manager*
-    - src/mongo/db/repl/*slotted_timestamp_list*
-    - src/mongo/db/repl/*session_update_tracker*
-    - src/mongo/db/repl/*consistency_markers*
-    - src/mongo/db/repl/*optime*
-    - src/mongo/db/repl/apply_container_ops_test.cpp
-    - src/mongo/db/repl/*reporter*
-    - src/mongo/db/repl/*idempotency_test_fixture*
-    - src/mongo/db/repl/*get_next_optimes_test*
 
 replication.server_rw_concerns:
   meta:
     slack: server-replication
     jira: Replication
+    fully_marked: true
   files:
     - src/mongo/db/commands/server_status/read_write_concern_defaults_server_status.cpp
     - src/mongo/db/*read_concern*
@@ -1046,12 +1073,14 @@ replication.server_rw_concerns:
     - src/mongo/db/repl/*speculative_majority_read_info*
     - src/mongo/db/stats/server_write_concern*
     - src/mongo/db/stats/server_read_concern*
+    - src/mongo/db/stats/read_concern_stats.idl
     - src/mongo/db/write_concern*
 
 replication.rs_aware_service:
   meta:
     slack: server-replication
     jira: Replication
+    fully_marked: true
   files:
     - src/mongo/db/repl/*primary_only_service*
     - src/mongo/db/repl/*replica_set_aware_service*
@@ -1061,6 +1090,7 @@ replication.recovery:
   meta:
     slack: server-replication
     jira: Replication
+    fully_marked: true
   files:
     - src/mongo/db/repl/*replication_recovery*
     - src/mongo/db/repl/*rollback*
@@ -1073,6 +1103,7 @@ replication.replication_coordinator:
   meta:
     slack: server-replication
     jira: Replication
+    fully_marked: true
   files:
     - src/mongo/db/repl/*replication_coordinator*
     - src/mongo/db/repl/*external_state*
@@ -1098,6 +1129,7 @@ replication.utils:
   meta:
     slack: server-replication
     jira: Replication
+    fully_marked: true
   files:
     - src/mongo/db/repl/*parsing_utils*
     - src/mongo/db/repl/*delayable_timeout_callback*
@@ -1110,6 +1142,7 @@ replication.utils:
     - src/mongo/db/repl/*replication_process*
     - src/mongo/db/repl/*collection_utils*
     - src/mongo/db/repl/*replication_types*
+    - src/mongo/db/repl/*temp_collections_cleanup_mongod*
     - src/mongo/db/*mongod_options_replication*
     - src/mongo/db/op_observer/find_and_modify_images_op_observer*
     - src/mongo/db/incremental_rollout_metrics.cpp
@@ -1118,6 +1151,7 @@ replication.repl_client_info:
   meta:
     slack: server-replication
     jira: Replication
+    fully_marked: true
   files:
     - src/mongo/db/repl/*repl_client_info*
     - src/mongo/db/repl/*repl_set_member_in_standalone_mode*
@@ -1126,6 +1160,7 @@ replication.commands:
   meta:
     slack: server-replication
     jira: Replication
+    fully_marked: true
   files:
     - src/mongo/db/repl/*repl_set_command*
     - src/mongo/db/repl/*repl_set_commands*
@@ -1138,6 +1173,7 @@ replication.testing:
   meta:
     slack: server-replication
     jira: Replication
+    fully_marked: true
   files:
     - src/mongo/db/repl/*mock_repl_coord*
     - src/mongo/db/repl/*repl_set_test_egress*
@@ -1152,6 +1188,7 @@ replication.split_horizon:
   meta:
     slack: server-replication
     jira: Replication
+    fully_marked: true
   files:
     - src/mongo/db/repl/split_horizon/
 
@@ -1159,6 +1196,7 @@ replication.intent:
   meta:
     slack: server-replication
     jira: Replication
+    fully_marked: true
   files:
     - src/mongo/db/repl/*intent*
     - src/mongo/db/replication_state_transition_lock_guard*

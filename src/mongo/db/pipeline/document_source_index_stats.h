@@ -46,17 +46,17 @@
 #include "mongo/db/pipeline/variables.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/stdx/unordered_set.h"
+#include "mongo/util/modules.h"
 
 #include <memory>
-#include <set>
-#include <string>
 #include <utility>
-#include <vector>
 
 #include <boost/optional/optional.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
+
+DECLARE_STAGE_PARAMS_DERIVED_DEFAULT(IndexStats);
 
 /**
  * Provides a document source interface to retrieve index statistics for a given namespace.
@@ -66,16 +66,16 @@ class DocumentSourceIndexStats final {
 public:
     static constexpr StringData kStageName = "$indexStats"_sd;
 
-    class LiteParsed final : public LiteParsedDocumentSource {
+    class LiteParsed final : public LiteParsedDocumentSourceDefault<LiteParsed> {
     public:
         static std::unique_ptr<LiteParsed> parse(const NamespaceString& nss,
                                                  const BSONElement& spec,
                                                  const LiteParserOptions& options) {
-            return std::make_unique<LiteParsed>(spec.fieldName(), nss);
+            return std::make_unique<LiteParsed>(spec, nss);
         }
 
-        explicit LiteParsed(std::string parseTimeName, NamespaceString nss)
-            : LiteParsedDocumentSource(std::move(parseTimeName)), _nss(std::move(nss)) {}
+        LiteParsed(const BSONElement& spec, NamespaceString nss)
+            : LiteParsedDocumentSourceDefault(spec), _nss(std::move(nss)) {}
 
         bool isIndexStats() const final {
             return true;
@@ -92,6 +92,10 @@ public:
 
         bool isInitialSource() const final {
             return true;
+        }
+
+        std::unique_ptr<StageParams> getStageParams() const final {
+            return std::make_unique<IndexStatsStageParams>(_originalBson);
         }
 
     private:

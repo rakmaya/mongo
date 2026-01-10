@@ -35,6 +35,7 @@
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/value.h"
+#include "mongo/db/field_ref.h"
 #include "mongo/db/pipeline/field_path.h"
 #include "mongo/db/query/explain_options.h"
 #include "mongo/db/query/explain_verbosity_gen.h"
@@ -103,7 +104,7 @@ struct SerializationOptions {
     // names.
     std::string serializeIdentifier(StringData str) const {
         if (transformIdentifiers) {
-            return transformIdentifiersCallback(str);
+            return transformIdentifier(str);
         }
         return std::string{str};
     }
@@ -115,7 +116,7 @@ struct SerializationOptions {
                 if (i > 0) {
                     hmaced << ".";
                 }
-                hmaced << transformIdentifiersCallback(path.getFieldName(i));
+                hmaced << transformIdentifier(path.getFieldName(i));
             }
             return hmaced.str();
         }
@@ -126,7 +127,21 @@ struct SerializationOptions {
         return "$" + serializeFieldPath(path);
     }
 
+    std::string transformIdentifier(StringData fieldPathPart) const {
+        // Update paths may contain array filter identifiers like "$[identifier]".
+        if (serializeForUpdateArrayFilters && fieldPathPart.size() >= 3 &&
+            fieldPathPart[0] == '$' && fieldPathPart[1] == '[' &&
+            fieldPathPart[fieldPathPart.size() - 1] == ']') {
+            StringData identifier = fieldPathPart.substr(2, fieldPathPart.size() - 3);
+            return std::string{"$[" + transformIdentifiersCallback(identifier) + "]"};
+        } else {
+            return std::string{transformIdentifiersCallback(fieldPathPart)};
+        }
+    }
+
     std::string serializeFieldPathFromString(StringData path) const;
+
+    std::string serializeFieldRef(const FieldRef& fieldRef) const;
 
     std::vector<std::string> serializeFieldPathFromString(
         const std::vector<std::string>& paths) const {
@@ -245,6 +260,9 @@ struct SerializationOptions {
 
     // If set to true, serializes each stage and expression as needed for query analysis.
     bool serializeForQueryAnalysis = false;
+
+    // If set to true, serializes each stage and expression as needed for array filters in updates.
+    bool serializeForUpdateArrayFilters = false;
 
     // Serialization state check helpers.
     bool isDefaultSerialization() const;

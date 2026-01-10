@@ -30,21 +30,15 @@
 #include "mongo/db/exec/sbe/util/spilling.h"
 
 #include "mongo/base/status.h"
-#include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
-#include "mongo/bson/timestamp.h"
 #include "mongo/db/curop.h"
-#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
-#include "mongo/db/local_catalog/lock_manager/exception_util.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/query/query_knobs_gen.h"
+#include "mongo/db/shard_role/lock_manager/d_concurrency.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/record_data.h"
 #include "mongo/db/storage/recovery_unit.h"
-#include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/bufreader.h"
-#include "mongo/util/str.h"
 
 #include <boost/optional/optional.hpp>
 
@@ -72,8 +66,8 @@ void assertIgnorePrepareConflictsBehavior(OperationContext* opCtx) {
                 PrepareConflictBehavior::kIgnoreConflicts);
 }
 
-std::pair<RecordId, key_string::TypeBits> encodeKeyString(key_string::Builder& kb,
-                                                          const value::MaterializedRow& value) {
+std::pair<RecordId, key_string::TypeBits> encodeKeyString(
+    key_string::Builder& kb, const value::FixedSizeRow<1 /* N */>& value) {
     value.serializeIntoKeyString(kb);
     auto typeBits = kb.getTypeBits();
     auto rid = RecordId(kb.getView());
@@ -160,8 +154,8 @@ Status SpillingStore::insertRecords(OperationContext* opCtx, std::vector<Record>
     return _spillTable->insertRecords(opCtx, inOutRecords);
 }
 
-boost::optional<value::MaterializedRow> SpillingStore::readFromRecordStore(OperationContext* opCtx,
-                                                                           const RecordId& rid) {
+boost::optional<value::FixedSizeRow<1 /* N */>> SpillingStore::readFromRecordStore(
+    OperationContext* opCtx, const RecordId& rid) {
     RecordData record;
     auto found = [&] {
         auto lk = acquireLock(opCtx);
@@ -170,7 +164,7 @@ boost::optional<value::MaterializedRow> SpillingStore::readFromRecordStore(Opera
 
     if (found) {
         auto valueReader = BufReader(record.data(), record.size());
-        return value::MaterializedRow::deserializeForSorter(valueReader, {});
+        return value::FixedSizeRow<1 /* N */>::deserializeForSorter(valueReader, {});
     }
     return boost::none;
 }
@@ -189,6 +183,5 @@ void SpillingStore::updateSpillStorageStatsForOperation(OperationContext* opCtx)
     CurOp::get(opCtx)->updateSpillStorageStats(
         _spillTable->computeOperationStatisticsSinceLastCall());
 }
-
 }  // namespace sbe
 }  // namespace mongo

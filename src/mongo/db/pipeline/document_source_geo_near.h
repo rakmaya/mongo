@@ -56,6 +56,8 @@
 
 namespace mongo {
 
+DEFINE_LITE_PARSED_STAGE_DEFAULT_DERIVED(GeoNear);
+
 class DocumentSourceGeoNear : public DocumentSource {
 public:
     static constexpr StringData kKeyFieldName = "key"_sd;
@@ -104,7 +106,7 @@ public:
 
     Value serialize(const SerializationOptions& opts = SerializationOptions{}) const final;
 
-    boost::intrusive_ptr<DocumentSource> optimize() final;
+    boost::intrusive_ptr<DocumentSource> optimize();
 
     static boost::intrusive_ptr<DocumentSource> createFromBson(
         BSONElement elem, const boost::intrusive_ptr<ExpressionContext>& pCtx);
@@ -181,9 +183,8 @@ public:
      */
     boost::optional<DistributedPlanLogic> distributedPlanLogic() final;
 
-protected:
-    DocumentSourceContainer::iterator doOptimizeAt(DocumentSourceContainer::iterator itr,
-                                                   DocumentSourceContainer* container) final;
+    DocumentSourceContainer::iterator optimizeAt(DocumentSourceContainer::iterator itr,
+                                                 DocumentSourceContainer* container);
 
 private:
     explicit DocumentSourceGeoNear(const boost::intrusive_ptr<ExpressionContext>& pExpCtx);

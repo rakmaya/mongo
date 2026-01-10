@@ -38,39 +38,26 @@
 #include "mongo/db/index_builds/index_build_block.h"
 #include "mongo/db/index_builds/index_build_interceptor.h"
 #include "mongo/db/index_builds/resumable_index_builds_gen.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_options.h"
-#include "mongo/db/local_catalog/index_catalog.h"
-#include "mongo/db/local_catalog/index_catalog_entry.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/record_id.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog_entry.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/util/fail_point.h"
+#include "mongo/util/modules.h"
+#include "mongo/util/progress_meter.h"
 #include "mongo/util/uuid.h"
 
 #include <functional>
-#include <iosfwd>
 #include <memory>
-#include <set>
-#include <string>
 #include <vector>
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
 
-namespace mongo {
-
-class Collection;
-class CollectionPtr;
-class MatchExpression;
-class NamespaceString;
-class OperationContext;
-class ProgressMeterHolder;
-struct IndexBuildInfo;
-
+namespace MONGO_MOD_PUBLIC mongo {
 /**
  * Builds one or more indexes.
  *
@@ -304,12 +291,31 @@ public:
     static OnCleanUpFn kNoopOnCleanUpFn;
 
     /**
+     * When called, will persist the resume state on demand; this should be valid to be called any
+     * time after construction but before a successful commit(). Writes the resumable index build
+     * state to disk if resumable index builds are supported.
+     *
+     * As the resume state, as well as the per-index trackers for side writes, duplicate keys, and
+     * skipped records, all use temporary tables, following a successful commit these temporary
+     * tables will be dropped after destruction of this MultiIndexBlock. If the server crashes,
+     * however, these temporary tables can be used to continue the resumable index build.
+     *
+     * To persist the resume state prior to a clean shutdown, abortWithoutCleanup(..) should be
+     * used, which will ensure the temporary tables will not be dropped.
+     */
+    void persistResumeState(OperationContext* opCtx,
+                            const CollectionPtr& collection,
+                            bool isResumable);
+
+    /**
      * May be called at any time after construction but before a successful commit(). Suppresses
      * the default behavior on destruction of removing all traces of uncommitted index builds. May
      * delete internal tables, but this is not transactional. Writes the resumable index build
      * state to disk if resumable index builds are supported.
      *
-     * This should only be used during shutdown or rollback.
+     * This should only be used during shutdown or rollback. It is valid (and necessary) to call
+     * abortWithoutCleanup(..) on shutdown even if the resume state has already been persisted with
+     * persistResumeState(..).
      */
     void abortWithoutCleanup(OperationContext* opCtx,
                              const CollectionPtr& collection,
@@ -343,7 +349,9 @@ private:
         const IndexCatalogEntry* entryForScan = nullptr;
     };
 
-    void _writeStateToDisk(OperationContext* opCtx, const CollectionPtr& collection) const;
+    void _writeStateToDisk(OperationContext* opCtx,
+                           const CollectionPtr& collection,
+                           TemporaryRecordStore* tempRS) const;
 
     BSONObj _constructStateObject(OperationContext* opCtx, const CollectionPtr& collection) const;
 
@@ -405,5 +413,9 @@ private:
     // compared after yielding, which is used to indicate whether we need to refetch the index
     // catalog entry pointers in IndexToBuild. This is necessary for index build performance.
     const Collection* _collForScan = nullptr;
+
+    // The temporary record store used for persisting the resume state of a resumable index build.
+    // This value may be null if the index build has not yet had its state persisted.
+    std::unique_ptr<TemporaryRecordStore> _resumeStateTempRecordStore;
 };
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUBLIC mongo

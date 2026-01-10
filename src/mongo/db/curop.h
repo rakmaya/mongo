@@ -40,7 +40,6 @@
 #include "mongo/db/commands.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/flow_control_ticketholder.h"
-#include "mongo/db/local_catalog/lock_manager/lock_stats.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_debug.h"
 #include "mongo/db/operation_context.h"
@@ -53,6 +52,7 @@
 #include "mongo/db/query/plan_summary_stats.h"
 #include "mongo/db/query/query_stats/data_bearing_node_metrics.h"
 #include "mongo/db/server_options.h"
+#include "mongo/db/shard_role/lock_manager/lock_stats.h"
 #include "mongo/db/storage/storage_stats.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/db/write_concern_options.h"
@@ -479,9 +479,10 @@ public:
         // marked (as inner executors are prepared outside of the codepath that begins the planning
         // timer).
         auto start = _queryPlanningStart.load();
-        if (debug().planningTime == Microseconds{0} && start != 0) {
+        auto& planningTime = debug().getAdditiveMetrics().planningTime;
+        if (!planningTime && start != 0) {
             _queryPlanningEnd = _tickSource->getTicks();
-            debug().planningTime = computeElapsedTimeTotal(start, _queryPlanningEnd.load());
+            planningTime = computeElapsedTimeTotal(start, _queryPlanningEnd.load());
         }
     }
 
@@ -790,9 +791,12 @@ private:
         bool shouldLogSlowQuery;
     };
     ShouldProfileQuery _shouldProfileAtLevel1AndLogSlowQuery(
-        const logv2::LogOptions& logOptions, std::shared_ptr<const ProfileFilter> filter);
+        const logv2::LogOptions& logOptions,
+        Milliseconds slowms,
+        std::shared_ptr<const ProfileFilter> filter);
 
     logv2::DynamicAttributes _reportDebugAndStats(const logv2::LogOptions& logOptions,
+                                                  const Date_t* opreationDeadline,
                                                   bool isFinalStorageStatsUpdate);
 
     /**

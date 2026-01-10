@@ -29,12 +29,16 @@
 #include "mongo/db/pipeline/expression_context_builder.h"
 
 #include "mongo/db/curop.h"
+#include "mongo/db/exec/disk_use_options_gen.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/pipeline/aggregation_request_helper.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/distinct_command_gen.h"
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/query/query_utils.h"
+#include "mongo/db/query/write_ops/delete_request_gen.h"
+#include "mongo/db/query/write_ops/update_request.h"
+#include "mongo/db/storage/storage_options.h"
 
 namespace mongo {
 
@@ -42,7 +46,7 @@ ExpressionContextBuilder& ExpressionContextBuilder::opCtx(OperationContext* opCt
     params.opCtx = opCtx;
 
     VersionContext vCtx = VersionContext::getDecoration(opCtx);
-    if (vCtx.isInitialized()) {
+    if (vCtx.hasOperationFCV()) {
         params.vCtx = vCtx;
     } else if (auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
                fcvSnapshot.isVersionInitialized()) {
@@ -63,8 +67,8 @@ ExpressionContextBuilder& ExpressionContextBuilder::opCtx(OperationContext* opCt
 }
 
 ExpressionContextBuilder& ExpressionContextBuilder::ifrContext(
-    const IncrementalFeatureRolloutContext& ifrContext) {
-    params.ifrContext = ifrContext;
+    std::shared_ptr<IncrementalFeatureRolloutContext> ifrContext) {
+    params.ifrContext = std::move(ifrContext);
 
     return *this;
 }
@@ -167,12 +171,6 @@ ExpressionContextBuilder& ExpressionContextBuilder::inUnionWith(bool inUnionWith
 ExpressionContextBuilder& ExpressionContextBuilder::isParsingViewDefinition(
     bool isParsingViewDefinition) {
     params.isParsingViewDefinition = isParsingViewDefinition;
-    return *this;
-}
-
-ExpressionContextBuilder& ExpressionContextBuilder::isParsingPipelineUpdate(
-    bool isParsingPipelineUpdate) {
-    params.isParsingPipelineUpdate = isParsingPipelineUpdate;
     return *this;
 }
 
@@ -349,8 +347,7 @@ ExpressionContextBuilder& ExpressionContextBuilder::serverSideJsConfig(
     return *this;
 }
 
-ExpressionContextBuilder& ExpressionContextBuilder::view(
-    boost::optional<std::pair<NamespaceString, std::vector<BSONObj>>> view) {
+ExpressionContextBuilder& ExpressionContextBuilder::view(boost::optional<ViewInfo> view) {
     params.view = std::move(view);
     return *this;
 }
@@ -385,6 +382,28 @@ ExpressionContextBuilder& ExpressionContextBuilder::subPipelineDepth(long long s
 
 ExpressionContextBuilder& ExpressionContextBuilder::tailableMode(TailableModeEnum tailableMode) {
     params.tailableMode = tailableMode;
+    return *this;
+}
+
+ExpressionContextBuilder& ExpressionContextBuilder::mainCollPathArrayness(
+    std::shared_ptr<const PathArrayness> mainCollPathArrayness) {
+    params.mainCollPathArrayness = mainCollPathArrayness;
+    return *this;
+}
+
+ExpressionContextBuilder& ExpressionContextBuilder::secondaryCollsPathArrayness(
+    stdx::unordered_map<NamespaceString, std::shared_ptr<const PathArrayness>>
+        secondaryCollsPathArrayness) {
+    params.secondaryCollsPathArrayness = std::move(secondaryCollsPathArrayness);
+    return *this;
+}
+
+ExpressionContextBuilder& ExpressionContextBuilder::pathArraynessFrom(
+    const ExpressionContext& other) {
+    // ExpressionContextBuilder is a friend of ExpressionContext,
+    // so this can access other._params directly.
+    params.mainCollPathArrayness = other._params.mainCollPathArrayness;
+    params.secondaryCollsPathArrayness = other._params.secondaryCollsPathArrayness;
     return *this;
 }
 
@@ -493,6 +512,36 @@ ExpressionContextBuilder& ExpressionContextBuilder::fromRequest(
     return *this;
 }
 
+ExpressionContextBuilder& ExpressionContextBuilder::fromRequest(OperationContext* operationContext,
+                                                                const UpdateRequest& request,
+                                                                bool forgoOpCounterIncrements) {
+    opCtx(operationContext);
+    ns(request.getNamespaceString());
+    // mayDbProfile. We pass 'true' here conservatively. In the
+    // future we may change this.
+    mayDbProfile(true);
+    allowDiskUse(allowDiskUseByDefault.load());
+    explain(request.explain());
+    runtimeConstants(request.getLegacyRuntimeConstants());
+    letParameters(request.getLetParameters());
+    isUpsert(request.isUpsert());
+    tmpDir(boost::filesystem::path(storageGlobalParams.dbpath) / "_tmp");
+
+    if (forgoOpCounterIncrements) {
+        enabledCounters(false);
+    }
+    return *this;
+}
+
+ExpressionContextBuilder& ExpressionContextBuilder::fromRequest(OperationContext* operationContext,
+                                                                const DeleteRequest& request) {
+    opCtx(operationContext);
+    ns(request.getNsString());
+    runtimeConstants(request.getLegacyRuntimeConstants());
+    letParameters(request.getLet());
+    return *this;
+}
+
 boost::intrusive_ptr<ExpressionContext> ExpressionContextBuilder::build() {
     auto expCtx = boost::intrusive_ptr<ExpressionContext>(new ExpressionContext{std::move(params)});
 
@@ -525,7 +574,7 @@ boost::intrusive_ptr<ExpressionContext> makeCopyFromExpressionContext(
     NamespaceString ns,
     boost::optional<UUID> uuid,
     boost::optional<std::unique_ptr<CollatorInterface>> updatedCollator,
-    boost::optional<std::pair<NamespaceString, std::vector<BSONObj>>> view,
+    const boost::optional<ViewInfo>& view,
     boost::optional<NamespaceString> userNs) {
     auto collator = [&]() {
         if (updatedCollator) {
@@ -537,48 +586,55 @@ boost::intrusive_ptr<ExpressionContext> makeCopyFromExpressionContext(
         }
     }();
 
+    boost::optional<ViewInfo> clonedView = view ? boost::make_optional(view->clone()) : boost::none;
+
     // Some of the properties of expression context are not cloned (e.g runtimeConstants,
     // letParameters, view). In case new fields need to be cloned, they will need to be added in the
     // builder and the proper setter called here.
-    auto expCtx =
-        ExpressionContextBuilder()
-            .opCtx(other->getOperationContext(), other->getVersionContext())
-            .ifrContext(other->getIfrContext())
-            .collator(std::move(collator))
-            .mongoProcessInterface(other->getMongoProcessInterface())
-            // For stages like $lookup and $unionWith that have a $rankFusion as subpipeline, we
-            // want to pass the namespace of the spec (aka the executionNs) to avoid running against
-            // an incorrect namespace, e.g.
-            // db.collA.aggregate([$unionWith: {coll: collB, pipeline: <rankFusionCollB>}]);
-            .originalNs(userNs.value_or(ns))
-            .ns(std::move(ns))
-            .resolvedNamespace(other->getResolvedNamespaces())
-            .mayDbProfile(other->getMayDbProfile())
-            .fromRouter(other->getFromRouter())
-            .mergeType(other->mergeType())
-            .forPerShardCursor(other->getForPerShardCursor())
-            .allowDiskUse(other->getAllowDiskUse())
-            .bypassDocumentValidation(other->getBypassDocumentValidation())
-            .collUUID(uuid)
-            .explain(other->getExplain())
-            .inRouter(other->getInRouter())
-            .tmpDir(other->getTempDir())
-            .serializationContext(other->getSerializationContext())
-            .inLookup(other->getInLookup())
-            .isParsingViewDefinition(other->getIsParsingViewDefinition())
-            .exprUnstableForApiV1(other->getExprUnstableForApiV1())
-            .exprDeprecatedForApiV1(other->getExprDeprecatedForApiV1())
-            .jsHeapLimitMB(other->getJsHeapLimitMB())
-            .changeStreamTokenVersion(other->getChangeStreamTokenVersion())
-            .changeStreamSpec(other->getChangeStreamSpec())
-            .originalAggregateCommand(other->getOriginalAggregateCommand())
-            .subPipelineDepth(other->getSubPipelineDepth())
-            .initialPostBatchResumeToken(other->getInitialPostBatchResumeToken().getOwned())
-            .view(view)
-            .requiresTimeseriesExtendedRangeSupport(
-                other->getRequiresTimeseriesExtendedRangeSupport())
-            .isHybridSearch(other->isHybridSearch())
-            .build();
+    ExpressionContextBuilder builder;
+    builder.opCtx(other->getOperationContext(), other->getVersionContext())
+        .ifrContext(other->getIfrContext())
+        .collator(std::move(collator))
+        .mongoProcessInterface(other->getMongoProcessInterface())
+        // For stages like $lookup and $unionWith that have a $rankFusion as subpipeline, we
+        // want to pass the namespace of the spec (aka the executionNs) to avoid running against
+        // an incorrect namespace, e.g.
+        // db.collA.aggregate([$unionWith: {coll: collB, pipeline: <rankFusionCollB>}]);
+        .originalNs(userNs.value_or(ns))
+        .ns(std::move(ns))
+        .resolvedNamespace(other->getResolvedNamespaces())
+        .mayDbProfile(other->getMayDbProfile())
+        .fromRouter(other->getFromRouter())
+        .mergeType(other->mergeType())
+        .forPerShardCursor(other->getForPerShardCursor())
+        .allowDiskUse(other->getAllowDiskUse())
+        .bypassDocumentValidation(other->getBypassDocumentValidation())
+        .collUUID(uuid)
+        .explain(other->getExplain())
+        .inRouter(other->getInRouter())
+        .tmpDir(other->getTempDir())
+        .serializationContext(other->getSerializationContext())
+        .inLookup(other->getInLookup())
+        .isParsingViewDefinition(other->getIsParsingViewDefinition())
+        .exprUnstableForApiV1(other->getExprUnstableForApiV1())
+        .exprDeprecatedForApiV1(other->getExprDeprecatedForApiV1())
+        .jsHeapLimitMB(other->getJsHeapLimitMB())
+        .changeStreamTokenVersion(other->getChangeStreamTokenVersion())
+        .changeStreamSpec(other->getChangeStreamSpec())
+        .originalAggregateCommand(other->getOriginalAggregateCommand())
+        .subPipelineDepth(other->getSubPipelineDepth())
+        .initialPostBatchResumeToken(other->getInitialPostBatchResumeToken().getOwned())
+        .view(std::move(clonedView))
+        .requiresTimeseriesExtendedRangeSupport(other->getRequiresTimeseriesExtendedRangeSupport())
+        .isHybridSearch(other->isHybridSearch());
+
+    // TODO: SERVER-111384: When removing feature flag, we can collapse the builder into one
+    // chained call.
+    if (feature_flags::gFeatureFlagPathArrayness.isEnabled()) {
+        builder.pathArraynessFrom(*other);
+    }
+
+    auto expCtx = builder.build();
 
     if (other->getIgnoreCollator()) {
         expCtx->setIgnoreCollator();

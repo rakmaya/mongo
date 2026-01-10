@@ -216,20 +216,13 @@ function isFcvGraterOrEqualTo(fcvRequired) {
 
 (function testMisplacedCollectionOnConfigServer() {
     jsTest.log("Executing testMisplacedCollectionOnConfigServer");
-    // TODO SERVER-107179: do not skip test in multiversion suites
-    const isMultiVersion = Boolean(jsTest.options().useRandomBinVersionsWithinReplicaSet);
-    if (isMultiVersion) {
-        jsTestLog(
-            "Skipping test because checkMetadataConsistency in the previous binary " +
-                "version doesn't include yet the config server as a participant shard",
-        );
-        return;
-    }
 
     const db = getNewDb();
+    const session = st.configRS.getPrimary().startSession({retryWrites: true});
+    const sessionDB = session.getDatabase(db.getName());
     assert.commandWorked(mongos.adminCommand({enableSharding: db.getName()}));
 
-    assert.commandWorked(st.configRS.getPrimary().getDB(db.getName()).coll.insert({_id: "foo"}));
+    assert.commandWorked(sessionDB.coll.insert({_id: "foo"}));
 
     // Database level mode command
     let inconsistencies = db.checkMetadataConsistency().toArray();
@@ -243,9 +236,20 @@ function isFcvGraterOrEqualTo(fcvRequired) {
     assert.eq("MisplacedCollection", collInconsistencies[0].type, tojson(inconsistencies[0]));
     assert.eq(1, collInconsistencies[0].details.numDocs, tojson(inconsistencies[0]));
 
+    session.endSession();
     // Clean up the database to pass the hooks that detect inconsistencies
     db.dropDatabase();
-    assert.commandWorked(st.configRS.getPrimary().getDB(db.getName()).runCommand({dropDatabase: 1}));
+    assert.soon(() => {
+        try {
+            assert.commandWorked(st.configRS.getPrimary().getDB(db.getName()).runCommand({dropDatabase: 1}));
+            return true;
+        } catch (e) {
+            if (ErrorCodes.isRetriableError(e.code)) {
+                return false;
+            }
+            throw e;
+        }
+    });
     assertNoInconsistencies();
 })();
 
@@ -1291,7 +1295,7 @@ if (FeatureFlagUtil.isPresentAndEnabled(st.s, "CheckRangeDeletionsWithMissingSha
                     {
                         op: "c",
                         ns: db.getName() + ".$cmd",
-                        o: {create: bucketsCollName, timeseries: {timeField: "t"}},
+                        o: {create: bucketsCollName, clusteredIndex: true, timeseries: {timeField: "t"}},
                     },
                 ],
             }),
@@ -1330,7 +1334,7 @@ if (FeatureFlagUtil.isPresentAndEnabled(st.s, "CheckRangeDeletionsWithMissingSha
                     {
                         op: "c",
                         ns: db.getName() + ".$cmd",
-                        o: {create: bucketsCollName, timeseries: {timeField: "t"}},
+                        o: {create: bucketsCollName, clusteredIndex: true, timeseries: {timeField: "t"}},
                     },
                 ],
             }),

@@ -30,7 +30,7 @@
 #pragma once
 
 #include "mongo/db/query/stage_builder/sbe/gen_helpers.h"
-#include "mongo/util/field_set.h"
+#include "mongo/db/query/util/field_set.h"
 #include "mongo/util/modules.h"
 #include "mongo/util/string_map.h"
 
@@ -99,7 +99,7 @@ enum class FieldEffect : int { kKeep, kDrop, kModify, kSet, kAdd, kGeneric };
  * (a single projection or multiple projections combined together) has on the set of all possible
  * top-level field names.
  *
- * Conceptully, a FieldEffects object can be thought of as a field name/FieldEffect map plus
+ * Conceptually, a FieldEffects object can be thought of as a field name/FieldEffect map plus
  * a "default" FieldEffect to be applied to all fields that are not present in the map.
  *
  * The six possible effects modeled by this class are: Keep, Drop, Modify, Set, Add, and Generic.

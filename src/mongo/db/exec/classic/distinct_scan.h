@@ -37,17 +37,18 @@
 #include "mongo/db/exec/plan_stats.h"
 #include "mongo/db/exec/shard_filterer_impl.h"
 #include "mongo/db/index/multikey_paths.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/index_catalog_entry.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/query/compiler/physical_model/index_bounds/index_bounds.h"
 #include "mongo/db/query/compiler/physical_model/query_solution/stage_types.h"
 #include "mongo/db/query/plan_executor.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog_entry.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
 #include "mongo/db/storage/index_entry_comparison.h"
 #include "mongo/db/storage/sorted_data_interface.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
 
 #include <memory>
 #include <string>
@@ -60,29 +61,34 @@ class IndexDescriptor;
 class WorkingSet;
 
 struct DistinctParams {
-    DistinctParams(const IndexDescriptor* descriptor,
+    DistinctParams(const IndexCatalogEntry* entry,
                    std::string indexName,
                    BSONObj keyPattern,
                    MultikeyPaths multikeyPaths,
                    bool multikey)
-        : indexDescriptor(descriptor),
+        : indexEntry(entry),
           name(std::move(indexName)),
           keyPattern(std::move(keyPattern)),
           multikeyPaths(std::move(multikeyPaths)),
           isMultiKey(multikey) {
-        invariant(indexDescriptor);
+        tassert(11051642, "Expecting Index Entry.", indexEntry);
     }
 
     DistinctParams(OperationContext* opCtx,
                    const CollectionPtr& collection,
-                   const IndexDescriptor* descriptor)
-        : DistinctParams(descriptor,
-                         descriptor->indexName(),
-                         descriptor->keyPattern(),
-                         descriptor->getEntry()->getMultikeyPaths(opCtx, collection),
-                         descriptor->getEntry()->isMultikey(opCtx, collection)) {}
+                   const IndexCatalogEntry* entry)
+        : DistinctParams(
+              entry,
+              entry->descriptor()->indexName(),
+              entry->descriptor()->keyPattern(),
+              [&]() {
+                  MultikeyPaths paths;
+                  collection->isIndexMultikey(opCtx, entry->descriptor()->indexName(), &paths);
+                  return paths;
+              }(),
+              collection->isIndexMultikey(opCtx, entry->descriptor()->indexName(), nullptr)) {}
 
-    const IndexDescriptor* indexDescriptor;
+    const IndexCatalogEntry* indexEntry;
     std::string name;
 
     BSONObj keyPattern;

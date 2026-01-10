@@ -43,8 +43,6 @@
 #include "mongo/db/exec/plan_stats.h"
 #include "mongo/db/exec/sbe/expressions/runtime_environment.h"
 #include "mongo/db/exec/sbe/stages/co_scan.h"
-#include "mongo/db/local_catalog/collection_mock.h"
-#include "mongo/db/local_catalog/shard_role_api/shard_role_mock.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/query/canonical_query.h"
@@ -58,6 +56,8 @@
 #include "mongo/db/query/plan_ranking_decision.h"
 #include "mongo/db/query/query_test_service_context.h"
 #include "mongo/db/query/stage_builder/sbe/builder.h"
+#include "mongo/db/shard_role/shard_catalog/collection_mock.h"
+#include "mongo/db/shard_role/shard_role_mock.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/clock_source.h"
 
@@ -65,10 +65,8 @@
 #include <functional>
 #include <memory>
 #include <utility>
-#include <variant>
 #include <vector>
 
-#include <fmt/format.h>
 
 namespace mongo {
 namespace {
@@ -349,13 +347,14 @@ private:
         auto decision = createDecision(nWorks);
         auto querySolution = std::make_unique<QuerySolution>();
 
-        auto buildDebugInfoFn = [soln =
-                                     querySolution.get()]() -> plan_cache_debug_info::DebugInfoSBE {
-            return plan_cache_util::buildDebugInfo(soln);
+        auto buildDebugInfoFn =
+            [nss = cq->nss(), soln = querySolution.get()]() -> plan_cache_debug_info::DebugInfoSBE {
+            return plan_cache_util::buildDebugInfo(nss, soln);
         };
         auto printCachedPlanFn = [](const sbe::CachedSbePlan& plan) {
             sbe::DebugPrinter p;
-            return p.print(*plan.root.get());
+            sbe::DebugPrintInfo debugPrintInfo{};
+            return p.print(*plan.root.get(), debugPrintInfo);
         };
         PlanCacheCallbacksImpl<sbe::PlanCacheKey,
                                sbe::CachedSbePlan,

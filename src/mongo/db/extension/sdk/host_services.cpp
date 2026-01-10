@@ -34,32 +34,23 @@
 
 namespace mongo::extension::sdk {
 
-// The static instance of HostServicesHandle is initially set to nullptr. It will be set "for real"
-// at the very start of extension initialization, before any extension should attempt to access it.
-HostServicesHandle HostServicesHandle::_hostServices(nullptr);
+// The static handle is initially set to nullptr. It will be set "for real" at the
+//  very start of extension initialization, before any extension should attempt to access it.
+// TODO: This static pointer should be able to initialize inline, since extensions should build
+// statically.
+UnownedHandle<const ::MongoExtensionHostServices> HostServicesAPI::_sHostServices{nullptr};
 
-BSONObj HostServicesHandle::createExtensionLogMessage(
-    std::string message,
-    std::int32_t code,
-    mongo::extension::MongoExtensionLogSeverityEnum severity) {
-    mongo::extension::MongoExtensionLog log(std::move(message), code, severity);
-    return log.toBSON();
-}
-
-BSONObj HostServicesHandle::createExtensionDebugLogMessage(std::string message,
-                                                           std::int32_t code,
-                                                           std::int32_t level) {
-    mongo::extension::MongoExtensionDebugLog debugLog(std::move(message), code, level);
-    return debugLog.toBSON();
-}
-
-void HostServicesHandle::_assertVTableConstraints(const VTable_t& vtable) const {
-    tripwireAssert(
+void HostServicesAPI::assertVTableConstraints(const VTable_t& vtable) {
+    sdk_tassert(
         11097801, "Host services' 'user_asserted' is null", vtable.user_asserted != nullptr);
-    tripwireAssert(11188200, "Host services' 'log' is null", vtable.log != nullptr);
-    tripwireAssert(11188201, "Host services' 'log_debug' is null", vtable.log_debug != nullptr);
+    sdk_tassert(11338300, "Host services' 'get_logger' is null", vtable.get_logger != nullptr);
     // Note that we intentionally do not validate tripwire_asserted here. If it wasn't valid, the
     // tripwire assert would fire and we would dereference the nullptr anyway.
+    sdk_tassert(11149304,
+                "Host services' 'create_host_agg_stage_parse_node' is null",
+                vtable.create_host_agg_stage_parse_node != nullptr);
+    sdk_tassert(
+        11134201, "Host services' 'create_id_lookup' is null", vtable.create_id_lookup != nullptr);
 }
 
 }  // namespace mongo::extension::sdk

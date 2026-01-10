@@ -585,11 +585,8 @@ error_codes:
       categories: [VersionedAPIError, VoteAbortError],
     }
 
-  - {
-      code: 348,
-      name: ChangeStreamTopologyChange,
-      extra: ChangeStreamTopologyChangeInfo,
-    }
+  # Removed in v8.3
+  # - {code: 348, name: ChangeStreamTopologyChange, extra: ChangeStreamTopologyChangeInfo}
 
   - {code: 349, name: KeyPatternShorterThanBound}
 
@@ -978,6 +975,31 @@ error_codes:
       categories: [Interruption, RetriableError],
     }
 
+  # Bad BSON column format found during decompression
+  - {code: 472, name: InvalidBSONColumn, categories: [ValidationError]}
+  - {
+      code: 473,
+      name: InterruptedDueToOverload,
+      categories: [Interruption, SystemOverloadedError],
+    }
+
+  - {code: 474, name: ReshardCollectionQuiescing}
+  - {code: 475, name: ReshardCollectionInterruptedDueToFCVChange}
+  - {code: 476, name: ReshardCollectionMissingAbortReason}
+  - {code: 477, name: CollectionBecameView}
+  - {
+      code: 478,
+      name: StreamProcessorPrivateNetworkingError,
+      categories: [StreamProcessorRetryableError],
+    }
+  - {
+      code: 479,
+      name: IFRFlagRetry,
+      categories: [RetriableError],
+      extra: IFRFlagRetryInfo,
+    }
+  - {code: 480, name: UnrecognizedIFRFlag}
+
   # Error codes 4000-8999 are reserved.
 
   # Non-sequential error codes for compatibility only)
@@ -1050,6 +1072,7 @@ error_codes:
     }
   - {code: 56846, name: ConfigServerUnreachable}
   - {code: 57986, name: RetryableInternalTransactionNotSupported}
+  # Codes 65000-70999 are reserved for extension-developed logs and errors. Do not use these unless they are used for writing an extension.
   - {code: 640570, name: IllegalChangeToExpectedShardVersion}
   - {code: 640571, name: IllegalChangeToExpectedDatabaseVersion}
   - {

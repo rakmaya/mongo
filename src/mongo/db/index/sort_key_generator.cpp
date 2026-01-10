@@ -27,17 +27,14 @@
  *    it in the license file.
  */
 
-#include <boost/smart_ptr.hpp>
 // IWYU pragma: no_include "boost/container/detail/flat_tree.hpp"
 #include <boost/container/vector.hpp>
-#include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 // IWYU pragma: no_include "ext/alloc_traits.h"
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/index/multikey_paths.h"
@@ -50,7 +47,6 @@
 
 #include <algorithm>
 #include <utility>
-#include <variant>
 
 namespace mongo {
 namespace {
@@ -90,9 +86,9 @@ SortKeyGenerator::SortKeyGenerator(SortPattern sortPattern, const CollatorInterf
         fieldNames.push_back(elem.fieldName());
     }
 
-    constexpr bool isSparse = false;
+    constexpr bool isSetSparseByUser = false;
     _indexKeyGen = std::make_unique<BtreeKeyGenerator>(
-        fieldNames, fixed, isSparse, key_string::Version::kLatestVersion, _ordering);
+        fieldNames, fixed, isSetSparseByUser, key_string::Version::kLatestVersion, _ordering);
 
     if (!_sortHasMeta) {
         size_t i = 0;

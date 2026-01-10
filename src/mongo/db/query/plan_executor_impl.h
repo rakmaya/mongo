@@ -38,9 +38,6 @@
 #include "mongo/db/exec/classic/working_set.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/plan_stats.h"
-#include "mongo/db/global_catalog/catalog_cache/shard_cannot_refresh_due_to_locks_held_exception.h"
-#include "mongo/db/local_catalog/lock_manager/exception_util.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/expression_context.h"
@@ -56,9 +53,13 @@
 #include "mongo/db/query/stage_builder/classic_stage_builder.h"
 #include "mongo/db/query/write_ops/update_result.h"
 #include "mongo/db/record_id.h"
+#include "mongo/db/router_role/routing_cache/shard_cannot_refresh_due_to_locks_held_exception.h"
+#include "mongo/db/shard_role/lock_manager/exception_util.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/yieldable.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
+#include "mongo/util/modules.h"
 
 #include <deque>
 #include <memory>
@@ -154,7 +155,7 @@ public:
                      NamespaceString nss,
                      PlanYieldPolicy::YieldPolicy yieldPolicy,
                      boost::optional<size_t> cachedPlanHash,
-                     QueryPlanner::CostBasedRankerResult cbrResult,
+                     QueryPlanner::PlanRankingResult planRankingResult,
                      stage_builder::PlanStageToQsnMap planStageQsnMap,
                      std::vector<std::unique_ptr<PlanStage>> cbrRejectedPlanStages);
 
@@ -272,6 +273,9 @@ private:
         }
     }
 
+    // Performs any waiting that's needed after locks and resources are released during yield.
+    void doWaitDuringYield();
+
     std::unique_ptr<insert_listener::Notifier> makeNotifier();
 
     // The OperationContext that we're executing within. This can be updated if necessary by using
@@ -302,6 +306,9 @@ private:
     // What namespace are we operating over?
     NamespaceString _nss;
 
+    // Access to the collection data and metadata if present.
+    boost::optional<CollectionAcquisition> _collection;
+
     // This is used to handle automatic yielding when allowed by the YieldPolicy. Never nullptr.
     std::unique_ptr<PlanYieldPolicy> _yieldPolicy;
 
@@ -327,8 +334,12 @@ private:
     // oplog, nullptr otherwise.
     OplogWaitConfig* _oplogWaitConfig{nullptr};
 
-    // Function used to wait for oplog visibility in between snapshot abandonment and
+    // Function used to wait for oplog visibility in between snapshot abandonment and restoring the
+    // snapshot.
     std::function<void()> _afterSnapshotAbandonFn{nullptr};
+
+    // When set, indicates that we should log and back off during yield.
+    boost::optional<size_t> _writeConflictsInARowToLog;
 };
 
 }  // namespace mongo

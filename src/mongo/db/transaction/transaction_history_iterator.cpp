@@ -35,9 +35,6 @@
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/curop.h"
-#include "mongo/db/local_catalog/database_holder.h"
-#include "mongo/db/local_catalog/db_raii.h"
-#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/expression_context.h"
@@ -49,6 +46,9 @@
 #include "mongo/db/query/get_executor.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/repl/oplog_entry.h"
+#include "mongo/db/shard_role/shard_catalog/database_holder.h"
+#include "mongo/db/shard_role/shard_catalog/db_raii.h"
+#include "mongo/db/shard_role/shard_role.h"
 #include "mongo/db/stats/top.h"
 #include "mongo/logv2/redaction.h"
 #include "mongo/util/assert_util.h"
@@ -89,7 +89,7 @@ BSONObj findOneOplogEntry(OperationContext* opCtx,
     const auto oplogRead = acquireCollectionOrViewMaybeLockFree(
         opCtx,
         CollectionOrViewAcquisitionRequest(NamespaceString::kRsOplogNamespace,
-                                           PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                           PlacementConcern(boost::none, ShardVersion::UNTRACKED()),
                                            repl::ReadConcernArgs::get(opCtx),
                                            AcquisitionPrerequisites::kRead));
 

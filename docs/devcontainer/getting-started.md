@@ -26,7 +26,8 @@ After installation, increase resources for better build performance:
 1. Open Rancher Desktop → Preferences → Virtual Machine
 2. **Memory**: Allocate as much as your system allows (leave ~4-8 GB for your host OS)
 3. **CPUs**: Allocate as many cores as possible (leave 1-2 for your host OS)
-4. Apply changes and restart Rancher Desktop
+4. **Disk**: Rancher Desktop doesn't have a UI for disk size. To increase it, see [Troubleshooting - Increase Docker disk allocation](./troubleshooting.md#build-fails-with-no-space-left-on-device) for instructions.
+5. Apply changes and restart Rancher Desktop
 
 > **Tip:** More resources = faster builds. MongoDB builds benefit significantly from additional CPU cores and memory.
 
@@ -35,6 +36,8 @@ After installation, increase resources for better build performance:
 #### Option B: Docker Desktop
 
 [Docker Desktop](https://www.docker.com/products/docker-desktop/) is a popular alternative.
+
+> **Note on Licensing**: Docker Desktop may require a paid license for commercial use. Please review the licensing terms to ensure compliance with your use case.
 
 **Installation:**
 
@@ -49,6 +52,8 @@ After installation, increase resources for better build performance:
 
 [OrbStack](https://orbstack.dev/) is a lightweight, fast Docker alternative for macOS.
 
+> **Note on Licensing**: OrbStack may require a paid license for commercial use. Please review the licensing terms to ensure compliance with your use case.
+
 **Installation:**
 
 1. Download from [orbstack.dev](https://orbstack.dev/)
@@ -62,18 +67,29 @@ For Linux users, you can use Docker Engine directly.
 **Installation:**
 Follow the official guide: [docs.docker.com/engine/install](https://docs.docker.com/engine/install/)
 
-### 2. Install Visual Studio Code
+### 2. Create SSH Directory (Required)
+
+> **⚠️ Critical:** You **must** have a `~/.ssh` directory on your host machine before building the devcontainer. The devcontainer requires this directory to exist, regardless of whether you use SSH or HTTPS to clone the repository.
+
+```bash
+# On your HOST machine (not inside the container)
+mkdir -p ~/.ssh
+```
+
+If you skip this step, you'll encounter bind mount errors when trying to start the devcontainer.
+
+### 3. Install Visual Studio Code
 
 Download and install VS Code from [code.visualstudio.com](https://code.visualstudio.com/)
 
-### 3. Install Dev Containers Extension
+### 4. Install Dev Containers Extension
 
 1. Open VS Code
 2. Go to Extensions (⌘/Ctrl+Shift+X)
 3. Search for "Dev Containers"
 4. Install the [Dev Containers](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers) extension by Microsoft
 
-### 4. Configure SSH Keys (Recommended)
+### 5. Configure SSH Keys (Recommended)
 
 To clone the repository using SSH (recommended for contributors), you'll need SSH keys configured with GitHub.
 

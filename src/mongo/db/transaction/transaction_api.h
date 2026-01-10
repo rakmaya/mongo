@@ -39,13 +39,13 @@
 #include "mongo/db/commands/query_cmd/bulk_write_gen.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/dbmessage.h"
-#include "mongo/db/local_catalog/shard_role_api/resource_yielder.h"
 #include "mongo/db/logical_time.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/logical_session_id_gen.h"
+#include "mongo/db/shard_role/resource_yielder.h"
 #include "mongo/executor/inline_executor.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/rpc/message.h"
@@ -124,7 +124,7 @@ struct AbortResult {
  */
 class TransactionClient {
 public:
-    virtual ~TransactionClient() {};
+    virtual ~TransactionClient() {}
 
     /**
      * Called by the transaction that owns this transaction client to install hooks for attaching
@@ -334,9 +334,9 @@ public:
                          std::shared_ptr<executor::TaskExecutor> cancelExecutor,
                          std::unique_ptr<SEPTransactionClientBehaviors> behaviors)
         : _serviceContext(opCtx->getServiceContext()),
-          _inlineExecutor(inlineExecutor),
-          _executor(executor),
-          _cancelExecutor(cancelExecutor),
+          _inlineExecutor(std::move(inlineExecutor)),
+          _executor(std::move(executor)),
+          _cancelExecutor(std::move(cancelExecutor)),
           _behaviors(std::move(behaviors)) {}
 
     SEPTransactionClient(const SEPTransactionClient&) = delete;
@@ -648,7 +648,7 @@ public:
                            const CancellationToken& token,
                            std::unique_ptr<TransactionClient> txnClient)
         : _internalTxn(std::make_shared<Transaction>(opCtx, executor, token, std::move(txnClient))),
-          _executor(executor),
+          _executor(std::move(executor)),
           _token(token) {}
 
     /**

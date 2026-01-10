@@ -118,14 +118,10 @@ struct CompDesc {
     }
 };
 
-using TimeSorterAscMin =
-    BoundedSorter<DocumentSourceSort::SortableDate, Document, CompAsc, BoundMakerMin>;
-using TimeSorterAscMax =
-    BoundedSorter<DocumentSourceSort::SortableDate, Document, CompAsc, BoundMakerMax>;
-using TimeSorterDescMin =
-    BoundedSorter<DocumentSourceSort::SortableDate, Document, CompDesc, BoundMakerMin>;
-using TimeSorterDescMax =
-    BoundedSorter<DocumentSourceSort::SortableDate, Document, CompDesc, BoundMakerMax>;
+using TimeSorterAscMin = BoundedSorter<DocumentSourceSort::SortableDate, Document, BoundMakerMin>;
+using TimeSorterAscMax = BoundedSorter<DocumentSourceSort::SortableDate, Document, BoundMakerMax>;
+using TimeSorterDescMin = BoundedSorter<DocumentSourceSort::SortableDate, Document, BoundMakerMin>;
+using TimeSorterDescMax = BoundedSorter<DocumentSourceSort::SortableDate, Document, BoundMakerMax>;
 }  // namespace
 
 const DocumentSourceSort::SortStageOptions DocumentSourceSort::kDefaultOptions = {};
@@ -146,24 +142,33 @@ DocumentSourceSort::DocumentSourceSort(const boost::intrusive_ptr<ExpressionCont
             !_sortExecutor->sortPattern().empty());
 }
 
-REGISTER_DOCUMENT_SOURCE(sort,
-                         LiteParsedDocumentSourceDefault::parse,
-                         DocumentSourceSort::createFromBson,
-                         AllowedWithApiStrict::kAlways);
+
+REGISTER_LITE_PARSED_DOCUMENT_SOURCE(sort, SortLiteParsed::parse, AllowedWithApiStrict::kAlways);
+
+REGISTER_DOCUMENT_SOURCE_WITH_STAGE_PARAMS_DEFAULT(sort, DocumentSourceSort, SortStageParams);
 
 ALLOCATE_DOCUMENT_SOURCE_ID(sort, DocumentSourceSort::id)
 
-REGISTER_DOCUMENT_SOURCE_CONDITIONALLY(_internalBoundedSort,
-                                       LiteParsedDocumentSourceDefault::parse,
-                                       DocumentSourceSort::parseBoundedSort,
-                                       ::mongo::getTestCommandsEnabled()
-                                           ? AllowedWithApiStrict::kNeverInVersion1
-                                           : AllowedWithApiStrict::kInternal,
-                                       ::mongo::getTestCommandsEnabled()
-                                           ? AllowedWithClientType::kAny
-                                           : AllowedWithClientType::kInternal,
-                                       nullptr,  // featureFlag
-                                       true);
+REGISTER_LITE_PARSED_DOCUMENT_SOURCE_WITH_CLIENT_TYPE(_internalBoundedSort,
+                                                      InternalBoundedSortLiteParsed::parse,
+                                                      ::mongo::getTestCommandsEnabled()
+                                                          ? AllowedWithApiStrict::kNeverInVersion1
+                                                          : AllowedWithApiStrict::kInternal,
+                                                      ::mongo::getTestCommandsEnabled()
+                                                          ? AllowedWithClientType::kAny
+                                                          : AllowedWithClientType::kInternal);
+
+DocumentSourceContainer _internalBoundedSortStageParamsToDocumentSourceFn(
+    const std::unique_ptr<StageParams>& stageParams,
+    const boost::intrusive_ptr<ExpressionContext>& expCtx) {
+    auto* typedParams = dynamic_cast<InternalBoundedSortStageParams*>(stageParams.get());
+    return {DocumentSourceSort::parseBoundedSort(typedParams->getOriginalBson(), expCtx)};
+}
+
+ALLOCATE_STAGE_PARAMS_ID(_internalBoundedSort, InternalBoundedSortStageParams::id);
+REGISTER_STAGE_PARAMS_TO_DOCUMENT_SOURCE_MAPPING(_internalBoundedSort,
+                                                 InternalBoundedSortStageParams::id,
+                                                 _internalBoundedSortStageParamsToDocumentSourceFn)
 
 void DocumentSourceSort::serializeForBoundedSort(std::vector<Value>& array,
                                                  const SerializationOptions& opts) const {
@@ -279,9 +284,9 @@ boost::optional<long long> DocumentSourceSort::getLimit() const {
                                      : boost::none;
 }
 
-DocumentSourceContainer::iterator DocumentSourceSort::doOptimizeAt(
+DocumentSourceContainer::iterator DocumentSourceSort::optimizeAt(
     DocumentSourceContainer::iterator itr, DocumentSourceContainer* container) {
-    invariant(*itr == this);
+    tassert(11282961, "Expecting DocumentSource iterator pointing to this stage", *itr == this);
 
     if (_timeSorter) {
         // Do not absorb a limit, or combine with other sort stages.
@@ -378,7 +383,6 @@ boost::intrusive_ptr<DocumentSourceSort> DocumentSourceSort::createBoundedSort(
     boost::optional<long long> limit,
     bool outputSortKeyMetadata,
     const boost::intrusive_ptr<ExpressionContext>& expCtx) {
-
     auto ds = DocumentSourceSort::create(expCtx, pat);
 
     SortOptions opts;
@@ -386,29 +390,29 @@ boost::intrusive_ptr<DocumentSourceSort> DocumentSourceSort::createBoundedSort(
         loadMemoryLimit(StageMemoryLimit::QueryMaxBlockingSortMemoryUsageBytes);
     if (expCtx->getAllowDiskUse()) {
         opts.TempDir(expCtx->getTempDir());
-        opts.FileStats(ds->_sortExecutor->getSorterFileStats());
     }
 
     if (limit) {
         opts.Limit(limit.value());
     }
 
+    auto fileStats = expCtx->getAllowDiskUse() ? ds->_sortExecutor->getSorterFileStats() : nullptr;
     if (boundBase == kMin) {
         if (pat.back().isAscending) {
-            ds->_timeSorter =
-                std::make_shared<TimeSorterAscMin>(opts, CompAsc{}, BoundMakerMin{boundOffset});
+            ds->_timeSorter = std::make_shared<TimeSorterAscMin>(
+                opts, fileStats, CompAsc{}, BoundMakerMin{boundOffset});
         } else {
-            ds->_timeSorter =
-                std::make_shared<TimeSorterDescMin>(opts, CompDesc{}, BoundMakerMin{boundOffset});
+            ds->_timeSorter = std::make_shared<TimeSorterDescMin>(
+                opts, fileStats, CompDesc{}, BoundMakerMin{boundOffset});
         }
         ds->_requiredMetadata.set(DocumentMetadataFields::MetaType::kTimeseriesBucketMinTime);
     } else if (boundBase == kMax) {
         if (pat.back().isAscending) {
-            ds->_timeSorter =
-                std::make_shared<TimeSorterAscMax>(opts, CompAsc{}, BoundMakerMax{boundOffset});
+            ds->_timeSorter = std::make_shared<TimeSorterAscMax>(
+                opts, fileStats, CompAsc{}, BoundMakerMax{boundOffset});
         } else {
-            ds->_timeSorter =
-                std::make_shared<TimeSorterDescMax>(opts, CompDesc{}, BoundMakerMax{boundOffset});
+            ds->_timeSorter = std::make_shared<TimeSorterDescMax>(
+                opts, fileStats, CompDesc{}, BoundMakerMax{boundOffset});
         }
         ds->_requiredMetadata.set(DocumentMetadataFields::MetaType::kTimeseriesBucketMaxTime);
     } else {
@@ -485,7 +489,6 @@ boost::intrusive_ptr<DocumentSourceSort> DocumentSourceSort::parseBoundedSort(
         loadMemoryLimit(StageMemoryLimit::QueryMaxBlockingSortMemoryUsageBytes));
     if (expCtx->getAllowDiskUse()) {
         opts.TempDir(expCtx->getTempDir());
-        opts.FileStats(ds->_sortExecutor->getSorterFileStats());
     }
     if (BSONElement limitElem = args["limit"]) {
         uassert(6588100,
@@ -494,22 +497,23 @@ boost::intrusive_ptr<DocumentSourceSort> DocumentSourceSort::parseBoundedSort(
         opts.Limit(limitElem.numberLong());
     }
 
+    auto fileStats = expCtx->getAllowDiskUse() ? ds->_sortExecutor->getSorterFileStats() : nullptr;
     if (boundBase == kMin) {
         if (pat.back().isAscending) {
-            ds->_timeSorter =
-                std::make_shared<TimeSorterAscMin>(opts, CompAsc{}, BoundMakerMin{boundOffset});
+            ds->_timeSorter = std::make_shared<TimeSorterAscMin>(
+                opts, fileStats, CompAsc{}, BoundMakerMin{boundOffset});
         } else {
-            ds->_timeSorter =
-                std::make_shared<TimeSorterDescMin>(opts, CompDesc{}, BoundMakerMin{boundOffset});
+            ds->_timeSorter = std::make_shared<TimeSorterDescMin>(
+                opts, fileStats, CompDesc{}, BoundMakerMin{boundOffset});
         }
         ds->_requiredMetadata.set(DocumentMetadataFields::MetaType::kTimeseriesBucketMinTime);
     } else if (boundBase == kMax) {
         if (pat.back().isAscending) {
-            ds->_timeSorter =
-                std::make_shared<TimeSorterAscMax>(opts, CompAsc{}, BoundMakerMax{boundOffset});
+            ds->_timeSorter = std::make_shared<TimeSorterAscMax>(
+                opts, fileStats, CompAsc{}, BoundMakerMax{boundOffset});
         } else {
-            ds->_timeSorter =
-                std::make_shared<TimeSorterDescMax>(opts, CompDesc{}, BoundMakerMax{boundOffset});
+            ds->_timeSorter = std::make_shared<TimeSorterDescMax>(
+                opts, fileStats, CompDesc{}, BoundMakerMax{boundOffset});
         }
         ds->_requiredMetadata.set(DocumentMetadataFields::MetaType::kTimeseriesBucketMaxTime);
     } else {

@@ -29,7 +29,6 @@
 
 #include "mongo/db/exec/agg/document_source_to_stage_registry.h"
 
-#include "mongo/db/pipeline/document_source_limit.h"
 #include "mongo/db/pipeline/document_source_test_optimizations.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/unittest/death_test.h"
@@ -70,7 +69,7 @@ boost::intrusive_ptr<exec::agg::Stage> documentSourceUniqueForThisTestMappingFn(
  * Test that for the DocumentSources that do not have a registered mapping function, we hit the
  * tassert in the mapping function.
  */
-DEATH_TEST(DocumentSourceToStageRegistryTest,
+DEATH_TEST(DocumentSourceToStageRegistryTestDeathTest,
            NonexistentMapper,
            "Missing 'DocumentSource' to 'agg::Stage' mapping function") {
     const auto expCtx = make_intrusive<ExpressionContextForTest>();

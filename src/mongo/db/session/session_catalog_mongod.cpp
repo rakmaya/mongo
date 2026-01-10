@@ -38,7 +38,7 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/client/dbclient_cursor.h"
-#include "mongo/db/admission/execution_admission_context.h"
+#include "mongo/db/admission/execution_control/execution_admission_context.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands/feature_compatibility_version.h"
 #include "mongo/db/database_name.h"
@@ -47,15 +47,6 @@
 #include "mongo/db/index_builds/index_builds_coordinator.h"
 #include "mongo/db/index_builds/index_builds_manager.h"
 #include "mongo/db/internal_transactions_feature_flag_gen.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/clustered_collection_util.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_options.h"
-#include "mongo/db/local_catalog/ddl/create_indexes_gen.h"
-#include "mongo/db/local_catalog/index_catalog.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/find_command.h"
@@ -71,10 +62,21 @@
 #include "mongo/db/session/session_killer.h"
 #include "mongo/db/session/session_txn_record_gen.h"
 #include "mongo/db/session/sessions_collection.h"
+#include "mongo/db/shard_role/ddl/create_indexes_gen.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/clustered_collection_util.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_options.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
+#include "mongo/transport/session.h"
+#include "mongo/transport/session_id.h"
 #include "mongo/util/concurrency/admission_context.h"
 #include "mongo/util/concurrency/thread_pool.h"
 #include "mongo/util/decorable.h"
@@ -547,11 +549,24 @@ BSONObj MongoDSessionCatalog::getConfigTxnPartialIndexSpec() {
     return index.toBSON();
 }
 
+void MongoDSessionCatalog::addCanonicalizedNamespacesToTxnEntry(
+    const NamespaceHashSet& affectedNamespacesSet, SessionTxnRecord& sessionTxnRecord) {
+    std::vector<NamespaceString> sortedNamespaces;
+    sortedNamespaces.reserve(affectedNamespacesSet.size());
+    for (const auto& ns : affectedNamespacesSet) {
+        sortedNamespaces.push_back(ns);
+    }
+    std::sort(sortedNamespaces.begin(), sortedNamespaces.end());
+    sessionTxnRecord.setAffectedNamespaces(
+        boost::optional<std::vector<NamespaceString>>(std::move(sortedNamespaces)));
+}
+
 MongoDSessionCatalog::MongoDSessionCatalog(
     std::unique_ptr<MongoDSessionCatalogTransactionInterface> ti)
     : _ti(std::move(ti)) {}
 
 void MongoDSessionCatalog::onStepUp(OperationContext* opCtx) {
+    LOGV2(11148203, "Starting MongoDSessionCatalog::onStepUp.");
     // Invalidate sessions that could have a retryable write on it, so that we can refresh from disk
     // in case the in-memory state was out of sync.
     const auto catalog = SessionCatalog::get(opCtx);
@@ -788,7 +803,8 @@ MongoDOperationContextSessionWithoutRefresh::~MongoDOperationContextSessionWitho
         auto txnNum = _opCtx->getTxnNumber().get_value_or(TxnNumber(-1));
         auto txnRetries = _opCtx->getTxnRetryCounter().get_value_or(-1);
         auto opId = _opCtx->getOpID();
-        auto sessionId = _opCtx->getClient()->session()->id();
+        auto sessionId = _opCtx->getClient()->session() ? _opCtx->getClient()->session()->id()
+                                                        : transport::SessionId{};
         auto lsid = _opCtx->getLogicalSessionId();
         auto clientAddress = _opCtx->getClient()->clientAddress(true);
         invariant(!_ti->isTransactionInProgress(_opCtx),

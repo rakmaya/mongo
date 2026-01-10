@@ -27,14 +27,17 @@
  *    it in the license file.
  */
 
+#include "mongo/db/exec/classic/multi_plan.h"
 #include "mongo/db/exec/runtime_planners/classic_runtime_planner/planner_interface.h"
+#include "mongo/db/query/plan_yield_policy_impl.h"
+#include "mongo/util/assert_util.h"
 
 namespace mongo::classic_runtime_planner {
 
 MultiPlanner::MultiPlanner(PlannerData plannerData,
                            std::vector<std::unique_ptr<QuerySolution>> solutions,
-                           QueryPlanner::CostBasedRankerResult cbrResult)
-    : ClassicPlannerInterface(std::move(plannerData), std::move(cbrResult)) {
+                           QueryPlanner::PlanRankingResult planRankingResult)
+    : ClassicPlannerInterface(std::move(plannerData), std::move(planRankingResult)) {
     auto stage = std::make_unique<MultiPlanStage>(
         cq()->getExpCtxRaw(),
         collections().getMainCollectionPtrOrAcquisition(),
@@ -53,11 +56,41 @@ MultiPlanner::MultiPlanner(PlannerData plannerData,
 }
 
 Status MultiPlanner::doPlan(PlanYieldPolicy* planYieldPolicy) {
-    return _multiplanStage->pickBestPlan(planYieldPolicy);
+    tassert(11451403, "MultiPlanner::doPlan() called in invalid state", _state == kNotInitialized);
+    auto status = _multiplanStage->runTrials(planYieldPolicy);
+    if (!status.isOK()) {
+        return status;
+    }
+    status = _multiplanStage->pickBestPlan();
+    _state = kInitialized;
+    return status;
+}
+
+const MultiPlanStats* MultiPlanner::getSpecificStats() const {
+    return static_cast<const MultiPlanStats*>(_multiplanStage->getSpecificStats());
+}
+
+Status MultiPlanner::runTrials(trial_period::TrialPhaseConfig trialConfig) {
+    tassert(
+        11451402, "MultiPlanner::runTrials() called in invalid state", _state == kNotInitialized);
+    auto trialPeriodYieldPolicy = makeClassicYieldPolicy(
+        opCtx(), cq()->nss(), static_cast<PlanStage*>(_multiplanStage), yieldPolicy());
+    return _multiplanStage->runTrials(trialPeriodYieldPolicy.get(), trialConfig);
+}
+
+Status MultiPlanner::pickBestPlan() {
+    auto status = _multiplanStage->pickBestPlan();
+    _state = kInitialized;
+    return status;
 }
 
 std::unique_ptr<QuerySolution> MultiPlanner::extractQuerySolution() {
     // The query solutions are owned by the 'MultiPlan' stage.
+    if (_state == kInitialized) {
+        _state = kDisposed;
+        return _multiplanStage->extractBestSolution();
+    }
     return nullptr;
 }
+
 }  // namespace mongo::classic_runtime_planner

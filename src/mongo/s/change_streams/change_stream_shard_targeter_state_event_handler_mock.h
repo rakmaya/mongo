@@ -31,6 +31,7 @@
 
 #include "mongo/db/pipeline/historical_placement_fetcher_mock.h"
 #include "mongo/s/change_streams/change_stream_shard_targeter_state_event_handler.h"
+#include "mongo/util/modules.h"
 
 #include <memory>
 #include <vector>
@@ -89,6 +90,7 @@ public:
         ++normalCallCount;
         return normalDecision;
     }
+
     ShardTargeterDecision handleEventInDegradedMode(
         OperationContext*,
         const ControlEvent& e,
@@ -97,6 +99,10 @@ public:
         calls.emplace_back(true, e);
         ++degradedCallCount;
         return degradedDecision;
+    }
+
+    std::string toString() const override {
+        return "ChangeStreamShardTargeterEventHandlerMock";
     }
 
     std::vector<Call> calls;

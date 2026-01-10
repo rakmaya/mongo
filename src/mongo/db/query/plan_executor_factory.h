@@ -48,6 +48,7 @@
 #include "mongo/db/query/sbe_plan_ranker.h"
 #include "mongo/db/query/stage_builder/classic_stage_builder.h"
 #include "mongo/db/query/stage_builder/sbe/builder_data.h"
+#include "mongo/util/modules.h"
 
 #include <cstddef>
 #include <memory>
@@ -77,7 +78,7 @@ namespace mongo::plan_executor_factory {
  * Note that the PlanExecutor will use the ExpressionContext associated with 'cq' and the
  * OperationContext associated with that ExpressionContext.
  */
-StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> make(
+MONGO_MOD_PUBLIC StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> make(
     std::unique_ptr<CanonicalQuery> cq,
     std::unique_ptr<WorkingSet> ws,
     std::unique_ptr<PlanStage> rootStage,
@@ -95,7 +96,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> make(
  * Note that the PlanExecutor will use the OperationContext associated with the 'expCtx'
  * ExpressionContext.
  */
-StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> make(
+MONGO_MOD_PUBLIC StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> make(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     std::unique_ptr<WorkingSet> ws,
     std::unique_ptr<PlanStage> rootStage,
@@ -106,7 +107,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> make(
     std::unique_ptr<QuerySolution> qs = nullptr);
 
 // TODO: SERVER-86878 Remove `StatusWith` return type from plan_executor_factory::make().
-StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> make(
+MONGO_MOD_PUBLIC StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> make(
     OperationContext* opCtx,
     std::unique_ptr<WorkingSet> ws,
     std::unique_ptr<PlanStage> rootStage,
@@ -118,7 +119,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> make(
     NamespaceString nss,
     PlanYieldPolicy::YieldPolicy yieldPolicy,
     boost::optional<size_t> cachedPlanHash,
-    QueryPlanner::CostBasedRankerResult cbrResult,
+    QueryPlanner::PlanRankingResult planRankingResult,
     stage_builder::PlanStageToQsnMap planStageQsnMap,
     std::vector<std::unique_ptr<PlanStage>> cbrRejectedPlanStages);
 
@@ -139,6 +140,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> make(
     std::unique_ptr<PlanYieldPolicySBE> yieldPolicy,
     bool isFromPlanCache,
     boost::optional<size_t> cachedPlanHash,
+    bool usedJoinOpt = false,
     std::unique_ptr<RemoteCursorMap> remoteCursors = nullptr,
     std::unique_ptr<RemoteExplainVector> remoteExplains = nullptr,
     std::unique_ptr<MultiPlanStage> classicRuntimePlannerStage = nullptr);
@@ -163,7 +165,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> make(
 /**
  * Constructs a plan executor for executing the given 'pipeline'.
  */
-std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> make(
+MONGO_MOD_PUBLIC std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> make(
     boost::intrusive_ptr<ExpressionContext> expCtx,
     std::unique_ptr<Pipeline> pipeline,
     PlanExecutorPipeline::ResumableScanType resumableScanType =

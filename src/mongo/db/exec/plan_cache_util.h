@@ -33,7 +33,6 @@
 #include "mongo/db/exec/classic/plan_stage.h"
 #include "mongo/db/exec/plan_stats.h"
 #include "mongo/db/exec/sbe/stages/stages.h"
-#include "mongo/db/local_catalog/collection.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/collection_query_info.h"
@@ -44,6 +43,8 @@
 #include "mongo/db/query/plan_ranker.h"
 #include "mongo/db/query/plan_ranking_decision.h"
 #include "mongo/db/query/stage_builder/sbe/builder_data.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/util/modules.h"
 
 #include <memory>
 #include <utility>
@@ -65,8 +66,11 @@ plan_cache_debug_info::DebugInfo buildDebugInfo(
 /**
  * Builds "DebugInfoSBE" for storing in the SBE plan cache. Pre-computes necessary debugging
  * information to build "PlanExplainerSBE" when recoverying the cached SBE plan from the cache.
+ * 'nss' is the NamespaceString for the main collection (the collection the original query was
+ * written against).
  */
-plan_cache_debug_info::DebugInfoSBE buildDebugInfo(const QuerySolution* solution);
+plan_cache_debug_info::DebugInfoSBE buildDebugInfo(const NamespaceString& nss,
+                                                   const QuerySolution* solution);
 
 /**
  * Updates the classic plan cache from candidates generated using classic planning, but with the

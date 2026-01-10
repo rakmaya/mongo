@@ -12,23 +12,6 @@ mongo_cc_library(
     srcs = [
         "set_terminate_internals.cpp",
     ],
-    hdrs = [
-        "chrono.h",
-        "condition_variable.h",
-        "exception.h",
-        "future.h",
-        "mutex.h",
-        "new.h",
-        "thread.h",
-        "trusted_hasher.h",
-        "type_traits.h",
-        "unordered_map.h",
-        "unordered_set.h",
-        "utility.h",
-        "//src/mongo/platform:compiler.h",
-        "//src/mongo/util:modules.h",
-        "//src/mongo/util:parking_lot.h",
-    ],
 )
 
 mongo_cc_unit_test(
@@ -48,7 +31,7 @@ mongo_cc_unit_test(
     srcs = [
         "sigaltstack_location_test.cpp",
     ],
-    has_custom_mainline = True,
+    provides_main = True,
     tags = ["mongo_unittest_second_group"],
     deps = [
         "//src/mongo:base",
@@ -60,7 +43,7 @@ mongo_cc_unit_test(
     srcs = [
         "set_terminate_dispatch_test.cpp",
     ],
-    has_custom_mainline = True,
+    provides_main = True,
     tags = ["mongo_unittest_first_group"],
     deps = [
         "//src/mongo:base",
@@ -72,7 +55,7 @@ mongo_cc_unit_test(
     srcs = [
         "set_terminate_from_main_die_in_thread_test.cpp",
     ],
-    has_custom_mainline = True,
+    provides_main = True,
     tags = ["mongo_unittest_seventh_group"],
     deps = [
         "//src/mongo:base",
@@ -84,7 +67,7 @@ mongo_cc_unit_test(
     srcs = [
         "set_terminate_from_thread_die_in_main_test.cpp",
     ],
-    has_custom_mainline = True,
+    provides_main = True,
     tags = ["mongo_unittest_seventh_group"],
     deps = [
         "//src/mongo:base",
@@ -96,7 +79,7 @@ mongo_cc_unit_test(
     srcs = [
         "set_terminate_from_thread_die_in_thread_test.cpp",
     ],
-    has_custom_mainline = True,
+    provides_main = True,
     tags = ["mongo_unittest_sixth_group"],
     deps = [
         "//src/mongo:base",

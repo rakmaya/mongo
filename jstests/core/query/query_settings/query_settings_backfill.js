@@ -14,6 +14,8 @@
 //   simulate_atlas_proxy_incompatible,
 //   # TODO SERVER-89461 Investigate why test using huge batch size timeout in suites with balancer.
 //   assumes_balancer_off,
+//   # TODO(SERVER-113800): Enable setClusterParameters with replicaset started with --shardsvr
+//   transitioning_replicaset_incompatible,
 // ]
 
 import {kGenericArgFieldNames} from "jstests/libs/cmd_object_utils.js";
@@ -21,6 +23,11 @@ import {assertDropAndRecreateCollection, assertDropCollection} from "jstests/lib
 import {configureFailPoint} from "jstests/libs/fail_point_util.js";
 import {after, before, describe, it} from "jstests/libs/mochalite.js";
 import {QuerySettingsUtils} from "jstests/libs/query/query_settings_utils.js";
+
+// The test sets a failpoint on a specific mongos and expects subsequent commands to hit that same mongos.
+// Certain tasks (such as "sharding_jscore...") may use test fixtures with multiple mongos.
+// pinToSingleMongos due to configureFailPoint command.
+TestData.pinToSingleMongos = true;
 
 class QuerySettingsBackfillMetricsTests {
     constructor(qsutils) {

@@ -41,6 +41,7 @@
 #include "mongo/util/cancellation.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/interruptible.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/string_map.h"
 
 #include <concepts>
@@ -49,7 +50,7 @@
 #include <type_traits>
 #include <utility>
 
-namespace mongo {
+namespace MONGO_MOD_PUB mongo {
 
 /**
  *
@@ -124,6 +125,8 @@ namespace mongo {
  *
  */
 class FailPoint {
+    class Impl;
+
 public:
     using ValType = unsigned;
     enum Mode { off, alwaysOn, random, nTimes, skip };
@@ -137,6 +140,263 @@ public:
     // long long values are able to be appended to BSON. If this is using declaration is changed,
     // please make sure that the new type is also BSON-compatible.
     using EntryCountT = long long;
+
+    /**
+     * An object representing a FailPoint's interaction with the code it is
+     * instrumenting. Users don't create these. They are only used within the
+     * execute and executeIf functions and returned by the scoped() and
+     * scopedIf() functions.
+     *
+     * If the FailPoint access attempt does not acquire a reference to the
+     * FailPoint, the returned LockHandle will be disengaged. Otherwise, it
+     * holds a reference to its associated FailPoint, ensuring that FailPoint's
+     * state doesn't change while a LockHandle is attached to it.
+     *
+     * Even an engaged LockHandle (holds a reference to a FailPoint)
+     * can still have `isActive()==false`.
+     *
+     * If LockHandle `isActive()`, then `getData()` may be called on it to
+     * retrieve injected data from the associated FailPoint.
+     *
+     * Ex:
+     *     if (auto scoped = failPoint.scoped(); scoped.isActive()) {
+     *         const BSONObj& data = scoped.getData();
+     *         //  failPoint injects some behavior, informed by `data`.
+     *     }
+     */
+    class LockHandle {
+    public:
+        LockHandle(Impl* impl, bool hit) : _impl(impl), _hit(hit) {}
+
+        ~LockHandle() {
+            if (MONGO_unlikely(_impl))
+                _impl->_unlock();
+        }
+
+        LockHandle(const LockHandle&) = delete;
+        LockHandle& operator=(const LockHandle&) = delete;
+        LockHandle(LockHandle&& o) noexcept
+            : _impl{std::exchange(o._impl, nullptr)}, _hit{std::exchange(o._hit, false)} {}
+        LockHandle& operator=(LockHandle&&) = delete;
+
+        /**
+         * Returns true if this LockHandle associated with a FailPoint, and
+         * the lock outcome was a "hit". `lockHandle.isActive()` generally
+         * means the block of FailPoint special behavior should execute.
+         */
+        bool isActive() const {
+            return MONGO_unlikely(_hit);
+        }
+
+        /**
+         * Returns true if the fail point is still enabled.
+         *
+         * This function does not increment the underlying counter. Note that the fail point
+         * may have been changed in various ways while a LockHandle is held:
+         * - The fail point may be in the process of mutation which toggles to disabled until
+         *   LockHandles are released.
+         * - The fail point may have the modes "activationProbability", "skip", or
+         *   "times".
+         */
+        bool isStillEnabled() const {
+            return _impl->_shouldFail(Impl::AlreadyCounted{true}, alwaysRun);
+        }
+
+        /** May only be called if isActive() is true. */
+        const BSONObj& getData() const {
+            invariant(_impl, "getData without holding failpoint lock");
+            return _impl->_data;
+        }
+
+    private:
+        Impl* _impl = nullptr;
+        bool _hit = false;  //< True if this represents a tryLock "hit".
+    };
+
+    /**
+     * Explicitly resets the seed used for the PRNG in this thread.  If not called on a thread,
+     * an instance of SecureRandom is used to seed the PRNG.
+     */
+    static void setThreadPRNGSeed(int32_t seed);
+
+    /**
+     * Parses the {mode, val, extra} from the BSON.
+     * obj = {
+     *   mode: modeElem // required
+     *   data: extra    // optional payload to inject into the FailPoint intercept site.
+     * }
+     * where `modeElem` is one of:
+     *       "off"
+     *       "alwaysOn"
+     *       {"times" : val}   // active for the next val calls
+     *       {"skip" : val}    // skip calls, activate on and after call number (val+1).
+     *       {"activationProbability" : val}  // val is in interval [0.0, 1.0]
+     */
+    MONGO_MOD_FILE_PRIVATE static StatusWith<ModeOptions> parseBSON(const BSONObj& obj);
+
+    /**
+     * FailPoint state can be kept alive during shutdown by setting `immortal` true.
+     * The usual macro definition does this, but FailPoint unit tests do not.
+     */
+    explicit FailPoint(std::string name, bool immortal = false);
+
+    FailPoint(const FailPoint&) = delete;
+    FailPoint& operator=(const FailPoint&) = delete;
+
+    /**
+     * If this FailPoint was constructed as `immortal` (FailPoints defined by
+     * MONGO_FAIL_POINT_DEFINE are immortal), this destructor does nothing. In
+     * that case the FailPoint (and the code it is instrumenting) can operate
+     * normally while the process shuts down.
+     */
+    ~FailPoint();
+
+    const std::string& getName() const {
+        return _impl()->getName();
+    }
+
+    /**
+     * Returns true if fail point is active.
+     *
+     * @param pred       see `executeIf` for more information.
+     *
+     * Calls to `shouldFail` should be placed inside MONGO_unlikely for performance.
+     *    if (MONGO_unlikely(failpoint.shouldFail())) ...
+     */
+    template <std::predicate<const BSONObj&> Pred>
+    bool shouldFail(const Pred& pred) {
+        return _impl()->shouldFail(pred);
+    }
+
+    bool shouldFail() {
+        return shouldFail(alwaysRun);
+    }
+
+    /**
+     * Changes the settings of this fail point. This will turn off the FailPoint and
+     * wait for all references on this FailPoint to go away before modifying it.
+     *
+     * @param mode  new mode
+     * @param val   unsigned having different interpretations depending on the mode:
+     *
+     *     - off, alwaysOn: ignored
+     *     - random: static_cast<int32_t>(std::numeric_limits<int32_t>::max() * p), where
+     *           where p is the probability that any given evaluation of the failpoint should
+     *           activate.
+     *     - nTimes: the number of times this fail point will be active when
+     *         #shouldFail/#execute/#scoped are called.
+     *     - skip: will become active and remain active after
+     *         #shouldFail/#execute/#scoped are called this number of times.
+     *
+     * @param extra arbitrary BSON object that can be stored to this fail point
+     *     that can be referenced afterwards with #getData. Defaults to an empty
+     *     document.
+     *
+     * @returns the number of times the fail point has been entered so far.
+     */
+    EntryCountT setMode(Mode mode, ValType val = 0, BSONObj extra = {}) {
+        return _impl()->setMode(std::move(mode), std::move(val), std::move(extra));
+    }
+
+    EntryCountT setMode(ModeOptions opt) {
+        return setMode(std::move(opt.mode), std::move(opt.val), std::move(opt.extra));
+    }
+
+    /**
+     * Waits until the fail point has been entered the desired number of times.
+     *
+     * @param targetTimesEntered the number of times the fail point has been entered.
+     *
+     * @returns the number of times the fail point has been entered so far.
+     */
+    EntryCountT waitForTimesEntered(EntryCountT targetTimesEntered) const {
+        return waitForTimesEntered(Interruptible::notInterruptible(), targetTimesEntered);
+    }
+
+    /**
+     * Like `waitForTimesEntered`, but interruptible via the `interruptible->sleepFor` mechanism.
+     * See `mongo::Interruptible::sleepFor`.
+     */
+    EntryCountT waitForTimesEntered(Interruptible* interruptible,
+                                    EntryCountT targetTimesEntered) const {
+        return _impl()->waitForTimesEntered(interruptible, targetTimesEntered);
+    }
+
+    /**
+     * @returns a BSON object showing the current mode and data stored.
+     */
+    MONGO_MOD_FILE_PRIVATE BSONObj toBSON() const {
+        return _impl()->toBSON();
+    }
+
+    /**
+     * Create a LockHandle from this FailPoint.
+     * The returned object will be active if the failpoint is active.
+     * If it's active, the returned object can be used to access FailPoint data.
+     */
+    LockHandle scoped() {
+        return scopedIf(alwaysRun);
+    }
+
+    /**
+     * Create a LockHandle from this FailPoint.
+     * If `pred(payload)` is true, then the returned object is active and the
+     * FailPoint's activation count is altered (relevant to e.g. the `nTimes` mode). If the
+     * predicate is false, an inactive LockHandle is returned and this FailPoint's mode is not
+     * modified at all.
+     * If it's active, the returned object can be used to access FailPoint data.
+     * The `pred` should be callable like a `bool pred(const BSONObj&)`.
+     */
+    template <std::predicate<const BSONObj&> Pred>
+    LockHandle scopedIf(const Pred& pred) {
+        return _impl()->tryLock(pred);
+    }
+
+    template <std::invocable<const BSONObj&> F>
+    void execute(const F& f) {
+        return executeIf(f, alwaysRun);
+    }
+
+    /**
+     * If `pred(payload)` is true, then `f(payload)` is executed and the FailPoint's
+     * activation count is altered (relevant to e.g. the `nTimes` mode). Otherwise, `f`
+     * is not executed and this FailPoint's mode is not altered (e.g. `nTimes` isn't
+     * consumed).
+     * The `pred` should be callable like a `bool pred(const BSONObj&)`.
+     */
+    template <std::invocable<const BSONObj&> F, std::predicate<const BSONObj&> Pred>
+    void executeIf(const F& f, const Pred& pred) {
+        auto sfp = scopedIf(pred);
+        if (MONGO_unlikely(sfp.isActive())) {
+            f(sfp.getData());
+        }
+    }
+
+    /**
+     * Take short `_kWaitGranularity` pauses for as long as the FailPoint is
+     * active. Though this makes several accesses to `shouldFail()`, it counts
+     * as only one increment in the FailPoint `nTimes` counter.
+     */
+    void pauseWhileSet() {
+        pauseWhileSet(Interruptible::notInterruptible());
+    }
+
+    /**
+     * Like `pauseWhileSet`, but interruptible via the `interruptible->sleepFor` mechanism.  See
+     * `mongo::Interruptible::sleepFor`.
+     */
+    void pauseWhileSet(Interruptible* interruptible) {
+        _impl()->pauseWhileSet(interruptible);
+    }
+
+    /**
+     * Like `pauseWhileSet`, but will also unpause as soon as the cancellation token is canceled.
+     * This method will throw if the token is canceled, to match the behavior when the
+     * Interruptible* is interrupted.
+     */
+    void pauseWhileSetAndNotCanceled(Interruptible* interruptible, const CancellationToken& token) {
+        _impl()->pauseWhileSetAndNotCanceled(interruptible, token);
+    }
 
 private:
     // Equivalent to a lambda like `[](const BSONObj&) { return true; }`, but only
@@ -157,54 +417,7 @@ private:
         static constexpr auto _kActiveBit = ValType{ValType{1} << 31};
 
     public:
-        class LockHandle {
-        public:
-            LockHandle(Impl* impl, bool hit) : _impl(impl), _hit(hit) {}
-
-            ~LockHandle() {
-                if (MONGO_unlikely(_impl))
-                    _impl->_unlock();
-            }
-
-            LockHandle(const LockHandle&) = delete;
-            LockHandle& operator=(const LockHandle&) = delete;
-            LockHandle(LockHandle&& o) noexcept
-                : _impl{std::exchange(o._impl, nullptr)}, _hit{std::exchange(o._hit, false)} {}
-            LockHandle& operator=(LockHandle&&) = delete;
-
-            /**
-             * Returns true if this LockHandle associated with a FailPoint, and
-             * the lock outcome was a "hit". `lockHandle.isActive()` generally
-             * means the block of FailPoint special behavior should execute.
-             */
-            bool isActive() const {
-                return MONGO_unlikely(_hit);
-            }
-
-            /**
-             * Returns true if the fail point is still enabled.
-             *
-             * This function does not increment the underlying counter. Note that the fail point
-             * may have been changed in various ways while a LockHandle is held:
-             * - The fail point may be in the process of mutation which toggles to disabled until
-             *   LockHandles are released.
-             * - The fail point may have the modes "activationProbability", "skip", or
-             *   "times".
-             */
-            bool isStillEnabled() const {
-                return _impl->_shouldFail(AlreadyCounted{true}, alwaysRun);
-            }
-
-            /** May only be called if isActive() is true. */
-            const BSONObj& getData() const {
-                invariant(_impl, "getData without holding failpoint lock");
-                return _impl->_data;
-            }
-
-        private:
-            Impl* _impl = nullptr;
-            bool _hit = false;  //< True if this represents a tryLock "hit".
-        };
+        friend class LockHandle;
 
         Impl(std::string name) : _name(std::move(name)) {}
 
@@ -340,219 +553,6 @@ private:
         // protects _mode, _modeValue, _data
         mutable stdx::mutex _modMutex;
     };
-
-public:
-    /**
-     * An object representing a FailPoint's interaction with the code it is
-     * instrumenting. Users don't create these. They are only used within the
-     * execute and executeIf functions and returned by the scoped() and
-     * scopedIf() functions.
-     *
-     * If the FailPoint access attempt does not acquire a reference to the
-     * FailPoint, the returned LockHandle will be disengaged. Otherwise, it
-     * holds a reference to its associated FailPoint, ensuring that FailPoint's
-     * state doesn't change while a LockHandle is attached to it.
-     *
-     * Even an engaged LockHandle (holds a reference to a FailPoint)
-     * can still have `isActive()==false`.
-     *
-     * LockHandle `isActive()`, then `getData()` may be called on it to
-     * retrieve injected data from the associated FailPoint.
-     *
-     * Ex:
-     *     if (auto scoped = failPoint.scoped(); scoped.isActive()) {
-     *         const BSONObj& data = scoped.getData();
-     *         //  failPoint injects some behavior, informed by `data`.
-     *     }
-     */
-    using LockHandle = Impl::LockHandle;
-
-    /**
-     * Explicitly resets the seed used for the PRNG in this thread.  If not called on a thread,
-     * an instance of SecureRandom is used to seed the PRNG.
-     */
-    static void setThreadPRNGSeed(int32_t seed);
-
-    /**
-     * Parses the {mode, val, extra} from the BSON.
-     * obj = {
-     *   mode: modeElem // required
-     *   data: extra    // optional payload to inject into the FailPoint intercept site.
-     * }
-     * where `modeElem` is one of:
-     *       "off"
-     *       "alwaysOn"
-     *       {"times" : val}   // active for the next val calls
-     *       {"skip" : val}    // skip calls, activate on and after call number (val+1).
-     *       {"activationProbability" : val}  // val is in interval [0.0, 1.0]
-     */
-    static StatusWith<ModeOptions> parseBSON(const BSONObj& obj);
-
-    /**
-     * FailPoint state can be kept alive during shutdown by setting `immortal` true.
-     * The usual macro definition does this, but FailPoint unit tests do not.
-     */
-    explicit FailPoint(std::string name, bool immortal = false);
-
-    FailPoint(const FailPoint&) = delete;
-    FailPoint& operator=(const FailPoint&) = delete;
-
-    /**
-     * If this FailPoint was constructed as `immortal` (FailPoints defined by
-     * MONGO_FAIL_POINT_DEFINE are immortal), this destructor does nothing. In
-     * that case the FailPoint (and the code it is instrumenting) can operate
-     * normally while the process shuts down.
-     */
-    ~FailPoint();
-
-    const std::string& getName() const {
-        return _impl()->getName();
-    }
-
-    /**
-     * Returns true if fail point is active.
-     *
-     * @param pred       see `executeIf` for more information.
-     *
-     * Calls to `shouldFail` should be placed inside MONGO_unlikely for performance.
-     *    if (MONGO_unlikely(failpoint.shouldFail())) ...
-     */
-    template <std::predicate<const BSONObj&> Pred>
-    bool shouldFail(const Pred& pred) {
-        return _impl()->shouldFail(pred);
-    }
-
-    bool shouldFail() {
-        return shouldFail(alwaysRun);
-    }
-
-    /**
-     * Changes the settings of this fail point. This will turn off the FailPoint and
-     * wait for all references on this FailPoint to go away before modifying it.
-     *
-     * @param mode  new mode
-     * @param val   unsigned having different interpretations depending on the mode:
-     *
-     *     - off, alwaysOn: ignored
-     *     - random: static_cast<int32_t>(std::numeric_limits<int32_t>::max() * p), where
-     *           where p is the probability that any given evaluation of the failpoint should
-     *           activate.
-     *     - nTimes: the number of times this fail point will be active when
-     *         #shouldFail/#execute/#scoped are called.
-     *     - skip: will become active and remain active after
-     *         #shouldFail/#execute/#scoped are called this number of times.
-     *
-     * @param extra arbitrary BSON object that can be stored to this fail point
-     *     that can be referenced afterwards with #getData. Defaults to an empty
-     *     document.
-     *
-     * @returns the number of times the fail point has been entered so far.
-     */
-    EntryCountT setMode(Mode mode, ValType val = 0, BSONObj extra = {}) {
-        return _impl()->setMode(std::move(mode), std::move(val), std::move(extra));
-    }
-
-    EntryCountT setMode(ModeOptions opt) {
-        return setMode(std::move(opt.mode), std::move(opt.val), std::move(opt.extra));
-    }
-
-    /**
-     * Waits until the fail point has been entered the desired number of times.
-     *
-     * @param targetTimesEntered the number of times the fail point has been entered.
-     *
-     * @returns the number of times the fail point has been entered so far.
-     */
-    EntryCountT waitForTimesEntered(EntryCountT targetTimesEntered) const {
-        return waitForTimesEntered(Interruptible::notInterruptible(), targetTimesEntered);
-    }
-
-    /**
-     * Like `waitForTimesEntered`, but interruptible via the `interruptible->sleepFor` mechanism.
-     * See `mongo::Interruptible::sleepFor`.
-     */
-    EntryCountT waitForTimesEntered(Interruptible* interruptible,
-                                    EntryCountT targetTimesEntered) const {
-        return _impl()->waitForTimesEntered(interruptible, targetTimesEntered);
-    }
-
-    /**
-     * @returns a BSON object showing the current mode and data stored.
-     */
-    BSONObj toBSON() const {
-        return _impl()->toBSON();
-    }
-
-    /**
-     * Create a LockHandle from this FailPoint.
-     * The returned object will be active if the failpoint is active.
-     * If it's active, the returned object can be used to access FailPoint data.
-     */
-    LockHandle scoped() {
-        return scopedIf(alwaysRun);
-    }
-
-    /**
-     * Create a LockHandle from this FailPoint.
-     * If `pred(payload)` is true, then the returned object is active and the
-     * FailPoint's activation count is altered (relevant to e.g. the `nTimes` mode). If the
-     * predicate is false, an inactive LockHandle is returned and this FailPoint's mode is not
-     * modified at all.
-     * If it's active, the returned object can be used to access FailPoint data.
-     * The `pred` should be callable like a `bool pred(const BSONObj&)`.
-     */
-    template <std::predicate<const BSONObj&> Pred>
-    LockHandle scopedIf(const Pred& pred) {
-        return _impl()->tryLock(pred);
-    }
-
-    template <std::invocable<const BSONObj&> F>
-    void execute(const F& f) {
-        return executeIf(f, alwaysRun);
-    }
-
-    /**
-     * If `pred(payload)` is true, then `f(payload)` is executed and the FailPoint's
-     * activation count is altered (relevant to e.g. the `nTimes` mode). Otherwise, `f`
-     * is not executed and this FailPoint's mode is not altered (e.g. `nTimes` isn't
-     * consumed).
-     * The `pred` should be callable like a `bool pred(const BSONObj&)`.
-     */
-    template <std::invocable<const BSONObj&> F, std::predicate<const BSONObj&> Pred>
-    void executeIf(const F& f, const Pred& pred) {
-        auto sfp = scopedIf(pred);
-        if (MONGO_unlikely(sfp.isActive())) {
-            f(sfp.getData());
-        }
-    }
-
-    /**
-     * Take short `_kWaitGranularity` pauses for as long as the FailPoint is
-     * active. Though this makes several accesses to `shouldFail()`, it counts
-     * as only one increment in the FailPoint `nTimes` counter.
-     */
-    void pauseWhileSet() {
-        pauseWhileSet(Interruptible::notInterruptible());
-    }
-
-    /**
-     * Like `pauseWhileSet`, but interruptible via the `interruptible->sleepFor` mechanism.  See
-     * `mongo::Interruptible::sleepFor`.
-     */
-    void pauseWhileSet(Interruptible* interruptible) {
-        _impl()->pauseWhileSet(interruptible);
-    }
-
-    /**
-     * Like `pauseWhileSet`, but will also unpause as soon as the cancellation token is canceled.
-     * This method will throw if the token is canceled, to match the behavior when the
-     * Interruptible* is interrupted.
-     */
-    void pauseWhileSetAndNotCanceled(Interruptible* interruptible, const CancellationToken& token) {
-        _impl()->pauseWhileSetAndNotCanceled(interruptible, token);
-    }
-
-private:
     const Impl* _rawImpl() const {
         return reinterpret_cast<const Impl*>(&_implStorage);
     }
@@ -582,7 +582,7 @@ private:
     std::aligned_storage_t<sizeof(Impl), alignof(Impl)> _implStorage;
 };
 
-class FailPointRegistry {
+class MONGO_MOD_FILE_PRIVATE FailPointRegistry {
 public:
     FailPointRegistry();
 
@@ -599,7 +599,7 @@ public:
     /**
      * @return a registered FailPoint, or nullptr if it was not registered.
      */
-    FailPoint* find(StringData name) const;
+    MONGO_MOD_PUBLIC FailPoint* find(StringData name) const;
 
     /**
      * Freezes this registry from being modified.
@@ -611,14 +611,14 @@ public:
      * failpoint to be set on the command line via --setParameter, but is only allowed when
      * running with '--setParameter enableTestCommands=1'.
      */
-    void registerAllFailPointsAsServerParameters();
+    MONGO_MOD_NEEDS_REPLACEMENT void registerAllFailPointsAsServerParameters();
 
     /**
      * Sets all registered FailPoints to Mode::off. Used primarily during unit test cleanup to
      * reset the state of all FailPoints set by the unit test. Does not prevent FailPoints from
      * being enabled again after.
      */
-    void disableAllFailpoints();
+    MONGO_MOD_PUBLIC void disableAllFailpoints();
 
 private:
     bool _frozen;
@@ -642,13 +642,8 @@ public:
     FailPointEnableBlock& operator=(const FailPointEnableBlock&) = delete;
 
     // Const access to the underlying FailPoint
-    const FailPoint* failPoint() const {
-        return _failPoint;
-    }
-
-    // Const access to the underlying FailPoint
     const FailPoint* operator->() const {
-        return failPoint();
+        return _failPoint;
     }
 
     // Return the value of timesEntered() when the block was entered
@@ -667,6 +662,7 @@ private:
  * @throw DBException corresponding to ErrorCodes::FailPointSetFailed if no failpoint
  * called failPointName exists.
  */
+MONGO_MOD_USE_REPLACEMENT(FailPointEnableBlock or globalFailPointRegistry().find())
 FailPoint::EntryCountT setGlobalFailPoint(const std::string& failPointName, const BSONObj& cmdObj);
 
 /**
@@ -690,4 +686,4 @@ FailPointRegistry& globalFailPointRegistry();
     ::mongo::FailPointRegisterer fp##failPointRegisterer(&fp);
 
 
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUB mongo

@@ -16,29 +16,44 @@ function assertSlowInProgressQueryLogged(db, comment, expectedPlanSummary) {
     assert.eq(log.attr.planSummary, expectedPlanSummary, "Unexpected plan summary in log line: " + logLine);
 }
 
-const kDocCount = 200;
+const kDocCount = 2048;
 
 // Ensure that we yield often enough to log the "slow" in-progress query.
-const conn = MongoRunner.runMongod({setParameter: {internalQueryExecYieldIterations: kDocCount / 10}});
+const conn = MongoRunner.runMongod({setParameter: {internalQueryExecYieldIterations: kDocCount / 128}});
 assert.neq(null, conn, "mongod was unable to start up");
 
 const db = conn.getDB("log_slow_in_progress_queries");
 const coll = db.test;
 
-assert.commandWorked(db.setLogLevel(1, "command.slowInProgress"));
-assert.commandWorked(db.setProfilingLevel(2, {slowms: -1}));
-
 assert.commandWorked(db.dropDatabase());
+assert.commandWorked(db.setProfilingLevel(0, {slowinprogms: 0}));
 
 const docs = [];
 for (let i = 0; i < kDocCount; ++i) {
     docs.push({a: i});
 }
-assert.commandWorked(coll.insertMany(docs));
-assert.commandWorked(coll.createIndex({a: 1}));
+
+function setup_coll(coll) {
+    assert.commandWorked(coll.insertMany(docs));
+    assert.commandWorked(coll.createIndex({a: 1}));
+}
+
+setup_coll(coll);
 
 assert.eq(kDocCount, coll.find({}).comment("Collection Scan").itcount());
 assertSlowInProgressQueryLogged(db, "Collection Scan", "COLLSCAN");
+
+// Slow in progress ms should be database-specific.
+const another_db = conn.getDB("log_slow_in_progress_queries_2");
+const another_db_coll = another_db.test;
+setup_coll(another_db_coll);
+
+assert.eq(kDocCount, another_db_coll.find({}).comment("Another Database Collection Scan").itcount());
+assert.eq(
+    null,
+    findSlowInProgressQueryLogLine(another_db, "Another Database Collection Scan"),
+    findSlowInProgressQueryLogLine(another_db, "Another Database Collection Scan"),
+);
 
 assert.eq(
     kDocCount,

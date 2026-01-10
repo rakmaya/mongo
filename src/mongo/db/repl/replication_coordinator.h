@@ -59,6 +59,7 @@
 #include "mongo/idl/generic_argument_gen.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/rpc/topology_version_gen.h"
+#include "mongo/util/concurrency/thread_pool.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/future.h"
 #include "mongo/util/interruptible.h"
@@ -268,7 +269,7 @@ public:
 
 
     /**
-     * Sets oldest timestamp value
+     * Sets oldest timestamp metric value and set it on the storage engine.
      */
     virtual void setOldestTimestamp(const Timestamp& timestamp);
 
@@ -546,6 +547,12 @@ public:
     virtual HostAndPort getMyHostAndPort() const = 0;
 
     /**
+     * Returns the maintenance port for this node as specified in the current replica set
+     * configuration.
+     */
+    virtual boost::optional<int> getMyMaintenancePort() const = 0;
+
+    /**
      * Sets this node into a specific follower mode.
      *
      * Returns OK if the follower mode was successfully set.  Returns NotSecondary if the
@@ -698,6 +705,13 @@ public:
      * last known optimes.
      */
     virtual void appendSecondaryInfoData(BSONObjBuilder* result) = 0;
+
+    /**
+     * Returns the ThreadPool used by replication to apply the sync source's operations in parallel
+     * (in OplogApplier) and to clone the databases and collections during initial sync.
+     * Note: the returned pointer can be null if called before the replication logic was started.
+     */
+    virtual ThreadPool* getDbWorkThreadPool() const = 0;
 
     /**
      * Returns the current ReplSetConfig.
@@ -1249,7 +1263,7 @@ public:
     /**
      * Returns true if the node undergoes initial sync or rollback.
      */
-    bool isInInitialSyncOrRollback() const;
+    virtual bool isInInitialSyncOrRollback() const;
 
     /**
      * Returns whether the provided client last committed opTime is older than our view of
@@ -1260,6 +1274,12 @@ public:
 
 protected:
     ReplicationCoordinator();
+
+    /**
+     * Validates that any afterClusterTime or atClusterTime specified are paired with an allowed
+     * readConcernLevel.
+     */
+    Status readConcernArgsValidForWait(ReadConcernArgs& readConcern) const;
 };
 
 }  // namespace repl

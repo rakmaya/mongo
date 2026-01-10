@@ -51,18 +51,23 @@
 namespace mongo {
 
 // No privileges are required to run this agg stage as it is only available with enableTestCommands.
-REGISTER_TEST_DOCUMENT_SOURCE(listMqlEntities,
-                              DocumentSourceListMqlEntities::LiteParsed::parse,
-                              DocumentSourceListMqlEntities::createFromBson);
+REGISTER_TEST_LITE_PARSED_DOCUMENT_SOURCE(listMqlEntities,
+                                          DocumentSourceListMqlEntities::LiteParsed::parse);
+
+REGISTER_DOCUMENT_SOURCE_WITH_STAGE_PARAMS_DEFAULT(listMqlEntities,
+                                                   DocumentSourceListMqlEntities,
+                                                   ListMqlEntitiesStageParams);
+
 ALLOCATE_DOCUMENT_SOURCE_ID(listMqlEntities, DocumentSourceListMqlEntities::id)
 
 boost::intrusive_ptr<DocumentSource> DocumentSourceListMqlEntities::createFromBson(
     BSONElement elem, const boost::intrusive_ptr<ExpressionContext>& expCtx) {
     const auto stageName = elem.fieldNameStringData();
-    invariant(
-        stageName == kStageName,
+    tassert(
+        11282984,
         str::stream() << "Unexpected stage registered with DocumentSourceListMqlEntities parser: "
-                      << stageName);
+                      << stageName,
+        stageName == kStageName);
     uassert(9590101,
             str::stream() << "expected an object as specification for " << kStageName
                           << " stage, got " << typeName(elem.type()),
@@ -101,7 +106,7 @@ const char* DocumentSourceListMqlEntities::getSourceName() const {
     return kStageName.data();
 }
 
-DocumentSourceContainer::iterator DocumentSourceListMqlEntities::doOptimizeAt(
+DocumentSourceContainer::iterator DocumentSourceListMqlEntities::optimizeAt(
     DocumentSourceContainer::iterator itr, DocumentSourceContainer* container) {
     return std::next(itr);
 }

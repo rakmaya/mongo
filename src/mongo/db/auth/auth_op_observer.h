@@ -31,8 +31,6 @@
 
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/database_name.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_options.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/op_observer/op_observer_noop.h"
@@ -40,6 +38,9 @@
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/session/logical_session_id.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_options.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/uuid.h"
 
 #include <cstdint>
@@ -54,7 +55,7 @@ namespace mongo {
  * OpObserver for authentication. Observes all secondary replication traffic and filters down to
  * relevant entries for authentication.
  */
-class AuthOpObserver final : public OpObserverNoop {
+class MONGO_MOD_PUBLIC AuthOpObserver final : public OpObserverNoop {
     AuthOpObserver(const AuthOpObserver&) = delete;
     AuthOpObserver& operator=(const AuthOpObserver&) = delete;
 

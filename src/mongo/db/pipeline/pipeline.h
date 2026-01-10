@@ -36,13 +36,12 @@
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/document_metadata_fields.h"
 #include "mongo/db/exec/document_value/value.h"
-#include "mongo/db/global_catalog/catalog_cache/catalog_cache.h"
-#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/pipeline/lite_parsed_pipeline.h"
 #include "mongo/db/pipeline/pipeline_split_state.h"
 #include "mongo/db/pipeline/process_interface/mongo_process_interface.h"
 #include "mongo/db/pipeline/sharded_agg_helpers_targeting_policy.h"
@@ -53,10 +52,13 @@
 #include "mongo/db/query/plan_summary_stats.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
+#include "mongo/db/router_role/routing_cache/catalog_cache.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/shard_role.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
 
 #include <functional>
 #include <memory>
@@ -79,7 +81,7 @@ using PipelineValidatorCallback = std::function<void(const Pipeline&)>;
  * A Pipeline object represents a list of DocumentSources and is responsible for optimizing the
  * pipeline.
  */
-class Pipeline {
+class MONGO_MOD_PUBLIC Pipeline {
 public:
     /**
      * The list of default supported match expression features.
@@ -101,37 +103,14 @@ public:
         MatchExpressionParser::AllowedFeatures::kGeoNear;
 
     /**
-     * Parses a Pipeline from a vector of BSONObjs then invokes the optional 'validator' callback
-     * with a reference to the newly created Pipeline. If no validator callback is given, this
-     * method assumes that we're parsing a top-level pipeline. Throws an exception if it failed to
-     * parse or if any exception occurs in the validator. The returned pipeline is not optimized,
-     * but the caller may convert it to an optimized pipeline by calling optimizePipeline().
-     *
-     * It is illegal to create a pipeline using an ExpressionContext which contains a collation that
-     * will not be used during execution of the pipeline. Doing so may cause comparisons made during
-     * parse-time to return the wrong results.
+     * Like parse, but takes a LiteParsedPipeline instead of raw BSONObjs.
+     * If 'isFacetPipeline' is true, skips top-level validators.
      */
-    static std::unique_ptr<Pipeline> parse(const std::vector<BSONObj>& rawPipeline,
-                                           const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                                           PipelineValidatorCallback validator = nullptr);
-
-    /**
-     * Parses sub-pipelines from a $facet aggregation. Like parse(), but skips top-level
-     * validators.
-     */
-    static std::unique_ptr<Pipeline> parseFacetPipeline(
-        const std::vector<BSONObj>& rawPipeline,
+    static std::unique_ptr<Pipeline> parseFromLiteParsed(
+        const LiteParsedPipeline& liteParsedPipeline,
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
-        PipelineValidatorCallback validator = nullptr);
-
-    /**
-     * Like parse, but takes a BSONElement instead of a vector of objects. 'arrElem' must be an
-     * array of objects.
-     */
-    static std::unique_ptr<Pipeline> parseFromArray(
-        BSONElement arrayElem,
-        const boost::intrusive_ptr<ExpressionContext>& expCtx,
-        PipelineValidatorCallback validator = nullptr);
+        PipelineValidatorCallback validator = nullptr,
+        bool isFacetPipeline = false);
 
     /**
      * Creates a Pipeline from an existing DocumentSourceContainer.
@@ -267,18 +246,18 @@ public:
      * helpers, which handle redaction.
      */
     std::vector<Value> serialize(
-        boost::optional<const SerializationOptions&> opts = boost::none) const;
+        const boost::optional<const SerializationOptions&>& opts = boost::none) const;
     std::vector<BSONObj> serializeToBson(
-        boost::optional<const SerializationOptions&> opts = boost::none) const;
+        const boost::optional<const SerializationOptions&>& opts = boost::none) const;
     static std::vector<Value> serializeContainer(
         const DocumentSourceContainer& container,
-        boost::optional<const SerializationOptions&> opts = boost::none);
+        const boost::optional<const SerializationOptions&>& opts = boost::none);
 
     std::vector<BSONObj> serializeForLogging(
-        boost::optional<const SerializationOptions&> opts = boost::none) const;
+        const boost::optional<const SerializationOptions&>& opts = boost::none) const;
     static std::vector<BSONObj> serializeContainerForLogging(
         const DocumentSourceContainer& container,
-        boost::optional<const SerializationOptions&> opts = boost::none);
+        const boost::optional<const SerializationOptions&>& opts = boost::none);
     static std::vector<BSONObj> serializePipelineForLogging(const std::vector<BSONObj>& pipeline);
 
     // The initial source is special since it varies between mongos and mongod.
@@ -433,6 +412,20 @@ public:
     void reattachToOperationContext(OperationContext* opCtx);
 
     /**
+     * Passes catalog information to underlying DocumentSources that need to directly access
+     * collection data during execution.
+     *
+     * This method should be called on a fully desugared pipeline and MUST be invoked on all
+     * pipelines before execution begins, including on subpipelines, to ensure all stages receive
+     * the necessary catalog information.
+     *
+     * This is for shard-level catalog information and not for routing information.
+     */
+    void bindCatalogInfo(
+        const MultipleCollectionAccessor& collections,
+        boost::intrusive_ptr<ShardRoleTransactionResourcesStasherForPipeline> sharedStasher);
+
+    /**
      * Recursively validate the operation contexts associated with this pipeline. Return true if
      * all document sources and subpipelines point to the given operation context.
      */
@@ -459,17 +452,6 @@ private:
     Pipeline(const boost::intrusive_ptr<ExpressionContext>& pCtx);
     Pipeline(DocumentSourceContainer stages, const boost::intrusive_ptr<ExpressionContext>& pCtx);
 
-    /**
-     * Helper for public methods that parse pipelines from vectors of different types.
-     */
-    template <class T>
-    static std::unique_ptr<Pipeline> parseCommon(
-        const std::vector<T>& rawPipeline,
-        const boost::intrusive_ptr<ExpressionContext>& expCtx,
-        PipelineValidatorCallback validator,
-        bool isFacetPipeline,
-        std::function<BSONObj(T)> getElemFunc);
-
     DocumentSourceContainer _sources;
 
     PipelineSplitState _splitState = PipelineSplitState::kUnsplit;
@@ -484,5 +466,5 @@ private:
     bool _translatedForViewlessTimeseries{false};
 };
 
-using PipelinePtr = std::unique_ptr<Pipeline>;
+using PipelinePtr MONGO_MOD_PUBLIC = std::unique_ptr<Pipeline>;
 }  // namespace mongo

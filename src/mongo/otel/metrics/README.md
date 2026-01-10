@@ -1,0 +1,217 @@
+# MongoDB Open Telemetry Metrics API
+
+This module provides an OpenTelemetry-compatible metrics API for instrumenting MongoDB code. Metrics are created through the `MetricsService` and can be tested using the provided test utilities.
+
+## Creating Metrics
+
+Metrics are created by calling the `create*` functions on the [`MetricsService`](https://github.com/mongodb/mongo/blob/a013280e0e5dc374f78adbc4cb68b4d190c1d9ed/src/mongo/otel/metrics/metrics_service.h), which is accessed via the `ServiceContext`:
+
+```cpp
+#include "mongo/otel/metrics/metric_names.h"
+#include "mongo/otel/metrics/metrics_service.h"
+
+void initializeMetrics(ServiceContext* svcCtx) {
+    auto& metricsService = otel::metrics::MetricsService::get(svcCtx);
+
+    auto* operationsCounter = metricsService.createInt64Counter(
+        otel::metrics::MetricNames::kQueryCount,        // name
+        "Number of queries executed",   // description
+        otel::metrics::MetricUnit::kQueries);          // unit
+}
+```
+
+Metrics should be stashed once they are created to avoid taking a lock on the global list of metrics.
+
+### MetricName Registry
+
+All metric names must be registered in the [`MetricNames`](metric_names.h) class. This central
+registry ensures the N&O team has full ownership over new OTel metrics in the server for centralized
+collaboration with downstream OTel consumers. OTel metrics are stored in time-series DBs by the SRE
+team, and a sudden increase in metrics will result in operational costs ballooning for the SRE team,
+which is why N&O owns this registry.
+
+When adding a new metric, add a `static constexpr MetricName` entry to the `MetricNames` class in `metric_names.h`, grouped under your team name:
+
+```cpp
+class MetricNames {
+public:
+    // Query Team Metrics
+    static constexpr MetricName kQueryCount = {"num_queries"};
+    static constexpr MetricName kQueryLatency = {"query_latency"};
+};
+```
+
+### Naming Conventions
+
+Follow [OpenTelemetry naming conventions](https://opentelemetry.io/docs/specs/semconv/general/naming/):
+
+- Use lowercase with dots as separators for namespaces (e.g., `network.connections.active`), and
+  underscores to separate words within namespaces (`slow_queries`)
+- Put every metric within a namespace related to the context of the metric (e.g.,
+  `network.connections.active`, rather than just `connections.active`)
+- Be descriptive but concise, there is no need to restate the units as part of the metric name
+
+`mongodb.` will be automatically prepended to all metric names because it is the service name provided to OTel.
+
+### Available Units
+
+The [`MetricUnit`](metric_unit.h) enum provides standard units. Please add any additional units to
+the enum as they are needed.
+
+## Metric Types
+
+Choose the appropriate metric type based on what you're measuring:
+
+### Counter
+
+**Use when:** You need to track a value that only increases over time. Rate-based queries will typically be run on these metrics.
+
+**Examples:**
+
+- Number of operations performed
+- Total bytes transferred
+- Number of connections established
+- Query count
+
+```cpp
+auto* counter = otel::metrics::MetricsService::get(svcCtx).createInt64Counter(
+    otel::metrics::MetricNames::kOperationsTotal,
+    "Total number of operations performed",
+    otel::metrics::MetricUnit::kOperations);
+
+counter->add(1);  // Increment by 1
+counter->add(10); // Increment by 10
+```
+
+**Important:** Counter values must only increase. Attempting to add a negative value will throw an exception.
+
+### Gauge
+
+**Use when:** You need to track a value that can go up or down.
+
+**Examples:**
+
+- Current number of active connections
+- Memory usage
+- Queue depth
+- Cache size
+
+### Histogram
+
+**Use when:** You need to track the distribution of values.
+
+**Examples:**
+
+- Operation latencies
+- Request sizes
+
+#### Explicit Bucket Boundaries
+
+Histograms can optionally be created with a list of explicit bucket boundaries. See the
+documentation for `createInt64Histogram` in [`metrics_service.h`](metrics_service.h) for more
+information.
+
+## Testing Metrics
+
+The [`metrics_test_util.h`](https://github.com/mongodb/mongo/blob/a013280e0e5dc374f78adbc4cb68b4d190c1d9ed/src/mongo/otel/metrics/metrics_test_util.h) header provides utilities for testing that your code correctly records metrics.
+
+### OtelMetricsCapturer
+
+The [`OtelMetricsCapturer`](https://github.com/mongodb/mongo/blob/a013280e0e5dc374f78adbc4cb68b4d190c1d9ed/src/mongo/otel/metrics/metrics_test_util.h#L96) sets up an in-memory metrics exporter that captures all metrics created during a test. **OtelMetricsCapturer must be constructed before any metrics are created** to ensure they are captured.
+
+```cpp
+#include "mongo/otel/metrics/metric_names.h"
+#include "mongo/otel/metrics/metrics_test_util.h"
+#include "mongo/otel/metrics/metrics_service.h"
+#include "mongo/unittest/unittest.h"
+
+namespace mongo::otel::metrics {
+
+TEST(MyFeatureTest, RecordsMetrics) {
+    otel::metrics::OtelMetricsCapturer capturer;
+
+    auto* counter = otel::metrics::MetricsService::get(getServiceContext()).createInt64Counter(
+        otel::metrics::MetricNames::kMyFeatureEvents,
+        "Number of events processed",
+        otel::metrics::MetricUnit::kOperations);
+    counter->add(5);
+
+    ASSERT_EQ(capturer.readInt64Counter(otel::metrics::MetricNames::kMyFeatureEvents), 5);
+}
+
+}  // namespace mongo::otel::metrics
+```
+
+## Build Dependencies
+
+To use the metrics API, add the appropriate dependency to your `BUILD.bazel`:
+
+```python
+mongo_cc_library(
+    name = "my_library",
+    # ...
+    deps = [
+        "//src/mongo/otel/metrics:metrics_service",
+    ],
+)
+```
+
+For tests using the test utilities:
+
+```python
+mongo_cc_unit_test(
+    name = "my_test",
+    # ...
+    deps = [
+        "//src/mongo/otel/metrics:metrics_test_util",
+    ],
+)
+```
+
+## Exporting Metrics
+
+Metrics can be exported in [OTLP format](https://github.com/open-telemetry/opentelemetry-proto/tree/main/docs) using either the file exporter or HTTP exporter. Configure these via server parameters at startup. Note that only one exporter can be active at a time.
+
+### File Exporter
+
+Export metrics to local JSONL files by specifying a directory:
+
+```bash
+mongod --openTelemetryMetricsDirectory=/var/log/mongodb/metrics
+```
+
+Metrics are written to files with the pattern: `mongodb-{pid}-%Y%m%d-metrics.jsonl`
+
+For example: `mongodb-12345-20251218-metrics.jsonl`
+
+### HTTP Exporter
+
+Export metrics to an OpenTelemetry collector or compatible backend via HTTP:
+
+```bash
+mongod --openTelemetryMetricsHttpEndpoint="http://localhost:4318/v1/metrics"
+```
+
+The HTTP exporter supports optional gzip compression:
+
+```bash
+mongod --openTelemetryMetricsHttpEndpoint="http://localhost:4318/v1/metrics" \
+       --openTelemetryMetricsCompression=gzip
+```
+
+### Export Timing
+
+Control how frequently metrics are exported and the timeout for export operations:
+
+| Parameter                             | Description                       | Default |
+| ------------------------------------- | --------------------------------- | ------- |
+| `--openTelemetryExportIntervalMillis` | Time between consecutive exports  | 1000 ms |
+| `--openTelemetryExportTimeoutMillis`  | Timeout for each export operation | 500 ms  |
+
+### Additional Export Methods
+
+Additional export methods (such as Prometheus Pull) are in development.
+
+## Feature Flag
+
+Metrics are gated behind the `featureFlagOtelMetrics` feature flag. The `OtelMetricsCapturer` automatically enables this flag in tests. In production, ensure the flag is enabled for metrics to be collected.

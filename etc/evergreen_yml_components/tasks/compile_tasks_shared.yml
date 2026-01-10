@@ -25,7 +25,8 @@ variables:
       - func: "save code coverage data"
       - func: "save mongo coredumps"
       - func: "generate hang analyzer tasks"
-      - func: "save failed unittests"
+      - func: "attach bazel invocation text"
+      - func: "save failed tests"
       - func: "save bazel headers"
       - func: "save bazel jvm dump"
       - func: "save bazel exec logs"
@@ -41,9 +42,9 @@ variables:
             src/gcov-intermediate-files.tgz
             src/*.core src/*.mdmp src/*.core.gz src/*.mdmp.gz
             mongo-coredumps.json
-            src/dist-unittests/bin/*
-            src/dist-unittests/lib/*
-            mongo-unittests.tgz
+            src/dist-tests/bin/*
+            src/dist-tests/lib/*
+            mongo-tests.tgz
             src/debugger*.*
             src/mongo-hanganalyzer.tgz
             diskstats.tgz
@@ -224,6 +225,8 @@ tasks:
             "src/bazel/**"
             "src/buildscripts/**"
             "src/docker_compose/**"
+            "src/etc/BUILD.bazel"
+            "src/etc/*san.denylist"
             "src/etc/*san.suppressions"
             "src/etc/backports_required_for_multiversion_tests.yml"
             "src/etc/evergreen.yml"
@@ -247,7 +250,7 @@ tasks:
             "src/src/**/*.yml"
             "src/src/mongo/client/sdam/json_tests/sdam_tests/**"
             "src/src/mongo/client/sdam/json_tests/server_selection_tests/**"
-            "src/src/mongo/db/extension/test_examples/aggregation_stage_stub_parsers.json"
+            "src/src/mongo/db/extension/test_examples/aggregation_stage_fallback_parsers.json"
             "src/src/mongo/db/modules/atlas/evergreen/**"
             "src/src/mongo/db/modules/atlas/jstests/**"
             "src/src/mongo/db/modules/enterprise/docs/**"
@@ -261,10 +264,16 @@ tasks:
             "src/src/mongo/util/version/**"
             "src/src/third_party/JSON-Schema-Test-Suite/tests/draft4/**"
             "src/src/third_party/abseil-cpp/**"
+            "src/src/third_party/cares/**"
+            "src/src/third_party/boringssl_replacement/**"
+            "src/src/third_party/googletest/**"
             "src/src/third_party/grpc/**"
             "src/src/third_party/mock_ocsp_responder/**"
             "src/src/third_party/protobuf/**"
+            "src/src/third_party/re2/**"
             "src/src/third_party/schemastore.org/**"
+            "src/src/third_party/zlib/**"
+            "src/.tmp/_placeholder_"
             "src/tools/**"
             "src/x509/**"
 
@@ -290,7 +299,7 @@ tasks:
           permissions: private
           visibility: signed
           content_type: application/tar
-          display_name: Artifacts
+          display_name: Artifacts zstd
           optional: true
 
       - command: archive.targz_pack

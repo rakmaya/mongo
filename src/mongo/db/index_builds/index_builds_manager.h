@@ -38,34 +38,25 @@
 #include "mongo/db/index_builds/rebuild_indexes.h"
 #include "mongo/db/index_builds/repl_index_build_state.h"
 #include "mongo/db/index_builds/resumable_index_builds_gen.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/index_catalog.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/record_id.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/stdx/mutex.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/uuid.h"
 
-#include <functional>
 #include <map>
 #include <memory>
-#include <string>
 #include <utility>
 #include <vector>
 
-#include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
 
-namespace mongo {
-
-class Collection;
-class CollectionPtr;
-class OperationContext;
-class ServiceContext;
-struct IndexBuildInfo;
-
+namespace MONGO_MOD_PUBLIC mongo {
 enum IndexBuildRecoveryState { Building, Verifying, Committing };
 
 /**
@@ -143,10 +134,7 @@ public:
      * Returns the number of records and the size of the data iterated over.
      */
     StatusWith<std::pair<long long, long long>> startBuildingIndexForRecovery(
-        OperationContext* opCtx,
-        const CollectionAcquisition& coll,
-        const UUID& buildUUID,
-        RepairData repair);
+        OperationContext* opCtx, const CollectionAcquisition& coll, const UUID& buildUUID);
 
     /**
      * Document inserts observed during the scanning/insertion phase of an index build are not
@@ -247,4 +235,4 @@ private:
     std::map<UUID, std::unique_ptr<MultiIndexBlock>> _builders;
 };
 
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUBLIC mongo

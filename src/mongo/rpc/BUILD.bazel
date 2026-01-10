@@ -15,18 +15,13 @@ mongo_cc_library(
         "message.cpp",
         "op_msg.cpp",
     ],
-    hdrs = [
-        "message.h",
-        "op_compressed.h",
-        "op_msg.h",
-    ],
     deps = [
-        "//src/mongo/bson:bson_validate",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/bson:bson_validate",
         "//src/mongo/bson/dotted_path:dotted_path_support",
-        "//src/mongo/bson/util:bson_extract",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/bson/util:bson_extract",
         "//src/mongo/db:multitenancy",
         "//src/mongo/db:server_base",
-        "//src/mongo/db:wire_version",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/db:wire_version",
         "//src/mongo/db/auth:security_token_auth",
     ] + select({
         "//bazel/config:use_wiredtiger_enabled": [
@@ -50,17 +45,14 @@ mongo_cc_library(
         "//src/mongo/rpc/metadata:client_metadata.cpp",
         "//src/mongo/rpc/metadata:client_metadata_gen",
     ],
-    hdrs = [
-        "//src/mongo/rpc/metadata:client_metadata.h",
-    ],
     deps = [
         "//src/mongo:base",
         "//src/mongo/db:server_base",
         "//src/mongo/db:service_context",
-        "//src/mongo/transport:message_compressor",  # TODO(SERVER-93876): Remove.
-        "//src/mongo/util:processinfo",  # TODO(SERVER-93876): Remove.
-        "//src/mongo/util/concurrency:spin_lock",  # TODO(SERVER-93876): Remove.
-        "//src/mongo/util/net:network",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/transport:message_compressor",
+        "//src/mongo/util:processinfo",
+        "//src/mongo/util/concurrency:spin_lock",
+        "//src/mongo/util/net:network",
     ],
 )
 
@@ -73,28 +65,21 @@ mongo_cc_library(
         "//src/mongo/rpc/metadata:oplog_query_metadata.cpp",
         "//src/mongo/rpc/metadata:repl_set_metadata.cpp",
     ],
-    hdrs = [
-        "metadata.h",
-        "//src/mongo/rpc/metadata:egress_metadata_hook_list.h",
-        "//src/mongo/rpc/metadata:metadata_hook.h",
-        "//src/mongo/rpc/metadata:oplog_query_metadata.h",
-        "//src/mongo/rpc/metadata:repl_set_metadata.h",
-    ],
     deps = [
         ":client_metadata",
-        ":message",  # TODO(SERVER-93876): Remove.
+        ":message",
         ":metadata_impersonated_user",
-        "//src/mongo/bson/util:bson_extract",  # TODO(SERVER-93876): Remove.
-        "//src/mongo/client:read_preference",  # TODO(SERVER-93876): Remove.
-        "//src/mongo/db:multitenancy",  # TODO(SERVER-93876): Remove.
-        "//src/mongo/db:raw_data_operation",
+        "//src/mongo/bson/util:bson_extract",
+        "//src/mongo/client:read_preference",
+        "//src/mongo/db:multitenancy",
         "//src/mongo/db:server_base",
-        "//src/mongo/db:signed_logical_time",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/db:signed_logical_time",
         "//src/mongo/db:vector_clock",
-        "//src/mongo/db:write_block_bypass",
-        "//src/mongo/db/auth:security_token",  # TODO(SERVER-93876): Remove.
-        "//src/mongo/db/repl:optime",  # TODO(SERVER-93876): Remove.
-        "//src/mongo/util/concurrency:spin_lock",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/db/auth:security_token",
+        "//src/mongo/db/repl:optime",
+        "//src/mongo/db/shard_role/shard_catalog:raw_data_operation",
+        "//src/mongo/db/topology/user_write_block:write_block_bypass",
+        "//src/mongo/util/concurrency:spin_lock",
     ],
 )
 
@@ -115,26 +100,16 @@ mongo_cc_library(
         "reply_builder_interface.cpp",
         ":object_check_gen",
     ],
-    hdrs = [
-        "check_allowed_op_query_cmd.h",
-        "factory.h",
-        "legacy_reply.h",
-        "legacy_reply_builder.h",
-        "legacy_request.h",
-        "object_check.h",
-        "op_msg_rpc_impls.h",
-        "reply_builder_interface.h",
-    ],
     deps = [
         ":message",
         ":metadata",
-        ":rewrite_state_change_errors",  # TODO(SERVER-93876): Remove.
+        ":rewrite_state_change_errors",
         "//src/mongo/db:dbmessage",
-        "//src/mongo/db:server_base",  # TODO(SERVER-93876): Remove.
-        "//src/mongo/db/commands:test_commands_enabled",  # TODO(SERVER-93876): Remove.
-        "//src/mongo/db/stats:counters",  # TODO(SERVER-93876): Remove.
-        "//src/mongo/s:common_s",  # TODO(SERVER-93876): Remove.
-        "//src/mongo/util/net:network",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/db:server_base",
+        "//src/mongo/db/commands:test_commands_enabled",
+        "//src/mongo/db/stats:counters",
+        "//src/mongo/s:common_s",
+        "//src/mongo/util/net:network",
     ],
 )
 
@@ -148,19 +123,12 @@ mongo_cc_library(
         "//src/mongo/rpc/metadata:audit_user_attrs_client_observer.cpp",
         "//src/mongo/rpc/metadata:impersonated_client_session.cpp",
     ],
-    hdrs = [
-        "//src/mongo/rpc/metadata:audit_client_attrs.h",
-        "//src/mongo/rpc/metadata:audit_metadata.h",
-        "//src/mongo/rpc/metadata:audit_user_attrs.h",
-        "//src/mongo/rpc/metadata:audit_user_attrs_client_observer.h",
-        "//src/mongo/rpc/metadata:impersonated_client_session.h",
-    ],
     deps = [
         "//src/mongo:base",
-        "//src/mongo/db:server_base",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/db:server_base",
         "//src/mongo/db:server_feature_flags",  # TODO(SERVER-83990): Remove.
-        "//src/mongo/db:server_options",  # TODO(SERVER-93876): Remove.
-        "//src/mongo/db:service_context",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/db:server_options",
+        "//src/mongo/db:service_context",
         "//src/mongo/db/auth",
     ],
 )
@@ -184,15 +152,12 @@ mongo_cc_library(
         "rewrite_state_change_errors.cpp",
         "rewrite_state_change_errors_server_parameter_gen",
     ],
-    hdrs = [
-        "rewrite_state_change_errors.h",
-    ],
     deps = [
-        ":message",  # TODO(SERVER-93876): Remove.
-        "//src/mongo:base",  # TODO(SERVER-93876): Remove.
-        "//src/mongo/bson/util:bson_extract",  # TODO(SERVER-93876): Remove.
+        ":message",
+        "//src/mongo:base",
+        "//src/mongo/bson/util:bson_extract",
         "//src/mongo/db:server_base",
-        "//src/mongo/db:service_context",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/db:service_context",
         "//src/mongo/db/exec/mutable_bson",
         "//src/mongo/util:pcre_wrapper",
     ],
@@ -205,7 +170,6 @@ mongo_cc_library(
         "write_concern_error_detail.cpp",
         "write_concern_error_gen",
     ],
-    private_hdrs = [":write_concern_error_detail.h"],
     deps = [
         "//src/mongo/bson/util:bson_extract",
         "//src/mongo/db:common",
@@ -217,9 +181,6 @@ mongo_cc_library(
     name = "get_status_from_command_result",
     srcs = [
         "get_status_from_command_result.cpp",
-    ],
-    hdrs = [
-        "get_status_from_command_result.h",
     ],
     deps = [
         "//src/mongo:base",
@@ -256,7 +217,6 @@ mongo_cc_unit_test(
         "//src/mongo/rpc/metadata:repl_set_metadata_test.cpp",
         "//src/mongo/rpc/metadata:security_token_metadata_test.cpp",
     ],
-    private_hdrs = [":op_msg_test.h"],
     tags = ["mongo_unittest_fifth_group"],
     target_compatible_with = select({
         "//bazel/config:use_wiredtiger_enabled": [],
@@ -268,10 +228,9 @@ mongo_cc_unit_test(
         ":rewrite_state_change_errors",
         ":rpc",
         "//src/mongo/client:clientdriver_minimal",
-        "//src/mongo/db:service_context_non_d",
         "//src/mongo/db:service_context_test_fixture",
         "//src/mongo/db/auth:authmocks",
-        "//src/mongo/idl:server_parameter_test_controller",
+        "//src/mongo/db/shard_role:service_context_non_d",
         "//src/mongo/transport:transport_layer_mock",
         "//src/third_party/wiredtiger:wiredtiger_checksum",
     ],
@@ -316,8 +275,8 @@ mongo_cc_fuzzer_test(
     deps = [
         "message",
         "rpc",
-        "//src/mongo/db/local_catalog/lock_manager",
         "//src/mongo/db/query/write_ops:write_ops_parsers",
+        "//src/mongo/db/shard_role/lock_manager",
         "//src/mongo/transport:message_compressor",
     ],
 )

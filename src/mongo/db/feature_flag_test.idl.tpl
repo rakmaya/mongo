@@ -22,7 +22,7 @@ global:
 
 imports:
     - "mongo/db/basic_types.idl"
-    - "mongo/db/cluster_parameters/cluster_server_parameter.idl"
+    - "mongo/db/topology/cluster_parameters/cluster_server_parameter.idl"
 
 structs:
     CWSPIntStorage:
@@ -71,6 +71,14 @@ feature_flags:
       # The version should match GenericFCV::kLastLTS in the generated 'releases.h' file.
       version: $ver_str(last_lts)
       fcv_gated: true
+
+    featureFlagOperationFCVOnly:
+      description: "A feature flag that can be checked against an Operation FCV only"
+      cpp_varname: gFeatureFlagOperationFCVOnly
+      default: true
+      version: $ver_str(latest)
+      fcv_gated: true
+      check_against_fcv: operation_fcv_only
 
     featureFlagInDevelopmentForTest:
       description: "Incremental feature rollout flag"

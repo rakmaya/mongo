@@ -31,11 +31,15 @@
 
 #include <boost/container/small_vector.hpp>
 // IWYU pragma: no_include "boost/intrusive/detail/iterator.hpp"
-#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/query/compiler/metadata/path_arrayness.h"
 #include "mongo/db/query/plan_cache/classic_plan_cache.h"
 #include "mongo/db/query/plan_cache/plan_cache_indexability.h"
 #include "mongo/db/query/plan_cache/plan_cache_invalidator.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
+#include "mongo/platform/rwmutex.h"
 #include "mongo/util/decorable.h"
+#include "mongo/util/modules.h"
 
 #include <cstddef>
 #include <memory>
@@ -50,12 +54,13 @@ class OperationContext;
  *
  * Decorates a Collection instance. Lifecycle is the same as the Collection instance.
  */
-class CollectionQueryInfo {
+class MONGO_MOD_PUBLIC CollectionQueryInfo {
 public:
     CollectionQueryInfo();
 
     inline static const auto getCollectionQueryInfo =
         Collection::declareDecoration<CollectionQueryInfo>();
+
     static const CollectionQueryInfo& get(const CollectionPtr& collection) {
         return CollectionQueryInfo::getCollectionQueryInfo(collection.get());
     }
@@ -105,6 +110,40 @@ public:
      */
     void clearQueryCacheForSetMultikey(const CollectionPtr& coll) const;
 
+    /**
+     * Traverses the 'IndexCatalogEntry's of the Collection instance and populates a new
+     * PathArrayness instance with information from index metadata.
+     *
+     * When this runs:
+     * - DDL/startup (create collection, create/drop index, refreshEntry, repair index
+     * (forceSetMultikey())): invoked inside a WriteUnitOfWork (WUOW) that modifies the
+     * IndexCatalog. Publishing occurs at WUOW commit, atomically with the catalog change
+     *
+     * We assume this method will be called in a thread-safe manner since no other thread can
+     * observe in-flight mutations to the Collection instance cloned for copy-on-write.
+     */
+    void rebuildPathArrayness(OperationContext* opCtx, const Collection* coll);
+
+    /**
+     * Updates the PathArrayness instance in response to a multikeyness change in indexes.
+     *
+     * When this runs:
+     * - Multikey flips from write (no Collection copy-on-write): invoked under the write's WUOW and
+     * thus we do not have atomic catalog change. We ensure atomic updates to the shared
+     * PathArrayness via a WriteRarelyRWMutex. This path of code will be called rarely when an
+     * document insert or update flips  the multikeyness of indexes. This flip in multikeyness can
+     * only go in one direction, non-multikey to multikey.
+     *
+     * Const-ness: While this method modifies the 'PathArrayness' data associated with the
+     * 'CollectionQueryInfo', it can be marked as 'const' because the PathArrayness instance is
+     * marked as 'mutable'. This design ensures compatibility with
+     * 'IndexCatalogEntry::_catalogSetMultikey()' which require the method to be 'const'.
+     */
+    void updatePathArraynessForSetMultikey(const IndexDescriptor& descriptor,
+                                           const MultikeyPaths& multikeyPaths) const;
+
+    std::shared_ptr<const PathArrayness> getPathArrayness() const;
+
 private:
     /**
      * Stores Clasic and SBE PlanCache-related state. Classic Plan Cache is stored per collection
@@ -134,9 +173,37 @@ private:
         PlanCacheIndexabilityState planCacheIndexabilityState;
     };
 
+    /**
+     * Wrapper around the underlying 'PathArrayness' instance. This allows us to modify the
+     * underlying 'PathArrayness' instance despite the const-ness guarantees needed by callers.
+     */
+    struct PathArraynessCollectionState {
+        PathArraynessCollectionState();
+
+        PathArraynessCollectionState(const PathArraynessCollectionState& other);
+        PathArraynessCollectionState& operator=(const PathArraynessCollectionState& other);
+
+        PathArraynessCollectionState(PathArraynessCollectionState&&) = delete;
+        PathArraynessCollectionState& operator=(PathArraynessCollectionState&&) = delete;
+
+        // Mutex to protect concurrent writers from re-assigning the pathArrayness pointer.
+        // This is going to face contention in the rare case where the multikeyness of an index is
+        // flipped in a document write transaction concurrently with a query.
+        mutable WriteRarelyRWMutex rwMutex;
+
+        // All clones of CollectionQueryInfo will initially point to the same PathArrayness
+        // instance.
+        // This needs to marked as mutable in order to be compatible with the const requirements
+        // of IndexCatalogEntryImpl::_catalogSetMultikey.
+        // While the shared_ptr may be re-assigned the PathArrayness object is immutable.
+        mutable std::shared_ptr<const PathArrayness> pathArrayness;
+    };
+
     void updatePlanCacheIndexEntries(OperationContext* opCtx, const Collection* coll);
 
     std::shared_ptr<PlanCacheState> _planCacheState;
+
+    PathArraynessCollectionState _pathArraynessState;
 };
 
 }  // namespace mongo

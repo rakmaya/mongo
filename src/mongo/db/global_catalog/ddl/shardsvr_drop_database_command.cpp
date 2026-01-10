@@ -39,11 +39,11 @@
 #include "mongo/db/global_catalog/ddl/sharding_ddl_coordinator_gen.h"
 #include "mongo/db/global_catalog/ddl/sharding_ddl_coordinator_service.h"
 #include "mongo/db/global_catalog/ddl/sharding_ddl_util.h"
-#include "mongo/db/local_catalog/shard_role_catalog/operation_sharding_state.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/profile_settings.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/shard_catalog/operation_sharding_state.h"
 #include "mongo/db/sharding_environment/sharding_feature_flags_gen.h"
 #include "mongo/db/topology/sharding_state.h"
 #include "mongo/logv2/log.h"
@@ -112,8 +112,8 @@ public:
 
                         // The Operation FCV is currently propagated only for DDL operations,
                         // which cannot be nested. Therefore, the VersionContext shouldn't have
-                        // been initialized yet.
-                        invariant(!VersionContext::getDecoration(opCtx).isInitialized());
+                        // an OFCV yet.
+                        invariant(!VersionContext::getDecoration(opCtx).hasOperationFCV());
                         const auto authoritativeMetadataAccessLevel =
                             sharding_ddl_util::getGrantedAuthoritativeMetadataAccessLevel(
                                 VersionContext::getDecoration(opCtx),

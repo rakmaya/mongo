@@ -38,16 +38,17 @@
 #include "mongo/db/commands.h"
 #include "mongo/db/feature_flag.h"
 #include "mongo/db/generic_argument_util.h"
-#include "mongo/db/global_catalog/catalog_cache/catalog_cache.h"
 #include "mongo/db/global_catalog/ddl/sharded_ddl_commands_gen.h"
-#include "mongo/db/global_catalog/router_role_api/cluster_commands_helpers.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/router_role/cluster_commands_helpers.h"
+#include "mongo/db/router_role/routing_cache/catalog_cache.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/sharding_environment/client/shard.h"
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/executor/remote_command_response.h"
+#include "mongo/otel/traces/span/span.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/s/async_requests_sender.h"
@@ -81,6 +82,9 @@ public:
 
         void typedRun(OperationContext* opCtx) {
             const auto& nss = ns();
+
+            auto span =
+                otel::traces::Span::start(opCtx, "ReshardCollectionCmd::Invocation::typedRun");
 
             ShardsvrReshardCollection shardsvrReshardCollection(nss);
             shardsvrReshardCollection.setDbName(request().getDbName());
@@ -122,9 +126,8 @@ public:
             generic_argument_util::setMajorityWriteConcern(shardsvrReshardCollection,
                                                            &opCtx->getWriteConcern());
 
-            sharding::router::DBPrimaryRouter router(opCtx->getServiceContext(), nss.dbName());
-            router.route(opCtx,
-                         Request::kCommandParameterFieldName,
+            sharding::router::DBPrimaryRouter router(opCtx, nss.dbName());
+            router.route(Request::kCommandParameterFieldName,
                          [&](OperationContext* opCtx, const CachedDatabaseInfo& dbInfo) {
                              auto cmdResponse =
                                  executeCommandAgainstDatabasePrimaryOnlyAttachingDbVersion(

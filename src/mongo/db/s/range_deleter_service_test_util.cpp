@@ -36,15 +36,15 @@
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/global_catalog/type_chunk.h"
 #include "mongo/db/keypattern.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_runtime.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/persistent_task_store.h"
 #include "mongo/db/s/range_deleter_service.h"
 #include "mongo/db/s/range_deleter_service_test.h"
 #include "mongo/db/s/range_deletion_task_gen.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/collection_sharding_runtime.h"
 #include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
@@ -128,7 +128,7 @@ SharedSemiFuture<void> registerAndCreatePersistentTask(
 
     // Register task as `pending` in order to block it until the persistent document is non-pending
     auto completionFuture = rds->registerTask(
-        rdt, std::move(waitForActiveQueriesToComplete), false /* fromStepUp */, true /* pending*/);
+        rdt, std::move(waitForActiveQueriesToComplete), RangeDeleterService::TaskPending::kPending);
 
     // Range deletion task will only proceed if persistent doc exists and its `pending` field
     // doesn't exist

@@ -29,9 +29,9 @@
 
 #pragma once
 
-#include "mongo/db/global_catalog/catalog_cache/catalog_cache.h"
 #include "mongo/db/global_catalog/sharding_catalog_client.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/router_role/routing_cache/catalog_cache.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/topology/shard_registry.h"
 #include "mongo/executor/connection_pool_stats.h"
@@ -39,6 +39,7 @@
 #include "mongo/platform/atomic_word.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/observable_mutex.h"
 
 #include <functional>
@@ -58,7 +59,7 @@ class NetworkInterface;
 /**
  * Contains the sharding context for a running server. Exists on both MongoD and MongoS.
  */
-class Grid {
+class MONGO_MOD_NEEDS_REPLACEMENT Grid {
 public:
     Grid();
     ~Grid();

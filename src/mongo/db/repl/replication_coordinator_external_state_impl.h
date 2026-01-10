@@ -108,9 +108,12 @@ public:
     void onApplierDrainComplete(OperationContext* opCtx) override;
     OpTime onTransitionToPrimary(OperationContext* opCtx) override;
     void forwardSecondaryProgress(bool prioritized = false) override;
-    bool isSelf(const HostAndPort& host, ServiceContext* service) override;
-    bool isSelfFastPath(const HostAndPort& host) final;
+    bool isSelf(const HostAndPort& host,
+                const boost::optional<int>& maintenancePort,
+                ServiceContext* service) override;
+    bool isSelfFastPath(const HostAndPort& host, const boost::optional<int>& maintenancePort) final;
     bool isSelfSlowPath(const HostAndPort& host,
+                        const boost::optional<int>& maintenancePort,
                         ServiceContext* service,
                         Milliseconds timeout) final;
     Status createLocalLastVoteCollection(OperationContext* opCtx) final;
@@ -164,27 +167,12 @@ private:
     void _stopDataReplication(OperationContext* opCtx, stdx::unique_lock<stdx::mutex>& lock);
 
     /**
-     * Called when the instance transitions to primary in order to notify a potentially sharded host
-     * to perform respective state changes, such as starting the balancer, etc.
-     *
-     * Throws on errors.
-     */
-    void _shardingOnTransitionToPrimaryHook(OperationContext* opCtx, long long term);
-
-    /**
      * Drops all temporary collections on all databases except "local".
      *
      * The implementation may assume that the caller has acquired the global exclusive lock
      * for "opCtx".
      */
     void _dropAllTempCollections(OperationContext* opCtx);
-
-    /**
-     * Resets any active sharding metadata on this server and stops any sharding-related threads
-     * (such as the balancer). It is called after stepDown to ensure that if the node becomes
-     * primary again in the future it will recover its state from a clean slate.
-     */
-    void _shardingOnStepDownHook();
 
     /**
      * Stops asynchronous updates to and then clears the oplogTruncateAfterPoint.
@@ -265,7 +253,7 @@ private:
     // Task executor used to run replication tasks.
     std::shared_ptr<executor::TaskExecutor> _taskExecutor;
 
-    // Used by repl::applyOplogBatch() to apply the sync source's operations in parallel.
+    // Used by OplogApplier::applyOplogBatch() to apply the sync source's operations in parallel.
     // Also used by database and collection cloners to perform storage operations.
     // Cloners and oplog application run in separate phases of initial sync so it is fine to share
     // this thread pool.

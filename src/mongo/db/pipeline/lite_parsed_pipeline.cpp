@@ -147,7 +147,8 @@ void LiteParsedPipeline::validate(const OperationContext* opCtx,
                   !isRunningAgainstView_ForHybridSearch()));
 
         const auto& stageName = (*stage_it)->getParseTimeName();
-        const auto& stageInfo = LiteParsedDocumentSource::getInfo(stageName);
+        const auto& stageApiStrict = (*stage_it)->getApiStrict();
+        const auto& stageClientType = (*stage_it)->getClientType();
 
         // Validate that the stage is API version compatible.
         if (performApiVersionChecks) {
@@ -156,14 +157,11 @@ void LiteParsedPipeline::validate(const OperationContext* opCtx,
                 [&](const APIParameters& apiParameters) {
                     tassert(5807600,
                             "Expected callback only if allowed 'sometimes'",
-                            stageInfo.allowedWithApiStrict == AllowedWithApiStrict::kConditionally);
+                            stageApiStrict == AllowedWithApiStrict::kConditionally);
                     stage->assertPermittedInAPIVersion(apiParameters);
                 };
-            assertLanguageFeatureIsAllowed(opCtx,
-                                           stageName,
-                                           stageInfo.allowedWithApiStrict,
-                                           stageInfo.allowedWithClientType,
-                                           sometimesCallback);
+            assertLanguageFeatureIsAllowed(
+                opCtx, stageName, stageApiStrict, stageClientType, sometimesCallback);
         }
 
         for (auto&& subPipeline : stage->getSubPipelines()) {
@@ -188,6 +186,24 @@ void LiteParsedPipeline::checkStagesAllowedInViewDefinition() const {
             subPipeline.checkStagesAllowedInViewDefinition();
         }
     }
+}
+
+size_t LiteParsedPipeline::replaceStageWith(
+    size_t index, std::vector<std::unique_ptr<LiteParsedDocumentSource>>&& newSources) {
+    tassert(11533000,
+            str::stream() << "replaceStageWith index " << index << " out of range "
+                          << _stageSpecs.size(),
+            index < _stageSpecs.size());
+
+    auto& stages = _stageSpecs;
+    const auto numInserted = newSources.size();
+
+    stages.erase(stages.begin() + index);
+    stages.insert(stages.begin() + index,
+                  std::make_move_iterator(newSources.begin()),
+                  std::make_move_iterator(newSources.end()));
+
+    return index + numInserted;
 }
 
 }  // namespace mongo

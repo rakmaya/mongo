@@ -42,7 +42,6 @@
 #include "mongo/db/global_catalog/type_database_gen.h"
 #include "mongo/db/global_catalog/type_shard.h"
 #include "mongo/db/keypattern.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/op_observer/op_observer_registry.h"
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/repl/member_state.h"
@@ -63,6 +62,7 @@
 #include "mongo/db/session/logical_session_cache.h"
 #include "mongo/db/session/logical_session_cache_noop.h"
 #include "mongo/db/session/session_catalog_mongod.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/sharding_environment/config_server_test_fixture.h"
 #include "mongo/db/versioning_protocol/database_version.h"
 #include "mongo/executor/mock_async_rpc.h"
@@ -75,6 +75,7 @@
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source.h"
+#include "mongo/util/duration.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/time_support.h"
 
@@ -91,6 +92,8 @@
 
 namespace mongo {
 namespace {
+
+constexpr Milliseconds kOneDayMillis{24 * 3600 * 1000};
 
 using CoordinatorStateTransitionController =
     resharding_service_test_helpers::StateTransitionController<CoordinatorStateEnum>;
@@ -311,6 +314,7 @@ public:
         const std::vector<ShardId> recipientShardIds;
         const std::set<ShardId> recipientShardIdsNoInitialChunks;
         bool performVerification;
+        boost::optional<UUID> userReshardingUUID;
 
         ReshardingOptions(std::vector<ShardId> donorShardIds_,
                           std::vector<ShardId> recipientShardIds_,
@@ -396,7 +400,7 @@ public:
     void tearDown() override {
         globalFailPointRegistry().disableAllFailpoints();
 
-        TransactionCoordinatorService::get(operationContext())->interrupt();
+        TransactionCoordinatorService::get(operationContext())->interruptForStepDown();
         WaitForMajorityService::get(getServiceContext()).shutDown();
         ConfigServerTestFixture::tearDown();
         _registry->onShutdown();
@@ -436,6 +440,7 @@ public:
         ReshardingCoordinatorDocument doc(state, donorShards, recipientShards);
         doc.setCommonReshardingMetadata(meta);
         resharding::emplaceCloneTimestampIfExists(doc, _cloneTimestamp);
+        doc.setUserReshardingUUID(reshardingOptions.userReshardingUUID);
 
         // Set demo mode to true for testing purposes to avoid the delay before commit monitor
         // queries recipient.
@@ -474,7 +479,7 @@ public:
         const auto coordinatorColl = acquireCollection(
             opCtx,
             CollectionAcquisitionRequest{NamespaceString::kConfigReshardingOperationsNamespace,
-                                         PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                         PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
                                          repl::ReadConcernArgs::get(opCtx),
                                          AcquisitionPrerequisites::kRead},
             MODE_IS);
@@ -1063,6 +1068,172 @@ public:
             transitionFunctions, nullptr /* stateTransitionsGuard */, states, reshardingOptions);
     }
 
+    void runReshardingAbortWithoutQuiescingBeforeFailover(
+        CoordinatorStateEnum state, resharding::AbortType abortTypeAfterFailover) {
+        // Set a large quiesce period to test that there is no quiescing both before and after
+        // failover, regardless of the abort type after failover.
+        RAIIServerParameterControllerForTest quiescePeriodMillis{
+            "reshardingCoordinatorQuiescePeriodMillis", kOneDayMillis.count()};
+
+        // Set the failpoint to pause the coordinator before it removes the state doc. Otherwise,
+        // the doc would get removed as soon as the resharding operation aborts since there is
+        // no quiescing.
+        auto pauseCoordinatorBeforeRemovingStateDoc =
+            globalFailPointRegistry().find("reshardingPauseCoordinatorBeforeRemovingStateDoc");
+        pauseCoordinatorBeforeRemovingStateDoc->setMode(FailPoint::alwaysOn);
+
+        auto opCtx = operationContext();
+        auto coordinator = initializeAndGetCoordinator();
+
+        if (state >= CoordinatorStateEnum::kPreparingToDonate) {
+            waitUntilCommittedCoordinatorDocReach(opCtx, CoordinatorStateEnum::kPreparingToDonate);
+        }
+
+        if (state >= CoordinatorStateEnum::kCloning) {
+            makeDonorsReadyToDonateWithAssert(opCtx);
+            waitUntilCommittedCoordinatorDocReach(opCtx, CoordinatorStateEnum::kCloning);
+        }
+
+        if (state >= CoordinatorStateEnum::kApplying) {
+            makeRecipientsFinishedCloningWithAssert(opCtx);
+            waitUntilCommittedCoordinatorDocReach(opCtx, CoordinatorStateEnum::kApplying);
+        }
+
+        if (state >= CoordinatorStateEnum::kBlockingWrites) {
+            coordinator->onOkayToEnterCritical();
+            waitUntilCommittedCoordinatorDocReach(opCtx, CoordinatorStateEnum::kBlockingWrites);
+        }
+
+        // Initiate an abort with FCV change as the reason.
+        auto abortReason0 = resharding::kFCVChangeAbortReason;
+        coordinator->abort({abortReason0, resharding::AbortType::kAbortWithQuiesce});
+
+        // Wait for the coordinator to transition to the "aborting" state.
+        waitUntilCommittedCoordinatorDocReach(opCtx, CoordinatorStateEnum::kAborting);
+
+        stepDown(opCtx);
+        coordinator.reset();
+        // Unset the failpoint above to allow the coordinator to remove the state doc after stepup.
+        pauseCoordinatorBeforeRemovingStateDoc->setMode(FailPoint::off, 0);
+
+        // Pause the coordinator before it initializes the cancellation token holder after stepping
+        // up.
+        auto pauseBeforeCTHolderInitialization =
+            globalFailPointRegistry().find("pauseBeforeCTHolderInitialization");
+        auto timesEnteredFailPoint =
+            pauseBeforeCTHolderInitialization->setMode(FailPoint::alwaysOn);
+
+        stepUp(opCtx);
+        pauseBeforeCTHolderInitialization->waitForTimesEntered(timesEnteredFailPoint + 1);
+
+        auto instanceId =
+            BSON(ReshardingCoordinatorDocument::kReshardingUUIDFieldName << _reshardingUUID);
+        coordinator = getCoordinator(opCtx, instanceId);
+
+        // Try to abort again with user abort as the reason.
+        auto abortReason1 = resharding::kUserAbortReason;
+        coordinator->abort({abortReason1, abortTypeAfterFailover});
+
+        // Unset the failpoint to allow the coordinator to initialize the cancellation token holder
+        // and start recovering the resharding operation.
+        pauseBeforeCTHolderInitialization->setMode(FailPoint::off, 0);
+
+        makeRecipientsProceedToDone(opCtx);
+        makeDonorsProceedToDone(opCtx);
+
+        // Wait for completion and verify the original abort reason is still used.
+        ASSERT_EQ(coordinator->getCompletionFuture().getNoThrow(), abortReason0);
+        // There should be no quiescing regardless of the abort type after failover, i.e. the wait
+        // should finish immediately.
+        coordinator->getQuiescePeriodFinishedFuture().wait();
+    }
+
+    void runReshardingAbortWithQuiescingBeforeFailover(
+        CoordinatorStateEnum state, resharding::AbortType abortTypeAfterFailover) {
+        // Set a large quiesce period to test that there is quiescing before failover and no
+        // quiescing after failover if the abort type after failover specifies skip quiescing.
+        RAIIServerParameterControllerForTest quiescePeriodMillis{
+            "reshardingCoordinatorQuiescePeriodMillis", kOneDayMillis.count()};
+
+        auto opCtx = operationContext();
+
+        auto reshardingOptions = makeDefaultReshardingOptions();
+        // Set a user resharding UUID to enable quiescing.
+        reshardingOptions.userReshardingUUID = UUID::gen();
+        auto coordinator = initializeAndGetCoordinator(_reshardingUUID,
+                                                       _originalNss,
+                                                       _tempNss,
+                                                       _newShardKey,
+                                                       _originalUUID,
+                                                       _oldShardKey,
+                                                       reshardingOptions);
+
+        if (state >= CoordinatorStateEnum::kPreparingToDonate) {
+            waitUntilCommittedCoordinatorDocReach(opCtx, CoordinatorStateEnum::kPreparingToDonate);
+        }
+
+        if (state >= CoordinatorStateEnum::kCloning) {
+            makeDonorsReadyToDonateWithAssert(opCtx);
+            waitUntilCommittedCoordinatorDocReach(opCtx, CoordinatorStateEnum::kCloning);
+        }
+
+        if (state >= CoordinatorStateEnum::kApplying) {
+            makeRecipientsFinishedCloningWithAssert(opCtx);
+            waitUntilCommittedCoordinatorDocReach(opCtx, CoordinatorStateEnum::kApplying);
+        }
+
+        if (state >= CoordinatorStateEnum::kBlockingWrites) {
+            coordinator->onOkayToEnterCritical();
+            waitUntilCommittedCoordinatorDocReach(opCtx, CoordinatorStateEnum::kBlockingWrites);
+        }
+
+        // Initiate an abort with FCV change as the reason.
+        auto abortReason0 = resharding::kFCVChangeAbortReason;
+        coordinator->abort({abortReason0, resharding::AbortType::kAbortWithQuiesce});
+
+        waitUntilCommittedCoordinatorDocReach(opCtx, CoordinatorStateEnum::kAborting);
+
+        // Make donors and recipients transition to the "done" state. This is required to allow the
+        // coordinator to transition to the "quiesced" state.
+        makeDonorsProceedToDone(opCtx);
+        makeRecipientsProceedToDone(opCtx);
+
+        // Wait for the coordinator to transition to the "quiesced" state.
+        waitUntilCommittedCoordinatorDocReach(opCtx, CoordinatorStateEnum::kQuiesced);
+
+        stepDown(opCtx);
+        coordinator.reset();
+
+        // Pause the coordinator before it initializes the cancellation token holder after stepping
+        // up.
+        auto pauseBeforeCTHolderInitialization =
+            globalFailPointRegistry().find("pauseBeforeCTHolderInitialization");
+        auto timesEnteredFailPoint =
+            pauseBeforeCTHolderInitialization->setMode(FailPoint::alwaysOn);
+
+        stepUp(opCtx);
+        pauseBeforeCTHolderInitialization->waitForTimesEntered(timesEnteredFailPoint + 1);
+
+        auto instanceId =
+            BSON(ReshardingCoordinatorDocument::kReshardingUUIDFieldName << _reshardingUUID);
+        coordinator = getCoordinator(opCtx, instanceId);
+
+        // Try to abort again with user abort as the reason.
+        auto abortReason1 = resharding::kUserAbortReason;
+        coordinator->abort({abortReason1, abortTypeAfterFailover});
+        pauseBeforeCTHolderInitialization->setMode(FailPoint::off, 0);
+
+        // Wait for completion and verify the original abort reason is still used.
+        ASSERT_EQ(coordinator->getCompletionFuture().getNoThrow(), abortReason0);
+        // If the abort requests after failover specifies skip quiescing, there should be
+        // no quiescing.
+        if (abortTypeAfterFailover == resharding::AbortType::kAbortSkipQuiesce) {
+            coordinator->getQuiescePeriodFinishedFuture().wait();
+        } else {
+            ASSERT(!coordinator->getQuiescePeriodFinishedFuture().isReady());
+        }
+    }
+
     repl::PrimaryOnlyService* _service = nullptr;
 
     std::shared_ptr<CoordinatorStateTransitionController> _controller;
@@ -1416,7 +1587,7 @@ TEST_F(ReshardingCoordinatorServiceTest, ReportForCurrentOpAfterCompletion) {
     ASSERT_NE(coordinator, newCoordinator);
 
     // No need to finish the resharding op, so we just cancel the op.
-    newCoordinator->abort(true /* skipQuiescePeriod */);
+    newCoordinator->abort({resharding::kUserAbortReason, resharding::AbortType::kAbortSkipQuiesce});
     pauseBeforeCTHolderInitialization->setMode(FailPoint::off);
     newCoordinator->getCompletionFuture().wait();
 }
@@ -1524,7 +1695,7 @@ TEST_F(ReshardingCoordinatorServiceTest, SuccessfullyAbortReshardOperationImmedi
         globalFailPointRegistry().find("pauseBeforeCTHolderInitialization");
     auto timesEnteredFailPoint = pauseBeforeCTHolderInitialization->setMode(FailPoint::alwaysOn, 0);
     auto coordinator = initializeAndGetCoordinator();
-    coordinator->abort();
+    coordinator->abort({resharding::kUserAbortReason, resharding::AbortType::kAbortWithQuiesce});
     pauseBeforeCTHolderInitialization->waitForTimesEntered(timesEnteredFailPoint + 1);
     pauseBeforeCTHolderInitialization->setMode(FailPoint::off, 0);
     coordinator->getCompletionFuture().wait();
@@ -1536,7 +1707,7 @@ TEST_F(ReshardingCoordinatorServiceTest, AbortingReshardingOperationIncrementsMe
     auto timesEnteredFailPoint = pauseAfterInsertCoordinatorDoc->setMode(FailPoint::alwaysOn, 0);
     auto coordinator = initializeAndGetCoordinator();
     pauseAfterInsertCoordinatorDoc->waitForTimesEntered(timesEnteredFailPoint + 1);
-    coordinator->abort();
+    coordinator->abort({resharding::kUserAbortReason, resharding::AbortType::kAbortSkipQuiesce});
     pauseAfterInsertCoordinatorDoc->setMode(FailPoint::off, 0);
     coordinator->getCompletionFuture().wait();
 
@@ -2173,6 +2344,148 @@ TEST_F(ReshardingCoordinatorServiceFailGetDocumentsDelta,
                    CoordinatorStateEnum::kCommitting};
     runReshardingToCompletion(
         transitionFunctions, nullptr /* stateTransitionsGuard */, states, reshardingOptions);
+}
+
+TEST_F(ReshardingCoordinatorServiceTest,
+       AbortWithoutQuiescingBeforeFailover_AbortWithQuiescingAfterFailover_PreparingToDonate) {
+    runReshardingAbortWithoutQuiescingBeforeFailover(CoordinatorStateEnum::kPreparingToDonate,
+                                                     resharding::AbortType::kAbortWithQuiesce);
+}
+
+TEST_F(ReshardingCoordinatorServiceTest,
+       AbortWithoutQuiescingBeforeFailover_AbortWithoutQuiescingAfterFailover_PreparingToDonate) {
+    runReshardingAbortWithoutQuiescingBeforeFailover(CoordinatorStateEnum::kPreparingToDonate,
+                                                     resharding::AbortType::kAbortSkipQuiesce);
+}
+
+TEST_F(ReshardingCoordinatorServiceTest,
+       AbortWithQuiescingBeforeFailover_AbortWithQuiescingAfterFailover_PreparingToDonate) {
+    runReshardingAbortWithQuiescingBeforeFailover(CoordinatorStateEnum::kPreparingToDonate,
+                                                  resharding::AbortType::kAbortWithQuiesce);
+}
+
+TEST_F(ReshardingCoordinatorServiceTest,
+       AbortWithQuiescingBeforeFailover_AbortWithoutQuiescingAfterFailover_PreparingToDonate) {
+    runReshardingAbortWithQuiescingBeforeFailover(CoordinatorStateEnum::kPreparingToDonate,
+                                                  resharding::AbortType::kAbortSkipQuiesce);
+}
+
+TEST_F(ReshardingCoordinatorServiceTest,
+       AbortWithoutQuiescingBeforeFailover_AbortWithQuiescingAfterFailover_Cloning) {
+    runReshardingAbortWithoutQuiescingBeforeFailover(CoordinatorStateEnum::kCloning,
+                                                     resharding::AbortType::kAbortWithQuiesce);
+}
+
+TEST_F(ReshardingCoordinatorServiceTest,
+       AbortWithoutQuiescingBeforeFailover_AbortWithoutQuiescingAfterFailover_Cloning) {
+    runReshardingAbortWithoutQuiescingBeforeFailover(CoordinatorStateEnum::kCloning,
+                                                     resharding::AbortType::kAbortSkipQuiesce);
+}
+
+TEST_F(ReshardingCoordinatorServiceTest,
+       AbortWithQuiescingBeforeFailover_AbortWithQuiescingAfterFailover_Cloning) {
+    runReshardingAbortWithQuiescingBeforeFailover(CoordinatorStateEnum::kCloning,
+                                                  resharding::AbortType::kAbortWithQuiesce);
+}
+
+TEST_F(ReshardingCoordinatorServiceTest,
+       AbortWithQuiescingBeforeFailover_AbortWithoutQuiescingAfterFailover_Cloning) {
+    runReshardingAbortWithQuiescingBeforeFailover(CoordinatorStateEnum::kCloning,
+                                                  resharding::AbortType::kAbortSkipQuiesce);
+}
+
+TEST_F(ReshardingCoordinatorServiceTest,
+       AbortWithoutQuiescingBeforeFailover_AbortWithQuiescingAfterFailover_Applying) {
+    runReshardingAbortWithoutQuiescingBeforeFailover(CoordinatorStateEnum::kApplying,
+                                                     resharding::AbortType::kAbortWithQuiesce);
+}
+
+TEST_F(ReshardingCoordinatorServiceTest,
+       AbortWithoutQuiescingBeforeFailover_AbortWithoutQuiescingAfterFailover_Applying) {
+    runReshardingAbortWithoutQuiescingBeforeFailover(CoordinatorStateEnum::kApplying,
+                                                     resharding::AbortType::kAbortSkipQuiesce);
+}
+
+TEST_F(ReshardingCoordinatorServiceTest,
+       AbortWithQuiescingBeforeFailover_AbortWithQuiescingAfterFailover_Applying) {
+    runReshardingAbortWithQuiescingBeforeFailover(CoordinatorStateEnum::kApplying,
+                                                  resharding::AbortType::kAbortWithQuiesce);
+}
+
+TEST_F(ReshardingCoordinatorServiceTest,
+       AbortWithQuiescingBeforeFailover_AbortWithoutQuiescingAfterFailover_Applying) {
+    runReshardingAbortWithQuiescingBeforeFailover(CoordinatorStateEnum::kApplying,
+                                                  resharding::AbortType::kAbortSkipQuiesce);
+}
+
+TEST_F(ReshardingCoordinatorServiceTest,
+       AbortWithoutQuiescingBeforeFailover_AbortWithQuiescingAfterFailover_BlockingWrites) {
+    runReshardingAbortWithoutQuiescingBeforeFailover(CoordinatorStateEnum::kBlockingWrites,
+                                                     resharding::AbortType::kAbortWithQuiesce);
+}
+
+TEST_F(ReshardingCoordinatorServiceTest,
+       AbortWithoutQuiescingBeforeFailover_AbortWithoutQuiescingAfterFailover_BlockingWrites) {
+    runReshardingAbortWithoutQuiescingBeforeFailover(CoordinatorStateEnum::kBlockingWrites,
+                                                     resharding::AbortType::kAbortSkipQuiesce);
+}
+
+TEST_F(ReshardingCoordinatorServiceTest,
+       AbortWithQuiescingBeforeFailover_AbortWithQuiescingAfterFailover_BlockingWrites) {
+    runReshardingAbortWithQuiescingBeforeFailover(CoordinatorStateEnum::kBlockingWrites,
+                                                  resharding::AbortType::kAbortWithQuiesce);
+}
+
+TEST_F(ReshardingCoordinatorServiceTest,
+       AbortWithQuiescingBeforeFailover_AbortWithoutQuiescingAfterFailover_BlockingWrites) {
+    runReshardingAbortWithQuiescingBeforeFailover(CoordinatorStateEnum::kBlockingWrites,
+                                                  resharding::AbortType::kAbortSkipQuiesce);
+}
+
+TEST_F(ReshardingCoordinatorServiceTest, AbortDuringCommitDoesNotCauseInfiniteRetryLoop) {
+    const std::vector<CoordinatorStateEnum> states = {CoordinatorStateEnum::kPreparingToDonate,
+                                                      CoordinatorStateEnum::kCloning,
+                                                      CoordinatorStateEnum::kApplying,
+                                                      CoordinatorStateEnum::kBlockingWrites,
+                                                      CoordinatorStateEnum::kCommitting};
+
+    PauseDuringStateTransitions stateTransitionsGuard{controller(), states};
+
+    auto opCtx = operationContext();
+    auto coordinator = initializeAndGetCoordinator();
+
+    stateTransitionsGuard.wait(CoordinatorStateEnum::kPreparingToDonate);
+    stateTransitionsGuard.unset(CoordinatorStateEnum::kPreparingToDonate);
+    waitUntilCommittedCoordinatorDocReach(opCtx, CoordinatorStateEnum::kPreparingToDonate);
+    makeDonorsReadyToDonateWithAssert(opCtx);
+
+    stateTransitionsGuard.wait(CoordinatorStateEnum::kCloning);
+    stateTransitionsGuard.unset(CoordinatorStateEnum::kCloning);
+    waitUntilCommittedCoordinatorDocReach(opCtx, CoordinatorStateEnum::kCloning);
+    makeRecipientsFinishedCloningWithAssert(opCtx);
+
+    stateTransitionsGuard.wait(CoordinatorStateEnum::kApplying);
+    stateTransitionsGuard.unset(CoordinatorStateEnum::kApplying);
+    waitUntilCommittedCoordinatorDocReach(opCtx, CoordinatorStateEnum::kApplying);
+    coordinator->onOkayToEnterCritical();
+
+    stateTransitionsGuard.wait(CoordinatorStateEnum::kBlockingWrites);
+    stateTransitionsGuard.unset(CoordinatorStateEnum::kBlockingWrites);
+    waitUntilCommittedCoordinatorDocReach(opCtx, CoordinatorStateEnum::kBlockingWrites);
+    makeRecipientsBeInStrictConsistencyWithAssert(opCtx);
+
+    stateTransitionsGuard.wait(CoordinatorStateEnum::kCommitting);
+    stateTransitionsGuard.unset(CoordinatorStateEnum::kCommitting);
+    waitUntilCommittedCoordinatorDocReach(opCtx, CoordinatorStateEnum::kCommitting);
+
+    // Call abort after the coordinator has entered the committing state.
+    // This should be ignored because the resharding operation is past the point of no return.
+    coordinator->abort({resharding::kUserAbortReason, resharding::AbortType::kAbortSkipQuiesce});
+
+    makeDonorsProceedToDoneWithAssert(opCtx);
+    makeRecipientsProceedToDoneWithAssert(opCtx);
+
+    ASSERT_OK(coordinator->getCompletionFuture().getNoThrow());
 }
 
 }  // namespace

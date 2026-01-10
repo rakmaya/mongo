@@ -32,20 +32,26 @@
 #include "mongo/db/pipeline/shard_role_transaction_resources_stasher_for_pipeline.h"
 #include "mongo/util/modules.h"
 
-namespace MONGO_MOD_PRIVATE mongo {
+namespace mongo {
 
 /**
  * Interface for acquiring and releasing catalog resources needed for stages that need catalog
  * information (i.e. DocumentSourceCursor and DocumentSourceInternalSearchIdLookUp).
  */
-class CatalogResourceHandle : public RefCountable {
+class MONGO_MOD_PUBLIC CatalogResourceHandle : public RefCountable {
 public:
-    virtual void acquire(OperationContext*) = 0;
+    ~CatalogResourceHandle() override = default;
+
+    virtual void acquire(OperationContext* opCtx) = 0;
     virtual void release() = 0;
-    virtual void checkCanServeReads(OperationContext* opCtx, const PlanExecutor& exec) = 0;
+    virtual void checkCanServeReads(OperationContext* opCtx, const PlanExecutor& exec) {
+        // Default no-op.
+    }
+    virtual boost::intrusive_ptr<ShardRoleTransactionResourcesStasherForPipeline> getStasher()
+        const = 0;
 };
 
-class DSCatalogResourceHandleBase : public CatalogResourceHandle {
+class MONGO_MOD_PRIVATE DSCatalogResourceHandleBase : public CatalogResourceHandle {
 public:
     DSCatalogResourceHandleBase(
         boost::intrusive_ptr<ShardRoleTransactionResourcesStasherForPipeline> stasher)
@@ -55,20 +61,27 @@ public:
                 _transactionResourcesStasher);
     }
 
-    void acquire(OperationContext* opCtx) override {
+    void acquire(OperationContext* opCtx) final {
         tassert(10271302, "Expected resources to be absent", !_resources);
         _resources.emplace(opCtx, _transactionResourcesStasher.get());
     }
 
-    void release() override {
+    void release() final {
         _resources.reset();
     }
 
-    void checkCanServeReads(OperationContext* opCtx, const PlanExecutor& exec) override = 0;
+    boost::intrusive_ptr<ShardRoleTransactionResourcesStasherForPipeline> getStasher() const final {
+        return _transactionResourcesStasher;
+    }
+
+protected:
+    bool isAcquired() const {
+        return _resources.has_value();
+    }
 
 private:
     boost::optional<HandleTransactionResourcesFromStasher> _resources;
     boost::intrusive_ptr<ShardRoleTransactionResourcesStasherForPipeline>
         _transactionResourcesStasher;
 };
-}  // namespace MONGO_MOD_PRIVATE mongo
+}  // namespace mongo

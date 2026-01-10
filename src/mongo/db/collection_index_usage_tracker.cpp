@@ -36,7 +36,6 @@
 #include <utility>
 
 #include <absl/container/flat_hash_map.h>
-#include <absl/meta/type_traits.h>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
@@ -53,12 +52,17 @@ CollectionIndexUsageTracker::CollectionIndexUsageTracker(
 }
 
 void CollectionIndexUsageTracker::recordIndexAccess(StringData indexName) const {
-    invariant(!indexName.empty());
+    tassert(11122205,
+            "CollectionIndexUsageTracker::recordIndexAccess invoked with an empty indexname",
+            !indexName.empty());
 
     auto it = _indexUsageStatsMap.find(indexName);
 
     // The index is guaranteed to be tracked
-    invariant(it != _indexUsageStatsMap.end());
+    tassert(11122206,
+            str::stream() << "Index '" << indexName
+                          << "' is not registered in CollectionIndexUsageTracker",
+            it != _indexUsageStatsMap.end());
 
     _aggregatedIndexUsageTracker->onAccess(it->second->features);
 
@@ -78,18 +82,26 @@ void CollectionIndexUsageTracker::recordCollectionScansNonTailable(
 void CollectionIndexUsageTracker::registerIndex(StringData indexName,
                                                 const BSONObj& indexKey,
                                                 const IndexFeatures& features) {
-    invariant(!indexName.empty());
+    tassert(11122207,
+            "CollectionIndexUsageTracker::registerIndex invoked with an empty indexname",
+            !indexName.empty());
 
     // Create the map entry.
     auto inserted = _indexUsageStatsMap.try_emplace(
         indexName, make_intrusive<IndexUsageStats>(_clockSource->now(), indexKey, features));
-    invariant(inserted.second);
+    tassert(11122208,
+            str::stream()
+                << "CollectionIndexUsageTracker::registerIndex has already been invoked for index '"
+                << indexName << "'",
+            inserted.second);
 
     _aggregatedIndexUsageTracker->onRegister(inserted.first->second->features);
 }
 
 void CollectionIndexUsageTracker::unregisterIndex(StringData indexName) {
-    invariant(!indexName.empty());
+    tassert(11122209,
+            "CollectionIndexUsageTracker::unregisterIndex invoked with an empty indexname",
+            !indexName.empty());
 
     auto it = _indexUsageStatsMap.find(indexName);
     // Only finished/ready indexes are tracked and this function may be called for an unfinished

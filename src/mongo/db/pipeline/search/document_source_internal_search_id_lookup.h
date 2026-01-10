@@ -29,10 +29,10 @@
 
 #pragma once
 
-#include "mongo/db/exec/exec_shard_filter_policy.h"
 #include "mongo/db/pipeline/catalog_resource_handle.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/pipeline.h"
+#include "mongo/db/query/multiple_collection_accessor.h"
 #include "mongo/db/query/search/search_query_view_spec_gen.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/modules.h"
@@ -41,6 +41,9 @@
 
 namespace mongo {
 
+DECLARE_STAGE_PARAMS_DERIVED_DEFAULT(InternalSearchIdLookup);
+
+class DSInternalSearchIdLookUpCatalogResourceHandle;
 /**
  * Queries local collection for _id equality matches. Intended for use with
  * $_internalSearchMongotRemote (see $search) as part of the Search project.
@@ -58,7 +61,7 @@ public:
     static boost::intrusive_ptr<DocumentSource> createFromBson(
         BSONElement elem, const boost::intrusive_ptr<ExpressionContext>& expCtx);
 
-    class LiteParsed final : public LiteParsedDocumentSource {
+    class LiteParsed final : public LiteParsedDocumentSourceDefault<LiteParsed> {
     public:
         static std::unique_ptr<LiteParsed> parse(const NamespaceString& nss,
                                                  const BSONElement& spec,
@@ -66,7 +69,7 @@ public:
             uassert(ErrorCodes::FailedToParse,
                     "$_internalSearchIdLookup specification must be an object",
                     spec.type() == BSONType::object);
-            return std::make_unique<LiteParsed>(spec.fieldName(), spec.Obj().getOwned());
+            return std::make_unique<LiteParsed>(spec, spec.Obj().getOwned());
         }
 
         stdx::unordered_set<NamespaceString> getInvolvedNamespaces() const override {
@@ -86,24 +89,26 @@ public:
             return false;
         }
 
+        std::unique_ptr<StageParams> getStageParams() const final {
+            return std::make_unique<InternalSearchIdLookupStageParams>(_originalBson);
+        }
+
         const BSONObj& getBsonSpec() const {
             return _ownedSpec;
         }
 
-        explicit LiteParsed(std::string parseTimeName, BSONObj ownedSpec)
-            : LiteParsedDocumentSource(std::move(parseTimeName)),
-              _ownedSpec(std::move(ownedSpec)) {}
+        // TODO SERVER-114038 Remove redundancy of storing both originalBson and ownedSpec.
+        LiteParsed(const BSONElement& specElem, BSONObj spec)
+            : LiteParsedDocumentSourceDefault(specElem),
+              _ownedSpec(spec.isOwned() ? std::move(spec) : spec.getOwned()) {}
 
     private:
         BSONObj _ownedSpec;
     };
 
-    DocumentSourceInternalSearchIdLookUp(
-        const boost::intrusive_ptr<ExpressionContext>& expCtx,
-        long long limit = 0,
-        const boost::intrusive_ptr<CatalogResourceHandle>& catalogResourceHandle = {},
-        ExecShardFilterPolicy shardFilterPolicy = AutomaticShardFiltering{},
-        boost::optional<SearchQueryViewSpec> view = boost::none);
+    DocumentSourceInternalSearchIdLookUp(const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                                         long long limit = 0,
+                                         boost::optional<SearchQueryViewSpec> view = boost::none);
 
     const char* getSourceName() const final;
 
@@ -142,14 +147,14 @@ public:
     Value serialize(const SerializationOptions& opts = SerializationOptions{}) const final;
 
     /**
-     * This stage must be run on each shard.
+     * This stage must be run on each shard, but that must be enforced at a higher-level in the
+     * pipeline-splitting logic.
+     *
+     * For the purposes of this function, we want default behavior to happen upon seeing an idLookup
+     * (which is to push it down to the shards and continue forward in looking for a split point).
      */
     boost::optional<DistributedPlanLogic> distributedPlanLogic() final {
-        DistributedPlanLogic logic;
-
-        logic.shardsStage = this;
-
-        return logic;
+        return boost::none;
     }
 
     void addVariableRefs(std::set<Variables::Id>* refs) const final {}
@@ -226,9 +231,12 @@ public:
         return _searchIdLookupMetrics;
     }
 
-protected:
-    DocumentSourceContainer::iterator doOptimizeAt(DocumentSourceContainer::iterator itr,
-                                                   DocumentSourceContainer* container) override;
+    void bindCatalogInfo(
+        const MultipleCollectionAccessor& collections,
+        boost::intrusive_ptr<ShardRoleTransactionResourcesStasherForPipeline> sharedStasher) final;
+
+    DocumentSourceContainer::iterator optimizeAt(DocumentSourceContainer::iterator itr,
+                                                 DocumentSourceContainer* container);
 
 private:
     friend boost::intrusive_ptr<exec::agg::Stage> documentSourceInternalSearchIdLookupToStageFn(
@@ -236,11 +244,8 @@ private:
 
     long long _limit = 0;
 
-    // Handle to catalog state.
-    boost::intrusive_ptr<CatalogResourceHandle> _catalogResourceHandle;
-
-    // TODO SERVER-109825: Move to InternalSearchIdLookupStage class.
-    ExecShardFilterPolicy _shardFilterPolicy = AutomaticShardFiltering{};
+    // Handle to catalog state. Also contains the collection needed for execution.
+    boost::intrusive_ptr<DSInternalSearchIdLookUpCatalogResourceHandle> _catalogResourceHandle;
 
     std::shared_ptr<SearchIdLookupMetrics> _searchIdLookupMetrics =
         std::make_shared<SearchIdLookupMetrics>();
@@ -251,11 +256,20 @@ private:
 
 class DSInternalSearchIdLookUpCatalogResourceHandle : public DSCatalogResourceHandleBase {
 public:
-    using DSCatalogResourceHandleBase::DSCatalogResourceHandleBase;
+    DSInternalSearchIdLookUpCatalogResourceHandle(
+        boost::intrusive_ptr<ShardRoleTransactionResourcesStasherForPipeline> stasher,
+        CollectionAcquisition collection)
+        : DSCatalogResourceHandleBase(std::move(stasher)), _collection(std::move(collection)) {}
 
-    void checkCanServeReads(OperationContext* opCtx, const PlanExecutor& exec) override {
-        MONGO_UNREACHABLE;
+    CollectionAcquisition getCollection() {
+        tassert(11140101,
+                "catalogResourceHandle must be acquired to access the collection",
+                isAcquired());
+        return _collection;
     }
+
+private:
+    CollectionAcquisition _collection;
 };
 
 }  // namespace mongo

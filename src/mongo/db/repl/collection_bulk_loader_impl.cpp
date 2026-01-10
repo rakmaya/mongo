@@ -35,14 +35,14 @@
 #include "mongo/db/collection_crud/collection_write_path.h"
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/index_builds/index_builds_common.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/index_catalog.h"
-#include "mongo/db/local_catalog/index_catalog_entry.h"
-#include "mongo/db/local_catalog/lock_manager/exception_util.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/repl_server_parameters_gen.h"
+#include "mongo/db/shard_role/lock_manager/exception_util.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog_entry.h"
 #include "mongo/db/storage/key_string/key_string.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/write_unit_of_work.h"
@@ -88,8 +88,8 @@ CollectionBulkLoaderImpl::CollectionBulkLoaderImpl(ServiceContext::UniqueClient 
                                                    const NamespaceString& nss)
     : _client{std::move(client)},
       _opCtx{std::move(opCtx)},
-      _acquisition(
-          acquireCollectionForLocalCatalogOnlyWithPotentialDataLoss(_opCtx.get(), nss, MODE_X)),
+      _acquisition(shard_role_nocheck::acquireCollectionForLocalCatalogOnlyWithPotentialDataLoss(
+          _opCtx.get(), nss, MODE_X)),
       _nss{nss},
       _idIndexBlock(std::make_unique<MultiIndexBlock>()),
       _secondaryIndexesBlock(std::make_unique<MultiIndexBlock>()) {
@@ -212,7 +212,7 @@ Status CollectionBulkLoaderImpl::insertDocuments(std::span<BSONObj> objs,
                     locs.clear();
 
                     while (insertIter != objs.end() &&
-                           bytesInBlock < collectionBulkLoaderBatchSizeInBytes) {
+                           bytesInBlock < collectionBulkLoaderBatchSizeInBytes.load()) {
                         const auto& [replRid, doc] = fn(*insertIter++);
                         bytesInBlock += doc.objsize();
                         // Insert the documents without updating indexes because we're building the

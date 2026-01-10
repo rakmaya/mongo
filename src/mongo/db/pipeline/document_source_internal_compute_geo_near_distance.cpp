@@ -52,12 +52,16 @@
 
 namespace mongo {
 
-REGISTER_DOCUMENT_SOURCE(_internalComputeGeoNearDistance,
-                         LiteParsedDocumentSourceDefault::parse,
-                         DocumentSourceInternalGeoNearDistance::createFromBson,
-                         AllowedWithApiStrict::kInternal);
+REGISTER_LITE_PARSED_DOCUMENT_SOURCE(_internalComputeGeoNearDistance,
+                                     InternalComputeGeoNearDistanceLiteParsed::parse,
+                                     AllowedWithApiStrict::kInternal);
+
+REGISTER_DOCUMENT_SOURCE_WITH_STAGE_PARAMS_DEFAULT(_internalComputeGeoNearDistance,
+                                                   DocumentSourceInternalGeoNearDistance,
+                                                   InternalComputeGeoNearDistanceStageParams);
+
 ALLOCATE_DOCUMENT_SOURCE_ID(_internalComputeGeoNearDistance,
-                            DocumentSourceInternalGeoNearDistance::id)
+                            DocumentSourceInternalGeoNearDistance::id);
 
 boost::intrusive_ptr<DocumentSource> DocumentSourceInternalGeoNearDistance::createFromBson(
     BSONElement elem, const boost::intrusive_ptr<ExpressionContext>& pExpCtx) {
@@ -122,10 +126,20 @@ DocumentSourceInternalGeoNearDistance::DocumentSourceInternalGeoNearDistance(
       _distanceField(std::move(distanceField)),
       _distanceMultiplier(distanceMultiplier) {}
 
+Value getNearFieldRepresentativeValue(BSONType coordinateType) {
+    if (isNumericBSONType(coordinateType)) {
+        return Value({Value(1), Value(1)});
+    } else {
+        return Value(BSON("type" << "Point" << "coordinates" << BSON_ARRAY(1 << 1)));
+    }
+}
+
 Value DocumentSourceInternalGeoNearDistance::serialize(const SerializationOptions& opts) const {
     MutableDocument out;
+
     out.setField(DocumentSourceInternalGeoNearDistance::kNearFieldName,
-                 opts.serializeLiteral(_coords));
+                 opts.serializeLiteral(
+                     _coords, getNearFieldRepresentativeValue(_coords.firstElementType())));
     out.setField(DocumentSourceInternalGeoNearDistance::kKeyFieldName,
                  Value(opts.serializeFieldPathFromString(_key)));
     out.setField(DocumentSourceInternalGeoNearDistance::kDistanceFieldFieldName,

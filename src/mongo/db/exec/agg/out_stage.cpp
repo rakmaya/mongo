@@ -31,11 +31,10 @@
 
 #include "mongo/db/curop_failpoint_helpers.h"
 #include "mongo/db/exec/agg/document_source_to_stage_registry.h"
-#include "mongo/db/local_catalog/collection_catalog.h"
-#include "mongo/db/local_catalog/collection_uuid_mismatch_info.h"
 #include "mongo/db/pipeline/document_source_out.h"
 #include "mongo/db/pipeline/writer_util.h"
-#include "mongo/db/raw_data_operation.h"
+#include "mongo/db/shard_role/shard_catalog/collection_uuid_mismatch_info.h"
+#include "mongo/db/shard_role/shard_catalog/raw_data_operation.h"
 #include "mongo/db/timeseries/timeseries_options.h"
 #include "mongo/logv2/log.h"
 
@@ -217,9 +216,10 @@ void OutStage::initialize() {
 
     createTemporaryCollection();
 
-    // Save the collection UUID to detect if it was dropped during execution. Timeseries will detect
-    // this when inserting as it doesn't implicity create collections on insert.
-    if (!_timeseries) {
+    // Save the collection UUID to detect if it was dropped during execution. Viewful timeseries
+    // will detect this when inserting as it doesn't implicitly create collections on insert.
+    // TODO SERVER-111600 remove this conditional once 9.0 becomes last LTS.
+    if (!_timeseries || _viewlessTimeseriesEnabled) {
         _tempNsUUID = pExpCtx->getMongoProcessInterface()->fetchCollectionUUIDFromPrimary(
             pExpCtx->getOperationContext(), _tempNs);
     }
@@ -288,8 +288,10 @@ void OutStage::flush(BatchedCommandRequest bcr, BatchedObjects batch) {
     auto targetEpoch = boost::none;
 
     if (_timeseries) {
-        uassertStatusOK(pExpCtx->getMongoProcessInterface()->insertTimeseries(
-            pExpCtx, _tempNs, std::move(insertCommand), _writeConcern, targetEpoch));
+        for (const auto& writeError : pExpCtx->getMongoProcessInterface()->insertTimeseries(
+                 pExpCtx, _tempNs, std::move(insertCommand), _writeConcern, targetEpoch)) {
+            uassertStatusOK(writeError.getStatus());
+        }
     } else {
         // Use the UUID to catch a mismatch if the temp collection was dropped and recreated.
         // Timeseries will detect this as inserts don't implicitly
@@ -300,8 +302,10 @@ void OutStage::flush(BatchedCommandRequest bcr, BatchedObjects batch) {
             insertCommand->getWriteCommandRequestBase().setCollectionUUID(_tempNsUUID);
         }
         try {
-            uassertStatusOK(pExpCtx->getMongoProcessInterface()->insert(
-                pExpCtx, _tempNs, std::move(insertCommand), _writeConcern, targetEpoch));
+            for (const auto& writeError : pExpCtx->getMongoProcessInterface()->insert(
+                     pExpCtx, _tempNs, std::move(insertCommand), _writeConcern, targetEpoch)) {
+                uassertStatusOK(writeError.getStatus());
+            }
 
         } catch (ExceptionFor<ErrorCodes::CollectionUUIDMismatch>& ex) {
             ex.addContext(
@@ -342,9 +346,10 @@ void OutStage::renameTemporaryCollection() {
     const NamespaceString& outputNs = makeBucketNsIfLegacyTimeseries(_outputNs);
 
     // Use the UUID to catch a mismatch if the temp collection was dropped and recreated in case of
-    // stepdown. Timeseries has it's own handling for this case as the dropped temp collection isn't
-    // implicitly recreated.
-    if (!_timeseries) {
+    // stepdown. Viewful timeseries has it's own handling for this case as the dropped temp
+    // collection isn't implicitly recreated.
+    // TODO SERVER-111600 remove this conditional once 9.0 becomes last LTS.
+    if (!_timeseries || _viewlessTimeseriesEnabled) {
         tassert(8085301, "No uuid found for $out temporary namespace", _tempNsUUID);
         const UUID currentTempNsUUID =
             pExpCtx->getMongoProcessInterface()->fetchCollectionUUIDFromPrimary(

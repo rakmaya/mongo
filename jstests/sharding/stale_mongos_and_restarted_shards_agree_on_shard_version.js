@@ -213,12 +213,10 @@ withRetryOnTransientTxnError(
 
     let matchingOps;
     assert.soon(() => {
+        const filter = {"command.update": "TestConvoyColl"};
         matchingOps = st.shard0
             .getDB("admin")
-            .aggregate([
-                {$currentOp: {"allUsers": true, "idleConnections": true}},
-                {$match: {"command.update": "TestConvoyColl"}},
-            ])
+            .aggregate([{$currentOp: {"allUsers": true, "idleConnections": true}}, {$match: filter}])
             .toArray();
         // Wait until all operations are blocked waiting for the refresh.
         return kNumThreadsForConvoyTest === matchingOps.length && matchingOps[0].opid != null;

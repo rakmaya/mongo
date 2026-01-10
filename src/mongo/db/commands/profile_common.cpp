@@ -55,6 +55,18 @@
 
 namespace mongo {
 
+namespace {
+
+// This assert is here to make sure new command options are considered in the 'isReadOnly' check. If
+// this assert fails, please make sure you consider the authorization implications of your change.
+MONGO_STATIC_ASSERT(ProfileCmdRequest::fieldMetadata.size() == 47);
+
+bool isReadOnly(const ProfileCmdRequest& request) {
+    return !request.getSlowms() && !request.getSlowinprogms() && !request.getSampleRate() &&
+        !request.getFilter();
+}
+}  // namespace
+
 Status ProfileCmdBase::checkAuthForOperation(OperationContext* opCtx,
                                              const DatabaseName& dbName,
                                              const BSONObj& cmdObj) const {
@@ -69,9 +81,9 @@ Status ProfileCmdBase::checkAuthForOperation(OperationContext* opCtx,
         ProfileCmdRequest::parse(cmdObj, IDLParserContext("profile", vts, dbName.tenantId(), sc));
     const auto profilingLevel = request.getCommandParameter();
 
-    if (profilingLevel < 0 && !request.getSlowms() && !request.getSampleRate()) {
-        // If the user just wants to view the current values of 'slowms' and 'sampleRate', they
-        // only need read rights on system.profile, even if they can't change the profiling level.
+    if (profilingLevel < 0 && isReadOnly(request)) {
+        // If the user just wants to view the current profiling settings, they only need read rights
+        // on system.profile, even if they can't change the profiling level.
         if (authzSession->isAuthorizedForActionsOnResource(
                 ResourcePattern::forExactNamespace(
                     NamespaceStringUtil::deserialize(dbName, "system.profile")),
@@ -113,6 +125,7 @@ bool ProfileCmdBase::run(OperationContext* opCtx,
 
     result.append("was", oldSettings.level);
     result.append("slowms", oldSlowMS);
+    result.append("slowinprogms", oldSettings.slowOpInProgressThreshold.count());
     result.append("sampleRate", oldSampleRate);
     if (oldSettings.filter) {
         result.append("filter", oldSettings.filter->serialize());
@@ -131,8 +144,8 @@ bool ProfileCmdBase::run(OperationContext* opCtx,
     }
 
     // Log the change made to server's profiling settings, if the request asks to change anything.
-    if (profilingLevel != -1 || request.getSlowms() || request.getSampleRate() ||
-        request.getFilter()) {
+    if (profilingLevel != -1 || request.getSlowms() || request.getSlowinprogms() ||
+        request.getSampleRate() || request.getFilter()) {
         logv2::DynamicAttributes attrs;
 
         BSONObjBuilder oldState;
@@ -140,6 +153,7 @@ bool ProfileCmdBase::run(OperationContext* opCtx,
 
         oldState.append("level"_sd, oldSettings.level);
         oldState.append("slowms"_sd, oldSlowMS);
+        oldState.append("slowinprogms"_sd, oldSettings.slowOpInProgressThreshold.count());
         oldState.append("sampleRate"_sd, oldSampleRate);
         if (oldSettings.filter) {
             oldState.append("filter"_sd, oldSettings.filter->serialize());
@@ -153,6 +167,7 @@ bool ProfileCmdBase::run(OperationContext* opCtx,
         auto newSettings = dbProfileSettings.getDatabaseProfileSettings(dbName);
         newState.append("level"_sd, newSettings.level);
         newState.append("slowms"_sd, serverGlobalParams.slowMS.load());
+        newState.append("slowinprogms"_sd, newSettings.slowOpInProgressThreshold.count());
         newState.append("sampleRate"_sd, serverGlobalParams.sampleRate.load());
         if (newSettings.filter) {
             newState.append("filter"_sd, newSettings.filter->serialize());

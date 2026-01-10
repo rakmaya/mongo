@@ -32,11 +32,11 @@
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/damage_vector.h"
 #include "mongo/db/storage/ident.h"
 #include "mongo/db/storage/key_format.h"
@@ -250,7 +250,8 @@ TEST_F(SizeStorerUpdateTest, DataSizeModification) {
                                             recordId,
                                             oldRecordData,
                                             damageSource,
-                                            damageVector);
+                                            damageVector,
+                                            nullptr /*cursor*/);
         ASSERT_TRUE(newDoc.isOK());
         oldRecordData = newDoc.getValue().getOwned();
         ASSERT_EQ(std::memcmp(oldRecordData.data(), "234", 3), 0);
@@ -267,7 +268,8 @@ TEST_F(SizeStorerUpdateTest, DataSizeModification) {
                                           recordId,
                                           oldRecordData,
                                           damageSource,
-                                          damageVector)
+                                          damageVector,
+                                          nullptr /*cursor*/)
                         .isOK());
         ASSERT_EQ(getDataSize(), 5);
         txn.commit();

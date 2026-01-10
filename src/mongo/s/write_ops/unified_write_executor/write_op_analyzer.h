@@ -30,8 +30,8 @@
 #pragma once
 
 #include "mongo/base/status_with.h"
-#include "mongo/db/global_catalog/chunk_manager.h"
-#include "mongo/db/global_catalog/router_role_api/routing_context.h"
+#include "mongo/db/router_role/routing_context.h"
+#include "mongo/s/query/exec/target_write_op.h"
 #include "mongo/s/query_analysis_sampler_util.h"
 #include "mongo/s/write_ops/pause_migrations_during_multi_updates_enablement.h"
 #include "mongo/s/write_ops/unified_write_executor/stats.h"
@@ -44,17 +44,25 @@
 namespace mongo {
 namespace unified_write_executor {
 
-enum BatchType {
+enum AnalysisType {
     kSingleShard,
     kMultiShard,
-    kNonTargetedWrite,
+    kTwoPhaseWrite,
+    kRetryableWriteWithId,
     kInternalTransaction,
     kMultiWriteBlockingMigrations,
 };
 
 struct Analysis {
-    BatchType type;
+    AnalysisType type;
     std::vector<ShardEndpoint> shardsAffected;
+    // TODO SERVER-106874 remove the 'isViewfulTimeseries' flag entirely once 9.0 becomes last LTS.
+    // By then we will only have viewless timeseries that do not require nss translation.
+    //
+    // 'isViewfulTimeseries' is set to true when the write op is on the main namespace of a viewful
+    // timeseries collection. This flag makes sure the executor sends the command with translation
+    // to buckets namespace correctly.
+    bool isViewfulTimeseries;
     boost::optional<analyze_shard_key::TargetedSampleId> targetedSampleId;
 };
 
@@ -82,6 +90,14 @@ public:
                                  const WriteOp& op) override;
 
 private:
+    /**
+     * Record the targeting stats of the write op, this is only called for certain write types.
+     */
+    void recordTargetingStats(OperationContext* opCtx,
+                              const CollectionRoutingInfo& cri,
+                              const TargetOpResult& tr,
+                              const WriteOp& op);
+
     Stats& _stats;
     PauseMigrationsDuringMultiUpdatesEnablement _pauseMigrationsDuringMultiUpdatesParameter;
 };

@@ -40,7 +40,6 @@
 #include "mongo/db/pipeline/optimization/optimize.h"
 #include "mongo/db/pipeline/resume_token.h"
 #include "mongo/db/query/compiler/rewrites/matcher/expression_optimizer.h"
-#include "mongo/db/server_options.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/util/assert_util.h"
 
@@ -51,11 +50,13 @@
 
 namespace mongo {
 
+REGISTER_INTERNAL_LITE_PARSED_DOCUMENT_SOURCE(_internalChangeStreamOplogMatch,
+                                              ChangeStreamOplogMatchLiteParsed::parse);
 
-REGISTER_INTERNAL_DOCUMENT_SOURCE(_internalChangeStreamOplogMatch,
-                                  LiteParsedDocumentSourceChangeStreamInternal::parse,
-                                  DocumentSourceChangeStreamOplogMatch::createFromBson,
-                                  true);
+REGISTER_DOCUMENT_SOURCE_WITH_STAGE_PARAMS_DEFAULT(_internalChangeStreamOplogMatch,
+                                                   DocumentSourceChangeStreamOplogMatch,
+                                                   ChangeStreamOplogMatchStageParams);
+
 ALLOCATE_DOCUMENT_SOURCE_ID(_internalChangeStreamOplogMatch,
                             DocumentSourceChangeStreamOplogMatch::id)
 
@@ -178,7 +179,7 @@ StageConstraints DocumentSourceChangeStreamOplogMatch::constraints(
     return constraints;
 }
 
-DocumentSourceContainer::iterator DocumentSourceChangeStreamOplogMatch::doOptimizeAt(
+DocumentSourceContainer::iterator DocumentSourceChangeStreamOplogMatch::optimizeAt(
     DocumentSourceContainer::iterator itr, DocumentSourceContainer* container) {
     tassert(5687203, "Iterator mismatch during optimization", *itr == this);
 
@@ -205,7 +206,7 @@ DocumentSourceContainer::iterator DocumentSourceChangeStreamOplogMatch::doOptimi
         return itr;
     }
 
-    itr = pipeline_optimization::optimizeEndOfPipeline(std::prev(itr), container);
+    itr = pipeline_optimization::optimizeEndOfPipeline(*getExpCtx(), std::prev(itr), container);
     _optimizedEndOfPipeline = true;
 
     if (itr == container->end()) {

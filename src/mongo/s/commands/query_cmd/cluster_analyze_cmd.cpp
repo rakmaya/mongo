@@ -35,13 +35,13 @@
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/feature_flag.h"
-#include "mongo/db/global_catalog/router_role_api/cluster_commands_helpers.h"
-#include "mongo/db/global_catalog/router_role_api/router_role.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/legacy_runtime_constants_gen.h"
 #include "mongo/db/query/analyze_command_gen.h"
 #include "mongo/db/query/query_feature_flags_gen.h"
+#include "mongo/db/router_role/cluster_commands_helpers.h"
+#include "mongo/db/router_role/router_role.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/sharding_environment/client/shard.h"
@@ -98,11 +98,9 @@ public:
             auto& cmd = request();
             setReadWriteConcern(opCtx, cmd, this);
 
-            sharding::router::CollectionRouter router{opCtx->getServiceContext(), nss};
+            sharding::router::CollectionRouter router(opCtx, nss);
             router.routeWithRoutingContext(
-                opCtx,
-                Request::kCommandName,
-                [&](OperationContext* opCtx, RoutingContext& routingCtx) {
+                Request::kCommandName, [&](OperationContext* opCtx, RoutingContext& routingCtx) {
                     auto shardResponses = scatterGatherVersionedTargetByRoutingTable(
                         opCtx,
                         routingCtx,

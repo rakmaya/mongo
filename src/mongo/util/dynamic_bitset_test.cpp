@@ -31,7 +31,14 @@
 
 #include "mongo/unittest/unittest.h"
 
+#include <algorithm>
+#include <numeric>
+#include <vector>
+
+#include <boost/dynamic_bitset.hpp>
+
 namespace mongo {
+namespace {
 using Bitset = DynamicBitset<uint8_t, 1>;
 
 TEST(DynamicBitsetTests, Constructors) {
@@ -86,6 +93,18 @@ TEST(DynamicBitsetTests, Not) {
     ASSERT_EQ(Bitset("1110001110000000"), ~Bitset("0001110001111111"));
 }
 
+TEST(DynamicBitsetTests, GetUsingTest) {
+    Bitset bitset("100001010111001");
+    ASSERT_TRUE(bitset.test(0));
+    ASSERT_FALSE(bitset.test(1));
+    ASSERT_TRUE(bitset.test(4));
+    ASSERT_TRUE(bitset.test(5));
+    ASSERT_FALSE(bitset.test(6));
+    ASSERT_TRUE(bitset.test(9));
+    ASSERT_FALSE(bitset.test(10));
+    ASSERT_TRUE(bitset.test(14));
+}
+
 TEST(DynamicBitsetTests, SetAndGetSmall) {
     Bitset bitset(8);
 
@@ -128,6 +147,19 @@ TEST(DynamicBitsetTests, SetAndGetLargeBitset) {
     largeBitset.set(31, false);
     largeBitset.set(2, true);
     ASSERT_EQ(Bitset("01000000000000000000000000000110"), largeBitset);
+}
+
+TEST(DynamicBitsetTests, Clear) {
+    {
+        Bitset bitset("11111111111111111111111111111111");
+        bitset.clear();
+        ASSERT_EQ(bitset, Bitset(32));
+    }
+    {
+        Bitset bitset("10000001000000100001000000000001");
+        bitset.clear();
+        ASSERT_EQ(bitset, Bitset(32));
+    }
 }
 
 TEST(DynamicBitsetTests, SetAll) {
@@ -293,6 +325,39 @@ TEST(DynamicBitsetTests, None) {
     ASSERT_FALSE(Bitset("11110111").none());
 }
 
+TEST(DynamicBitsetTests, All) {
+    ASSERT_FALSE(Bitset("1").all());
+    ASSERT_TRUE(Bitset("11111111").all());
+    ASSERT_FALSE(Bitset("111111111111").all());
+    ASSERT_TRUE(Bitset("1111111111111111").all());
+}
+
+template <typename BlockType, size_t nBlocks>
+DynamicBitset<BlockType, nBlocks> makeBitset(size_t n) {
+    DynamicBitset<BlockType, nBlocks> bitset(sizeof(size_t) * CHAR_BIT);
+    // Iterates through each set bit in the number 'n': gets the index of the next set bit  and
+    // clears the bit until 'n' becomes 0.
+    for (; n != 0; n &= n - 1)
+        bitset.set(std::countr_zero(n));
+    return bitset;
+}
+
+void testAllInPrefix(size_t n, size_t maxBits) {
+    auto mongoBitset = makeBitset<uint8_t, 8>(n);
+    boost::dynamic_bitset<size_t> boostBitset(maxBits, n);
+    for (; !boostBitset.empty(); boostBitset.pop_back())
+        ASSERT_EQ(mongoBitset.allInPrefix(boostBitset.size()), boostBitset.all());
+    ASSERT_TRUE(mongoBitset.allInPrefix(0));
+}
+
+TEST(DynamicBitsetTests, allInPrefix) {
+    static constexpr size_t maxBits = 20;
+    static constexpr size_t maxValue = 1ull << maxBits;
+
+    for (size_t n = 0; n != maxValue; ++n)
+        testAllInPrefix(n, maxBits);
+}
+
 TEST(DynamicBitsetTests, Less) {
     ASSERT_LT(Bitset("0000"), Bitset("0001"));
     ASSERT_LT(Bitset("100000000"), Bitset("010000000"));
@@ -300,4 +365,92 @@ TEST(DynamicBitsetTests, Less) {
     ASSERT_LT(Bitset("100000000"), Bitset("1010000000"));
     ASSERT_FALSE(Bitset("0001") < Bitset("0001"));
 }
+
+template <typename T, size_t nBlocks>
+void testDynamicBitsetPopulationView(std::vector<size_t> expectedBits) {
+    auto maxIndexPos = std::max_element(expectedBits.begin(), expectedBits.end());
+    const size_t size = maxIndexPos == expectedBits.end() ? 0 : *maxIndexPos + 1;
+    DynamicBitset<T, nBlocks> bitset(size);
+    for (size_t bitIndex : expectedBits)
+        bitset.set(bitIndex);
+    auto view = makePopulationView(bitset);
+    ASSERT_EQ(std::vector<size_t>(view.begin(), view.end()), expectedBits);
+}
+
+template <typename T, size_t nBlocks>
+void testDynamicBitsetPopulationView() {
+    testDynamicBitsetPopulationView<T, nBlocks>({});
+    testDynamicBitsetPopulationView<T, nBlocks>({0});
+    testDynamicBitsetPopulationView<T, nBlocks>({1});
+    testDynamicBitsetPopulationView<T, nBlocks>({0, 1});
+    testDynamicBitsetPopulationView<T, nBlocks>({0, 74, 90});
+    testDynamicBitsetPopulationView<T, nBlocks>({2, 4, 37, 50, 70});
+
+    std::vector<size_t> allBitsSet(100);
+    std::iota(allBitsSet.begin(), allBitsSet.end(), 0);
+    testDynamicBitsetPopulationView<T, nBlocks>(std::move(allBitsSet));
+}
+
+void testPartiallyPopulatedDynamicBitsetPopulationView(size_t numPopulatedBlocks,
+                                                       size_t firstBlockToPopulate,
+                                                       bool addZeroBitsAfterPopulatedBlocks) {
+    using BlockType = size_t;
+    constexpr size_t kBlockSize = sizeof(BlockType) * CHAR_BIT;
+
+    std::vector<size_t> setbits{kBlockSize * numPopulatedBlocks};
+    std::iota(setbits.begin(), setbits.end(), kBlockSize * firstBlockToPopulate);
+    if (addZeroBitsAfterPopulatedBlocks)
+        setbits.push_back(setbits.back() + 10);
+    testDynamicBitsetPopulationView<BlockType, 1>(std::move(setbits));
+}
+
+TEST(DynamicBitsetPopulationViewTests, Iterator) {
+    testDynamicBitsetPopulationView<uint8_t, 1>();
+    testDynamicBitsetPopulationView<uint8_t, 2>();
+    testDynamicBitsetPopulationView<uint8_t, 8>();
+    testDynamicBitsetPopulationView<uint64_t, 1>();
+    testDynamicBitsetPopulationView<uint64_t, 2>();
+    testDynamicBitsetPopulationView<uint64_t, 8>();
+}
+
+/**
+ * Only one block is fully filled and it's the starting block.
+ */
+TEST(DynamicBitsetPopulationViewTests, IteratorFullStartingBlock) {
+    testPartiallyPopulatedDynamicBitsetPopulationView(
+        /*numPopulatedBlocks*/ 1,
+        /*firstBlockToPopulate*/ 0,
+        /*addZeroBitsAfterPopulatedBlocks*/ true);
+}
+
+/**
+ * Some block in the middle is fully filled.
+ */
+TEST(DynamicBitsetPopulationViewTests, IteratorFullMiddleBlock) {
+    testPartiallyPopulatedDynamicBitsetPopulationView(
+        /*numPopulatedBlocks*/ 1,
+        /*firstBlockToPopulate*/ 1,
+        /*addZeroBitsAfterPopulatedBlocks*/ true);
+}
+
+/**
+ * Final block is fully filled.
+ */
+TEST(DynamicBitsetPopulationViewTests, IteratorFullFinalBlock) {
+    testPartiallyPopulatedDynamicBitsetPopulationView(
+        /*numPopulatedBlocks*/ 1,
+        /*firstBlockToPopulate*/ 2,
+        /*addZeroBitsAfterPopulatedBlocks*/ false);
+}
+
+/**
+ * Two consecutive blocks are filled.
+ */
+TEST(DynamicBitsetPopulationViewTests, IteratorFullTwoBlocks) {
+    testPartiallyPopulatedDynamicBitsetPopulationView(
+        /*numPopulatedBlocks*/ 2,
+        /*firstBlockToPopulate*/ 1,
+        /*addZeroBitsAfterPopulatedBlocks*/ true);
+}
+}  // namespace
 }  // namespace mongo

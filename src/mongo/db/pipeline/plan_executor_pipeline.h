@@ -52,6 +52,7 @@
 #include "mongo/db/record_id.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
+#include "mongo/util/modules.h"
 
 #include <memory>
 #include <queue>
@@ -162,7 +163,7 @@ public:
     }
 
     Status getKillStatus() const override {
-        invariant(isMarkedAsKilled());
+        tassert(11282926, "Expect PlanExecutorPipeline to be marked as killed", isMarkedAsKilled());
         return _killStatus;
     }
 

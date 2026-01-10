@@ -29,13 +29,14 @@
 #pragma once
 
 #include "mongo/bson/bsonobj.h"
-#include "mongo/db/local_catalog/throttle_cursor.h"
 #include "mongo/db/repl/dbcheck/dbcheck.h"
 #include "mongo/db/repl/dbcheck/dbcheck_gen.h"
 #include "mongo/db/repl/dbcheck/dbcheck_idl.h"
+#include "mongo/db/throttle_cursor.h"
 #include "mongo/db/write_concern.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/util/background.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/namespace_string_util.h"
 #include "mongo/util/uuid.h"
 
@@ -266,7 +267,7 @@ private:
     bool _shouldEndCatalogSnapshotOrBatch(
         OperationContext* opCtx,
         const CollectionPtr& collection,
-        StringData indexName,
+        const BSONObj& indexKeyPattern,
         const key_string::Value& currKeyStringWithoutRecordId,
         const BSONObj& currKeyStringBson,
         int64_t numKeysInSnapshot,
@@ -285,7 +286,6 @@ private:
                         const CollectionPtr& collection,
                         const KeyStringEntry& keyStringEntryWithRecordId,
                         const BSONObj& keyStringBson,
-                        const IndexDescriptor* indexDescriptor,
                         const SortedDataIndexAccessMethod* iam,
                         const IndexCatalogEntry* indexCatalogEntry,
                         const BSONObj& indexSpec);
@@ -304,9 +304,9 @@ private:
     StatusWith<std::unique_ptr<DbCheckAcquisition>> _acquireDBCheckLocks(
         OperationContext* opCtx, const NamespaceString& nss);
 
-    StatusWith<const IndexDescriptor*> _acquireIndex(OperationContext* opCtx,
-                                                     const CollectionPtr& collection,
-                                                     StringData indexName);
+    StatusWith<const IndexCatalogEntry*> _acquireIndex(OperationContext* opCtx,
+                                                       const CollectionPtr& collection,
+                                                       StringData indexName);
 
     std::pair<bool, boost::optional<UUID>> _shouldLogOplogBatch(DbCheckOplogBatch& batch);
 

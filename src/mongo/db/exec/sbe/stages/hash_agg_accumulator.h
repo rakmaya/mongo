@@ -135,6 +135,8 @@ public:
      */
     virtual std::vector<DebugPrinter::Block> debugPrintMerge() const = 0;
 
+    virtual void debugPrintCode(std::vector<DebugPrinter::Block>& blocks) const = 0;
+
 protected:
     /**
      * The slot that stores the accumulator's state and usually also stores its final value.
@@ -183,8 +185,7 @@ public:
     void initialize(vm::ByteCode& bytecode, HashAggAccessor& accumulatorState) const final;
 
     void accumulate(vm::ByteCode& bytecode, HashAggAccessor& accumulatorState) const final {
-        auto [owned, tag, val] = bytecode.run(_accumulatorCode.get());
-        accumulatorState.reset(owned, tag, val);
+        accumulatorState.reset(bytecode.run(_accumulatorCode.get()));
     };
 
     void merge(vm::ByteCode& bytecode,
@@ -197,6 +198,12 @@ public:
     boost::optional<std::vector<DebugPrinter::Block>> debugPrintInitialize() const final;
     std::vector<DebugPrinter::Block> debugPrintAccumulate() const final;
     std::vector<DebugPrinter::Block> debugPrintMerge() const final;
+
+    void debugPrintCode(std::vector<DebugPrinter::Block>& blocks) const final {
+        PlanStage::debugPrintBytecode(blocks, _accumulatorCode, "ACCUMULATE" /*title*/);
+        PlanStage::debugPrintBytecode(blocks, _mergingCode, "MERGE" /*title*/);
+        PlanStage::debugPrintBytecode(blocks, _optionalInitializerCode, "INIT" /**/);
+    }
 
 private:
     /**
@@ -269,6 +276,10 @@ public:
     std::vector<DebugPrinter::Block> debugPrintAccumulate() const final;
     std::vector<DebugPrinter::Block> debugPrintMerge() const final;
 
+    void debugPrintCode(std::vector<DebugPrinter::Block>& blocks) const final {
+        /*no bytecode to print*/
+    }
+
 protected:
     /**
      * Child implementations of this class can override this method to perform any follow-on
@@ -282,9 +293,7 @@ protected:
      * (owned, type tag, value) pair and update the accumulator state stored in the
      * 'accumulatorState' accessor to incorporate the new value.
      */
-    virtual void accumulateTransformedValue(bool ownedField,
-                                            value::TypeTags tagField,
-                                            value::Value valField,
+    virtual void accumulateTransformedValue(value::TagValueMaybeOwned field,
                                             HashAggAccessor& accumulatorState) const = 0;
 
     /**
@@ -293,9 +302,7 @@ protected:
      * 'accumulatorState' accessor.
      */
     virtual void mergeRecoveredState(
-        bool ownedRecoveredState,
-        value::TypeTags tagRecoveredState,
-        value::Value valRecoveredState,
+        value::TagValueMaybeOwned recoveredState,
         value::MaterializedSingleRowAccessor& accumulatorState) const = 0;
 
     /**
@@ -303,8 +310,7 @@ protected:
      * as a (type tag, value) pair and write the final result of the accumulation to the
      * 'result' accessor.
      */
-    virtual void finalizePartialAggregate(value::TypeTags tagPartialAggregate,
-                                          value::Value valPartialAggregate,  // Owned
+    virtual void finalizePartialAggregate(value::TagValueOwned partialAggregate,
                                           value::AssignableSlotAccessor& result) const = 0;
 
     /**
@@ -345,14 +351,10 @@ public:
     void initialize(vm::ByteCode& bytecode, HashAggAccessor& accumulatorState) const final;
 
 protected:
-    void accumulateTransformedValue(bool ownedField,
-                                    value::TypeTags tagField,
-                                    value::Value valField,
+    void accumulateTransformedValue(value::TagValueMaybeOwned field,
                                     HashAggAccessor& accumulatorState) const final;
 
-    void mergeRecoveredState(bool ownedRecoveredState,
-                             value::TypeTags tagRecoveredState,
-                             value::Value valRecoveredState,
+    void mergeRecoveredState(value::TagValueMaybeOwned recoveredState,
                              value::MaterializedSingleRowAccessor& accumulatorState) const final;
 
     std::string getDebugName() const final {
@@ -374,8 +376,7 @@ public:
     }
 
 protected:
-    void finalizePartialAggregate(value::TypeTags tagPartialAggregate,
-                                  value::Value valPartialAggregate,  // Owned
+    void finalizePartialAggregate(value::TagValueOwned partialAggregate,
                                   value::AssignableSlotAccessor& result) const final;
 };
 
@@ -394,8 +395,7 @@ public:
     }
 
 protected:
-    void finalizePartialAggregate(value::TypeTags tagPartialAggregate,
-                                  value::Value valPartialAggregate,  // Owned
+    void finalizePartialAggregate(value::TagValueOwned partialAggregate,
                                   value::AssignableSlotAccessor& result) const final;
 };
 
@@ -431,18 +431,13 @@ public:
 protected:
     void singlePurposePrepare(CompileCtx& ctx) final;
 
-    void accumulateTransformedValue(bool ownedField,
-                                    value::TypeTags tagField,
-                                    value::Value valField,
+    void accumulateTransformedValue(value::TagValueMaybeOwned field,
                                     HashAggAccessor& accumulatorState) const final;
 
-    void mergeRecoveredState(bool ownedRecoveredState,
-                             value::TypeTags tagRecoveredState,
-                             value::Value valRecoveredState,
+    void mergeRecoveredState(value::TagValueMaybeOwned recoveredState,
                              value::MaterializedSingleRowAccessor& accumulatorState) const final;
 
-    void finalizePartialAggregate(value::TypeTags tagPartialAggregate,
-                                  value::Value valPartialAggregate,  // Owned
+    void finalizePartialAggregate(value::TagValueOwned partialAggregate,
                                   value::AssignableSlotAccessor& result) const final;
 
     std::string getDebugName() const final {
@@ -483,18 +478,13 @@ public:
     void initialize(vm::ByteCode& bytecode, HashAggAccessor& accumulatorState) const final;
 
 protected:
-    void accumulateTransformedValue(bool ownedField,
-                                    value::TypeTags tagField,
-                                    value::Value valField,
+    void accumulateTransformedValue(value::TagValueMaybeOwned field,
                                     HashAggAccessor& accumulatorState) const final;
 
-    void mergeRecoveredState(bool ownedRecoveredState,
-                             value::TypeTags tagRecoveredState,
-                             value::Value valRecoveredState,
+    void mergeRecoveredState(value::TagValueMaybeOwned recoveredState,
                              value::MaterializedSingleRowAccessor& accumulatorState) const final;
 
-    void finalizePartialAggregate(value::TypeTags tagPartialAggregate,
-                                  value::Value valPartialAggregate,  // Owned
+    void finalizePartialAggregate(value::TagValueOwned partialAggregate,
                                   value::AssignableSlotAccessor& result) const final;
 
     std::string getDebugName() const final {
@@ -517,18 +507,13 @@ public:
     }
 
 protected:
-    void accumulateTransformedValue(bool ownedField,
-                                    value::TypeTags tagField,
-                                    value::Value valField,
+    void accumulateTransformedValue(value::TagValueMaybeOwned field,
                                     HashAggAccessor& accumulatorState) const final;
 
-    void mergeRecoveredState(bool ownedRecoveredState,
-                             value::TypeTags tagRecoveredState,
-                             value::Value valRecoveredState,
+    void mergeRecoveredState(value::TagValueMaybeOwned recoveredState,
                              value::MaterializedSingleRowAccessor& accumulatorState) const final;
 
-    void finalizePartialAggregate(value::TypeTags tagPartialAggregate,
-                                  value::Value valPartialAggregate,  // Owned
+    void finalizePartialAggregate(value::TagValueOwned partialAggregate,
                                   value::AssignableSlotAccessor& result) const final;
 
     std::string getDebugName() const final {
@@ -546,14 +531,10 @@ public:
     void initialize(vm::ByteCode& bytecode, HashAggAccessor& accumulatorState) const final;
 
 protected:
-    void accumulateTransformedValue(bool ownedField,
-                                    value::TypeTags tagField,
-                                    value::Value valField,
+    void accumulateTransformedValue(value::TagValueMaybeOwned field,
                                     HashAggAccessor& accumulatorState) const final;
 
-    void mergeRecoveredState(bool ownedRecoveredState,
-                             value::TypeTags tagRecoveredState,
-                             value::Value valRecoveredState,
+    void mergeRecoveredState(value::TagValueMaybeOwned recoveredState,
                              value::MaterializedSingleRowAccessor& accumulatorState) const final;
 
     std::string getDebugName() const final {
@@ -575,8 +556,7 @@ public:
     }
 
 protected:
-    void finalizePartialAggregate(value::TypeTags tagPartialAggregate,
-                                  value::Value valPartialAggregate,  // Owned
+    void finalizePartialAggregate(value::TagValueOwned partialAggregate,
                                   value::AssignableSlotAccessor& result) const final;
 };
 
@@ -590,13 +570,12 @@ public:
     using CountHashAggAccumulatorBase::CountHashAggAccumulatorBase;
 
     std::unique_ptr<HashAggAccumulator> clone() const final {
-        return std::make_unique<CountHashAggAccumulatorTerminal>(
+        return std::make_unique<CountHashAggAccumulatorPartial>(
             _outSlot, _spillSlot, _transformExpr->clone(), boost::none);
     }
 
 protected:
-    void finalizePartialAggregate(value::TypeTags tagPartialAggregate,
-                                  value::Value valPartialAggregate,  // Owned
+    void finalizePartialAggregate(value::TagValueOwned partialAggregate,
                                   value::AssignableSlotAccessor& result) const final;
 };
 

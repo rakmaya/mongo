@@ -34,9 +34,9 @@
 #include "mongo/base/status_with.h"
 #include "mongo/client/read_preference.h"
 #include "mongo/client/remote_command_targeter.h"
-#include "mongo/db/local_catalog/shard_role_catalog/operation_sharding_state.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/shard_catalog/operation_sharding_state.h"
 #include "mongo/db/sharding_environment/client/shard.h"
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/sharding_environment/shard_id.h"
@@ -46,6 +46,7 @@
 #include "mongo/util/cancellation.h"
 #include "mongo/util/future.h"
 #include "mongo/util/future_impl.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/out_of_line_executor.h"
 
@@ -61,7 +62,7 @@
 namespace mongo {
 namespace async_rpc {
 
-class ShardIdTargeter : public Targeter {
+class MONGO_MOD_OPEN ShardIdTargeter : public Targeter {
 public:
     ShardIdTargeter(ExecutorPtr executor,
                     OperationContext* opCtx,

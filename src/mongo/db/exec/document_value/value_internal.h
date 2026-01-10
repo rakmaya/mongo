@@ -41,6 +41,7 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/debug_util.h"
 #include "mongo/util/intrusive_counter.h"
+#include "mongo/util/modules.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -60,7 +61,7 @@ class RCString final : public RefCountable {
 public:
     static boost::intrusive_ptr<const RCString> create(StringData s) {
         static constexpr size_t sizeLimit = BSONObjMaxUserSize;
-        uassert(16493,
+        uassert(ErrorCodes::BSONObjectTooLarge,
                 fmt::format("RCString too large. Requires size={} < limit={}", s.size(), sizeLimit),
                 s.size() < sizeLimit);
         return boost::intrusive_ptr{new (s) RCString{s}};

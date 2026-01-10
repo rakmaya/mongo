@@ -49,6 +49,12 @@ QueryKnobConfiguration::QueryKnobConfiguration(const query_settings::QuerySettin
                           ->get<QueryPlanRankerMode>("planRankerMode")
                           ->_data.get();
 
+    _planRankingStrategyForAutomaticQueryPlanRankerMode =
+        ServerParameterSet::getNodeParameterSet()
+            ->get<QueryPlanRankingStrategyForAutomaticQueryPlanRankerMode>(
+                "automaticCEPlanRankingStrategy")
+            ->_data.get();
+
     _samplingConfidenceInterval =
         ServerParameterSet::getNodeParameterSet()
             ->get<SamplingConfidenceInterval>("samplingConfidenceInterval")
@@ -74,9 +80,26 @@ QueryKnobConfiguration::QueryKnobConfiguration(const query_settings::QuerySettin
     _maxScansToExplodeValue = static_cast<size_t>(internalQueryMaxScansToExplode.loadRelaxed());
     _internalQuerySpillingMinAvailableDiskSpaceBytes =
         static_cast<int64_t>(internalQuerySpillingMinAvailableDiskSpaceBytes.loadRelaxed());
+    _measureQueryExecutionTimeInNanoseconds =
+        internalMeasureQueryExecutionTimeInNanoseconds.loadRelaxed();
+    _useMultiplannerForSingleSolutions =
+        internalQueryPlannerUseMultiplannerForSingleSolutions.loadRelaxed();
 
     _isJoinOrderingEnabled = internalEnableJoinOptimization.load();
+    _randomJoinReorderDefaultToHashJoin = internalRandomJoinReorderDefaultToHashJoin.load();
     _randomJoinOrderSeed = internalRandomJoinOrderSeed.load();
+    _joinReorderMode = ServerParameterSet::getNodeParameterSet()
+                           ->get<JoinReorderMode>("internalJoinReorderMode")
+                           ->_data.get();
+    _joinPlanTreeShape = ServerParameterSet::getNodeParameterSet()
+                             ->get<JoinPlanTreeShape>("internalJoinPlanTreeShape")
+                             ->_data.get();
+    _maxNodesInJoinGraph = internalMaxNodesInJoinGraph.load();
+    _maxEdgesInJoinGraph = internalMaxEdgesInJoinGraph.load();
+    _maxNumberNodesConsideredForImplicitEdges =
+        internalMaxNumberNodesConsideredForImplicitEdges.load();
+    _internalMaxGroupAccumulatorsInSbe = gInternalMaxGroupAccumulatorsInSbe.loadRelaxed();
+    _enableJoinEnumerationHJOrderPruning = internalEnableJoinEnumerationHJOrderPruning.load();
 }
 
 QueryFrameworkControlEnum QueryKnobConfiguration::getInternalQueryFrameworkControlForOp() const {
@@ -85,6 +108,11 @@ QueryFrameworkControlEnum QueryKnobConfiguration::getInternalQueryFrameworkContr
 
 QueryPlanRankerModeEnum QueryKnobConfiguration::getPlanRankerMode() const {
     return _planRankerMode;
+}
+
+QueryPlanRankingStrategyForAutomaticQueryPlanRankerModeEnum
+QueryKnobConfiguration::getPlanRankingStrategyForAutomaticQueryPlanRankerMode() const {
+    return _planRankingStrategyForAutomaticQueryPlanRankerMode;
 }
 
 SamplingConfidenceIntervalEnum QueryKnobConfiguration::getConfidenceInterval() const {
@@ -101,6 +129,34 @@ size_t QueryKnobConfiguration::getRandomJoinOrderSeed() const {
 
 bool QueryKnobConfiguration::isJoinOrderingEnabled() const {
     return _isJoinOrderingEnabled;
+}
+
+bool QueryKnobConfiguration::getRandomJoinReorderDefaultToHashJoin() const {
+    return _randomJoinReorderDefaultToHashJoin;
+}
+
+JoinReorderModeEnum QueryKnobConfiguration::getJoinReorderMode() const {
+    return _joinReorderMode;
+}
+
+JoinPlanTreeShapeEnum QueryKnobConfiguration::getJoinPlanTreeShape() const {
+    return _joinPlanTreeShape;
+}
+
+size_t QueryKnobConfiguration::getMaxNodesInJoinGraph() const {
+    return _maxNodesInJoinGraph;
+}
+
+size_t QueryKnobConfiguration::getMaxEdgesInJoinGraph() const {
+    return _maxEdgesInJoinGraph;
+}
+
+size_t QueryKnobConfiguration::getMaxNumberNodesConsideredForImplicitEdges() const {
+    return _maxNumberNodesConsideredForImplicitEdges;
+}
+
+bool QueryKnobConfiguration::getEnableJoinEnumerationHJOrderPruning() const {
+    return _enableJoinEnumerationHJOrderPruning;
 }
 
 double QueryKnobConfiguration::getSamplingMarginOfError() const {
@@ -166,6 +222,18 @@ bool QueryKnobConfiguration::canPushDownFullyCompatibleStages() const {
 
 int64_t QueryKnobConfiguration::getInternalQuerySpillingMinAvailableDiskSpaceBytes() const {
     return _internalQuerySpillingMinAvailableDiskSpaceBytes;
+}
+
+bool QueryKnobConfiguration::getMeasureQueryExecutionTimeInNanoseconds() const {
+    return _measureQueryExecutionTimeInNanoseconds;
+}
+
+bool QueryKnobConfiguration::getUseMultiplannerForSingleSolutions() const {
+    return _useMultiplannerForSingleSolutions;
+}
+
+int64_t QueryKnobConfiguration::getMaxGroupAccumulatorsInSbe() const {
+    return _internalMaxGroupAccumulatorsInSbe;
 }
 
 }  // namespace mongo

@@ -46,6 +46,7 @@
 #include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/intrusive_counter.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/string_map.h"
 
 #include <cstddef>
@@ -155,7 +156,11 @@ public:
      */
     void applyRename(const StringMap<std::string>& renameList) {
         SubstituteFieldPathWalker substituteWalker(renameList);
-        expression_walker::walk<Expression>(_expression.get(), &substituteWalker);
+        if (auto newExpr =
+                expression_walker::walk<Expression>(_expression.get(), &substituteWalker);
+            newExpr) {
+            _expression = newExpr.release();
+        }
     }
 
     bool hasRenameablePath(const StringMap<std::string>& renameList) const {

@@ -906,6 +906,7 @@ def _impl(ctx):
 
     external_include_paths_feature = feature(
         name = "external_include_paths",
+        enabled = True,
         flag_sets = [
             flag_set(
                 actions = [
@@ -1620,6 +1621,7 @@ def _impl(ctx):
             extension = ".dylib",
         ),
     ]
+
     features = [
         framework_paths_feature,
         cpp_modules_feature,
@@ -1720,6 +1722,12 @@ mongo_apple_llvm_cc_toolchain_config = rule(
         "builtin_sysroot": attr.label(mandatory = True),
         "optimization_level": attr.string(mandatory = False),
         "debug_level": attr.int(mandatory = False),
+        "internal_thin_lto_enabled": attr.bool(default = False, mandatory = False),
+        "coverage_enabled": attr.bool(default = False, mandatory = False),
+        "compress_debug_enabled": attr.bool(default = False, mandatory = False),
+        "warnings_as_errors_enabled": attr.bool(default = True, mandatory = False),
+        "linkstatic": attr.bool(mandatory = True),
+        "global_defines": attr.string_list(mandatory = False),
     },
     fragments = ["apple", "cpp"],
     provides = [CcToolchainConfigInfo],

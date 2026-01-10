@@ -96,6 +96,9 @@ filters:
   - "host_ipaddr.js":
     approvers:
       - 10gen/server-networking-and-observability
+  - "feature_compatibility_version.js":
+    approvers:
+      - 10gen/server-fcv
   - "*.pem":
     approvers:
       - 10gen/server-security
@@ -108,3 +111,9 @@ filters:
   - "*.pfx":
     approvers:
       - 10gen/server-security
+  - "fixture_helpers.js":
+    approvers:
+      - 10gen/server-catalog-and-routing-routing-and-topology
+  - "index_utils.js":
+    approvers:
+      - 10gen/server-catalog-and-routing-shard-catalog

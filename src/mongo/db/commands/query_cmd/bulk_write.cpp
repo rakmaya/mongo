@@ -40,7 +40,7 @@
 #include "mongo/bson/oid.h"
 #include "mongo/client/read_preference.h"
 #include "mongo/crypto/fle_field_schema_gen.h"
-#include "mongo/db/admission/execution_admission_context.h"
+#include "mongo/db/admission/execution_control/execution_admission_context.h"
 #include "mongo/db/api_parameters.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/basic_types.h"
@@ -61,13 +61,6 @@
 #include "mongo/db/feature_flag.h"
 #include "mongo/db/fle_crud.h"
 #include "mongo/db/initialize_operation_session_info.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_catalog.h"
-#include "mongo/db/local_catalog/collection_operation_source.h"
-#include "mongo/db/local_catalog/document_validation.h"
-#include "mongo/db/local_catalog/lock_manager/exception_util.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
-#include "mongo/db/local_catalog/shard_role_catalog/operation_sharding_state.h"
 #include "mongo/db/local_executor.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/not_primary_error_tracker.h"
@@ -96,7 +89,6 @@
 #include "mongo/db/query/write_ops/write_ops_gen.h"
 #include "mongo/db/query/write_ops/write_ops_parsers.h"
 #include "mongo/db/query/write_ops/write_ops_retryability.h"
-#include "mongo/db/raw_data_operation.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/oplog_entry.h"
@@ -110,6 +102,14 @@
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/logical_session_id.h"
+#include "mongo/db/shard_role/lock_manager/exception_util.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/collection_operation_source.h"
+#include "mongo/db/shard_role/shard_catalog/document_validation.h"
+#include "mongo/db/shard_role/shard_catalog/operation_sharding_state.h"
+#include "mongo/db/shard_role/shard_catalog/raw_data_operation.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/stats/server_write_concern_metrics.h"
@@ -448,7 +448,7 @@ void finishCurOp(OperationContext* opCtx, CurOp* curOp, LogicalOp logicalOp) {
     try {
         curOp->done();
         auto executionTimeMicros = curOp->elapsedTimeExcludingPauses();
-        curOp->debug().additiveMetrics.executionTime = executionTimeMicros;
+        curOp->debug().getAdditiveMetrics().executionTime = executionTimeMicros;
 
         recordCurOpMetrics(opCtx);
         Top::getDecoration(opCtx).record(opCtx,
@@ -505,7 +505,7 @@ void setCurOpInfoAndEnsureStarted(OperationContext* opCtx,
     curOp->ensureStarted();
 
     if (logicalOp == LogicalOp::opInsert) {
-        curOp->debug().additiveMetrics.ninserted = 0;
+        curOp->debug().getAdditiveMetrics().ninserted = 0;
     }
 }
 
@@ -1112,7 +1112,6 @@ bool handleDeleteOp(OperationContext* opCtx,
                                                           &deleteRequest,
                                                           &curOp,
                                                           inTransaction,
-                                                          nsEntry.getCollectionUUID(),
                                                           docFound,
                                                           preConditions,
                                                           isTimeseriesLogicalRequest);
@@ -1187,6 +1186,7 @@ void explainUpdateOp(OperationContext* opCtx,
 
     write_ops_exec::explainUpdate(opCtx,
                                   updateRequest,
+                                  nullptr,  // null while bulkWrite query stats unsupported
                                   isTimeseriesLogicalRequest,
                                   req.getSerializationContext(),
                                   command,
@@ -1740,7 +1740,6 @@ bool handleUpdateOp(OperationContext* opCtx,
                                                                 opCtx->inMultiDocumentTransaction(),
                                                                 false,
                                                                 updateRequest.isUpsert(),
-                                                                nsEntry.getCollectionUUID(),
                                                                 docFound,
                                                                 &updateRequest,
                                                                 preConditions,
@@ -1756,8 +1755,22 @@ bool handleUpdateOp(OperationContext* opCtx,
                                                                        op->getMulti());
                     return true;
                 } catch (const ExceptionFor<ErrorCodes::DuplicateKey>& ex) {
-                    auto cq = uassertStatusOK(
-                        parseWriteQueryToCQ(opCtx, nullptr /* expCtx */, updateRequest));
+                    // The function shouldRetryDuplicateKeyException() will check the collation from
+                    // the collection using 'ex'. So we only need to resolve the collator from the
+                    // request and pass it into 'expCtx'.
+                    auto requestCollator = [&]() -> std::unique_ptr<CollatorInterface> {
+                        if (updateRequest.getCollation().isEmpty()) {
+                            return nullptr;
+                        }
+                        return uassertStatusOK(
+                            CollatorFactoryInterface::get(opCtx->getServiceContext())
+                                ->makeFromBSON(updateRequest.getCollation()));
+                    }();
+                    auto expCtx = ExpressionContextBuilder{}
+                                      .fromRequest(opCtx, updateRequest)
+                                      .collator(std::move(requestCollator))
+                                      .build();
+                    auto cq = uassertStatusOK(parseWriteQueryToCQ(expCtx.get(), updateRequest));
                     if (!write_ops_exec::shouldRetryDuplicateKeyException(
                             opCtx,
                             updateRequest,
@@ -1814,10 +1827,6 @@ BulkWriteReply performWrites(OperationContext* opCtx, const BulkWriteCommandRequ
 
     bool hasEncryptionInformation = false;
 
-    // TODO: SERVER-103226 Remove this.
-    BypassCheckAllShardRoleAcquisitionsVersioned bypassCheckAllShardRoleAcquisitionsAreVersioned(
-        opCtx);
-
     // Tell mongod what the shard and database versions are. This will cause writes to fail in
     // case there is a mismatch in the mongos request provided versions and the local (shard's)
     // understanding of the version.
@@ -1826,23 +1835,27 @@ BulkWriteReply performWrites(OperationContext* opCtx, const BulkWriteCommandRequ
         auto& databaseVersion = nsInfo.getDatabaseVersion();
 
         if (shardVersion || databaseVersion) {
-            // If a timeseries collection is sharded, only the buckets collection would be sharded.
-            // We expect all versioned commands to be sent over 'system.buckets' namespace. But it
-            // is possible that a stale mongos may send the request over a view namespace. In this
-            // case, we initialize the 'OperationShardingState' with buckets namespace. The bucket
-            // namespace is used because if the shard recognizes this is a timeseries collection,
-            // the timeseries write path will eventually execute on the bucket namespace and locks
-            // will be acquired with the bucket namespace. So we must initialize the
-            // 'OperationShardingState' with the bucket namespace to trigger the shard version
-            // checks.
+            OperationShardingState::setShardRole(
+                opCtx, nsInfo.getNs(), shardVersion, databaseVersion);
+
+            // For timeseries, a router may target the main namespace but the shard will execute on
+            // the buckets namespace. This NSS translation is only safe if both router and shard
+            // agree the collection is 'untracked'.
             //
-            // The returned namespaceForSharding will be the timeseries system bucket collection if
-            // the request is made on a timeseries collection. Otherwise, it will stay unchanged
-            // (i.e. the namespace from the client request).
+            // We enforce this by initializing the 'OperationShardingState' with the 'buckets_nss',
+            // but intentionally passing it the router's version for the main nss.
+            //
+            // This forces a check of the router's main_nss version vs. the shard's buckets_nss
+            // version. This check will only pass if both are 'untracked'. All other combinations
+            // (e.g., 'tracked' vs 'untracked', or 'tracked' vs 'tracked') will fail.
             auto preConditions = timeseries::CollectionPreConditions::getCollectionPreConditions(
                 opCtx, nsInfo.getNs(), /*expectedUUID=*/boost::none);
-            OperationShardingState::setShardRole(
-                opCtx, preConditions.getTargetNs(nsInfo.getNs()), shardVersion, databaseVersion);
+            if (nsInfo.getNs() != preConditions.getTargetNs(nsInfo.getNs())) {
+                OperationShardingState::setShardRole(opCtx,
+                                                     preConditions.getTargetNs(nsInfo.getNs()),
+                                                     shardVersion,
+                                                     databaseVersion);
+            }
         }
 
         if (nsInfo.getEncryptionInformation().has_value()) {

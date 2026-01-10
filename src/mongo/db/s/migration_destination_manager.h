@@ -36,14 +36,13 @@
 #include "mongo/bson/oid.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/client/connection_string.h"
-#include "mongo/db/global_catalog/catalog_cache/catalog_cache.h"
 #include "mongo/db/global_catalog/chunk_manager.h"
 #include "mongo/db/global_catalog/type_chunk.h"
-#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_runtime.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/replica_set_aware_service.h"
+#include "mongo/db/router_role/routing_cache/catalog_cache.h"
 #include "mongo/db/s/active_migrations_registry.h"
 #include "mongo/db/s/migration_batch_fetcher.h"
 #include "mongo/db/s/migration_batch_inserter.h"
@@ -53,6 +52,7 @@
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/logical_session_id_gen.h"
+#include "mongo/db/shard_role/shard_catalog/collection_sharding_runtime.h"
 #include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/platform/atomic_word.h"
@@ -63,6 +63,7 @@
 #include "mongo/util/concurrency/with_lock.h"
 #include "mongo/util/future.h"
 #include "mongo/util/future_impl.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/timer.h"
 #include "mongo/util/uuid.h"
 
@@ -96,7 +97,7 @@ struct CollectionOptionsAndIndexes {
 /**
  * Drives the receiving side of the MongoD migration process. One instance exists per shard.
  */
-class MigrationDestinationManager
+class MONGO_MOD_NEEDS_REPLACEMENT MigrationDestinationManager
     : public ReplicaSetAwareServiceShardSvr<MigrationDestinationManager> {
     MigrationDestinationManager(const MigrationDestinationManager&) = delete;
     MigrationDestinationManager& operator=(const MigrationDestinationManager&) = delete;
@@ -201,12 +202,13 @@ public:
         std::vector<BSONObj> indexSpecs;
         BSONObj idIndexSpec;
     };
-    static IndexesAndIdIndex getCollectionIndexes(OperationContext* opCtx,
-                                                  const NamespaceString& nss,
-                                                  const ShardId& fromShardId,
-                                                  const boost::optional<CollectionRoutingInfo>& cri,
-                                                  boost::optional<Timestamp> afterClusterTime,
-                                                  bool expandSimpleCollation = false);
+    MONGO_MOD_NEEDS_REPLACEMENT static IndexesAndIdIndex getCollectionIndexes(
+        OperationContext* opCtx,
+        const NamespaceString& nss,
+        const ShardId& fromShardId,
+        const boost::optional<CollectionRoutingInfo>& cri,
+        boost::optional<Timestamp> afterClusterTime,
+        bool expandSimpleCollation = false);
 
     /**
      * Gets the collection uuid and options from fromShardId. If given a chunk manager, will fetch
@@ -229,14 +231,36 @@ public:
      * If the collection already exists, it will be updated to match the target options and indexes,
      * including dropping any indexes not specified in the target index specs.
      */
-    static void cloneCollectionIndexesAndOptions(
+    MONGO_MOD_NEEDS_REPLACEMENT static void cloneCollectionIndexesAndOptions(
         OperationContext* opCtx,
         const NamespaceString& nss,
         const CollectionOptionsAndIndexes& collectionOptionsAndIndexes);
 
+    /**
+     * Checks if any documents already exist in the given shard key range on the recipient shard.
+     * This is used to detect orphaned documents that are present due to possible range deleter bugs
+     * or unsupported manual operations on a direct connection.
+     *
+     * Returns the shard key of the first document found in the range, or boost::none if no
+     * documents exist.
+     */
+    static boost::optional<BSONObj> checkForExistingDocumentsInRange(OperationContext* opCtx,
+                                                                     const NamespaceString& nss,
+                                                                     const UUID& collUuid,
+                                                                     const BSONObj& shardKeyPattern,
+                                                                     const BSONObj& min,
+                                                                     const BSONObj& max);
+
 private:
     /**
-     * These log the argument msg; then, under lock, move msg to _errmsg and set the state to FAIL.
+     * Set state to Fail without Logging.
+     * Under lock, move msg to _errmsg and set the state to FAIL.
+     */
+    void _setStateFailNoLog(StringData msg);
+
+    /**
+     * These log the argument msg; then call _setStateFailNoLog, which
+     * under lock, moves msg to _errmsg and sets the state to FAIL.
      * The setStateWailWarn version logs with "warning() << msg".
      */
     void _setStateFail(StringData msg);

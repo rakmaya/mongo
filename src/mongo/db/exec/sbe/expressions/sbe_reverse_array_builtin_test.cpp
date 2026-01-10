@@ -27,8 +27,6 @@
  *    it in the license file.
  */
 
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/db/exec/sbe/expression_test_base.h"
 #include "mongo/db/exec/sbe/expressions/expression.h"
 #include "mongo/db/exec/sbe/values/slot.h"
@@ -93,7 +91,7 @@ TEST_F(SBEBuiltinReverseArrayTest, ArraySet) {
     value::ValueGuard testArrayGuard{testArray};
     value::ArrayEnumerator testEnumerator{testArray.first, testArray.second};
 
-    std::vector<std::pair<value::TypeTags, value::Value>> testArrayContents;
+    std::vector<value::TagValueView> testArrayContents;
     auto expectedResult = value::makeNewArray();
     value::ValueGuard expectedResultGuard{expectedResult};
     auto expectedResultView = value::getArrayView(expectedResult.second);
@@ -104,7 +102,7 @@ TEST_F(SBEBuiltinReverseArrayTest, ArraySet) {
     }
 
     for (auto it = testArrayContents.rbegin(); it != testArrayContents.rend(); ++it) {
-        auto [copyTag, copyVal] = copyValue(it->first, it->second);
+        auto [copyTag, copyVal] = copyValue(it->tag, it->value);
         expectedResultView->push_back(copyTag, copyVal);
     }
 

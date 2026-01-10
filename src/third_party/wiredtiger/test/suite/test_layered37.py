@@ -27,8 +27,7 @@
 # OTHER DEALINGS IN THE SOFTWARE.
 
 import wttest
-from helper_disagg import disagg_test_class, gen_disagg_storages
-from test_layered23 import Oplog
+from helper_disagg import disagg_test_class, gen_disagg_storages, Oplog
 from wtscenario import make_scenarios
 
 # test_layered37.py
@@ -118,9 +117,3 @@ class test_layered37(wttest.WiredTigerTestCase):
         while cursor.next() == 0:
             count += 1
         self.assertEqual(count, self.nitems)
-
-        self.close_conn()
-
-        # Ignore "Removing local file due to disagg mode" messages printed by
-        # __wti_ensure_clean_startup_dir during disagg mode restarts.
-        self.ignoreStdoutPattern('local file')

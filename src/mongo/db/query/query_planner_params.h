@@ -29,8 +29,6 @@
 
 #pragma once
 
-#include "mongo/db/local_catalog/clustered_collection_options_gen.h"
-#include "mongo/db/local_catalog/collection.h"
 #include "mongo/db/query/canonical_distinct.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/collation/collation_index_key.h"
@@ -40,6 +38,9 @@
 #include "mongo/db/query/index_hint.h"
 #include "mongo/db/query/multiple_collection_accessor.h"
 #include "mongo/db/query/query_knobs_gen.h"
+#include "mongo/db/shard_role/shard_catalog/clustered_collection_options_gen.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/util/modules.h"
 
 #include <vector>
 
@@ -110,7 +111,7 @@ struct TraversalPreference {
     std::string clusterField;
 };
 
-struct QueryPlannerParams {
+struct MONGO_MOD_NEEDS_REPLACEMENT QueryPlannerParams {
     enum Options {
         // You probably want to set this.
         DEFAULT = 0,
@@ -129,7 +130,7 @@ struct QueryPlannerParams {
         // Set this if you're running on a sharded cluster.  We'll add a "drop all docs that
         // shouldn't be on this shard" stage before projection.
         //
-        // In order to set this, you must check OperationShardingState::isComingFromRouter() in the
+        // In order to set this, you must check the collectionAcquisition isSharded() value in the
         // same lock that you use to build the query executor. You must also wrap the PlanExecutor
         // in a ClientCursor within the same lock.
         //
@@ -307,11 +308,19 @@ struct QueryPlannerParams {
     QueryPlannerParams& operator=(QueryPlannerParams&& other) = default;
 
     /**
-     * Fills planner parameters for the secondary collections.
+     * Fills planner parameters for the secondary collections if there is a pipeline in
+     * canonicalQuery.
      */
     void fillOutSecondaryCollectionsPlannerParams(OperationContext* opCtx,
                                                   const CanonicalQuery& canonicalQuery,
                                                   const MultipleCollectionAccessor& collections);
+
+    /**
+     * Fills planner parameters for the secondary collections.
+     */
+    void fillOutSecondaryCollectionsInfo(OperationContext* opCtx,
+                                         const CanonicalQuery& canonicalQuery,
+                                         const MultipleCollectionAccessor& collections);
 
     /**
      * This method updates this QueryPlannerParams object as needed so that it can be used with

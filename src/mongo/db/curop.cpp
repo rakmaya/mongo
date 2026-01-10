@@ -36,22 +36,22 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/util/builder_fwd.h"
 #include "mongo/config.h"  // IWYU pragma: keep
-#include "mongo/db/admission/execution_admission_context.h"
+#include "mongo/db/admission/execution_control/execution_admission_context.h"
+#include "mongo/db/admission/execution_control/ticketing_system.h"
 #include "mongo/db/admission/ingress_admission_context.h"
-#include "mongo/db/admission/ticketing_system.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/server_status/server_status_metric.h"
 #include "mongo/db/curop_bson_helpers.h"
-#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/operation_context_options_gen.h"
 #include "mongo/db/profile_filter.h"
 #include "mongo/db/profile_settings.h"
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/logical_session_id_gen.h"
+#include "mongo/db/shard_role/lock_manager/d_concurrency.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/stats/timer_stats.h"
 #include "mongo/db/storage/execution_context.h"
 #include "mongo/db/storage/prepare_conflict_tracker.h"
@@ -337,6 +337,11 @@ void CurOp::reportCurrentOpForClient(const boost::intrusive_ptr<ExpressionContex
     }
 
     infoBuilder->appendBool("isFromUserConnection", client->isFromUserConnection());
+    if (gFeatureFlagDedicatedPortForMaintenanceOperations.isEnabled()) {
+        infoBuilder->appendBool("isFromMaintenancePortConnection",
+                                client->session() &&
+                                    client->session()->isConnectedToMaintenancePort());
+    }
 
     if (transport::ServiceExecutorContext::get(client)) {
         infoBuilder->append("threaded"_sd, true);
@@ -358,7 +363,7 @@ void CurOp::reportCurrentOpForClient(const boost::intrusive_ptr<ExpressionContex
             lsid->serialize(&lsidBuilder);
         }
 
-        if (auto& vCtx = VersionContext::getDecoration(clientOpCtx); vCtx.isInitialized()) {
+        if (auto& vCtx = VersionContext::getDecoration(clientOpCtx); vCtx.hasOperationFCV()) {
             infoBuilder->append("versionContext", vCtx.toBSON());
         }
 
@@ -370,12 +375,6 @@ void CurOp::reportCurrentOpForClient(const boost::intrusive_ptr<ExpressionContex
         // reportState is used to generate a command reply
         auto sc = SerializationContext::stateCommandReply(expCtx->getSerializationContext());
         CurOp::get(clientOpCtx)->reportState(infoBuilder, sc, truncateOps);
-    }
-
-    if (expCtx->getOperationContext()->routedByReplicaSetEndpoint()) {
-        // On the replica set endpoint, currentOp reports both router and shard operations so it
-        // should label each op with its associated role.
-        infoBuilder->append("role", toString(client->getService()->role()));
     }
 }
 
@@ -462,7 +461,7 @@ void CurOp::_fetchStorageStatsIfNecessary(Date_t deadline, bool isFinal) {
 }
 
 void CurOp::setEndOfOpMetrics(long long nreturned) {
-    _debug.additiveMetrics.nreturned = nreturned;
+    _debug.getAdditiveMetrics().nreturned = nreturned;
     // A non-none queryStatsInfo.keyHash indicates the current query is being tracked locally for
     // queryStats, and a metricsRequested being true indicates the query is being tracked remotely
     // via the metrics included in cursor responses. In either case, we need to track the current
@@ -472,35 +471,50 @@ void CurOp::setEndOfOpMetrics(long long nreturned) {
     // for query stats collection we want it set before incrementing cursor metrics using OpDebug's
     // AdditiveMetrics. The value of executionTime set here will be overwritten later in
     // completeAndLogOperation.
-    const auto& info = _debug.queryStatsInfo;
+    const auto& info = _debug.getQueryStatsInfo();
     if (info.keyHash || info.metricsRequested) {
-        auto& metrics = _debug.additiveMetrics;
+        auto& metrics = _debug.getAdditiveMetrics();
         auto elapsed = elapsedTimeExcludingPauses();
         // We don't strictly need to record executionTime unless keyHash is non-none, but there's
         // no harm in recording it since we've already computed the value.
         metrics.executionTime = elapsed;
+        auto workingMillis =
+            duration_cast<Milliseconds>(elapsed - (_sumBlockedTimeTotal() - _blockedTimeAtStart));
         metrics.clusterWorkingTime = metrics.clusterWorkingTime.value_or(Milliseconds(0)) +
-            (duration_cast<Milliseconds>(elapsed - (_sumBlockedTimeTotal() - _blockedTimeAtStart)));
+            std::max(Milliseconds(0), workingMillis);
 
         calculateCpuTime();
         metrics.cpuNanos = metrics.cpuNanos.value_or(Nanoseconds(0)) + _debug.cpuTime;
 
         if (const auto& admCtx = ExecutionAdmissionContext::get(opCtx());
-            admCtx.getDelinquentAcquisitions() > 0 && !opCtx()->inMultiDocumentTransaction() &&
-            !parent()) {
-            // Note that we don't record delinquency stats around ticketing when in a
-            // multi-document transaction, since operations within multi-document transactions hold
-            // tickets for a long time by design and reporting them as delinquent will just create
-            // noise in the data.
+            !opCtx()->inMultiDocumentTransaction() && !parent()) {
+            if (admCtx.getDelinquentAcquisitions() > 0) {
 
-            metrics.delinquentAcquisitions = metrics.delinquentAcquisitions.value_or(0) +
-                static_cast<uint64_t>(admCtx.getDelinquentAcquisitions());
-            metrics.totalAcquisitionDelinquency =
-                metrics.totalAcquisitionDelinquency.value_or(Milliseconds(0)) +
-                Milliseconds(admCtx.getTotalAcquisitionDelinquencyMillis());
-            metrics.maxAcquisitionDelinquency = Milliseconds{
-                std::max(metrics.maxAcquisitionDelinquency.value_or(Milliseconds(0)).count(),
-                         admCtx.getMaxAcquisitionDelinquencyMillis())};
+                // Note that we don't record delinquency stats around ticketing when in a
+                // multi-document transaction, since operations within multi-document
+                // transactions hold tickets for a long time by design and reporting them as
+                // delinquent will just create noise in the data.
+
+                metrics.delinquentAcquisitions = metrics.delinquentAcquisitions.value_or(0) +
+                    static_cast<uint64_t>(admCtx.getDelinquentAcquisitions());
+                metrics.totalAcquisitionDelinquency =
+                    metrics.totalAcquisitionDelinquency.value_or(Milliseconds(0)) +
+                    Milliseconds(admCtx.getTotalAcquisitionDelinquencyMillis());
+                metrics.maxAcquisitionDelinquency = Milliseconds{
+                    std::max(metrics.maxAcquisitionDelinquency.value_or(Milliseconds(0)).count(),
+                             admCtx.getMaxAcquisitionDelinquencyMillis())};
+            }
+
+            if (admCtx.getAdmissions() > 0) {
+                metrics.totalTimeQueuedMicros =
+                    metrics.totalTimeQueuedMicros.value_or(Microseconds(0)) +
+                    admCtx.totalTimeQueuedMicros();
+                metrics.totalAdmissions =
+                    metrics.totalAdmissions.value_or(0) + admCtx.getAdmissions();
+                metrics.wasLoadShed = metrics.wasLoadShed.value_or(false) || admCtx.getLoadShed();
+                metrics.wasDeprioritized =
+                    metrics.wasDeprioritized.value_or(false) || admCtx.getPriorityLowered();
+            }
         }
 
         if (!parent()) {
@@ -717,9 +731,9 @@ bool CurOp::shouldCurOpStackOmitDiagnosticInformation(CurOp* curop) {
 }
 
 void CurOp::_updateExecutionTimers() {
-    _debug.additiveMetrics.executionTime = elapsedTimeExcludingPauses();
+    _debug.getAdditiveMetrics().executionTime = elapsedTimeExcludingPauses();
 
-    auto workingMillis = duration_cast<Milliseconds>(*_debug.additiveMetrics.executionTime) -
+    auto workingMillis = duration_cast<Milliseconds>(*_debug.getAdditiveMetrics().executionTime) -
         (_sumBlockedTimeTotal() - _blockedTimeAtStart);
     // Round up to zero if necessary to allow precision errors from FastClockSource used by flow
     // control ticketholder.
@@ -727,7 +741,9 @@ void CurOp::_updateExecutionTimers() {
 }
 
 CurOp::ShouldProfileQuery CurOp::_shouldProfileAtLevel1AndLogSlowQuery(
-    const logv2::LogOptions& logOptions, std::shared_ptr<const ProfileFilter> filter) {
+    const logv2::LogOptions& logOptions,
+    Milliseconds slowms,
+    std::shared_ptr<const ProfileFilter> filter) {
     if (filter) {
         // Calculate this operation's CPU time before deciding whether logging/profiling is
         // necessary only if it is needed for filtering.
@@ -740,11 +756,8 @@ CurOp::ShouldProfileQuery CurOp::_shouldProfileAtLevel1AndLogSlowQuery(
     } else {
         // Log the operation if it is eligible according to the current slowMS and sampleRate
         // settings.
-        const auto [shouldLogSlowOp, shouldSample] =
-            shouldLogSlowOpWithSampling(opCtx(),
-                                        logOptions.component(),
-                                        _debug.workingTimeMillis,
-                                        Milliseconds(serverGlobalParams.slowMS.load()));
+        const auto [shouldLogSlowOp, shouldSample] = shouldLogSlowOpWithSampling(
+            opCtx(), logOptions.component(), _debug.workingTimeMillis, slowms);
 
         return ShouldProfileQuery{.shouldProfileAtLevel1 = shouldLogSlowOp && shouldSample,
                                   .shouldLogSlowQuery = shouldLogSlowOp};
@@ -752,6 +765,7 @@ CurOp::ShouldProfileQuery CurOp::_shouldProfileAtLevel1AndLogSlowQuery(
 }
 
 logv2::DynamicAttributes CurOp::_reportDebugAndStats(const logv2::LogOptions& logOptions,
+                                                     const Date_t* operationDeadline,
                                                      bool isFinalStorageStatsUpdate) {
     auto* opCtx = this->opCtx();
     auto locker = shard_role_details::getLocker(opCtx);
@@ -781,7 +795,8 @@ logv2::DynamicAttributes CurOp::_reportDebugAndStats(const logv2::LogOptions& lo
     const auto& storageMetrics = getOperationStorageMetrics();
 
     logv2::DynamicAttributes attr;
-    _debug.report(opCtx, &lockStats, storageMetrics, getPrepareReadConflicts(), &attr);
+    _debug.report(
+        opCtx, &lockStats, storageMetrics, getPrepareReadConflicts(), operationDeadline, &attr);
     return attr;
 }
 
@@ -802,11 +817,21 @@ bool CurOp::completeAndLogOperation(const logv2::LogOptions& logOptions,
 
     _updateExecutionTimers();
 
-    if (!opCtx->inMultiDocumentTransaction()) {
+    // Record execution and delinquency stats for the top-level operation only. We don't want to
+    // double count stats from child operations (e.g., bulk writes, sub-operations in aggregations)
+    // that share the same ExecutionAdmissionContext.
+    if (!parent() && !opCtx->inMultiDocumentTransaction()) {
         // If we're not in a txn, we record information about delinquent ticket acquisitions to the
         // Queue's stats.
-        if (auto ticketingSystem = admission::TicketingSystem::get(opCtx->getServiceContext())) {
-            ticketingSystem->incrementDelinquencyStats(opCtx);
+        if (auto ticketingSystem =
+                admission::execution_control::TicketingSystem::get(opCtx->getServiceContext())) {
+            calculateCpuTime();
+            auto start = _start.load();
+            auto end = _end.load();
+            ticketingSystem->finalizeOperationStats(
+                opCtx,
+                start != 0 ? durationCount<Microseconds>(computeElapsedTimeTotal(start, end)) : 0,
+                durationCount<Microseconds>(_debug.cpuTime));
         }
     }
 
@@ -824,10 +849,12 @@ bool CurOp::completeAndLogOperation(const logv2::LogOptions& logOptions,
 
     if (_debug.isReplOplogGetMore) {
         oplogGetMoreStats.recordMillis(
-            durationCount<Milliseconds>(*_debug.additiveMetrics.executionTime));
+            durationCount<Milliseconds>(*_debug.getAdditiveMetrics().executionTime));
     }
-    const auto [shouldProfileAtLevel1, shouldLogSlowOp] =
-        _shouldProfileAtLevel1AndLogSlowQuery(logOptions, std::move(filter));
+    const auto [shouldProfileAtLevel1, shouldLogSlowOp] = _shouldProfileAtLevel1AndLogSlowQuery(
+        logOptions,
+        Milliseconds(slowMsOverride.value_or(serverGlobalParams.slowMS.load())),
+        std::move(filter));
 
     // Defer calculating the CPU time until we know that we actually are going to write it to
     // the logs or profiler. The CPU time may have been determined earlier if it was a
@@ -837,7 +864,8 @@ bool CurOp::completeAndLogOperation(const logv2::LogOptions& logOptions,
     }
 
     if (forceLog || shouldLogSlowOp) {
-        logv2::DynamicAttributes attr = _reportDebugAndStats(logOptions, true);
+        Date_t deadline = opCtx->getDeadline();
+        logv2::DynamicAttributes attr = _reportDebugAndStats(logOptions, &deadline, true);
         LOGV2_OPTIONS(51803, logOptions, "Slow query", attr);
 
         _checkForFailpointsAfterCommandLogged();
@@ -852,12 +880,10 @@ bool CurOp::completeAndLogOperation(const logv2::LogOptions& logOptions,
 }
 
 void CurOp::logLongRunningOperationIfNeeded() {
-    static constexpr int kSlowInProgressLogDebugLevel = 1;
     static const logv2::LogOptions kLogOptions{logv2::LogComponent::kCommandSlowInProg};
 
     if (!_eligibleForLongRunningQueryLogging ||
-        !logv2::shouldLog(kLogOptions.component(),
-                          logv2::LogSeverity::Debug(kSlowInProgressLogDebugLevel))) {
+        !logv2::shouldLog(kLogOptions.component(), logv2::LogSeverity::Log())) {
         return;
     }
     if (shouldCurOpStackOmitDiagnosticInformation(this)) {
@@ -868,20 +894,20 @@ void CurOp::logLongRunningOperationIfNeeded() {
 
     _updateExecutionTimers();
 
-    std::shared_ptr<const ProfileFilter> filter =
-        DatabaseProfileSettings::get(opCtx()->getServiceContext())
-            .getDatabaseProfileSettings(getNSS().dbName())
-            .filter;
+    auto profileSettings = DatabaseProfileSettings::get(opCtx()->getServiceContext())
+                               .getDatabaseProfileSettings(getNSS().dbName());
     const bool shouldLogSlowOp =
-        _shouldProfileAtLevel1AndLogSlowQuery(kLogOptions, std::move(filter)).shouldLogSlowQuery;
+        _shouldProfileAtLevel1AndLogSlowQuery(
+            kLogOptions, profileSettings.slowOpInProgressThreshold, profileSettings.filter)
+            .shouldLogSlowQuery;
     if (!shouldLogSlowOp) {
         return;
     }
 
     calculateCpuTime();
-    logv2::DynamicAttributes attr = _reportDebugAndStats(kLogOptions, false);
-    LOGV2_DEBUG_OPTIONS(
-        1794200, kSlowInProgressLogDebugLevel, kLogOptions, "Slow in-progress query", attr);
+    Date_t deadline = opCtx()->getDeadline();
+    logv2::DynamicAttributes attr = _reportDebugAndStats(kLogOptions, &deadline, false);
+    LOGV2_OPTIONS(1794200, kLogOptions, "Slow in-progress query", attr);
     _eligibleForLongRunningQueryLogging = false;
 }
 
@@ -1151,6 +1177,12 @@ void CurOp::reportState(BSONObjBuilder* builder,
             (stats && stats->overdueInterruptChecks.loadRelaxed() > 0)) {
             BSONObjBuilder sub(builder->subobjStart("delinquencyInfo"));
             OpDebug::appendDelinquentInfo(opCtx, sub);
+        }
+        if (admCtx.getAdmissions() > 0) {
+            builder->append("totalTimeQueuedMicros", admCtx.totalTimeQueuedMicros().count());
+            builder->append("totalAdmissions", admCtx.getAdmissions());
+            builder->append("wasLoadShed", admCtx.getLoadShed());
+            builder->append("wasDeprioritized", admCtx.getPriorityLowered());
         }
     }
 

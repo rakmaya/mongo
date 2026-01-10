@@ -24,7 +24,7 @@ acts as an adapter from [`mongo::PlanExecutor`](https://github.com/mongodb/mongo
 is responsible for acquiring and releasing the storage resources (snapshots, locks, etc.), so that
 they don't leave the `mongo::exec::agg::CursorStage` scope. Some of the storage resources are acquired and released by `mongo::PlanExecutor` via `mongo::PlanExecutor::restoreState` and `mongo::PlanExecutor::saveState`.
 
-Before executing the `PlanExecutor`, `CursorStage` must first [restore the ShardRole resources](https://github.com/mongodb/mongo/blob/master/src/mongo/db/README_shard_role_api.md#yielding-and-restoring) associated with the enclosed `PlanExecutor`. `CursorStage` owns a reference to a `ShardRoleTransactionResourcesStasherForPipeline` object from which the ShardRole resources can be obtained. `CursorStage` must stash back the ShardRole resources before handing control to the next pipeline stage.
+Before executing the `PlanExecutor`, `CursorStage` must first [restore the ShardRole resources](../shard_role/README_shard_role_api.md#yielding-and-restoring) associated with the enclosed `PlanExecutor`. `CursorStage` owns a reference to a `ShardRoleTransactionResourcesStasherForPipeline` object from which the ShardRole resources can be obtained. `CursorStage` must stash back the ShardRole resources before handing control to the next pipeline stage.
 
 In order to avoid acquiring and releasing resources for every call to
 `mongo::PlanExecutor:getNextDocument`, `mongo::exec::agg::CursorStage`
@@ -37,9 +37,9 @@ are released. Buffered results are then used in subsequent calls to
 
 Classic plan executor performs yields outside of calls to work(). Classic plan stages also use
 interrupt style yielding. When yield is needed work() can be interrupted and a
-[`mongo::PlanStage::StageState::NEED_YIELD`](https://github.com/mongodb/mongo/blob/master/src/mongo/db/exec/plan_stage.h#L166-L184)
+[`mongo::PlanStage::StageState::NEED_YIELD`](/src/mongo/db/exec/classic/plan_stage.h#L166-L184)
 is used to unwind the plan stage call stack. After that classic plan executor
-([`mongo::PlanExecutorImpl`](https://github.com/mongodb/mongo/blob/master/src/mongo/db/query/plan_executor_impl.h#L118`))
+([`mongo::PlanExecutorImpl`](/src/mongo/db/query/plan_executor_impl.h#L118`))
 will release and reaquire storage resources.
 
 ### SBE yielding
@@ -89,7 +89,7 @@ Such values must be either discarded, when no longer needed, or converted to own
 their copy before the storage resources are released.
 
 This is commongly done by using
-[mongo::sbe::CanChangeState::prepareForYielding](https://github.com/mongodb/mongo/blob/master/src/mongo/db/exec/sbe/stages/stages.h#L126)
+[mongo::sbe::CanChangeState::prepareForYielding](/src/mongo/db/exec/sbe/stages/stages.h#L126)
 utility.
 
 When stage slots are no longer needed, a `mongo::sbe::CanTrackStats::disableSlotAccess` method can

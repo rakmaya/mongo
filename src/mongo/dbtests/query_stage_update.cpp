@@ -31,9 +31,7 @@
  * This file tests the UpdateStage class
  */
 
-#include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/json.h"
@@ -50,7 +48,6 @@
 #include "mongo/db/exec/collection_scan_common.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/plan_stats.h"
-#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
 #include "mongo/db/matcher/expression_with_placeholder.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
@@ -59,17 +56,16 @@
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/compiler/physical_model/query_solution/eof_node_type.h"
 #include "mongo/db/query/find_command.h"
-#include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/write_ops/update_request.h"
 #include "mongo/db/query/write_ops/write_ops_parsers.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/shard_role.h"
 #include "mongo/db/storage/snapshot.h"
 #include "mongo/db/update/update_driver.h"
 #include "mongo/dbtests/dbtests.h"  // IWYU pragma: keep
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/intrusive_counter.h"
 
 #include <cstddef>
 #include <map>
@@ -78,7 +74,6 @@
 #include <utility>
 #include <vector>
 
-#include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 

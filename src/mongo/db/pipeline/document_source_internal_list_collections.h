@@ -44,6 +44,7 @@
 #include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/stdx/unordered_set.h"
+#include "mongo/util/modules.h"
 
 #include <memory>
 #include <set>
@@ -57,6 +58,8 @@
 
 namespace mongo {
 
+DECLARE_STAGE_PARAMS_DERIVED_DEFAULT(InternalListCollections);
+
 /**
  * Provides a document source interface to get a list of collections. If the targeted database is
  * `admin`, it will return all the collections of the cluster. Otherwise, it will return all the
@@ -64,20 +67,20 @@ namespace mongo {
  */
 class DocumentSourceInternalListCollections final : public DocumentSource {
 public:
-    static constexpr StringData kStageNameInternal = "$_internalListCollections"_sd;
+    static constexpr StringData kStageName = "$_internalListCollections"_sd;
 
     DocumentSourceInternalListCollections(const boost::intrusive_ptr<ExpressionContext>& pExpCtx);
 
-    class LiteParsed final : public LiteParsedDocumentSource {
+    class LiteParsed final : public LiteParsedDocumentSourceDefault<LiteParsed> {
     public:
         static std::unique_ptr<LiteParsed> parse(const NamespaceString& nss,
                                                  const BSONElement& spec,
                                                  const LiteParserOptions& options) {
-            return std::make_unique<LiteParsed>(spec.fieldName(), nss.tenantId());
+            return std::make_unique<LiteParsed>(spec, nss.tenantId());
         }
 
-        explicit LiteParsed(std::string parseTimeName, const boost::optional<TenantId>& tenantId)
-            : LiteParsedDocumentSource(std::move(parseTimeName)),
+        LiteParsed(const BSONElement& spec, const boost::optional<TenantId>& tenantId)
+            : LiteParsedDocumentSourceDefault(spec),
               _privileges({Privilege(ResourcePattern::forClusterResource(tenantId),
                                      ActionType::internal)}) {}
 
@@ -94,6 +97,10 @@ public:
             return true;
         }
 
+        std::unique_ptr<StageParams> getStageParams() const final {
+            return std::make_unique<InternalListCollectionsStageParams>(_originalBson);
+        }
+
         bool generatesOwnDataOnce() const final {
             return true;
         }
@@ -102,7 +109,7 @@ public:
                                                      bool isImplicitDefault) const override {
             // The listCollections command that runs under the hood only accepts 'local' read
             // concern.
-            return onlyReadConcernLocalSupported(kStageNameInternal, level, isImplicitDefault);
+            return onlyReadConcernLocalSupported(kStageName, level, isImplicitDefault);
         }
 
     private:
@@ -150,8 +157,8 @@ public:
     static boost::intrusive_ptr<DocumentSource> createFromBson(
         BSONElement elem, const boost::intrusive_ptr<ExpressionContext>& pExpCtx);
 
-    DocumentSourceContainer::iterator doOptimizeAt(DocumentSourceContainer::iterator itr,
-                                                   DocumentSourceContainer* container) final;
+    DocumentSourceContainer::iterator optimizeAt(DocumentSourceContainer::iterator itr,
+                                                 DocumentSourceContainer* container);
 
 private:
     friend boost::intrusive_ptr<exec::agg::Stage> documentSourceInternalListCollectionsToStageFn(

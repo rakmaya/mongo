@@ -43,11 +43,6 @@
 #include "mongo/db/field_ref.h"
 #include "mongo/db/global_catalog/shard_key_pattern.h"
 #include "mongo/db/internal_transactions_feature_flag_gen.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_operation_source.h"
-#include "mongo/db/local_catalog/document_validation.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
-#include "mongo/db/local_catalog/shard_role_catalog/operation_sharding_state.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/compiler/physical_model/query_solution/stage_types.h"
@@ -56,12 +51,16 @@
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/session/logical_session_id.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_operation_source.h"
+#include "mongo/db/shard_role/shard_catalog/document_validation.h"
+#include "mongo/db/shard_role/shard_catalog/operation_sharding_state.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/db/storage/exceptions.h"
 #include "mongo/db/storage/record_data.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/write_unit_of_work.h"
-#include "mongo/db/update/path_support.h"
 #include "mongo/db/update/update_oplog_entry_serialization.h"
 #include "mongo/db/update/update_util.h"
 #include "mongo/db/versioning_protocol/shard_version.h"
@@ -312,7 +311,8 @@ BSONObj UpdateStage::transformAndUpdate(const Snapshotted<BSONObj>& oldObj,
                     diff.has_value() ? &*diff : collection_internal::kUpdateAllIndexes,
                     &indexesAffected,
                     _params.opDebug,
-                    &args));
+                    &args,
+                    nullptr /*cursor*/));
                 invariant(oldObj.snapshotId() ==
                           shard_role_details::getRecoveryUnit(opCtx())->getSnapshotId());
                 wunit.commit();
@@ -733,35 +733,37 @@ void ShardingChecksForUpdate::_checkRestrictionsOnUpdatingShardKeyAreNotViolated
     }
 }
 
-void ShardingChecksForUpdate::checkUpdateChangesReshardingKey(
-    OperationContext* opCtx,
-    const ShardingWriteRouter& shardingWriteRouter,
-    const BSONObj& newObj,
-    const Snapshotted<BSONObj>& oldObj) {
+void ShardingChecksForUpdate::checkUpdateChangesReshardingKey(OperationContext* opCtx,
+                                                              const BSONObj& newObj,
+                                                              const Snapshotted<BSONObj>& oldObj) {
 
-    const auto& collDesc = _collAcq.getShardingDescription();
-    auto reshardingKeyPattern = collDesc.getReshardingKeyIfShouldForwardOps();
-    if (!reshardingKeyPattern)
+    auto& reshardingPlacement = _collAcq.getPostReshardingPlacement();
+    if (!reshardingPlacement)
         return;
-
-    auto oldShardKey = reshardingKeyPattern->extractShardKeyFromDoc(oldObj.value());
-    auto newShardKey = reshardingKeyPattern->extractShardKeyFromDoc(newObj);
+    auto oldShardKey = reshardingPlacement->extractReshardingKeyFromDocument(oldObj.value());
+    auto newShardKey = reshardingPlacement->extractReshardingKeyFromDocument(newObj);
 
     if (newShardKey.binaryEqual(oldShardKey))
         return;
 
+    const auto& collDesc = _collAcq.getShardingDescription();
     FieldRefSet shardKeyPaths(collDesc.getKeyPatternFields());
     _checkRestrictionsOnUpdatingShardKeyAreNotViolated(opCtx, collDesc, shardKeyPaths);
 
-    auto oldRecipShard = *shardingWriteRouter.getReshardingDestinedRecipient(oldObj.value());
-    auto newRecipShard = *shardingWriteRouter.getReshardingDestinedRecipient(newObj);
+    auto oldRecipShard =
+        reshardingPlacement->getReshardingDestinedRecipientFromShardKey(oldShardKey);
+    auto newRecipShard =
+        reshardingPlacement->getReshardingDestinedRecipientFromShardKey(newShardKey);
 
-    auto& collectionPtr = _collAcq.getCollectionPtr();
-    uassert(
-        WouldChangeOwningShardInfo(
-            oldObj.value(), newObj, false /* upsert */, collectionPtr->ns(), collectionPtr->uuid()),
-        "This update would cause the doc to change owning shards under the new shard key",
-        oldRecipShard == newRecipShard);
+    uassert(WouldChangeOwningShardInfo(oldObj.value(),
+                                       newObj,
+                                       false /* upsert */,
+                                       _collAcq.nss(),
+                                       _collAcq.uuid(),
+                                       boost::none,
+                                       oldRecipShard),
+            "This update would cause the doc to change owning shards under the new shard key",
+            oldRecipShard == newRecipShard);
 }
 
 void ShardingChecksForUpdate::checkUpdateChangesShardKeyFields(
@@ -781,8 +783,7 @@ void ShardingChecksForUpdate::checkUpdateChangesShardKeyFields(
     // It is possible that both the existing and new shard keys are being updated, so we do not want
     // to short-circuit checking whether either is being modified.
     checkUpdateChangesExistingShardKey(opCtx, newDoc, newObj, oldObj);
-    ShardingWriteRouter shardingWriteRouter(opCtx, _collAcq.getCollectionPtr()->ns());
-    checkUpdateChangesReshardingKey(opCtx, shardingWriteRouter, newObj, oldObj);
+    checkUpdateChangesReshardingKey(opCtx, newObj, oldObj);
 }
 
 void ShardingChecksForUpdate::checkUpdateChangesExistingShardKey(

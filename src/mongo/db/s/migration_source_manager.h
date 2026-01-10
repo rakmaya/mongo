@@ -32,18 +32,19 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/oid.h"
 #include "mongo/client/connection_string.h"
-#include "mongo/db/local_catalog/shard_role_catalog/collection_metadata.h"
-#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_runtime.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/s/migration_chunk_cloner_source.h"
 #include "mongo/db/s/migration_coordinator.h"
 #include "mongo/db/s/move_timing_helper.h"
+#include "mongo/db/shard_role/shard_catalog/collection_metadata.h"
+#include "mongo/db/shard_role/shard_catalog/collection_sharding_runtime.h"
 #include "mongo/db/versioning_protocol/chunk_version.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/s/request_types/move_range_request_gen.h"
 #include "mongo/util/future.h"
 #include "mongo/util/future_impl.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/timer.h"
 #include "mongo/util/uuid.h"
@@ -84,7 +85,7 @@ struct ShardingStatistics;
  * case the desctructor will take care of clean up based on how far we have advanced. One exception
  * is the commitDonateChunk and its comments explain the reasoning.
  */
-class MigrationSourceManager {
+class MONGO_MOD_NEEDS_REPLACEMENT MigrationSourceManager {
     MigrationSourceManager(const MigrationSourceManager&) = delete;
     MigrationSourceManager& operator=(const MigrationSourceManager&) = delete;
 
@@ -174,7 +175,7 @@ public:
      * Aborts the migration after observing a concurrent index operation by marking its operation
      * context as killed.
      */
-    SharedSemiFuture<void> abort();
+    MONGO_MOD_NEEDS_REPLACEMENT SharedSemiFuture<void> abort();
 
     /**
      * Returns a report on the active migration.
@@ -237,6 +238,16 @@ private:
      * Resulting state: kDone
      */
     void _cleanupOnError();
+
+    /**
+     * Sets _errMsg to the provided string before running the given callable. If the callable
+     * throws, _errMsg remains set so that _cleanupOnError() can log it in the moveChunk.error
+     * changelog entry. If it completes successfully, _errMsg is reset to empty. Only intended for
+     * short asserts or status checks within migration steps where a failure should trigger
+     * _cleanupOnError().
+     */
+    template <typename F>
+    void withChangelogErrMsg(std::string errMsg, F&& functionCall);
 
     // This is the opCtx of the moveChunk request that constructed the MigrationSourceManager.
     // The caller must guarantee it outlives the MigrationSourceManager.
@@ -318,6 +329,9 @@ private:
     // on this node. The future is set when the range deletion completes. Used if the moveChunk was
     // sent with waitForDelete.
     boost::optional<SharedSemiFuture<void>> _cleanupCompleteFuture;
+
+    // Error message to be logged in changelog event if a failure occurs.
+    std::string _errMsg;
 };
 
 }  // namespace mongo

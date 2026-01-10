@@ -29,6 +29,7 @@
 #pragma once
 
 #include "mongo/db/extension/public/api.h"
+#include "mongo/db/extension/public/extension_agg_stage_static_properties_gen.h"
 #include "mongo/db/extension/shared/byte_buf_utils.h"
 #include "mongo/db/extension/shared/handle/aggregation_stage/logical.h"
 #include "mongo/db/extension/shared/handle/handle.h"
@@ -38,16 +39,22 @@
 
 namespace mongo::extension {
 
+class AggStageAstNodeAPI;
+
+using AggStageAstNodeHandle = OwnedHandle<::MongoExtensionAggStageAstNode>;
+
+template <>
+struct c_api_to_cpp_api<::MongoExtensionAggStageAstNode> {
+    using CppApi_t = AggStageAstNodeAPI;
+};
+
 /**
- * AggStageAstNodeHandle is an owned handle wrapper around a
- * MongoExtensionAggStageAstNode.
+ * AggStageAstNodeAPI is a wrapper around a MongoExtensionAggStageAstNode vtable API.
  */
-class AggStageAstNodeHandle : public OwnedHandle<::MongoExtensionAggStageAstNode> {
+class AggStageAstNodeAPI : public VTableAPI<::MongoExtensionAggStageAstNode> {
 public:
-    AggStageAstNodeHandle(::MongoExtensionAggStageAstNode* ptr)
-        : OwnedHandle<::MongoExtensionAggStageAstNode>(ptr) {
-        _assertValidVTable();
-    }
+    AggStageAstNodeAPI(::MongoExtensionAggStageAstNode* ptr)
+        : VTableAPI<::MongoExtensionAggStageAstNode>(ptr) {}
 
     /**
      * Returns a StringData containing the name of this aggregation stage.
@@ -56,6 +63,8 @@ public:
         auto stringView = byteViewAsStringView(vtable().get_name(get()));
         return StringData{stringView.data(), stringView.size()};
     }
+
+    MongoExtensionStaticProperties getProperties() const;
 
     /**
      * Returns a logical stage with the stage's runtime implementation of the optimization
@@ -67,10 +76,24 @@ public:
      */
     LogicalAggStageHandle bind() const;
 
-protected:
-    void _assertVTableConstraints(const VTable_t& vtable) const override {
+    /**
+     * Clones this AST node into an identical AST node.
+     *
+     * On success, the ownership of the returned AST node is transferred to the caller.
+     *
+     * On failure, the call triggers an assertion and no ownership is transferred.
+     *
+     * The caller is responsible for managing the lifetime of the returned handle.
+     */
+    AggStageAstNodeHandle clone() const;
+
+    static void assertVTableConstraints(const VTable_t& vtable) {
         tassert(11217601, "AggStageAstNode 'get_name' is null", vtable.get_name != nullptr);
+        tassert(
+            11347800, "AggStageAstNode 'get_properties' is null", vtable.get_properties != nullptr);
         tassert(11113700, "AggStageAstNode 'bind' is null", vtable.bind != nullptr);
+        tassert(11565501, "AggStageAstNode 'clone' is null", vtable.clone != nullptr);
     }
 };
+
 }  // namespace mongo::extension

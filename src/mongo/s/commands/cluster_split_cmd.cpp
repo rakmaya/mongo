@@ -41,17 +41,16 @@
 #include "mongo/db/commands.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/field_parser.h"
-#include "mongo/db/global_catalog/catalog_cache/catalog_cache.h"
 #include "mongo/db/global_catalog/chunk.h"
 #include "mongo/db/global_catalog/chunk_manager.h"
 #include "mongo/db/global_catalog/ddl/shard_util.h"
-#include "mongo/db/global_catalog/router_role_api/cluster_commands_helpers.h"
 #include "mongo/db/global_catalog/shard_key_pattern.h"
-#include "mongo/db/global_catalog/shard_key_pattern_query_util.h"
 #include "mongo/db/global_catalog/type_chunk.h"
 #include "mongo/db/global_catalog/type_chunk_range.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/router_role/cluster_commands_helpers.h"
+#include "mongo/db/router_role/routing_cache/catalog_cache.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/sharding_environment/client/shard.h"
 #include "mongo/db/sharding_environment/grid.h"
@@ -61,6 +60,7 @@
 #include "mongo/db/versioning_protocol/chunk_version.h"
 #include "mongo/db/versioning_protocol/shard_version.h"
 #include "mongo/logv2/log.h"
+#include "mongo/s/query/shard_key_pattern_query_util.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/database_name_util.h"
 #include "mongo/util/namespace_string_util.h"
@@ -94,7 +94,7 @@ BSONObj selectMedianKey(OperationContext* opCtx,
     cmd.append("keyPattern", shardKeyPattern.toBSON());
     chunkRange.serialize(&cmd);
     cmd.appendBool("force", true);
-    cri.getShardVersion(shardId).serialize(ShardVersion::kShardVersionField, &cmd);
+    appendShardVersion(cmd, cri.getShardVersion(shardId));
 
     auto shard = uassertStatusOK(Grid::get(opCtx)->shardRegistry()->getShard(opCtx, shardId));
 

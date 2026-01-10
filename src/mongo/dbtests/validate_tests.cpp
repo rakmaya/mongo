@@ -27,48 +27,42 @@
  *    it in the license file.
  */
 
-#include <boost/container/small_vector.hpp>
-#include <boost/container/vector.hpp>
-#include <fmt/format.h>
-// IWYU pragma: no_include "boost/intrusive/detail/iterator.hpp"
-// IWYU pragma: no_include "boost/move/algo/detail/set_difference.hpp"
 #include "mongo/base/data_view.h"
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/json.h"
 #include "mongo/bson/oid.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/client.h"
-#include "mongo/db/collection_crud/collection_write_path.h"
 #include "mongo/db/curop.h"
+#include "mongo/db/dbhelpers.h"
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/index/multikey_paths.h"
 #include "mongo/db/index_builds/index_build_interceptor.h"
+#include "mongo/db/index_builds/index_build_test_helpers.h"
 #include "mongo/db/index_builds/index_builds_common.h"
 #include "mongo/db/index_builds/multi_index_block.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/clustered_collection_util.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_catalog.h"
-#include "mongo/db/local_catalog/collection_options.h"
-#include "mongo/db/local_catalog/database.h"
-#include "mongo/db/local_catalog/db_raii.h"
-#include "mongo/db/local_catalog/durable_catalog.h"
-#include "mongo/db/local_catalog/index_catalog.h"
-#include "mongo/db/local_catalog/index_catalog_entry.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/record_id_helpers.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/clustered_collection_util.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/collection_options.h"
+#include "mongo/db/shard_role/shard_catalog/database.h"
+#include "mongo/db/shard_role/shard_catalog/durable_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog_entry.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/key_format.h"
 #include "mongo/db/storage/key_string/key_string.h"
 #include "mongo/db/storage/mdb_catalog.h"
@@ -93,14 +87,11 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
-#include <ostream>
 #include <string>
 #include <utility>
-#include <vector>
 
-#include <boost/move/algo/move.hpp>
-#include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
+#include <fmt/format.h>
 
 namespace mongo {
 namespace ValidateTests {
@@ -211,6 +202,10 @@ public:
     CollectionPtr coll() const {
         return CollectionPtr(CollectionCatalog::get(&_opCtx)->establishConsistentCollection(
             &_opCtx, _nss, boost::none));
+    }
+
+    void insertDocument(const BSONObj& doc) {
+        ASSERT_OK(Helpers::insert(&_opCtx, coll(), doc));
     }
 
 protected:
@@ -340,7 +335,7 @@ protected:
             Lock::CollectionLock collLock(&_opCtx, _nss, MODE_X);
             CollectionWriter collection(&_opCtx, _nss);
             beginTransaction();
-            auto status = dbtests::initializeMultiIndexBlock(&_opCtx, collection, indexer, spec);
+            auto status = initializeMultiIndexBlock(&_opCtx, collection, indexer, spec);
             commitTransaction();
             if (status == ErrorCodes::IndexAlreadyExists) {
                 return Status::OK();
@@ -408,16 +403,13 @@ public:
 
         RecordId id1;
         {
-            OpDebug* const nullOpDebug = nullptr;
             beginTransaction();
             ASSERT_OK(_db->dropCollection(&_opCtx, _nss));
             _db->createCollection(&_opCtx, _nss);
 
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx, coll(), InsertStatement(BSON("_id" << 1)), nullOpDebug, true));
+            insertDocument(BSON("_id" << 1));
             id1 = coll()->getCursor(&_opCtx)->next()->id;
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx, coll(), InsertStatement(BSON("_id" << 2)), nullOpDebug, true));
+            insertDocument(BSON("_id" << 2));
             commitTransaction();
         }
         releaseDb();
@@ -465,15 +457,12 @@ public:
         lockDb(MODE_X);
         RecordId id1;
         {
-            OpDebug* const nullOpDebug = nullptr;
             beginTransaction();
             ASSERT_OK(_db->dropCollection(&_opCtx, _nss));
             _db->createCollection(&_opCtx, _nss);
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx, coll(), InsertStatement(BSON("_id" << 1 << "a" << 1)), nullOpDebug, true));
+            insertDocument(BSON("_id" << 1 << "a" << 1));
             id1 = coll()->getCursor(&_opCtx)->next()->id;
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx, coll(), InsertStatement(BSON("_id" << 2 << "a" << 2)), nullOpDebug, true));
+            insertDocument(BSON("_id" << 2 << "a" << 2));
             commitTransaction();
         }
 
@@ -525,19 +514,15 @@ public:
     void run() {
         // Create a new collection, insert three records.
         lockDb(MODE_X);
-        OpDebug* const nullOpDebug = nullptr;
         RecordId id1;
         {
             beginTransaction();
             ASSERT_OK(_db->dropCollection(&_opCtx, _nss));
             _db->createCollection(&_opCtx, _nss);
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx, coll(), InsertStatement(BSON("_id" << 1 << "a" << 1)), nullOpDebug, true));
+            insertDocument(BSON("_id" << 1 << "a" << 1));
             id1 = coll()->getCursor(&_opCtx)->next()->id;
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx, coll(), InsertStatement(BSON("_id" << 2 << "a" << 2)), nullOpDebug, true));
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx, coll(), InsertStatement(BSON("_id" << 3 << "b" << 3)), nullOpDebug, true));
+            insertDocument(BSON("_id" << 2 << "a" << 2));
+            insertDocument(BSON("_id" << 3 << "b" << 3));
             commitTransaction();
         }
 
@@ -579,18 +564,15 @@ public:
     void run() {
         // Create a new collection, insert records {_id: 1} and {_id: 2} and check it's valid.
         lockDb(MODE_X);
-        OpDebug* const nullOpDebug = nullptr;
         RecordId id1;
         {
             beginTransaction();
             ASSERT_OK(_db->dropCollection(&_opCtx, _nss));
             _db->createCollection(&_opCtx, _nss);
 
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx, coll(), InsertStatement(BSON("_id" << 1)), nullOpDebug, true));
+            insertDocument(BSON("_id" << 1));
             id1 = coll()->getCursor(&_opCtx)->next()->id;
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx, coll(), InsertStatement(BSON("_id" << 2)), nullOpDebug, true));
+            insertDocument(BSON("_id" << 2));
             commitTransaction();
         }
         releaseDb();
@@ -662,7 +644,6 @@ public:
     void run() {
         // Create a new collection, insert three records and check it's valid.
         lockDb(MODE_X);
-        OpDebug* const nullOpDebug = nullptr;
         RecordId id1;
         // {a: [b: 1, c: 2]}, {a: [b: 2, c: 2]}, {a: [b: 1, c: 1]}
         auto doc1 = BSON("_id" << 1 << "a" << BSON_ARRAY(BSON("b" << 1) << BSON("c" << 2)));
@@ -679,13 +660,10 @@ public:
             _db->createCollection(&_opCtx, _nss);
 
 
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx, coll(), InsertStatement(doc1), nullOpDebug, true));
+            insertDocument(doc1);
             id1 = coll()->getCursor(&_opCtx)->next()->id;
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx, coll(), InsertStatement(doc2), nullOpDebug, true));
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx, coll(), InsertStatement(doc3), nullOpDebug, true));
+            insertDocument(doc2);
+            insertDocument(doc3);
             commitTransaction();
         }
         releaseDb();
@@ -746,20 +724,16 @@ public:
     void run() {
         // Create a new collection, insert three records and check it's valid.
         lockDb(MODE_X);
-        OpDebug* const nullOpDebug = nullptr;
         RecordId id1;
         {
             beginTransaction();
             ASSERT_OK(_db->dropCollection(&_opCtx, _nss));
             _db->createCollection(&_opCtx, _nss);
 
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx, coll(), InsertStatement(BSON("_id" << 1 << "a" << 1)), nullOpDebug, true));
+            insertDocument(BSON("_id" << 1 << "a" << 1));
             id1 = coll()->getCursor(&_opCtx)->next()->id;
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx, coll(), InsertStatement(BSON("_id" << 2 << "a" << 2)), nullOpDebug, true));
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx, coll(), InsertStatement(BSON("_id" << 3 << "b" << 1)), nullOpDebug, true));
+            insertDocument(BSON("_id" << 2 << "a" << 2));
+            insertDocument(BSON("_id" << 3 << "b" << 1));
             commitTransaction();
         }
 
@@ -801,26 +775,18 @@ public:
     void run() {
         // Create a new collection, insert three records and check it's valid.
         lockDb(MODE_X);
-        OpDebug* const nullOpDebug = nullptr;
         RecordId id1;
         {
             beginTransaction();
             ASSERT_OK(_db->dropCollection(&_opCtx, _nss));
             _db->createCollection(&_opCtx, _nss);
 
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx, coll(), InsertStatement(BSON("_id" << 1 << "a" << 1)), nullOpDebug, true));
+            insertDocument(BSON("_id" << 1 << "a" << 1));
             id1 = coll()->getCursor(&_opCtx)->next()->id;
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx, coll(), InsertStatement(BSON("_id" << 2 << "a" << 2)), nullOpDebug, true));
+            insertDocument(BSON("_id" << 2 << "a" << 2));
             // Explicitly test that multi-key partial indexes containing documents that
             // don't match the filter expression are handled correctly.
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx,
-                coll(),
-                InsertStatement(BSON("_id" << 3 << "a" << BSON_ARRAY(-1 << -2 << -3))),
-                nullOpDebug,
-                true));
+            insertDocument(BSON("_id" << 3 << "a" << BSON_ARRAY(-1 << -2 << -3)));
             commitTransaction();
         }
 
@@ -864,19 +830,13 @@ public:
         // Create a new collection and insert a record that has a non-indexable value on the indexed
         // field.
         lockDb(MODE_X);
-        OpDebug* const nullOpDebug = nullptr;
 
         RecordId id1;
         {
             beginTransaction();
             ASSERT_OK(_db->dropCollection(&_opCtx, _nss));
             _db->createCollection(&_opCtx, _nss);
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx,
-                coll(),
-                InsertStatement(BSON("_id" << 1 << "x" << 1 << "a" << 2)),
-                nullOpDebug,
-                true));
+            insertDocument(BSON("_id" << 1 << "x" << 1 << "a" << 2));
             commitTransaction();
         }
 
@@ -905,7 +865,6 @@ public:
     void run() {
         // Create a new collection, insert five records and check it's valid.
         lockDb(MODE_X);
-        OpDebug* const nullOpDebug = nullptr;
 
         RecordId id1;
         {
@@ -913,25 +872,12 @@ public:
             ASSERT_OK(_db->dropCollection(&_opCtx, _nss));
             _db->createCollection(&_opCtx, _nss);
 
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx,
-                coll(),
-                InsertStatement(BSON("_id" << 1 << "a" << 1 << "b" << 4)),
-                nullOpDebug,
-                true));
+            insertDocument(BSON("_id" << 1 << "a" << 1 << "b" << 4));
             id1 = coll()->getCursor(&_opCtx)->next()->id;
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx,
-                coll(),
-                InsertStatement(BSON("_id" << 2 << "a" << 2 << "b" << 5)),
-                nullOpDebug,
-                true));
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx, coll(), InsertStatement(BSON("_id" << 3 << "a" << 3)), nullOpDebug, true));
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx, coll(), InsertStatement(BSON("_id" << 4 << "b" << 6)), nullOpDebug, true));
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx, coll(), InsertStatement(BSON("_id" << 5 << "c" << 7)), nullOpDebug, true));
+            insertDocument(BSON("_id" << 2 << "a" << 2 << "b" << 5));
+            insertDocument(BSON("_id" << 3 << "a" << 3));
+            insertDocument(BSON("_id" << 4 << "b" << 6));
+            insertDocument(BSON("_id" << 5 << "c" << 7));
             commitTransaction();
         }
 
@@ -981,7 +927,6 @@ public:
 
         // Create a new collection, insert three records and check it's valid.
         lockDb(MODE_X);
-        OpDebug* const nullOpDebug = nullptr;
 
         RecordId id1;
         {
@@ -989,13 +934,10 @@ public:
             ASSERT_OK(_db->dropCollection(&_opCtx, _nss));
             _db->createCollection(&_opCtx, _nss);
 
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx, coll(), InsertStatement(BSON("_id" << 1 << "a" << 1)), nullOpDebug, true));
+            insertDocument(BSON("_id" << 1 << "a" << 1));
             id1 = coll()->getCursor(&_opCtx)->next()->id;
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx, coll(), InsertStatement(BSON("_id" << 2 << "a" << 2)), nullOpDebug, true));
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx, coll(), InsertStatement(BSON("_id" << 3 << "b" << 1)), nullOpDebug, true));
+            insertDocument(BSON("_id" << 2 << "a" << 2));
+            insertDocument(BSON("_id" << 3 << "b" << 1));
             commitTransaction();
         }
 
@@ -1011,8 +953,8 @@ public:
 
         // Replace a correct index entry with a bad one and check it's invalid.
         const IndexCatalog* indexCatalog = coll()->getIndexCatalog();
-        auto descriptor = indexCatalog->findIndexByName(&_opCtx, indexName);
-        auto iam = indexCatalog->getEntry(descriptor)->accessMethod()->asSortedData();
+        auto entry = indexCatalog->findIndexByName(&_opCtx, indexName);
+        auto iam = entry->accessMethod()->asSortedData();
 
         {
             beginTransaction();
@@ -1027,7 +969,7 @@ public:
             iam->getKeys(
                 &_opCtx,
                 coll(),
-                descriptor->getEntry(),
+                entry,
                 pooledBuilder,
                 actualKey,
                 InsertDeleteOptions::ConstraintEnforcementMode::kRelaxConstraintsUnfiltered,
@@ -1039,14 +981,15 @@ public:
 
             auto removeStatus = iam->removeKeys(&_opCtx,
                                                 *shard_role_details::getRecoveryUnit(&_opCtx),
-                                                descriptor->getEntry(),
+                                                coll(),
+                                                entry,
                                                 {keys.begin(), keys.end()},
                                                 options,
                                                 &numDeleted);
             auto insertStatus = iam->insert(&_opCtx,
                                             pooledBuilder,
                                             coll(),
-                                            descriptor->getEntry(),
+                                            entry,
                                             {{id1, timestampToUse, &badKey}},
                                             options,
                                             &numInserted);
@@ -1108,22 +1051,11 @@ public:
         ASSERT_OK(status);
 
         // Insert non-multikey documents.
-        OpDebug* const nullOpDebug = nullptr;
         lockDb(MODE_X);
         {
             beginTransaction();
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx,
-                coll(),
-                InsertStatement(BSON("_id" << 1 << "a" << 1 << "b" << 1)),
-                nullOpDebug,
-                true));
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx,
-                coll(),
-                InsertStatement(BSON("_id" << 2 << "b" << BSON("0" << 1))),
-                nullOpDebug,
-                true));
+            insertDocument(BSON("_id" << 1 << "a" << 1 << "b" << 1));
+            insertDocument(BSON("_id" << 2 << "b" << BSON("0" << 1)));
             commitTransaction();
         }
         releaseDb();
@@ -1133,18 +1065,8 @@ public:
         lockDb(MODE_X);
         {
             beginTransaction();
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx,
-                coll(),
-                InsertStatement(BSON("_id" << 3 << "mk_1" << BSON_ARRAY(1 << 2 << 3))),
-                nullOpDebug,
-                true));
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx,
-                coll(),
-                InsertStatement(BSON("_id" << 4 << "mk_2" << BSON_ARRAY(BSON("e" << 1)))),
-                nullOpDebug,
-                true));
+            insertDocument(BSON("_id" << 3 << "mk_1" << BSON_ARRAY(1 << 2 << 3)));
+            insertDocument(BSON("_id" << 4 << "mk_2" << BSON_ARRAY(BSON("e" << 1))));
             commitTransaction();
         }
         releaseDb();
@@ -1155,8 +1077,8 @@ public:
         const RecordId recordId(record_id_helpers::reservedIdFor(
             record_id_helpers::ReservationId::kWildcardMultikeyMetadataId, KeyFormat::Long));
         const IndexCatalog* indexCatalog = coll()->getIndexCatalog();
-        auto descriptor = indexCatalog->findIndexByName(&_opCtx, indexName);
-        auto accessMethod = indexCatalog->getEntry(descriptor)->accessMethod()->asSortedData();
+        auto entry = indexCatalog->findIndexByName(&_opCtx, indexName);
+        auto accessMethod = entry->accessMethod()->asSortedData();
         auto sortedDataInterface = accessMethod->getSortedDataInterface();
         {
             beginTransaction();
@@ -1230,42 +1152,15 @@ public:
         ASSERT_OK(status);
 
         // Insert documents with indexed and not-indexed paths.
-        OpDebug* const nullOpDebug = nullptr;
         lockDb(MODE_X);
         {
             beginTransaction();
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx,
-                coll(),
-                InsertStatement(BSON("_id" << 1 << "a" << 1 << "b" << 1)),
-                nullOpDebug,
-                true));
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx,
-                coll(),
-                InsertStatement(BSON("_id" << 2 << "a" << BSON("w" << 1))),
-                nullOpDebug,
-                true));
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx,
-                coll(),
-                InsertStatement(BSON("_id" << 3 << "a" << BSON_ARRAY("x" << 1))),
-                nullOpDebug,
-                true));
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx, coll(), InsertStatement(BSON("_id" << 4 << "b" << 2)), nullOpDebug, true));
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx,
-                coll(),
-                InsertStatement(BSON("_id" << 5 << "b" << BSON("y" << 1))),
-                nullOpDebug,
-                true));
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx,
-                coll(),
-                InsertStatement(BSON("_id" << 6 << "b" << BSON_ARRAY("z" << 1))),
-                nullOpDebug,
-                true));
+            insertDocument(BSON("_id" << 1 << "a" << 1 << "b" << 1));
+            insertDocument(BSON("_id" << 2 << "a" << BSON("w" << 1)));
+            insertDocument(BSON("_id" << 3 << "a" << BSON_ARRAY("x" << 1)));
+            insertDocument(BSON("_id" << 4 << "b" << 2));
+            insertDocument(BSON("_id" << 5 << "b" << BSON("y" << 1)));
+            insertDocument(BSON("_id" << 6 << "b" << BSON_ARRAY("z" << 1)));
             commitTransaction();
         }
         releaseDb();
@@ -1273,8 +1168,8 @@ public:
 
         lockDb(MODE_X);
         const IndexCatalog* indexCatalog = coll()->getIndexCatalog();
-        auto descriptor = indexCatalog->findIndexByName(&_opCtx, indexName);
-        auto accessMethod = indexCatalog->getEntry(descriptor)->accessMethod()->asSortedData();
+        auto entry = indexCatalog->findIndexByName(&_opCtx, indexName);
+        auto accessMethod = entry->accessMethod()->asSortedData();
         auto sortedDataInterface = accessMethod->getSortedDataInterface();
 
         // Removing a multikey metadata path for a path included in the projection causes validate
@@ -1326,17 +1221,13 @@ public:
         ASSERT_OK(status);
 
         // Insert documents.
-        OpDebug* const nullOpDebug = nullptr;
         RecordId rid = RecordId::minLong();
         lockDb(MODE_X);
         {
             beginTransaction();
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx, coll(), InsertStatement(BSON("_id" << 1 << "a" << 1)), nullOpDebug, true));
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx, coll(), InsertStatement(BSON("_id" << 2 << "a" << 2)), nullOpDebug, true));
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx, coll(), InsertStatement(BSON("_id" << 3 << "a" << 3)), nullOpDebug, true));
+            insertDocument(BSON("_id" << 1 << "a" << 1));
+            insertDocument(BSON("_id" << 2 << "a" << 2));
+            insertDocument(BSON("_id" << 3 << "a" << 3));
             rid = coll()->getCursor(&_opCtx)->next()->id;
             commitTransaction();
         }
@@ -1415,17 +1306,13 @@ public:
         ASSERT_OK(status);
 
         // Insert documents.
-        OpDebug* const nullOpDebug = nullptr;
         RecordId rid = RecordId::minLong();
         lockDb(MODE_X);
         {
             beginTransaction();
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx, coll(), InsertStatement(BSON("_id" << 1 << "a" << 1)), nullOpDebug, true));
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx, coll(), InsertStatement(BSON("_id" << 2 << "a" << 2)), nullOpDebug, true));
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx, coll(), InsertStatement(BSON("_id" << 3 << "a" << 3)), nullOpDebug, true));
+            insertDocument(BSON("_id" << 1 << "a" << 1));
+            insertDocument(BSON("_id" << 2 << "a" << 2));
+            insertDocument(BSON("_id" << 3 << "a" << 3));
             rid = coll()->getCursor(&_opCtx)->next()->id;
             commitTransaction();
         }
@@ -1438,8 +1325,8 @@ public:
             lockDb(MODE_X);
 
             const IndexCatalog* indexCatalog = coll()->getIndexCatalog();
-            auto descriptor = indexCatalog->findIndexByName(&_opCtx, indexName);
-            auto iam = indexCatalog->getEntry(descriptor)->accessMethod()->asSortedData();
+            auto entry = indexCatalog->findIndexByName(&_opCtx, indexName);
+            auto iam = entry->accessMethod()->asSortedData();
 
             beginTransaction();
             int64_t numDeleted;
@@ -1451,7 +1338,7 @@ public:
             iam->getKeys(
                 &_opCtx,
                 coll(),
-                descriptor->getEntry(),
+                entry,
                 pooledBuilder,
                 actualKey,
                 InsertDeleteOptions::ConstraintEnforcementMode::kRelaxConstraintsUnfiltered,
@@ -1462,7 +1349,8 @@ public:
                 rid);
             auto removeStatus = iam->removeKeys(&_opCtx,
                                                 *shard_role_details::getRecoveryUnit(&_opCtx),
-                                                descriptor->getEntry(),
+                                                coll(),
+                                                entry,
                                                 {keys.begin(), keys.end()},
                                                 options,
                                                 &numDeleted);
@@ -1525,17 +1413,13 @@ public:
         ASSERT_OK(status);
 
         // Insert documents.
-        OpDebug* const nullOpDebug = nullptr;
         RecordId rid = RecordId::minLong();
         lockDb(MODE_X);
         {
             beginTransaction();
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx, coll(), InsertStatement(BSON("_id" << 1 << "a" << 1)), nullOpDebug, true));
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx, coll(), InsertStatement(BSON("_id" << 2 << "a" << 2)), nullOpDebug, true));
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx, coll(), InsertStatement(BSON("_id" << 3 << "a" << 3)), nullOpDebug, true));
+            insertDocument(BSON("_id" << 1 << "a" << 1));
+            insertDocument(BSON("_id" << 2 << "a" << 2));
+            insertDocument(BSON("_id" << 3 << "a" << 3));
             rid = coll()->getCursor(&_opCtx)->next()->id;
             commitTransaction();
         }
@@ -1613,28 +1497,12 @@ public:
                                                   << static_cast<int>(kIndexVersion))));
 
         // Insert documents.
-        OpDebug* const nullOpDebug = nullptr;
         lockDb(MODE_X);
         {
             beginTransaction();
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx,
-                coll(),
-                InsertStatement(BSON("_id" << 1 << "a" << 1 << "b" << 1)),
-                nullOpDebug,
-                true));
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx,
-                coll(),
-                InsertStatement(BSON("_id" << 2 << "a" << 3 << "b" << 3)),
-                nullOpDebug,
-                true));
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx,
-                coll(),
-                InsertStatement(BSON("_id" << 3 << "a" << 6 << "b" << 6)),
-                nullOpDebug,
-                true));
+            insertDocument(BSON("_id" << 1 << "a" << 1 << "b" << 1));
+            insertDocument(BSON("_id" << 2 << "a" << 3 << "b" << 3));
+            insertDocument(BSON("_id" << 3 << "a" << 6 << "b" << 6));
             commitTransaction();
         }
         releaseDb();
@@ -1794,17 +1662,13 @@ public:
         ASSERT_OK(status);
 
         // Insert documents.
-        OpDebug* const nullOpDebug = nullptr;
         RecordId rid = RecordId::minLong();
         lockDb(MODE_X);
         {
             beginTransaction();
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx, coll(), InsertStatement(BSON("_id" << 1 << "a" << 1)), nullOpDebug, true));
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx, coll(), InsertStatement(BSON("_id" << 2 << "a" << 2)), nullOpDebug, true));
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx, coll(), InsertStatement(BSON("_id" << 3 << "a" << 3)), nullOpDebug, true));
+            insertDocument(BSON("_id" << 1 << "a" << 1));
+            insertDocument(BSON("_id" << 2 << "a" << 2));
+            insertDocument(BSON("_id" << 3 << "a" << 3));
             rid = coll()->getCursor(&_opCtx)->next()->id;
             commitTransaction();
         }
@@ -1817,8 +1681,8 @@ public:
             lockDb(MODE_X);
 
             const IndexCatalog* indexCatalog = coll()->getIndexCatalog();
-            auto descriptor = indexCatalog->findIndexByName(&_opCtx, indexName);
-            auto iam = indexCatalog->getEntry(descriptor)->accessMethod()->asSortedData();
+            auto entry = indexCatalog->findIndexByName(&_opCtx, indexName);
+            auto iam = entry->accessMethod()->asSortedData();
 
             beginTransaction();
             int64_t numDeleted;
@@ -1830,7 +1694,7 @@ public:
             iam->getKeys(
                 &_opCtx,
                 coll(),
-                descriptor->getEntry(),
+                entry,
                 pooledBuilder,
                 actualKey,
                 InsertDeleteOptions::ConstraintEnforcementMode::kRelaxConstraintsUnfiltered,
@@ -1841,7 +1705,8 @@ public:
                 rid);
             auto removeStatus = iam->removeKeys(&_opCtx,
                                                 *shard_role_details::getRecoveryUnit(&_opCtx),
-                                                descriptor->getEntry(),
+                                                coll(),
+                                                entry,
                                                 {keys.begin(), keys.end()},
                                                 options,
                                                 &numDeleted);
@@ -1971,17 +1836,13 @@ public:
         ASSERT_OK(status);
 
         // Insert documents.
-        OpDebug* const nullOpDebug = nullptr;
         RecordId rid = RecordId::minLong();
         lockDb(MODE_X);
         {
             beginTransaction();
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx, coll(), InsertStatement(BSON("_id" << 1 << "a" << 1)), nullOpDebug, true));
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx, coll(), InsertStatement(BSON("_id" << 2 << "a" << 2)), nullOpDebug, true));
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx, coll(), InsertStatement(BSON("_id" << 3 << "a" << 3)), nullOpDebug, true));
+            insertDocument(BSON("_id" << 1 << "a" << 1));
+            insertDocument(BSON("_id" << 2 << "a" << 2));
+            insertDocument(BSON("_id" << 3 << "a" << 3));
             rid = coll()->getCursor(&_opCtx)->next()->id;
             commitTransaction();
         }
@@ -2107,13 +1968,11 @@ public:
         // Create a new collection and insert a document.
         lockDb(MODE_X);
 
-        OpDebug* const nullOpDebug = nullptr;
         {
             beginTransaction();
             ASSERT_OK(_db->dropCollection(&_opCtx, _nss));
             _db->createCollection(&_opCtx, _nss);
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx, coll(), InsertStatement(BSON("_id" << 1 << "a" << 1)), nullOpDebug, true));
+            insertDocument(BSON("_id" << 1 << "a" << 1));
             commitTransaction();
         }
 
@@ -2131,8 +1990,7 @@ public:
         BSONObj dupObj = BSON("_id" << 2 << "a" << 1);
         {
             beginTransaction();
-            ASSERT_NOT_OK(collection_internal::insertDocument(
-                &_opCtx, coll(), InsertStatement(dupObj), nullOpDebug, true));
+            ASSERT_NOT_OK(Helpers::insert(&_opCtx, coll(), dupObj));
             abortTransaction();
         }
         releaseDb();
@@ -2168,8 +2026,7 @@ public:
             // Insert the key on _id.
             {
                 auto storageEngine = _opCtx.getServiceContext()->getStorageEngine();
-                auto descriptor = indexCatalog->findIdIndex(&_opCtx);
-                auto entry = const_cast<IndexCatalogEntry*>(indexCatalog->getEntry(descriptor));
+                auto entry = indexCatalog->findIdIndex(&_opCtx);
                 IndexBuildInfo indexBuildInfo(indexCatalog->getDefaultIdIndexSpec(coll()),
                                               entry->getIdent());
                 indexBuildInfo.setInternalIdents(*storageEngine,
@@ -2292,7 +2149,7 @@ public:
                     acquireCollection(&_opCtx,
                                       CollectionAcquisitionRequest(
                                           lostAndFoundNss,
-                                          PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                          PlacementConcern(boost::none, ShardVersion::UNTRACKED()),
                                           repl::ReadConcernArgs::get(&_opCtx),
                                           AcquisitionPrerequisites::kRead),
                                       MODE_IS);
@@ -2307,7 +2164,7 @@ public:
                     acquireCollection(&_opCtx,
                                       CollectionAcquisitionRequest(
                                           _nss,
-                                          PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                          PlacementConcern(boost::none, ShardVersion::UNTRACKED()),
                                           repl::ReadConcernArgs::get(&_opCtx),
                                           AcquisitionPrerequisites::kRead),
                                       MODE_IS);
@@ -2368,17 +2225,11 @@ public:
         // Create a new collection and insert a document.
         lockDb(MODE_X);
 
-        OpDebug* const nullOpDebug = nullptr;
         {
             beginTransaction();
             ASSERT_OK(_db->dropCollection(&_opCtx, _nss));
             _db->createCollection(&_opCtx, _nss);
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx,
-                coll(),
-                InsertStatement(BSON("_id" << 1 << "a" << 1 << "b" << 1)),
-                nullOpDebug,
-                true));
+            insertDocument(BSON("_id" << 1 << "a" << 1 << "b" << 1));
             commitTransaction();
         }
 
@@ -2407,8 +2258,7 @@ public:
         BSONObj dupObj = BSON("_id" << 2 << "a" << 1 << "b" << 1);
         {
             beginTransaction();
-            ASSERT_NOT_OK(collection_internal::insertDocument(
-                &_opCtx, coll(), InsertStatement(dupObj), nullOpDebug, true));
+            ASSERT_NOT_OK(Helpers::insert(&_opCtx, coll(), dupObj));
             abortTransaction();
         }
         releaseDb();
@@ -2445,8 +2295,7 @@ public:
             // Insert the key on _id.
             {
                 auto storageEngine = _opCtx.getServiceContext()->getStorageEngine();
-                auto descriptor = indexCatalog->findIdIndex(&_opCtx);
-                auto entry = const_cast<IndexCatalogEntry*>(indexCatalog->getEntry(descriptor));
+                auto entry = indexCatalog->findIdIndex(&_opCtx);
                 auto iam = entry->accessMethod()->asSortedData();
                 IndexBuildInfo indexBuildInfo(indexCatalog->getDefaultIdIndexSpec(coll()),
                                               entry->getIdent());
@@ -2576,7 +2425,7 @@ public:
                     acquireCollection(&_opCtx,
                                       CollectionAcquisitionRequest(
                                           lostAndFoundNss,
-                                          PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                          PlacementConcern(boost::none, ShardVersion::UNTRACKED()),
                                           repl::ReadConcernArgs::get(&_opCtx),
                                           AcquisitionPrerequisites::kRead),
                                       MODE_IS);
@@ -2591,7 +2440,7 @@ public:
                     acquireCollection(&_opCtx,
                                       CollectionAcquisitionRequest(
                                           _nss,
-                                          PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                          PlacementConcern(boost::none, ShardVersion::UNTRACKED()),
                                           repl::ReadConcernArgs::get(&_opCtx),
                                           AcquisitionPrerequisites::kRead),
                                       MODE_IS);
@@ -2655,18 +2504,12 @@ public:
         // Create a new collection and insert a document.
         lockDb(MODE_X);
 
-        OpDebug* const nullOpDebug = nullptr;
         RecordId rid1 = RecordId::minLong();
         {
             beginTransaction();
             ASSERT_OK(_db->dropCollection(&_opCtx, _nss));
             _db->createCollection(&_opCtx, _nss);
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx,
-                coll(),
-                InsertStatement(BSON("_id" << 1 << "a" << 1 << "b" << 1)),
-                nullOpDebug,
-                true));
+            insertDocument(BSON("_id" << 1 << "a" << 1 << "b" << 1));
             rid1 = coll()->getCursor(&_opCtx)->next()->id;
             commitTransaction();
         }
@@ -2696,8 +2539,7 @@ public:
         BSONObj dupObj = BSON("_id" << 2 << "a" << 1 << "b" << 1);
         {
             beginTransaction();
-            ASSERT_NOT_OK(collection_internal::insertDocument(
-                &_opCtx, coll(), InsertStatement(dupObj), nullOpDebug, true));
+            ASSERT_NOT_OK(Helpers::insert(&_opCtx, coll(), dupObj));
             abortTransaction();
         }
         releaseDb();
@@ -2713,8 +2555,8 @@ public:
             options.dupsAllowed = true;
 
             {
-                auto descriptor = indexCatalog->findIndexByName(&_opCtx, indexNameB);
-                auto iam = indexCatalog->getEntry(descriptor)->accessMethod()->asSortedData();
+                auto entry = indexCatalog->findIndexByName(&_opCtx, indexNameB);
+                auto iam = entry->accessMethod()->asSortedData();
 
                 beginTransaction();
                 int64_t numDeleted;
@@ -2724,7 +2566,7 @@ public:
                 iam->getKeys(
                     &_opCtx,
                     coll(),
-                    descriptor->getEntry(),
+                    entry,
                     pooledBuilder,
                     actualKey,
                     InsertDeleteOptions::ConstraintEnforcementMode::kRelaxConstraintsUnfiltered,
@@ -2735,7 +2577,8 @@ public:
                     rid1);
                 auto removeStatus = iam->removeKeys(&_opCtx,
                                                     *shard_role_details::getRecoveryUnit(&_opCtx),
-                                                    descriptor->getEntry(),
+                                                    coll(),
+                                                    entry,
                                                     {keys.begin(), keys.end()},
                                                     options,
                                                     &numDeleted);
@@ -2778,8 +2621,7 @@ public:
             // Insert the key on _id.
             {
                 auto storageEngine = _opCtx.getServiceContext()->getStorageEngine();
-                auto descriptor = indexCatalog->findIdIndex(&_opCtx);
-                auto entry = const_cast<IndexCatalogEntry*>(indexCatalog->getEntry(descriptor));
+                auto entry = indexCatalog->findIdIndex(&_opCtx);
                 auto iam = entry->accessMethod()->asSortedData();
                 IndexBuildInfo indexBuildInfo(indexCatalog->getDefaultIdIndexSpec(coll()),
                                               entry->getIdent());
@@ -2834,8 +2676,7 @@ public:
             // Insert the key on b.
             {
                 auto storageEngine = _opCtx.getServiceContext()->getStorageEngine();
-                auto descriptor = indexCatalog->findIndexByName(&_opCtx, indexNameB);
-                auto entry = const_cast<IndexCatalogEntry*>(indexCatalog->getEntry(descriptor));
+                auto entry = indexCatalog->findIndexByName(&_opCtx, indexNameB);
                 auto iam = entry->accessMethod()->asSortedData();
                 IndexBuildInfo indexBuildInfo(indexSpecB, entry->getIdent());
                 indexBuildInfo.setInternalIdents(*storageEngine,
@@ -2961,7 +2802,7 @@ public:
                     acquireCollection(&_opCtx,
                                       CollectionAcquisitionRequest(
                                           lostAndFoundNss,
-                                          PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                          PlacementConcern(boost::none, ShardVersion::UNTRACKED()),
                                           repl::ReadConcernArgs::get(&_opCtx),
                                           AcquisitionPrerequisites::kRead),
                                       MODE_IS);
@@ -2976,7 +2817,7 @@ public:
                     acquireCollection(&_opCtx,
                                       CollectionAcquisitionRequest(
                                           _nss,
-                                          PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                          PlacementConcern(boost::none, ShardVersion::UNTRACKED()),
                                           repl::ReadConcernArgs::get(&_opCtx),
                                           AcquisitionPrerequisites::kRead),
                                       MODE_IS);
@@ -3043,13 +2884,11 @@ public:
         RecordId id1;
         BSONObj doc = BSON("_id" << 1 << "a" << 1);
         {
-            OpDebug* const nullOpDebug = nullptr;
             beginTransaction();
             ASSERT_OK(_db->dropCollection(&_opCtx, _nss));
             _db->createCollection(&_opCtx, _nss);
 
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx, coll(), InsertStatement(doc), nullOpDebug, true));
+            insertDocument(doc);
             id1 = coll()->getCursor(&_opCtx)->next()->id;
             commitTransaction();
         }
@@ -3067,8 +2906,8 @@ public:
         {
             lockDb(MODE_X);
             const IndexCatalog* indexCatalog = coll()->getIndexCatalog();
-            auto descriptor = indexCatalog->findIndexByName(&_opCtx, indexName);
-            auto iam = indexCatalog->getEntry(descriptor)->accessMethod()->asSortedData();
+            auto entry = indexCatalog->findIndexByName(&_opCtx, indexName);
+            auto iam = entry->accessMethod()->asSortedData();
             InsertDeleteOptions options;
             options.dupsAllowed = true;
 
@@ -3079,7 +2918,7 @@ public:
                 iam->getKeys(
                     &_opCtx,
                     coll(),
-                    descriptor->getEntry(),
+                    entry,
                     pooledBuilder,
                     doc,
                     InsertDeleteOptions::ConstraintEnforcementMode::kRelaxConstraintsUnfiltered,
@@ -3093,7 +2932,8 @@ public:
                 int64_t numDeleted;
                 auto removeStatus = iam->removeKeys(&_opCtx,
                                                     *shard_role_details::getRecoveryUnit(&_opCtx),
-                                                    descriptor->getEntry(),
+                                                    coll(),
+                                                    entry,
                                                     {keys.begin(), keys.end()},
                                                     options,
                                                     &numDeleted);
@@ -3251,17 +3091,11 @@ public:
         }
 
         // Insert a document.
-        OpDebug* const nullOpDebug = nullptr;
         RecordId rid = RecordId::minLong();
         lockDb(MODE_X);
         {
             beginTransaction();
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx,
-                coll(),
-                InsertStatement(BSON("_id" << 1 << "a" << 1 << "b" << 1)),
-                nullOpDebug,
-                true));
+            insertDocument(BSON("_id" << 1 << "a" << 1 << "b" << 1));
             rid = coll()->getCursor(&_opCtx)->next()->id;
             commitTransaction();
         }
@@ -3274,8 +3108,8 @@ public:
 
             const IndexCatalog* indexCatalog = coll()->getIndexCatalog();
             const std::string indexName = "a";
-            auto descriptor = indexCatalog->findIndexByName(&_opCtx, indexName);
-            auto iam = indexCatalog->getEntry(descriptor)->accessMethod()->asSortedData();
+            auto entry = indexCatalog->findIndexByName(&_opCtx, indexName);
+            auto iam = entry->accessMethod()->asSortedData();
 
             beginTransaction();
             int64_t numDeleted;
@@ -3287,7 +3121,7 @@ public:
             iam->getKeys(
                 &_opCtx,
                 coll(),
-                descriptor->getEntry(),
+                entry,
                 pooledBuilder,
                 actualKey,
                 InsertDeleteOptions::ConstraintEnforcementMode::kRelaxConstraintsUnfiltered,
@@ -3298,7 +3132,8 @@ public:
                 rid);
             auto removeStatus = iam->removeKeys(&_opCtx,
                                                 *shard_role_details::getRecoveryUnit(&_opCtx),
-                                                descriptor->getEntry(),
+                                                coll(),
+                                                entry,
                                                 {keys.begin(), keys.end()},
                                                 options,
                                                 &numDeleted);
@@ -3316,8 +3151,8 @@ public:
 
             const IndexCatalog* indexCatalog = coll()->getIndexCatalog();
             const std::string indexName = "b";
-            auto descriptor = indexCatalog->findIndexByName(&_opCtx, indexName);
-            auto iam = indexCatalog->getEntry(descriptor)->accessMethod()->asSortedData();
+            auto entry = indexCatalog->findIndexByName(&_opCtx, indexName);
+            auto iam = entry->accessMethod()->asSortedData();
 
             beginTransaction();
             int64_t numDeleted;
@@ -3329,7 +3164,7 @@ public:
             iam->getKeys(
                 &_opCtx,
                 coll(),
-                descriptor->getEntry(),
+                entry,
                 pooledBuilder,
                 actualKey,
                 InsertDeleteOptions::ConstraintEnforcementMode::kRelaxConstraintsUnfiltered,
@@ -3340,7 +3175,8 @@ public:
                 rid);
             auto removeStatus = iam->removeKeys(&_opCtx,
                                                 *shard_role_details::getRecoveryUnit(&_opCtx),
-                                                descriptor->getEntry(),
+                                                coll(),
+                                                entry,
                                                 {keys.begin(), keys.end()},
                                                 options,
                                                 &numDeleted);
@@ -3390,12 +3226,10 @@ public:
         }
 
         // Insert a document.
-        OpDebug* const nullOpDebug = nullptr;
         lockDb(MODE_X);
         {
             beginTransaction();
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx, coll(), InsertStatement(BSON("_id" << 1 << "a" << 1)), nullOpDebug, true));
+            insertDocument(BSON("_id" << 1 << "a" << 1));
             commitTransaction();
         }
 
@@ -3404,8 +3238,7 @@ public:
         BSONObj dupObj = BSON("_id" << 2 << "a" << 1);
         {
             beginTransaction();
-            ASSERT_NOT_OK(collection_internal::insertDocument(
-                &_opCtx, coll(), InsertStatement(dupObj), nullOpDebug, true));
+            ASSERT_NOT_OK(Helpers::insert(&_opCtx, coll(), dupObj));
             abortTransaction();
         }
         releaseDb();
@@ -3439,8 +3272,7 @@ public:
             // Insert the key on _id.
             {
                 auto storageEngine = _opCtx.getServiceContext()->getStorageEngine();
-                auto descriptor = indexCatalog->findIdIndex(&_opCtx);
-                auto entry = const_cast<IndexCatalogEntry*>(indexCatalog->getEntry(descriptor));
+                auto entry = indexCatalog->findIdIndex(&_opCtx);
                 auto iam = entry->accessMethod()->asSortedData();
                 IndexBuildInfo indexBuildInfo(indexCatalog->getDefaultIdIndexSpec(coll()),
                                               entry->getIdent());
@@ -3495,8 +3327,7 @@ public:
             // Insert the key on "a".
             {
                 auto storageEngine = _opCtx.getServiceContext()->getStorageEngine();
-                auto descriptor = indexCatalog->findIndexByName(&_opCtx, indexName);
-                auto entry = const_cast<IndexCatalogEntry*>(indexCatalog->getEntry(descriptor));
+                auto entry = indexCatalog->findIndexByName(&_opCtx, indexName);
                 auto iam = entry->accessMethod()->asSortedData();
                 IndexBuildInfo indexBuildInfo(indexSpec, entry->getIdent());
                 indexBuildInfo.setInternalIdents(*storageEngine,
@@ -3835,13 +3666,11 @@ public:
         RecordId id1;
         BSONObj doc = BSON("_id" << 1 << "a" << 1);
         {
-            OpDebug* const nullOpDebug = nullptr;
             beginTransaction();
             ASSERT_OK(_db->dropCollection(&_opCtx, _nss));
             _db->createCollection(&_opCtx, _nss);
 
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx, coll(), InsertStatement(doc), nullOpDebug, true));
+            insertDocument(doc);
             id1 = coll()->getCursor(&_opCtx)->next()->id;
             commitTransaction();
         }
@@ -3859,8 +3688,8 @@ public:
         {
             lockDb(MODE_X);
             const IndexCatalog* indexCatalog = coll()->getIndexCatalog();
-            auto descriptor = indexCatalog->findIndexByName(&_opCtx, indexName);
-            auto iam = indexCatalog->getEntry(descriptor)->accessMethod()->asSortedData();
+            auto entry = indexCatalog->findIndexByName(&_opCtx, indexName);
+            auto iam = entry->accessMethod()->asSortedData();
             InsertDeleteOptions options;
             options.dupsAllowed = true;
 
@@ -3871,7 +3700,7 @@ public:
                 iam->getKeys(
                     &_opCtx,
                     coll(),
-                    descriptor->getEntry(),
+                    entry,
                     pooledBuilder,
                     doc,
                     InsertDeleteOptions::ConstraintEnforcementMode::kRelaxConstraintsUnfiltered,
@@ -3885,7 +3714,8 @@ public:
                 int64_t numDeleted;
                 auto removeStatus = iam->removeKeys(&_opCtx,
                                                     *shard_role_details::getRecoveryUnit(&_opCtx),
-                                                    descriptor->getEntry(),
+                                                    coll(),
+                                                    entry,
                                                     {keys.begin(), keys.end()},
                                                     options,
                                                     &numDeleted);
@@ -3916,7 +3746,7 @@ public:
                 iam->getKeys(
                     &_opCtx,
                     coll(),
-                    descriptor->getEntry(),
+                    entry,
                     pooledBuilder,
                     mkDoc,
                     InsertDeleteOptions::ConstraintEnforcementMode::kRelaxConstraintsUnfiltered,
@@ -3937,7 +3767,7 @@ public:
                 auto insertStatus = iam->insertKeysAndUpdateMultikeyPaths(&_opCtx,
                                                                           ru,
                                                                           coll(),
-                                                                          descriptor->getEntry(),
+                                                                          entry,
                                                                           {*keysIterator},
                                                                           {},
                                                                           MultikeyPaths{},
@@ -3952,7 +3782,7 @@ public:
                 insertStatus = iam->insertKeysAndUpdateMultikeyPaths(&_opCtx,
                                                                      ru,
                                                                      coll(),
-                                                                     descriptor->getEntry(),
+                                                                     entry,
                                                                      {*keysIterator},
                                                                      {},
                                                                      MultikeyPaths{},
@@ -4071,14 +3901,11 @@ public:
         RecordId id1;
         BSONObj doc1 = BSON("_id" << 1 << "a" << BSON_ARRAY(1 << 2) << "b" << 1);
         {
-            OpDebug* const nullOpDebug = nullptr;
-
             beginTransaction();
             ASSERT_OK(_db->dropCollection(&_opCtx, _nss));
             _db->createCollection(&_opCtx, _nss);
 
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx, coll(), InsertStatement(doc1), nullOpDebug, true));
+            insertDocument(doc1);
             id1 = coll()->getCursor(&_opCtx)->next()->id;
             commitTransaction();
         }
@@ -4098,8 +3925,8 @@ public:
             lockDb(MODE_X);
 
             const IndexCatalog* indexCatalog = coll()->getIndexCatalog();
-            auto descriptor = indexCatalog->findIndexByName(&_opCtx, indexName);
-            auto iam = indexCatalog->getEntry(descriptor)->accessMethod()->asSortedData();
+            auto entry = indexCatalog->findIndexByName(&_opCtx, indexName);
+            auto iam = entry->accessMethod()->asSortedData();
             InsertDeleteOptions options;
             options.dupsAllowed = true;
 
@@ -4111,7 +3938,7 @@ public:
                 iam->getKeys(
                     &_opCtx,
                     coll(),
-                    descriptor->getEntry(),
+                    entry,
                     pooledBuilder,
                     doc1,
                     InsertDeleteOptions::ConstraintEnforcementMode::kRelaxConstraintsUnfiltered,
@@ -4125,7 +3952,8 @@ public:
                 int64_t numDeleted;
                 auto removeStatus = iam->removeKeys(&_opCtx,
                                                     *shard_role_details::getRecoveryUnit(&_opCtx),
-                                                    descriptor->getEntry(),
+                                                    coll(),
+                                                    entry,
                                                     {keys.begin(), keys.end()},
                                                     options,
                                                     &numDeleted);
@@ -4157,7 +3985,7 @@ public:
                 iam->getKeys(
                     &_opCtx,
                     coll(),
-                    descriptor->getEntry(),
+                    entry,
                     pooledBuilder,
                     doc2,
                     InsertDeleteOptions::ConstraintEnforcementMode::kRelaxConstraintsUnfiltered,
@@ -4173,7 +4001,7 @@ public:
                     &_opCtx,
                     *shard_role_details::getRecoveryUnit(&_opCtx),
                     coll(),
-                    descriptor->getEntry(),
+                    entry,
                     keys,
                     {},
                     oldMultikeyPaths,
@@ -4318,15 +4146,15 @@ public:
         }
 
         // Reload the index from the modified catalog.
-        const IndexDescriptor* descriptor = nullptr;
+        const IndexCatalogEntry* entry = nullptr;
         {
             beginTransaction();
             auto writableCatalog = writer.getWritableCollection(&_opCtx)->getIndexCatalog();
-            descriptor = writableCatalog->findIndexByName(&_opCtx, indexName);
-            descriptor = writableCatalog->refreshEntry(&_opCtx,
-                                                       writer.getWritableCollection(&_opCtx),
-                                                       descriptor,
-                                                       CreateIndexEntryFlags::kIsReady);
+            entry = writableCatalog->findIndexByName(&_opCtx, indexName);
+            entry = writableCatalog->refreshEntry(&_opCtx,
+                                                  writer.getWritableCollection(&_opCtx),
+                                                  entry,
+                                                  CreateIndexEntryFlags::kIsReady);
             commitTransaction();
         }
 
@@ -4334,19 +4162,16 @@ public:
         // state.
         RecordId id1;
         BSONObj doc1 = BSON("_id" << 0 << "a" << BSON_ARRAY(1 << 2) << "b" << 1);
-        OpDebug* const nullOpDebug = nullptr;
         {
             beginTransaction();
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx, coll(), InsertStatement(doc1), nullOpDebug, true));
+            insertDocument(doc1);
             id1 = coll()->getCursor(&_opCtx)->next()->id;
             commitTransaction();
         }
 
-        auto catalogEntry = coll()->getIndexCatalog()->getEntry(descriptor);
         auto expectedPathsBefore = MultikeyPaths{};
-        ASSERT(catalogEntry->isMultikey(&_opCtx, coll()));
-        ASSERT(catalogEntry->getMultikeyPaths(&_opCtx, coll()) == expectedPathsBefore);
+        ASSERT(entry->isMultikey(&_opCtx, coll()));
+        ASSERT(entry->getMultikeyPaths(&_opCtx, coll()) == expectedPathsBefore);
 
         releaseDb();
         ensureValidateWorked();
@@ -4382,8 +4207,8 @@ public:
         }
 
         auto expectedPathsAfter = MultikeyPaths{{0}, {}};
-        ASSERT(catalogEntry->isMultikey(&_opCtx, coll()));
-        ASSERT(catalogEntry->getMultikeyPaths(&_opCtx, coll()) == expectedPathsAfter);
+        ASSERT(entry->isMultikey(&_opCtx, coll()));
+        ASSERT(entry->getMultikeyPaths(&_opCtx, coll()) == expectedPathsAfter);
 
         // Confirm validate does not make changes when run a second time.
         {
@@ -4415,8 +4240,8 @@ public:
             dumpOnErrorGuard.dismiss();
         }
 
-        ASSERT(catalogEntry->isMultikey(&_opCtx, coll()));
-        ASSERT(catalogEntry->getMultikeyPaths(&_opCtx, coll()) == expectedPathsAfter);
+        ASSERT(entry->isMultikey(&_opCtx, coll()));
+        ASSERT(entry->getMultikeyPaths(&_opCtx, coll()) == expectedPathsAfter);
     }
 };
 
@@ -4507,31 +4332,15 @@ public:
         ASSERT_OK(status);
 
         // Insert documents.
-        OpDebug* const nullOpDebug = nullptr;
         RecordId rid = RecordId::minLong();
         lockDb(MODE_X);
 
         const OID firstRecordId = OID::gen();
         {
             beginTransaction();
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx,
-                coll(),
-                InsertStatement(BSON("_id" << firstRecordId << "a" << 1)),
-                nullOpDebug,
-                true));
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx,
-                coll(),
-                InsertStatement(BSON("_id" << OID::gen() << "a" << 2)),
-                nullOpDebug,
-                true));
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx,
-                coll(),
-                InsertStatement(BSON("_id" << OID::gen() << "a" << 3)),
-                nullOpDebug,
-                true));
+            insertDocument(BSON("_id" << firstRecordId << "a" << 1));
+            insertDocument(BSON("_id" << OID::gen() << "a" << 2));
+            insertDocument(BSON("_id" << OID::gen() << "a" << 3));
             rid = coll()->getCursor(&_opCtx)->next()->id;
             commitTransaction();
         }
@@ -4673,15 +4482,12 @@ public:
             secondDoc = BSON("_id" << "2"
                                    << "a" << 10000002);
         }
-        OpDebug* const nullOpDebug = nullptr;
         lockDb(MODE_X);
         {
             beginTransaction();
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx, coll(), InsertStatement(firstDoc), nullOpDebug, true));
+            insertDocument(firstDoc);
             if (falsePositiveCase) {
-                ASSERT_OK(collection_internal::insertDocument(
-                    &_opCtx, coll(), InsertStatement(secondDoc), nullOpDebug, true));
+                insertDocument(secondDoc);
             }
             commitTransaction();
         }
@@ -4716,8 +4522,7 @@ public:
             // Insert the key on "a".
             {
                 auto storageEngine = _opCtx.getServiceContext()->getStorageEngine();
-                auto descriptor = indexCatalog->findIndexByName(&_opCtx, indexName);
-                auto entry = const_cast<IndexCatalogEntry*>(indexCatalog->getEntry(descriptor));
+                auto entry = indexCatalog->findIndexByName(&_opCtx, indexName);
                 auto iam = entry->accessMethod()->asSortedData();
                 IndexBuildInfo indexBuildInfo(indexSpec, entry->getIdent());
                 indexBuildInfo.setInternalIdents(*storageEngine,
@@ -4810,31 +4615,15 @@ public:
         ASSERT_OK(status);
 
         // Insert documents.
-        OpDebug* const nullOpDebug = nullptr;
         RecordId rid = RecordId::minLong();
         lockDb(MODE_X);
 
         const OID firstRecordId = OID::gen();
         {
             beginTransaction();
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx,
-                coll(),
-                InsertStatement(BSON("_id" << firstRecordId << "a" << 1)),
-                nullOpDebug,
-                true));
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx,
-                coll(),
-                InsertStatement(BSON("_id" << OID::gen() << "a" << 2)),
-                nullOpDebug,
-                true));
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx,
-                coll(),
-                InsertStatement(BSON("_id" << OID::gen() << "a" << 3)),
-                nullOpDebug,
-                true));
+            insertDocument(BSON("_id" << firstRecordId << "a" << 1));
+            insertDocument(BSON("_id" << OID::gen() << "a" << 2));
+            insertDocument(BSON("_id" << OID::gen() << "a" << 3));
             rid = coll()->getCursor(&_opCtx)->next()->id;
             commitTransaction();
         }
@@ -4971,30 +4760,14 @@ public:
         }
 
         // Insert documents
-        OpDebug* const nullOpDebug = nullptr;
         lockDb(MODE_X);
 
         const OID firstRecordId = OID::gen();
         {
             beginTransaction();
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx,
-                coll(),
-                InsertStatement(BSON("_id" << firstRecordId << "a" << 1)),
-                nullOpDebug,
-                true));
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx,
-                coll(),
-                InsertStatement(BSON("_id" << OID::gen() << "a" << 2)),
-                nullOpDebug,
-                true));
-            ASSERT_OK(collection_internal::insertDocument(
-                &_opCtx,
-                coll(),
-                InsertStatement(BSON("_id" << OID::gen() << "a" << 3)),
-                nullOpDebug,
-                true));
+            insertDocument(BSON("_id" << firstRecordId << "a" << 1));
+            insertDocument(BSON("_id" << OID::gen() << "a" << 2));
+            insertDocument(BSON("_id" << OID::gen() << "a" << 3));
             commitTransaction();
         }
         releaseDb();
@@ -5003,7 +4776,7 @@ public:
 
         // Corrupt the first record in the RecordStore by dropping the document's _id field.
         // Corrupt the second record in the RecordStore by having the RecordId not match the _id
-        // field. Leave the third record untocuhed.
+        // field. Leave the third record untouched.
 
         RecordStore* rs = coll()->getRecordStore();
         auto cursor = coll()->getCursor(&_opCtx);

@@ -33,6 +33,7 @@
 #include "mongo/db/update/update_node.h"
 #include "mongo/db/update/update_object_node.h"
 #include "mongo/db/update/v2_log_builder.h"
+#include "mongo/util/modules.h"
 
 namespace mongo {
 
@@ -71,7 +72,10 @@ public:
      * format of the update command's update parameter.
      */
     Value serialize() const final {
-        return Value(_updateTree->serialize());
+        return serialize(SerializationOptions());
+    }
+    Value serialize(const SerializationOptions& opts) const {
+        return Value(_updateTree->serialize(opts));
     }
 
     void setCollator(const CollatorInterface* collator) final {

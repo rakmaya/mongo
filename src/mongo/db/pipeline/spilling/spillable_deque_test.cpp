@@ -30,7 +30,6 @@
 #include "mongo/db/pipeline/spilling/spillable_deque.h"
 
 #include "mongo/base/string_data.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/exec/document_value/document_value_test_util.h"
 #include "mongo/db/exec/document_value/value.h"
@@ -121,7 +120,10 @@ TEST_F(SpillableDequeTest, CanReturnDocumentsFromCacheAndDisk) {
     cache->finalize();
 }
 
-DEATH_TEST_F(SpillableDequeTest, RemovesDocumentsWhenExpired, "Requested expired document") {
+using SpillableDequeTestDeathTest = SpillableDequeTest;
+DEATH_TEST_F(SpillableDequeTestDeathTest,
+             RemovesDocumentsWhenExpired,
+             "Requested expired document") {
     _expCtx->setAllowDiskUse(false);
     auto cache = createSpillableDeque(2000);
     buildAndLoadDocumentSet(4, cache.get());

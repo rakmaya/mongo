@@ -39,6 +39,7 @@
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/stage_constraints.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/string_map.h"
 
 #include <boost/none.hpp>
@@ -46,6 +47,11 @@
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
+
+DECLARE_STAGE_PARAMS_DERIVED_DEFAULT(ChangeStreamInjectControlEvents);
+using ChangeStreamInjectControlEventsLiteParsed =
+    DocumentSourceChangeStreamLiteParsedInternal<ChangeStreamInjectControlEventsStageParams>;
+
 /**
  * This pipeline stage can turn specific events into so-called 'control events'. It can either be
  * configured to turn certain event types into control events, by setting the control events flag on

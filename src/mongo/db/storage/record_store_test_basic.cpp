@@ -339,7 +339,8 @@ TEST(RecordStoreTest, UpdateInPlace1) {
                                       loc,
                                       s1Rec,
                                       damageSource,
-                                      dv);
+                                      dv,
+                                      nullptr /*cursor*/);
             ASSERT_OK(newRecStatus.getStatus());
             ASSERT_EQUALS(s2, newRecStatus.getValue().data());
             txn.commit();
@@ -896,7 +897,9 @@ TEST(RecordStoreTest, ClusteredCappedRecordStoreSeek) {
 }
 
 // Verify that a failed restore leaves the _hasRestored flag unset.
-DEATH_TEST_REGEX(RecordStoreTest, FailedRestoreDoesNotSetFlag, "Invariant failure.*_hasRestored") {
+DEATH_TEST_REGEX(RecordStoreTestDeathTest,
+                 FailedRestoreDoesNotSetFlag,
+                 "Invariant failure.*_hasRestored") {
     const auto harnessHelper(newRecordStoreHarnessHelper());
     auto rs(harnessHelper->newRecordStore());
     {

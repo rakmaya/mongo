@@ -33,12 +33,13 @@
 #include "mongo/bson/json.h"
 #include "mongo/db/collection_crud/collection_write_path.h"
 #include "mongo/db/dbdirectclient.h"
-#include "mongo/db/local_catalog/collection_type.h"
-#include "mongo/db/local_catalog/create_collection.h"
-#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_runtime.h"
-#include "mongo/db/local_catalog/shard_role_catalog/shard_filtering_metadata_refresh.h"
-#include "mongo/db/raw_data_operation.h"
+#include "mongo/db/feature_flag.h"
 #include "mongo/db/repl/read_concern_level.h"
+#include "mongo/db/shard_role/shard_catalog/collection_sharding_runtime.h"
+#include "mongo/db/shard_role/shard_catalog/collection_type.h"
+#include "mongo/db/shard_role/shard_catalog/create_collection.h"
+#include "mongo/db/shard_role/shard_catalog/raw_data_operation.h"
+#include "mongo/db/shard_role/shard_catalog/shard_filtering_metadata_refresh.h"
 #include "mongo/db/sharding_environment/shard_server_test_fixture.h"
 #include "mongo/db/versioning_protocol/database_version.h"
 #include "mongo/db/versioning_protocol/shard_version_factory.h"
@@ -79,8 +80,8 @@ protected:
 
         CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(opCtx, nss)
             ->setFilteringMetadata(opCtx, CollectionMetadata::UNTRACKED());
-        auto cm = ChunkManager(RoutingTableHistoryValueHandle{OptionalRoutingTableHistory{}},
-                               _dbVersion.getTimestamp());
+        PointInTimeChunkManager cm(RoutingTableHistoryValueHandle{OptionalRoutingTableHistory{}},
+                                   _dbVersion.getTimestamp());
         getCatalogCacheMock()->setCollectionReturnValue(
             nss,
             CollectionRoutingInfo(
@@ -132,7 +133,7 @@ protected:
             std::make_shared<RoutingTableHistory>(std::move(rt)),
             ComparableChunkVersion::makeComparableChunkVersion(version));
 
-        auto cm = ChunkManager(rtHandle, boost::none);
+        CurrentChunkManager cm(rtHandle);
         const auto collectionMetadata = CollectionMetadata(cm, shardName);
 
         AutoGetCollection coll(opCtx, NamespaceStringOrUUID(nss), MODE_IX);
@@ -234,7 +235,8 @@ protected:
                                             _cmdObj,
                                             _privileges,
                                             _externalSources,
-                                            boost::none /* verbosity */);
+                                            boost::none /* verbosity */,
+                                            _ifrContext);
     }
 
     /**
@@ -260,7 +262,8 @@ protected:
                                             _cmdObj,
                                             _privileges,
                                             _externalSources,
-                                            boost::none /* verbosity */);
+                                            boost::none /* verbosity */,
+                                            _ifrContext);
     }
 
     /**
@@ -289,7 +292,8 @@ protected:
                                                        _cmdObj,
                                                        _privileges,
                                                        _externalSources,
-                                                       boost::none /* verbosity */);
+                                                       boost::none /* verbosity */,
+                                                       _ifrContext);
 
         return aggExState;
     }
@@ -317,7 +321,8 @@ protected:
                                             _cmdObj,
                                             _privileges,
                                             _externalSources,
-                                            boost::none /* verbosity */);
+                                            boost::none /* verbosity */,
+                                            _ifrContext);
     }
 
 private:
@@ -326,6 +331,8 @@ private:
     PrivilegeVector _privileges;
     BSONObj _cmdObj;
     std::vector<std::pair<NamespaceString, std::vector<ExternalDataSourceInfo>>> _externalSources;
+    std::shared_ptr<IncrementalFeatureRolloutContext> _ifrContext =
+        std::make_shared<IncrementalFeatureRolloutContext>();
     DatabaseVersion _dbVersion = {UUID::gen(), Timestamp(1, 0)};
     const DatabaseName _dbName = DatabaseName::createDatabaseName_forTest(boost::none, "test");
 };
@@ -365,6 +372,22 @@ TEST_F(AggregationExecutionStateTest, CreateDefaultAggCatalogState) {
     ASSERT_EQ(aggCatalogState->determineCollectionType(), query_shape::CollectionType::kCollection);
 
     ASSERT_DOES_NOT_THROW(aggCatalogState->relinquishResources());
+}
+
+TEST_F(AggregationExecutionStateTest, CreateIfrContextForAggExStateAndExpressionContext) {
+    StringData coll{"coll"};
+    createTestCollectionWithMetadata(coll, false /*sharded*/);
+
+    std::unique_ptr<AggExState> aggExState = createDefaultAggExState(coll);
+
+    auto ifrContext = aggExState->getIfrContext();
+    ASSERT_TRUE(ifrContext != nullptr);
+
+    std::unique_ptr<AggCatalogState> aggCatalogState = aggExState->createAggCatalogState();
+    auto expCtx = aggCatalogState->createExpressionContext();
+
+    // Verify that the same IFRContext is propagated to the ExpressionContext.
+    ASSERT_EQ(ifrContext.get(), expCtx->getIfrContext().get());
 }
 
 TEST_F(AggregationExecutionStateTest, CreateDefaultAggCatalogStateWithSecondaryCollection) {
@@ -413,7 +436,7 @@ TEST_F(AggregationExecutionStateTest, CreateDefaultAggCatalogStateWithSecondaryS
     // Add at least 1 shard version to the opCtx to simulate a router request. This is necessary
     // to correctly set the isAnySecondaryNamespaceAViewOrNotFullyLocal.
     ScopedSetShardRole setShardRole(
-        operationContext(), mainNss, ShardVersion::UNSHARDED(), getDbVersion());
+        operationContext(), mainNss, ShardVersion::UNTRACKED(), getDbVersion());
     std::unique_ptr<AggExState> aggExState =
         createDefaultAggExStateWithSecondaryCollections(main, secondaryColl);
 

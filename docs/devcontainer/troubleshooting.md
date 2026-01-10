@@ -32,6 +32,54 @@ Restart VSCode. If you install Rancher Desktop while you already have VSCode ope
 
 ## Container Build Issues
 
+### Build Fails with SSH Bind Mount Error
+
+**Symptoms:**
+
+```
+Error response from daemon: invalid mount config for type "bind": bind source path does not exist: /Users/username/.ssh
+```
+
+Or on macOS/Linux systems using certain Docker providers:
+
+```
+Error response from daemon: invalid mount config for type "bind": bind source path does not exist: /socket_mnt/...
+```
+
+**Root Cause:**
+
+The devcontainer configuration mounts your `~/.ssh` directory to enable Git operations over SSH. If this directory doesn't exist on your host machine, the container fails to start. **This directory is required even if you plan to use HTTPS instead of SSH for cloning.**
+
+**Solutions:**
+
+1. **Create the .ssh directory on your host machine:**
+
+   ```bash
+   # On your HOST machine (not in container)
+   mkdir -p ~/.ssh
+   ```
+
+2. **Rebuild the container:**
+
+   - Command Palette → "Dev Containers: Rebuild Container"
+
+**Note on SSH Agent Forwarding:**
+
+SSH agent forwarding behavior varies by Docker provider on macOS:
+
+- **Docker Desktop**: Automatic SSH agent forwarding built-in
+- **OrbStack**: Automatic SSH agent forwarding built-in
+- **Rancher Desktop**:
+  - With dockerd runtime: Automatic agent forwarding
+  - With containerd runtime: Agent forwarding requires additional setup
+
+To use SSH agent forwarding, ensure your SSH keys are added to your host's SSH agent before starting the container:
+
+```bash
+ssh-add ~/.ssh/id_ed25519  # or your key name
+ssh-add -l  # verify keys are loaded
+```
+
 ### Build Fails with "No Space Left on Device"
 
 **Symptoms:**
@@ -54,8 +102,37 @@ Error: failed to solve: write /var/lib/docker/...: no space left on device
 
 2. **Increase Docker disk allocation:**
 
-   - **Docker Desktop/Rancher Desktop**: Settings → Resources → Disk
-   - Increase to at least 60 GB for comfortable MongoDB development
+   **Rancher Desktop:**
+
+   Rancher Desktop does not have a UI for increasing disk size. To increase it:
+
+   **On macOS or Linux:**
+
+   1. Stop Rancher Desktop completely
+   2. Create or edit the VM configuration file:
+      - **macOS**: `~/Library/Application Support/rancher-desktop/lima/_config/override.yaml`
+      - **Linux**: `~/.config/rancher-desktop/lima/_config/override.yaml`
+   3. Add or modify the disk size setting:
+      ```yaml
+      disk: 100GB
+      ```
+   4. Start Rancher Desktop
+   5. If Rancher Desktop was previously initialized, you may need to perform a factory reset (Preferences → Troubleshooting → Reset Kubernetes) for the disk size change to take effect.
+
+   **On Windows (WSL2):**
+
+   The disk is managed by WSL2:
+
+   1. Stop Rancher Desktop
+   2. Run: `wsl --shutdown`
+   3. Follow Microsoft's guide to increase WSL2 disk size: https://learn.microsoft.com/en-us/windows/wsl/disk-space
+
+   **Docker Desktop:**
+
+   1. Open Docker Desktop
+   2. Go to Settings → Resources → Disk image size
+   3. Increase to at least 60 GB (100+ GB recommended for MongoDB development)
+   4. Click "Apply & Restart"
 
 3. **Remove old dev containers:**
 

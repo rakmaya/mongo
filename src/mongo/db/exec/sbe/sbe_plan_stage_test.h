@@ -43,29 +43,13 @@
 // IWYU pragma: no_include "boost/container/detail/std_fwd.hpp"
 
 #include "mongo/base/string_data.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/db/exec/sbe/expressions/compile_ctx.h"
 #include "mongo/db/exec/sbe/expressions/expression.h"
-#include "mongo/db/exec/sbe/expressions/runtime_environment.h"
-#include "mongo/db/exec/sbe/stages/co_scan.h"
-#include "mongo/db/exec/sbe/stages/limit_skip.h"
-#include "mongo/db/exec/sbe/stages/project.h"
 #include "mongo/db/exec/sbe/stages/stages.h"
-#include "mongo/db/exec/sbe/stages/unwind.h"
-#include "mongo/db/exec/sbe/values/bson.h"
 #include "mongo/db/exec/sbe/values/slot.h"
 #include "mongo/db/exec/sbe/values/value.h"
-#include "mongo/db/local_catalog/catalog_test_fixture.h"
-#include "mongo/db/operation_context.h"
-#include "mongo/db/query/plan_yield_policy.h"
-#include "mongo/db/query/plan_yield_policy_sbe.h"
-#include "mongo/db/query/stage_builder/sbe/builder.h"
-#include "mongo/db/service_context.h"
-#include "mongo/db/service_context_d_test_fixture.h"
-#include "mongo/db/yieldable.h"
-#include "mongo/unittest/unittest.h"
-#include "mongo/util/duration.h"
-#include "mongo/util/id_generator.h"
+#include "mongo/db/query/stage_builder/sbe/gen_helpers.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_test_fixture.h"
+#include "mongo/util/modules.h"
 
 namespace mongo::sbe {
 
@@ -220,7 +204,10 @@ public:
      * Note that this method assumes ownership of the SBE Array being passed in.
      */
     std::pair<value::SlotId, std::unique_ptr<PlanStage>> generateVirtualScan(
-        value::TypeTags arrTag, value::Value arrVal, PlanNodeId planNodeId = kEmptyPlanNodeId);
+        value::TypeTags arrTag,
+        value::Value arrVal,
+        PlanNodeId planNodeId = kEmptyPlanNodeId,
+        bool owned = true);
 
     /**
      * This method is similar to generateVirtualScan(), except that the subtree returned outputs to
@@ -277,6 +264,8 @@ public:
     std::pair<value::TypeTags, value::Value> getAllResults(PlanStage* stage,
                                                            value::SlotAccessor* accessor);
 
+    void exhaustStage(PlanStage* stage, value::SlotAccessor* accessor);
+
     /**
      * This method is similar to getAllResults(), except that it supports multiple SlotAccessors.
      * This method returns an array of subarrays. Each subarray contains exactly N elements (where
@@ -312,6 +301,17 @@ public:
                                                      value::TypeTags inputTag,
                                                      value::Value inputVal,
                                                      const MakeStageFn<value::SlotId>& makeStage);
+
+    void runFast(value::TypeTags inputTag, value::Value inputVal, auto makeStage) {
+        auto cctx = makeCompileCtx();
+        auto ctx = cctx.get();
+        auto [scanSlot, scanStage] =
+            generateVirtualScan(inputTag, inputVal, kEmptyPlanNodeId, false /*owned*/);
+        auto [outputSlot, stage] = makeStage(
+            scanSlot, std::move(scanStage), [&]() { return _slotIdGenerator->generate(); });
+        auto resultAccessor = prepareTree(ctx, stage.get(), outputSlot);
+        exhaustStage(stage.get(), resultAccessor);
+    }
 
     /**
      * This method is similar to runTest(), but it allows for streaming input via multiple slots as

@@ -1,5 +1,6 @@
 load("@poetry//:dependencies.bzl", "dependency")
 load("@npm//:eslint/package_json.bzl", "bin")
+load("@rules_python//python:defs.bzl", "py_binary", "py_library")
 
 exports_files([
     "candle_wrapper.py",
@@ -231,11 +232,10 @@ py_library(
 )
 
 py_binary(
-    name = "gather_failed_unittests",
-    srcs = ["gather_failed_unittests.py"],
+    name = "gather_failed_tests",
+    srcs = ["gather_failed_tests.py"],
     visibility = ["//visibility:public"],
     deps = [
-        ":parse_test_xml",
         "//buildscripts/util",
         dependency(
             "typer",
@@ -244,6 +244,40 @@ py_binary(
         dependency(
             "pyyaml",
             group = "core",
+        ),
+    ],
+)
+
+py_binary(
+    name = "generate_result_tasks",
+    srcs = ["generate_result_tasks.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//buildscripts:gather_failed_tests",
+        dependency(
+            "typer",
+            group = "core",
+        ),
+        dependency(
+            "shrub-py",
+            group = "testing",
+        ),
+    ],
+)
+
+py_binary(
+    name = "append_result_tasks",
+    srcs = ["append_result_tasks.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//buildscripts:gather_failed_tests",
+        dependency(
+            "typer",
+            group = "core",
+        ),
+        dependency(
+            "shrub-py",
+            group = "testing",
         ),
     ],
 )
@@ -397,5 +431,35 @@ py_binary(
     ],
     deps = [
         "local_rbe_container_url",
+    ],
+)
+
+# Markdown link linter
+py_binary(
+    name = "markdown_link_linter",
+    srcs = ["lint_markdown_links.py"],
+    main = "lint_markdown_links.py",
+    visibility = ["//visibility:public"],
+    deps = [],  # 'requests' optional (external link checks skipped if absent)
+)
+
+py_binary(
+    name = "yamllinters",
+    srcs = ["yamllinters.py"],
+    main = "yamllinters.py",
+    visibility = ["//visibility:public"],
+    deps = [
+        dependency(
+            "yamllint",
+            group = "lint",
+        ),
+        dependency(
+            "evergreen-lint",
+            group = "lint",
+        ),
+        dependency(
+            "evergreen-py",
+            group = "testing",
+        ),
     ],
 )

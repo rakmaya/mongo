@@ -37,8 +37,6 @@
 #include "mongo/db/client.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/exec/document_value/document_value_test_util.h"
-#include "mongo/db/exec/exec_shard_filter_policy.h"
-#include "mongo/db/global_catalog/router_role_api/router_role.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/pipeline/aggregation_context_fixture.h"
 #include "mongo/db/pipeline/document_source.h"
@@ -61,6 +59,8 @@
 #include "mongo/db/pipeline/document_source_test_optimizations.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/pipeline/optimization/optimize.h"
+#include "mongo/db/pipeline/optimization/rule_based_rewriter.h"
+#include "mongo/db/pipeline/pipeline_factory.h"
 #include "mongo/db/pipeline/pipeline_test_util.h"
 #include "mongo/db/pipeline/plan_executor_pipeline.h"
 #include "mongo/db/pipeline/process_interface/common_process_interface.h"
@@ -73,6 +73,7 @@
 #include "mongo/db/query/query_test_service_context.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
+#include "mongo/db/router_role/router_role.h"
 #include "mongo/db/sharding_environment/shard_server_test_fixture.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/db/topology/sharding_state.h"
@@ -144,8 +145,13 @@ BSONObj pipelineFromJsonArray(const std::string& jsonArray) {
 }
 
 class StubExplainInterface : public StubMongoProcessInterface {
-    BSONObj preparePipelineAndExplain(std::unique_ptr<Pipeline> pipeline,
-                                      ExplainOptions::Verbosity verbosity) override {
+    BSONObj finalizePipelineAndExplain(
+        std::unique_ptr<Pipeline> pipeline,
+        ExplainOptions::Verbosity verbosity,
+        std::function<void(Pipeline* pipeline)> optimizePipeline = nullptr) override {
+        if (optimizePipeline) {
+            optimizePipeline(pipeline.get());
+        }
         BSONArrayBuilder bab;
         auto opts = SerializationOptions{.verbosity = boost::make_optional(verbosity)};
         auto pipelineVec = pipeline->writeExplainOps(opts);
@@ -157,8 +163,7 @@ class StubExplainInterface : public StubMongoProcessInterface {
     std::unique_ptr<Pipeline> attachCursorSourceToPipelineForLocalRead(
         std::unique_ptr<Pipeline> pipeline,
         boost::optional<const AggregateCommandRequest&> aggRequest,
-        bool shouldUseCollectionDefaultCollator,
-        ExecShardFilterPolicy = AutomaticShardFiltering{}) override {
+        bool shouldUseCollectionDefaultCollator) override {
         return pipeline;
     }
 };
@@ -193,7 +198,8 @@ protected:
         ctx->setResolvedNamespace(lookupCollNs, {lookupCollNs, std::vector<BSONObj>{}});
         ctx->setResolvedNamespace(unionCollNs, {unionCollNs, std::vector<BSONObj>{}});
 
-        auto outputPipe = Pipeline::parse(request.getPipeline(), ctx);
+        auto outputPipe = pipeline_factory::makePipeline(
+            request.getPipeline(), ctx, pipeline_factory::kOptionsMinimal);
         pipeline_optimization::optimizePipeline(*outputPipe);
 
         // We normalize match expressions in the pipeline here to ensure the stability of the
@@ -3735,7 +3741,8 @@ public:
     }
 
     std::unique_ptr<Pipeline> makePipeline(const std::vector<BSONObj>& rawPipeline) {
-        auto pipeline = Pipeline::parse(rawPipeline, _expCtx);
+        auto pipeline =
+            pipeline_factory::makePipeline(rawPipeline, _expCtx, pipeline_factory::kOptionsMinimal);
         return pipeline;
     }
 
@@ -4514,10 +4521,7 @@ TEST_F(PipelineOptimizationTest, UnionWithViewsSampleUseCase) {
         "]");
 }
 
-std::unique_ptr<Pipeline> getOptimizedPipeline(const BSONObj inputBson) {
-    QueryTestServiceContext testServiceContext;
-    auto opCtx = testServiceContext.makeOperationContext();
-
+std::unique_ptr<Pipeline> getOptimizedPipeline(const BSONObj inputBson, OperationContext* opCtx) {
     ASSERT_EQUALS(inputBson["pipeline"].type(), BSONType::array);
     std::vector<BSONObj> rawPipeline;
     for (auto&& stageElem : inputBson["pipeline"].Array()) {
@@ -4526,12 +4530,13 @@ std::unique_ptr<Pipeline> getOptimizedPipeline(const BSONObj inputBson) {
     }
     AggregateCommandRequest request(kTestNss, rawPipeline);
     boost::intrusive_ptr<ExpressionContextForTest> ctx =
-        new ExpressionContextForTest(opCtx.get(), request);
+        new ExpressionContextForTest(opCtx, request);
     ctx->setMongoProcessInterface(std::make_shared<StubExplainInterface>());
     unittest::TempDir tempDir("PipelineTest");
     ctx->setTempDir(tempDir.path());
 
-    auto outputPipe = Pipeline::parse(request.getPipeline(), ctx);
+    auto outputPipe = pipeline_factory::makePipeline(
+        request.getPipeline(), ctx, pipeline_factory::kOptionsMinimal);
     pipeline_optimization::optimizePipeline(*outputPipe);
     return outputPipe;
 }
@@ -4543,8 +4548,10 @@ void assertTwoPipelinesOptimizeAndMergeTo(const std::string& inputPipe1,
     const BSONObj input2Bson = pipelineFromJsonArray(inputPipe2);
     const BSONObj outputBson = pipelineFromJsonArray(outputPipe);
 
-    auto pipeline1 = getOptimizedPipeline(input1Bson);
-    auto pipeline2 = getOptimizedPipeline(input2Bson);
+    QueryTestServiceContext serviceCtx;
+    auto opCtx = serviceCtx.makeOperationContext();
+    auto pipeline1 = getOptimizedPipeline(input1Bson, opCtx.get());
+    auto pipeline2 = getOptimizedPipeline(input2Bson, opCtx.get());
 
     // Merge the pipelines
     for (const auto& source : pipeline2->getSources()) {
@@ -4786,7 +4793,7 @@ TEST_F(PipelineOptimizationTest, SerializationForLogging) {
     AggregateCommandRequest request(kTestNss, pipeVec);
     boost::intrusive_ptr<ExpressionContextForTest> ctx =
         new ExpressionContextForTest(opCtx.get(), request);
-    auto pipeline = Pipeline::parse(pipeVec, ctx);
+    auto pipeline = pipeline_factory::makePipeline(pipeVec, ctx, pipeline_factory::kOptionsMinimal);
 
     Value unredacted = Value(pipeline->serializeToBson());
     Value redacted = Value(std::vector<BSONObj>{fromjson("{$match: {'a.c': {$eq: '###'}}}"),
@@ -4871,7 +4878,8 @@ public:
         ctx->setResolvedNamespace(lookupCollNs, {lookupCollNs, std::vector<BSONObj>{}});
 
         // Test that we can both split the pipeline and reassemble it into its original form.
-        mergePipe = Pipeline::parse(request.getPipeline(), ctx);
+        mergePipe = pipeline_factory::makePipeline(
+            request.getPipeline(), ctx, pipeline_factory::kOptionsMinimal);
         pipeline_optimization::optimizePipeline(*mergePipe);
 
         auto splitPipeline =
@@ -5513,7 +5521,8 @@ public:
         getCatalogCacheMock()->setCollectionReturnValue(
             NamespaceString::createNamespaceString_forTest(kDBName, "outColl"),
             CollectionRoutingInfo{
-                ChunkManager{makeStandaloneRoutingTableHistory(std::move(rt)), timestamp},
+                PointInTimeChunkManager{makeStandaloneRoutingTableHistory(std::move(rt)),
+                                        timestamp},
                 DatabaseTypeValueHandle(
                     DatabaseType{DatabaseName::createDatabaseName_forTest(boost::none, kDBName),
                                  kMyShardName,
@@ -5558,7 +5567,8 @@ TEST_F(PipelineOptimizationsShardMerger, MergeWithUntrackedCollection) {
     getCatalogCacheMock()->setCollectionReturnValue(
         NamespaceString::createNamespaceString_forTest(kDBName, "outColl"),
         CollectionRoutingInfo{
-            ChunkManager{RoutingTableHistoryValueHandle{OptionalRoutingTableHistory{}}, timestamp},
+            PointInTimeChunkManager{RoutingTableHistoryValueHandle{OptionalRoutingTableHistory{}},
+                                    timestamp},
             DatabaseTypeValueHandle(
                 DatabaseType{DatabaseName::createDatabaseName_forTest(boost::none, kDBName),
                              kMyShardName,
@@ -5613,7 +5623,7 @@ TEST_F(PipelineOptimizationsShardMerger, LookUpUnsplittableFromCollection) {
     getCatalogCacheMock()->setCollectionReturnValue(
         fromCollNs,
         CollectionRoutingInfo{
-            ChunkManager{makeStandaloneRoutingTableHistory(std::move(rt)), timestamp},
+            PointInTimeChunkManager{makeStandaloneRoutingTableHistory(std::move(rt)), timestamp},
             DatabaseTypeValueHandle(
                 DatabaseType{DatabaseName::createDatabaseName_forTest(boost::none, kDBName),
                              kMyShardName,
@@ -5650,7 +5660,7 @@ TEST_F(PipelineOptimizationsShardMerger, LookUpShardedFromCollection) {
     getCatalogCacheMock()->setCollectionReturnValue(
         fromCollNs,
         CollectionRoutingInfo{
-            ChunkManager{makeStandaloneRoutingTableHistory(std::move(rt)), timestamp},
+            PointInTimeChunkManager{makeStandaloneRoutingTableHistory(std::move(rt)), timestamp},
             DatabaseTypeValueHandle(
                 DatabaseType{DatabaseName::createDatabaseName_forTest(boost::none, kDBName),
                              kMyShardName,
@@ -5689,9 +5699,10 @@ TEST_F(PipelineMustRunOnRouterTest, UnsplittableRouterPipelineAssertsIfDisallowe
     ASSERT_NOT_OK(pipeline->canRunOnRouter());
 }
 
-DEATH_TEST_F(PipelineMustRunOnRouterTest,
+using PipelineMustRunOnRouterTestDeathTest = PipelineMustRunOnRouterTest;
+DEATH_TEST_F(PipelineMustRunOnRouterTestDeathTest,
              SplittablePipelineMustMergeOnRouterAfterSplit,
-             "invariant") {
+             "Tripwire assertion") {
     setExpCtx({.inRouter = true, .allowDiskUse = false});
     auto pipeline =
         makePipeline({matchStage("{x: 5}"), splitStage(HostTypeRequirement::kNone), runOnRouter()});
@@ -5706,7 +5717,7 @@ DEATH_TEST_F(PipelineMustRunOnRouterTest,
 
     ASSERT_TRUE(splitPipeline.mergePipeline->requiredToRunOnRouter());
 
-    // Calling 'requiredToRunOnRouter' on the shard pipeline will hit an invariant.
+    // Calling 'requiredToRunOnRouter' on the shard pipeline will hit a tassert.
     splitPipeline.shardsPipeline->requiredToRunOnRouter();
 }
 
@@ -5819,7 +5830,7 @@ public:
         auto opCtx = makeOperationContext();
         boost::intrusive_ptr<ExpressionContextForTest> ctx = new ExpressionContextForTest(
             opCtx.get(), AggregateCommandRequest(kTestNss, rawPipeline));
-        return Pipeline::parse(rawPipeline, ctx);
+        return pipeline_factory::makePipeline(rawPipeline, ctx, pipeline_factory::kOptionsMinimal);
     }
 };
 
@@ -5866,7 +5877,9 @@ TEST_F(PipelineValidateTest, AggregateOneNSNotValidForEmptyPipeline) {
     auto ctx = getExpCtx({.hasCollectionName = false, .setMockReplCoord = false});
 
     ASSERT_THROWS_CODE(
-        Pipeline::parse(rawPipeline, ctx), AssertionException, ErrorCodes::InvalidNamespace);
+        pipeline_factory::makePipeline(rawPipeline, ctx, pipeline_factory::kOptionsMinimal),
+        AssertionException,
+        ErrorCodes::InvalidNamespace);
 }
 
 TEST_F(PipelineValidateTest, AggregateOneNSNotValidIfInitialStageRequiresCollection) {
@@ -5874,7 +5887,9 @@ TEST_F(PipelineValidateTest, AggregateOneNSNotValidIfInitialStageRequiresCollect
     auto ctx = getExpCtx({.hasCollectionName = false, .setMockReplCoord = false});
 
     ASSERT_THROWS_CODE(
-        Pipeline::parse(rawPipeline, ctx), AssertionException, ErrorCodes::InvalidNamespace);
+        pipeline_factory::makePipeline(rawPipeline, ctx, pipeline_factory::kOptionsMinimal),
+        AssertionException,
+        ErrorCodes::InvalidNamespace);
 }
 
 TEST_F(PipelineValidateTest, AggregateOneNSValidIfInitialStageIsCollectionless) {
@@ -5886,10 +5901,10 @@ TEST_F(PipelineValidateTest, AggregateOneNSValidIfInitialStageIsCollectionless) 
 
 TEST_F(PipelineValidateTest, CollectionNSNotValidIfInitialStageIsCollectionless) {
     auto ctx = getExpCtx({.hasCollectionName = true, .setMockReplCoord = false});
-    auto collectionlessSource = DocumentSourceCollectionlessMock::create(ctx);
-
-    ASSERT_THROWS_CODE(Pipeline::parse({fromjson("{$listLocalSessions: {}}")},
-                                       ctx),  // makePipeline({collectionlessSource}),
+    // Use $querySettings as a collectionless stage.
+    ASSERT_THROWS_CODE(pipeline_factory::makePipeline({fromjson("{$querySettings: {}}")},
+                                                      ctx,
+                                                      pipeline_factory::kOptionsMinimal),
                        AssertionException,
                        ErrorCodes::InvalidNamespace);
 }
@@ -5899,13 +5914,15 @@ TEST_F(PipelineValidateTest, AggregateOneNSValidForFacetPipelineRegardlessOfInit
     auto ctx = getExpCtx({.hasCollectionName = false, .setMockReplCoord = false});
 
     ASSERT_THROWS_CODE(
-        Pipeline::parse(rawPipeline, ctx), AssertionException, ErrorCodes::InvalidNamespace);
+        pipeline_factory::makePipeline(rawPipeline, ctx, pipeline_factory::kOptionsMinimal),
+        AssertionException,
+        ErrorCodes::InvalidNamespace);
 }
 
 TEST_F(PipelineValidateTest, ChangeStreamIsValidAsFirstStage) {
     const std::vector<BSONObj> rawPipeline = {fromjson("{$changeStream: {}}")};
     auto ctx = getExpCtx({.hasCollectionName = true, .setMockReplCoord = true});
-    Pipeline::parse(rawPipeline, ctx);
+    pipeline_factory::makePipeline(rawPipeline, ctx, pipeline_factory::kOptionsMinimal);
 }
 
 TEST_F(PipelineValidateTest, ChangeStreamIsNotValidIfNotFirstStage) {
@@ -5913,7 +5930,10 @@ TEST_F(PipelineValidateTest, ChangeStreamIsNotValidIfNotFirstStage) {
                                               fromjson("{$changeStream: {}}")};
     auto ctx = getExpCtx({.hasCollectionName = true, .setMockReplCoord = true});
 
-    ASSERT_THROWS_CODE(Pipeline::parse(rawPipeline, ctx), AssertionException, 40602);
+    ASSERT_THROWS_CODE(
+        pipeline_factory::makePipeline(rawPipeline, ctx, pipeline_factory::kOptionsMinimal),
+        AssertionException,
+        40602);
 }
 
 
@@ -5923,7 +5943,10 @@ TEST_F(PipelineValidateTest, ChangeStreamIsNotValidIfNotFirstStageInFacet) {
 
     auto ctx = getExpCtx({.hasCollectionName = true, .setMockReplCoord = true});
 
-    ASSERT_THROWS_CODE(Pipeline::parse(rawPipeline, ctx), AssertionException, 40600);
+    ASSERT_THROWS_CODE(
+        pipeline_factory::makePipeline(rawPipeline, ctx, pipeline_factory::kOptionsMinimal),
+        AssertionException,
+        40600);
 }
 
 
@@ -5931,7 +5954,7 @@ TEST_F(PipelineValidateTest, ChangeStreamSplitLargeEventIsValid) {
     const std::vector<BSONObj> rawPipeline = {fromjson("{$changeStream: {}}"),
                                               fromjson("{$changeStreamSplitLargeEvent: {}}")};
     auto ctx = getExpCtx({.hasCollectionName = true, .setMockReplCoord = true});
-    Pipeline::parse(rawPipeline, ctx);
+    pipeline_factory::makePipeline(rawPipeline, ctx, pipeline_factory::kOptionsMinimal);
 }
 
 TEST_F(PipelineValidateTest, ChangeStreamSplitLargeEventIsNotValidWithoutChangeStream) {
@@ -5940,7 +5963,9 @@ TEST_F(PipelineValidateTest, ChangeStreamSplitLargeEventIsNotValidWithoutChangeS
     ctx->setChangeStreamSpec(boost::none);
 
     ASSERT_THROWS_CODE(
-        Pipeline::parse(rawPipeline, ctx), DBException, ErrorCodes::IllegalOperation);
+        pipeline_factory::makePipeline(rawPipeline, ctx, pipeline_factory::kOptionsMinimal),
+        DBException,
+        ErrorCodes::IllegalOperation);
 }
 
 TEST_F(PipelineValidateTest, ChangeStreamSplitLargeEventIsNotLastStage) {
@@ -5949,7 +5974,10 @@ TEST_F(PipelineValidateTest, ChangeStreamSplitLargeEventIsNotLastStage) {
                                               fromjson("{$match: {}}")};
     auto ctx = getExpCtx({.hasCollectionName = true, .setMockReplCoord = true});
 
-    ASSERT_THROWS_CODE(Pipeline::parse(rawPipeline, ctx), DBException, 7182802);
+    ASSERT_THROWS_CODE(
+        pipeline_factory::makePipeline(rawPipeline, ctx, pipeline_factory::kOptionsMinimal),
+        DBException,
+        7182802);
 }
 
 TEST_F(PipelineValidateTest, ChangeStreamSplitLargeEventIsValidAfterMatch) {
@@ -5957,7 +5985,7 @@ TEST_F(PipelineValidateTest, ChangeStreamSplitLargeEventIsValidAfterMatch) {
                                               fromjson("{$match: {custom: 'filter'}}"),
                                               fromjson("{$changeStreamSplitLargeEvent: {}}")};
     auto ctx = getExpCtx({.hasCollectionName = true, .setMockReplCoord = true});
-    Pipeline::parse(rawPipeline, ctx);
+    pipeline_factory::makePipeline(rawPipeline, ctx, pipeline_factory::kOptionsMinimal);
 }
 
 TEST_F(PipelineValidateTest, ChangeStreamSplitLargeEventIsValidAfterRedact) {
@@ -5965,7 +5993,7 @@ TEST_F(PipelineValidateTest, ChangeStreamSplitLargeEventIsValidAfterRedact) {
                                               fromjson("{$redact: '$$PRUNE'}"),
                                               fromjson("{$changeStreamSplitLargeEvent: {}}")};
     auto ctx = getExpCtx({.hasCollectionName = true, .setMockReplCoord = true});
-    Pipeline::parse(rawPipeline, ctx);
+    pipeline_factory::makePipeline(rawPipeline, ctx, pipeline_factory::kOptionsMinimal);
 }
 
 using DocumentSourceDisallowedInTransactions = DocumentSourceDisallowedInTransactions;
@@ -5987,9 +6015,10 @@ TEST_F(PipelineValidateTest, FacetPipelineValidatedForStagesIllegalInTransaction
 
     const std::vector<BSONObj> rawPipeline = {
         fromjson("{$facet: {subPipe: [{$match: {}}, {$out: 'outColl'}]}}")};
-    ASSERT_THROWS_CODE(Pipeline::parse(rawPipeline, ctx),
-                       AssertionException,
-                       ErrorCodes::OperationNotSupportedInTransaction);
+    ASSERT_THROWS_CODE(
+        pipeline_factory::makePipeline(rawPipeline, ctx, pipeline_factory::kOptionsMinimal),
+        AssertionException,
+        ErrorCodes::OperationNotSupportedInTransaction);
 }
 
 }  // namespace pipeline_validate
@@ -6257,6 +6286,9 @@ private:
     OrderedPathSet _generated;
     DepsTracker::State _depsState;
 };
+
+REGISTER_RULES(DocumentSourceProducerConsumer,
+               OPTIMIZE_IN_PLACE_RULE(DocumentSourceProducerConsumer));
 
 TEST_F(PipelineDependenciesTest, ShouldNotReturnDependenciesOnGeneratedPaths) {
     auto ctx = getExpCtx();

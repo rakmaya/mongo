@@ -32,12 +32,13 @@
 #include "mongo/db/global_catalog/type_namespace_placement_gen.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/util/modules.h"
 
 #include <boost/optional/optional.hpp>
 
 namespace mongo {
 
-class HistoricalPlacementFetcher {
+class MONGO_MOD_UNFORTUNATELY_OPEN HistoricalPlacementFetcher {
 public:
     virtual ~HistoricalPlacementFetcher() = default;
 
@@ -51,7 +52,8 @@ public:
     virtual HistoricalPlacement fetch(OperationContext* opCtx,
                                       const boost::optional<NamespaceString>& nss,
                                       Timestamp atClusterTime,
-                                      bool checkIfPointInTimeIsInFuture = false) = 0;
+                                      bool checkIfPointInTimeIsInFuture,
+                                      bool ignoreRemovedShards) = 0;
 };
 
 }  // namespace mongo

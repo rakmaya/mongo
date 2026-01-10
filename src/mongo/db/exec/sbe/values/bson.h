@@ -31,22 +31,24 @@
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/exec/sbe/values/value.h"
+#include "mongo/util/modules.h"
 
 #include <cstddef>
 #include <utility>
+
+// TODO(SERVER-114140): Remove all MONGO_MOD_NEEDS_REPLACEMENT annotations
 
 namespace mongo {
 namespace sbe {
 namespace bson {
 template <bool View>
-std::pair<value::TypeTags, value::Value> convertFrom(const char* be,
-                                                     const char* end,
-                                                     size_t fieldNameSize);
+MONGO_MOD_NEEDS_REPLACEMENT std::pair<value::TypeTags, value::Value> convertFrom(
+    const char* be, const char* end, size_t fieldNameSize);
 
 template <bool View>
-std::pair<value::TypeTags, value::Value> convertFrom(const BSONElement& elem) {
+MONGO_MOD_NEEDS_REPLACEMENT std::pair<value::TypeTags, value::Value> convertFrom(
+    const BSONElement& elem) {
     return convertFrom<View>(
         elem.rawdata(), elem.rawdata() + elem.size(), elem.fieldNameSize() - 1);
 }
@@ -94,6 +96,35 @@ inline auto fieldNameAndLength(const char* be) noexcept {
 // add 1(typetag) + stringlength + 1(nullptr) to skip the null byte should give the value
 inline const char* getValue(const char* be) noexcept {
     return be + 1 + strlen(be + 1) + 1;
+}
+
+inline std::pair<value::TypeTags, value::Value> getField(const char* be,
+                                                         StringData fieldStr) noexcept {
+    const auto end = be + ConstDataView(be).read<LittleEndian<uint32_t>>();
+    // Skip document length.
+    be += sizeof(int);
+    while (be != end - 1) {
+        auto ptr = be;
+        // Compute equality and length in a single pass. Avoids reading the same bytes twice.
+        for (auto c : fieldStr)
+            // Increment before compare to skip the type tag byte.
+            if (*++ptr != c || c == '\0')
+                goto next;  // *ptr is the first non-matching byte, possibly the 0 terminator
+
+        // If the field names are equal, incrementing ptr will step onto a null terminator byte.
+        if (*++ptr == '\0') {
+            auto [tag, val] = bson::convertFrom<true>(be, end, fieldStr.size());
+            return {tag, val};
+        }
+
+next:
+        // Skip any remaining part of the field name.
+        while (*ptr != '\0')
+            ++ptr;
+
+        be = bson::advance(be, ptr - be - 1);
+    }
+    return {value::TypeTags::Nothing, 0};
 }
 
 inline const char* fieldNameRaw(const char* be) noexcept {

@@ -31,35 +31,34 @@
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes_util.h"
 #include "mongo/client/index_spec.h"
 #include "mongo/db/client.h"
-#include "mongo/db/collection_crud/collection_write_path.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/dbdirectclient.h"
+#include "mongo/db/dbhelpers.h"
 #include "mongo/db/index/index_constants.h"
+#include "mongo/db/index_builds/index_build_test_helpers.h"
 #include "mongo/db/index_builds/multi_index_block.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_options.h"
-#include "mongo/db/local_catalog/index_catalog.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
-#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/lock_manager/d_concurrency.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_options.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
 #include "mongo/db/storage/storage_engine.h"
 #include "mongo/db/storage/storage_engine_init.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/dbtests/dbtests.h"  // IWYU pragma: keep
-#include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/scopeguard.h"
@@ -67,16 +66,12 @@
 #include <cstdint>
 #include <string>
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
 #include <fmt/format.h>
 
 namespace mongo {
-namespace IndexUpdateTests {
 namespace {
 const auto kIndexVersion = IndexDescriptor::IndexVersion::kV2;
-}  // namespace
 
 static const char* const _ns = "unittests.indexupdate";
 static const NamespaceString _nss = NamespaceString::createNamespaceString_forTest(_ns);
@@ -124,7 +119,7 @@ protected:
                 indexer.abortIndexBuild(_opCtx, collection(), MultiIndexBlock::kNoopOnCleanUpFn);
             });
 
-            uassertStatusOK(dbtests::initializeMultiIndexBlock(_opCtx, collection(), indexer, key));
+            uassertStatusOK(initializeMultiIndexBlock(_opCtx, collection(), indexer, key));
             uassertStatusOK(indexer.insertAllDocumentsInCollection(_opCtx, collection()->ns()));
             WriteUnitOfWork wunit(_opCtx);
             ASSERT_OK(indexer.commit(_opCtx,
@@ -164,19 +159,8 @@ public:
         auto& coll = collection();
         {
             WriteUnitOfWork wunit(_opCtx);
-            OpDebug* const nullOpDebug = nullptr;
-            ASSERT_OK(collection_internal::insertDocument(_opCtx,
-                                                          coll.get(),
-                                                          InsertStatement(BSON("_id" << 1 << "a"
-                                                                                     << "dup")),
-                                                          nullOpDebug,
-                                                          true));
-            ASSERT_OK(collection_internal::insertDocument(_opCtx,
-                                                          coll.get(),
-                                                          InsertStatement(BSON("_id" << 2 << "a"
-                                                                                     << "dup")),
-                                                          nullOpDebug,
-                                                          true));
+            ASSERT_OK(Helpers::insert(_opCtx, coll.get(), BSON("_id" << 1 << "a" << "dup")));
+            ASSERT_OK(Helpers::insert(_opCtx, coll.get(), BSON("_id" << 2 << "a" << "dup")));
             wunit.commit();
         }
 
@@ -191,7 +175,7 @@ public:
             indexer.abortIndexBuild(_opCtx, collection(), MultiIndexBlock::kNoopOnCleanUpFn);
         });
 
-        ASSERT_OK(dbtests::initializeMultiIndexBlock(_opCtx, collection(), indexer, spec));
+        ASSERT_OK(initializeMultiIndexBlock(_opCtx, collection(), indexer, spec));
         ASSERT_OK(indexer.insertAllDocumentsInCollection(_opCtx, _nss));
         ASSERT_OK(indexer.checkConstraints(_opCtx, coll.get()));
 
@@ -219,19 +203,8 @@ public:
             auto& coll = collection();
             {
                 WriteUnitOfWork wunit(_opCtx);
-                OpDebug* const nullOpDebug = nullptr;
-                ASSERT_OK(collection_internal::insertDocument(_opCtx,
-                                                              coll.get(),
-                                                              InsertStatement(BSON("_id" << 1 << "a"
-                                                                                         << "dup")),
-                                                              nullOpDebug,
-                                                              true));
-                ASSERT_OK(collection_internal::insertDocument(_opCtx,
-                                                              coll.get(),
-                                                              InsertStatement(BSON("_id" << 2 << "a"
-                                                                                         << "dup")),
-                                                              nullOpDebug,
-                                                              true));
+                ASSERT_OK(Helpers::insert(_opCtx, coll.get(), BSON("_id" << 1 << "a" << "dup")));
+                ASSERT_OK(Helpers::insert(_opCtx, coll.get(), BSON("_id" << 2 << "a" << "dup")));
                 wunit.commit();
             }
         }
@@ -247,7 +220,7 @@ public:
                 indexer.abortIndexBuild(_opCtx, collection(), MultiIndexBlock::kNoopOnCleanUpFn);
             });
 
-            ASSERT_OK(dbtests::initializeMultiIndexBlock(_opCtx, collection(), indexer, spec));
+            ASSERT_OK(initializeMultiIndexBlock(_opCtx, collection(), indexer, spec));
 
             auto& coll = collection();
             auto desc = coll->getIndexCatalog()->findIndexByName(
@@ -282,10 +255,8 @@ public:
                     _opCtx, coll.getWritableCollection(_opCtx), true, {});
                 // Insert some documents.
                 int32_t nDocs = 1000;
-                OpDebug* const nullOpDebug = nullptr;
                 for (int32_t i = 0; i < nDocs; ++i) {
-                    ASSERT_OK(collection_internal::insertDocument(
-                        _opCtx, coll.get(), InsertStatement(BSON("a" << i)), nullOpDebug));
+                    ASSERT_OK(Helpers::insert(_opCtx, coll.get(), BSON("a" << i)));
                 }
                 wunit.commit();
             }
@@ -332,16 +303,11 @@ public:
             coll->getIndexCatalog()->dropAllIndexes(_opCtx, coll, true, {});
             // Insert some documents.
             int32_t nDocs = 1000;
-            OpDebug* const nullOpDebug = nullptr;
             for (int32_t i = 0; i < nDocs; ++i) {
                 // TODO(SERVER-103400): Investigate usage validity of
                 // CollectionPtr::CollectionPtr_UNSAFE
-                ASSERT_OK(
-                    collection_internal::insertDocument(_opCtx,
-                                                        CollectionPtr::CollectionPtr_UNSAFE(coll),
-                                                        InsertStatement(BSON("_id" << i)),
-                                                        nullOpDebug,
-                                                        true));
+                ASSERT_OK(Helpers::insert(
+                    _opCtx, CollectionPtr::CollectionPtr_UNSAFE(coll), BSON("_id" << i)));
             }
             wunit.commit();
             // Request an interrupt.
@@ -369,7 +335,7 @@ Status IndexBuildBase::createIndex(const BSONObj& indexSpec) {
     MultiIndexBlock indexer;
     ScopeGuard abortOnExit(
         [&] { indexer.abortIndexBuild(_opCtx, collection(), MultiIndexBlock::kNoopOnCleanUpFn); });
-    auto status = dbtests::initializeMultiIndexBlock(_opCtx, collection(), indexer, indexSpec);
+    auto status = initializeMultiIndexBlock(_opCtx, collection(), indexer, indexSpec);
     if (status == ErrorCodes::IndexAlreadyExists) {
         return Status::OK();
     }
@@ -681,19 +647,14 @@ class IndexUpdateTests : public unittest::OldStyleSuiteSpecification {
 public:
     IndexUpdateTests() : OldStyleSuiteSpecification("indexupdate") {}
 
-    template <typename T>
-    void addIf() {
-        addNameCallback(nameForTestClass<T>(), [] { T().run(); });
-    }
-
     void setupTests() override {
         // These tests check that index creation ignores the unique constraint when told to.
         // The mobile storage engine does not support duplicate keys in unique indexes so these
         // tests are disabled.
-        addIf<InsertBuildIgnoreUnique<true>>();
-        addIf<InsertBuildIgnoreUnique<false>>();
-        addIf<InsertBuildEnforceUnique<true>>();
-        addIf<InsertBuildEnforceUnique<false>>();
+        add<InsertBuildIgnoreUnique<true>>();
+        add<InsertBuildIgnoreUnique<false>>();
+        add<InsertBuildEnforceUnique<true>>();
+        add<InsertBuildEnforceUnique<false>>();
 
         add<InsertBuildIndexInterrupt>();
         add<InsertBuildIdIndexInterrupt>();
@@ -720,5 +681,5 @@ public:
 
 unittest::OldStyleSuiteInitializer<IndexUpdateTests> indexUpdateTests;
 
-}  // namespace IndexUpdateTests
+}  // namespace
 }  // namespace mongo

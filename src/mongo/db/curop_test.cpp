@@ -36,12 +36,15 @@
 #include "mongo/db/operation_context_options_gen.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/query/query_test_service_context.h"
+#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/idl/server_parameter_test_controller.h"
+#include "mongo/transport/mock_session.h"
 #include "mongo/transport/transport_layer_mock.h"
 #include "mongo/unittest/death_test.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/tick_source_mock.h"
 
+#include <algorithm>
 #include <initializer_list>
 #include <mutex>
 
@@ -105,10 +108,20 @@ TEST(CurOpTest, AddingAdditiveMetricsObjectsTogetherShouldAddFieldsTogether) {
     additiveMetricsToAdd.totalAcquisitionDelinquency = Milliseconds{200};
     currentAdditiveMetrics.maxAcquisitionDelinquency = Milliseconds{300};
     additiveMetricsToAdd.maxAcquisitionDelinquency = Milliseconds{100};
+    currentAdditiveMetrics.totalTimeQueuedMicros = Microseconds{300};
+    additiveMetricsToAdd.totalTimeQueuedMicros = Microseconds{200};
+    currentAdditiveMetrics.totalAdmissions = 1;
+    additiveMetricsToAdd.totalAdmissions = 2;
+    currentAdditiveMetrics.wasLoadShed = false;
+    additiveMetricsToAdd.wasLoadShed = true;
+    currentAdditiveMetrics.wasDeprioritized = false;
+    additiveMetricsToAdd.wasDeprioritized = true;
     currentAdditiveMetrics.numInterruptChecks = 1;
     additiveMetricsToAdd.numInterruptChecks = 2;
     currentAdditiveMetrics.overdueInterruptApproxMax = Milliseconds{100};
     additiveMetricsToAdd.overdueInterruptApproxMax = Milliseconds{300};
+    currentAdditiveMetrics.planningTime = Microseconds{100};
+    additiveMetricsToAdd.planningTime = Microseconds{50};
 
     // Save the current AdditiveMetrics object before adding.
     OpDebug::AdditiveMetrics additiveMetricsBeforeAdd;
@@ -154,12 +167,23 @@ TEST(CurOpTest, AddingAdditiveMetricsObjectsTogetherShouldAddFieldsTogether) {
     ASSERT_EQ(*currentAdditiveMetrics.maxAcquisitionDelinquency,
               std::max(*additiveMetricsBeforeAdd.maxAcquisitionDelinquency,
                        *additiveMetricsToAdd.maxAcquisitionDelinquency));
+    ASSERT_EQ(*currentAdditiveMetrics.totalTimeQueuedMicros,
+              *additiveMetricsBeforeAdd.totalTimeQueuedMicros +
+                  *additiveMetricsToAdd.totalTimeQueuedMicros);
+    ASSERT_EQ(*currentAdditiveMetrics.totalAdmissions,
+              *additiveMetricsBeforeAdd.totalAdmissions + *additiveMetricsToAdd.totalAdmissions);
+    ASSERT_EQ(*currentAdditiveMetrics.wasLoadShed,
+              *additiveMetricsBeforeAdd.wasLoadShed || *additiveMetricsToAdd.wasLoadShed);
+    ASSERT_EQ(*currentAdditiveMetrics.wasDeprioritized,
+              *additiveMetricsBeforeAdd.wasDeprioritized || *additiveMetricsToAdd.wasDeprioritized);
     ASSERT_EQ(*currentAdditiveMetrics.numInterruptChecks,
               *additiveMetricsBeforeAdd.numInterruptChecks +
                   *additiveMetricsToAdd.numInterruptChecks);
     ASSERT_EQ(*currentAdditiveMetrics.overdueInterruptApproxMax,
               std::max(*additiveMetricsBeforeAdd.overdueInterruptApproxMax,
                        *additiveMetricsToAdd.overdueInterruptApproxMax));
+    ASSERT_EQ(*currentAdditiveMetrics.planningTime,
+              *additiveMetricsBeforeAdd.planningTime + *additiveMetricsToAdd.planningTime);
 }
 
 TEST(CurOpTest, AddingUninitializedAdditiveMetricsFieldsShouldBeTreatedAsZero) {
@@ -181,8 +205,14 @@ TEST(CurOpTest, AddingUninitializedAdditiveMetricsFieldsShouldBeTreatedAsZero) {
     additiveMetricsToAdd.delinquentAcquisitions = 1;
     additiveMetricsToAdd.totalAcquisitionDelinquency = Milliseconds(100);
     additiveMetricsToAdd.maxAcquisitionDelinquency = Milliseconds(100);
+    additiveMetricsToAdd.totalTimeQueuedMicros = Microseconds(100);
+    additiveMetricsToAdd.totalAdmissions = 1;
+    additiveMetricsToAdd.wasLoadShed = true;
+    additiveMetricsToAdd.wasDeprioritized = true;
+    additiveMetricsToAdd.maxAcquisitionDelinquency = Milliseconds(100);
     additiveMetricsToAdd.numInterruptChecks = 1;
     additiveMetricsToAdd.overdueInterruptApproxMax = Milliseconds(100);
+    additiveMetricsToAdd.planningTime = Microseconds(100);
 
     // Save the current AdditiveMetrics object before adding.
     OpDebug::AdditiveMetrics additiveMetricsBeforeAdd;
@@ -239,6 +269,18 @@ TEST(CurOpTest, AddingUninitializedAdditiveMetricsFieldsShouldBeTreatedAsZero) {
     ASSERT_EQ(*currentAdditiveMetrics.numInterruptChecks, *additiveMetricsToAdd.numInterruptChecks);
     ASSERT_EQ(*currentAdditiveMetrics.overdueInterruptApproxMax,
               *additiveMetricsToAdd.overdueInterruptApproxMax);
+
+    // The execution control fields for the current AdditiveMetrics object were not initialized, so
+    // they should be treated as zero.
+    ASSERT_EQ(*currentAdditiveMetrics.totalTimeQueuedMicros,
+              *additiveMetricsToAdd.totalTimeQueuedMicros);
+    ASSERT_EQ(*currentAdditiveMetrics.totalAdmissions, *additiveMetricsToAdd.totalAdmissions);
+    ASSERT_EQ(*currentAdditiveMetrics.wasLoadShed, *additiveMetricsToAdd.wasLoadShed);
+    ASSERT_EQ(*currentAdditiveMetrics.wasDeprioritized, *additiveMetricsToAdd.wasDeprioritized);
+
+    // The 'planningTime' field for the current AdditiveMetrics object was not initialized, so it
+    // should be treated as zero.
+    ASSERT_EQ(*currentAdditiveMetrics.planningTime, *additiveMetricsToAdd.planningTime);
 }
 
 TEST(CurOpTest, AdditiveMetricsFieldsShouldIncrementByN) {
@@ -278,6 +320,10 @@ TEST(CurOpTest, AdditiveMetricsShouldAggregateCursorMetrics) {
     additiveMetrics.delinquentAcquisitions = 2;
     additiveMetrics.totalAcquisitionDelinquency = Milliseconds(400);
     additiveMetrics.maxAcquisitionDelinquency = Milliseconds(300);
+    additiveMetrics.totalTimeQueuedMicros = Microseconds(400);
+    additiveMetrics.totalAdmissions = 2;
+    additiveMetrics.wasLoadShed = false;
+    additiveMetrics.wasDeprioritized = false;
     additiveMetrics.numInterruptChecks = 2;
     additiveMetrics.overdueInterruptApproxMax = Milliseconds(100);
     additiveMetrics.nMatched = 1;
@@ -285,7 +331,7 @@ TEST(CurOpTest, AdditiveMetricsShouldAggregateCursorMetrics) {
     additiveMetrics.nModified = 1;
     additiveMetrics.ndeleted = 0;
     additiveMetrics.ninserted = 0;
-
+    additiveMetrics.planningTime = Microseconds(100);
 
     CursorMetrics cursorMetrics(3 /* keysExamined */,
                                 4 /* docsExamined */,
@@ -296,6 +342,7 @@ TEST(CurOpTest, AdditiveMetricsShouldAggregateCursorMetrics) {
                                 false /* usedDisk */,
                                 true /* fromMultiPlanner */,
                                 false /* fromPlanCache */,
+                                150 /* planningTimeMicros */,
                                 9 /* cpuNanos */,
                                 3 /* numInterruptChecks */,
                                 1 /* nMatched */,
@@ -307,6 +354,10 @@ TEST(CurOpTest, AdditiveMetricsShouldAggregateCursorMetrics) {
     cursorMetrics.setTotalAcquisitionDelinquencyMillis(400);
     cursorMetrics.setMaxAcquisitionDelinquencyMillis(200);
     cursorMetrics.setOverdueInterruptApproxMaxMillis(200);
+    cursorMetrics.setTotalTimeQueuedMicros(400);
+    cursorMetrics.setTotalAdmissions(5);
+    cursorMetrics.setWasLoadShed(true);
+    cursorMetrics.setWasDeprioritized(true);
 
     additiveMetrics.aggregateCursorMetrics(cursorMetrics);
 
@@ -328,6 +379,11 @@ TEST(CurOpTest, AdditiveMetricsShouldAggregateCursorMetrics) {
     ASSERT_EQ(*additiveMetrics.nModified, 2);
     ASSERT_EQ(*additiveMetrics.ndeleted, 0);
     ASSERT_EQ(*additiveMetrics.ninserted, 0);
+    ASSERT_EQ(*additiveMetrics.totalTimeQueuedMicros, Microseconds(800));
+    ASSERT_EQ(*additiveMetrics.totalAdmissions, 7);
+    ASSERT_EQ(*additiveMetrics.wasLoadShed, true);
+    ASSERT_EQ(*additiveMetrics.wasDeprioritized, true);
+    ASSERT_EQ(*additiveMetrics.planningTime, Microseconds(250));
 }
 
 TEST(CurOpTest, AdditiveMetricsShouldAggregateNegativeCpuNanos) {
@@ -345,6 +401,7 @@ TEST(CurOpTest, AdditiveMetricsShouldAggregateNegativeCpuNanos) {
                                 false /* usedDisk */,
                                 true /* fromMultiPlanner */,
                                 false /* fromPlanCache */,
+                                12 /* planningTimeMicros */,
                                 -1 /* cpuNanos */,
                                 3 /* numInterruptChecks */,
                                 1 /* nMatched */,
@@ -363,6 +420,7 @@ TEST(CurOpTest, AdditiveMetricsAggregateCursorMetricsTreatsNoneAsZero) {
     additiveMetrics.keysExamined = boost::none;
     additiveMetrics.docsExamined = boost::none;
     additiveMetrics.bytesRead = boost::none;
+    additiveMetrics.planningTime = boost::none;
 
     CursorMetrics cursorMetrics(1 /* keysExamined */,
                                 2 /* docsExamined */,
@@ -373,6 +431,7 @@ TEST(CurOpTest, AdditiveMetricsAggregateCursorMetricsTreatsNoneAsZero) {
                                 false /* usedDisk */,
                                 true /* fromMultiPlanner */,
                                 false /* fromPlanCache */,
+                                100 /* planningTimeMicros */,
                                 10 /* cpuNanos */,
                                 3 /* numInterruptChecks */,
                                 1 /* nMatched */,
@@ -386,6 +445,7 @@ TEST(CurOpTest, AdditiveMetricsAggregateCursorMetricsTreatsNoneAsZero) {
     ASSERT_EQ(*additiveMetrics.keysExamined, 1);
     ASSERT_EQ(*additiveMetrics.docsExamined, 2);
     ASSERT_EQ(*additiveMetrics.bytesRead, 3);
+    ASSERT_EQ(*additiveMetrics.planningTime, Microseconds(100));
 }
 
 TEST(CurOpTest, AdditiveMetricsShouldAggregateDataBearingNodeMetrics) {
@@ -400,8 +460,13 @@ TEST(CurOpTest, AdditiveMetricsShouldAggregateDataBearingNodeMetrics) {
     additiveMetrics.delinquentAcquisitions = 2;
     additiveMetrics.totalAcquisitionDelinquency = Milliseconds(400);
     additiveMetrics.maxAcquisitionDelinquency = Milliseconds(200);
+    additiveMetrics.totalTimeQueuedMicros = Microseconds(400);
+    additiveMetrics.totalAdmissions = 3;
+    additiveMetrics.wasLoadShed = true;
+    additiveMetrics.wasDeprioritized = true;
     additiveMetrics.numInterruptChecks = 2;
     additiveMetrics.overdueInterruptApproxMax = Milliseconds(100);
+    additiveMetrics.planningTime = Microseconds(100);
 
     query_stats::DataBearingNodeMetrics remoteMetrics;
     remoteMetrics.keysExamined = 3;
@@ -413,8 +478,13 @@ TEST(CurOpTest, AdditiveMetricsShouldAggregateDataBearingNodeMetrics) {
     remoteMetrics.delinquentAcquisitions = 1;
     remoteMetrics.totalAcquisitionDelinquency = Milliseconds(300);
     remoteMetrics.maxAcquisitionDelinquency = Milliseconds(300);
+    remoteMetrics.totalTimeQueuedMicros = Microseconds(300);
+    remoteMetrics.totalAdmissions = 2;
+    remoteMetrics.wasLoadShed = false;
+    remoteMetrics.wasDeprioritized = false;
     remoteMetrics.numInterruptChecks = 1;
     remoteMetrics.overdueInterruptApproxMax = Milliseconds(300);
+    remoteMetrics.planningTime = Microseconds(150);
 
     additiveMetrics.aggregateDataBearingNodeMetrics(remoteMetrics);
 
@@ -427,8 +497,13 @@ TEST(CurOpTest, AdditiveMetricsShouldAggregateDataBearingNodeMetrics) {
     ASSERT_EQ(*additiveMetrics.delinquentAcquisitions, 3);
     ASSERT_EQ(*additiveMetrics.totalAcquisitionDelinquency, Milliseconds(700));
     ASSERT_EQ(*additiveMetrics.maxAcquisitionDelinquency, Milliseconds(300));
+    ASSERT_EQ(*additiveMetrics.totalTimeQueuedMicros, Microseconds(700));
+    ASSERT_EQ(*additiveMetrics.totalAdmissions, 5);
+    ASSERT_EQ(*additiveMetrics.wasLoadShed, true);
+    ASSERT_EQ(*additiveMetrics.wasDeprioritized, true);
     ASSERT_EQ(*additiveMetrics.numInterruptChecks, 3);
     ASSERT_EQ(*additiveMetrics.overdueInterruptApproxMax, Milliseconds(300));
+    ASSERT_EQ(*additiveMetrics.planningTime, Microseconds(250));
 }
 
 TEST(CurOpTest, AdditiveMetricsAggregateDataBearingNodeMetricsTreatsNoneAsZero) {
@@ -525,7 +600,11 @@ TEST(CurOpTest, OptionalAdditiveMetricsNotDisplayedIfUninitialized) {
     }
 
     // Append should include only the basic fields when just initialized.
-    ASSERT_EQ(static_cast<size_t>(bs.nFields()), basicFields.size());
+    for (const auto& elem : bs) {
+        ASSERT(std::find(basicFields.begin(), basicFields.end(), elem.fieldName()) !=
+               basicFields.end())
+            << "Unexpected extra field in output: " << elem.fieldName();
+    }
 }
 
 TEST(CurOpTest, ShouldUpdateMemoryStats) {
@@ -564,7 +643,7 @@ TEST(CurOpTest, CanReadMemoryStatsWithoutFeatureFlag) {
     ASSERT_EQ(0, curop->getPeakTrackedMemoryBytes());
 }
 
-DEATH_TEST(CurOpTest, RequireFeatureFlagEnabledToUpdateMemoryStats, "tassert") {
+DEATH_TEST(CurOpTestDeathTest, RequireFeatureFlagEnabledToUpdateMemoryStats, "tassert") {
     QueryTestServiceContext serviceContext;
     auto opCtx = serviceContext.makeOperationContext();
     auto curop = CurOp::get(*opCtx);
@@ -664,10 +743,8 @@ TEST(CurOpTest, ReportStateIncludesDelinquentStatsIfNonZero) {
 
     // If the delinquent stats are not zero, they *are* included in the state.
     {
-        ExecutionAdmissionContext::get(opCtx.get())
-            .recordDelinquentReadAcquisition(Milliseconds(20));
-        ExecutionAdmissionContext::get(opCtx.get())
-            .recordDelinquentReadAcquisition(Milliseconds(10));
+        ExecutionAdmissionContext::get(opCtx.get()).recordDelinquentAcquisition(Milliseconds(20));
+        ExecutionAdmissionContext::get(opCtx.get()).recordDelinquentAcquisition(Milliseconds(10));
         BSONObjBuilder bob;
         curOp->reportState(&bob, SerializationContext{});
         BSONObj state = bob.obj();
@@ -695,6 +772,41 @@ TEST(CurOpTest, ReportStateIncludesDelinquentStatsIfNonZero) {
                   200 - interval.count());
         ASSERT_EQ(state["delinquencyInfo"]["overdueInterruptApproxMaxMillis"].Number(),
                   200 - interval.count());
+    }
+}
+
+TEST(CurOpTest, ReportDeprioritizationStats) {
+    QueryTestServiceContext serviceContext;
+    auto opCtx = serviceContext.makeOperationContext();
+    auto curOp = CurOp::get(*opCtx);
+    curOp->ensureStarted();
+
+    // 1. Check the default state. If they're zero, they're not reported.
+    {
+        BSONObjBuilder bob;
+        curOp->reportState(&bob, SerializationContext{});
+        BSONObj state = bob.obj();
+        ASSERT_FALSE(state.hasField("totalTimeQueuedMicros"));
+        ASSERT_FALSE(state.hasField("totalAdmissions"));
+        ASSERT_FALSE(state.hasField("wasLoadShed"));
+        ASSERT_FALSE(state.hasField("wasDeprioritized"));
+    }
+
+    // 2. If there are admissions then report the stats.
+    {
+        ExecutionAdmissionContext::get(opCtx.get()).setAdmission_forTest(1);
+        ExecutionAdmissionContext::get(opCtx.get()).setTotalTimeQueuedMicros_forTest(100);
+        BSONObjBuilder bob;
+        curOp->reportState(&bob, SerializationContext{});
+        BSONObj state = bob.obj();
+        ASSERT_TRUE(state.hasField("totalAdmissions"));
+        ASSERT_EQ(state["totalAdmissions"].Number(), 1);
+        ASSERT_TRUE(state.hasField("totalTimeQueuedMicros"));
+        ASSERT_EQ(state["totalTimeQueuedMicros"].Number(), 100);
+        ASSERT_TRUE(state.hasField("wasLoadShed"));
+        ASSERT_FALSE(state["wasLoadShed"].Bool());
+        ASSERT_TRUE(state.hasField("wasDeprioritized"));
+        ASSERT_FALSE(state["wasDeprioritized"].Bool());
     }
 }
 
@@ -783,6 +895,99 @@ TEST(CurOpTest, ShouldReportIsFromUserConnection) {
     ASSERT_TRUE(bsonObjUserConn.hasField("isFromUserConnection"));
     ASSERT_FALSE(bsonObj.getField("isFromUserConnection").Bool());
     ASSERT_TRUE(bsonObjUserConn.getField("isFromUserConnection").Bool());
+}
+
+class MockMaintenanceSession : public transport::MockSession {
+public:
+    explicit MockMaintenanceSession(transport::TransportLayer* tl) : MockSession(tl) {}
+
+    bool isConnectedToMaintenancePort() const override {
+        return true;
+    }
+};
+
+TEST(CurOpTest, ShouldNotReportIsFromMaintenancePortConnectionWhenFFDisabled) {
+    gFeatureFlagDedicatedPortForMaintenanceOperations.setForServerParameter(false);
+
+    QueryTestServiceContext serviceContext;
+    auto opCtx = serviceContext.makeOperationContext();
+    auto client = serviceContext.getClient();
+
+    // Mock a client with a user connection.
+    transport::TransportLayerMock transportLayer;
+    transportLayer.createSessionHook = [](transport::TransportLayer* tl) {
+        return std::make_shared<MockMaintenanceSession>(tl);
+    };
+    auto clientMaintenanceConn = serviceContext.getServiceContext()->getService()->makeClient(
+        "maintenanceConn", transportLayer.createSession());
+
+    auto curop = CurOp::get(*opCtx);
+
+    BSONObjBuilder curOpObj;
+    BSONObjBuilder curOpObjMaintenanceConn;
+    {
+        stdx::lock_guard<Client> lk(*opCtx->getClient());
+        auto nss = NamespaceString::createNamespaceString_forTest("db", "coll");
+
+        // Serialization Context on expression context should be non-empty in
+        // reportCurrentOpForClient.
+        auto sc = SerializationContext(SerializationContext::Source::Command,
+                                       SerializationContext::CallerType::Reply,
+                                       SerializationContext::Prefix::ExcludePrefix);
+        auto expCtx = make_intrusive<ExpressionContextForTest>(opCtx.get(), nss, sc);
+
+        curop->reportCurrentOpForClient(expCtx, client, false, &curOpObj);
+        curop->reportCurrentOpForClient(
+            expCtx, clientMaintenanceConn.get(), false, &curOpObjMaintenanceConn);
+    }
+    auto bsonObj = curOpObj.done();
+    auto bsonObjMaintenanceConn = curOpObjMaintenanceConn.done();
+
+    ASSERT_FALSE(bsonObj.hasField("isFromMaintenancePortConnection"));
+    ASSERT_FALSE(bsonObjMaintenanceConn.hasField("isFromMaintenancePortConnection"));
+}
+
+TEST(CurOpTest, ShouldReportIsFromMaintenancePortConnection) {
+    gFeatureFlagDedicatedPortForMaintenanceOperations.setForServerParameter(true);
+
+    QueryTestServiceContext serviceContext;
+    auto opCtx = serviceContext.makeOperationContext();
+    auto client = serviceContext.getClient();
+
+    // Mock a client with a user connection.
+    transport::TransportLayerMock transportLayer;
+    transportLayer.createSessionHook = [](transport::TransportLayer* tl) {
+        return std::make_shared<MockMaintenanceSession>(tl);
+    };
+    auto clientMaintenanceConn = serviceContext.getServiceContext()->getService()->makeClient(
+        "maintenanceConn", transportLayer.createSession());
+
+    auto curop = CurOp::get(*opCtx);
+
+    BSONObjBuilder curOpObj;
+    BSONObjBuilder curOpObjMaintenanceConn;
+    {
+        stdx::lock_guard<Client> lk(*opCtx->getClient());
+        auto nss = NamespaceString::createNamespaceString_forTest("db", "coll");
+
+        // Serialization Context on expression context should be non-empty in
+        // reportCurrentOpForClient.
+        auto sc = SerializationContext(SerializationContext::Source::Command,
+                                       SerializationContext::CallerType::Reply,
+                                       SerializationContext::Prefix::ExcludePrefix);
+        auto expCtx = make_intrusive<ExpressionContextForTest>(opCtx.get(), nss, sc);
+
+        curop->reportCurrentOpForClient(expCtx, client, false, &curOpObj);
+        curop->reportCurrentOpForClient(
+            expCtx, clientMaintenanceConn.get(), false, &curOpObjMaintenanceConn);
+    }
+    auto bsonObj = curOpObj.done();
+    auto bsonObjMaintenanceConn = curOpObjMaintenanceConn.done();
+
+    ASSERT_TRUE(bsonObj.hasField("isFromMaintenancePortConnection"));
+    ASSERT_TRUE(bsonObjMaintenanceConn.hasField("isFromMaintenancePortConnection"));
+    ASSERT_FALSE(bsonObj.getField("isFromMaintenancePortConnection").Bool());
+    ASSERT_TRUE(bsonObjMaintenanceConn.getField("isFromMaintenancePortConnection").Bool());
 }
 
 TEST(CurOpTest, ElapsedTimeReflectsTickSource) {
@@ -887,6 +1092,44 @@ TEST(CurOpTest, KilledOperationReportsLatency) {
     ASSERT_EQ(killLatency, res.getIntField("interruptLatencyNanos"));
 }
 
+TEST(CurOpTest, ShouldReportDeadline) {
+    QueryTestServiceContext serviceContext;
+    auto opCtx = serviceContext.makeOperationContext();
+    Date_t expectedDeadline = Date_t::now();
+    opCtx->setDeadlineByDate(expectedDeadline, ErrorCodes::MaxTimeMSExpired);
+
+    auto curop = CurOp::get(*opCtx);
+    const OpDebug& opDebug = curop->debug();
+    SingleThreadedLockStats ls;
+
+    BSONObjBuilder bob;
+    opDebug.append(opCtx.get(), ls, {}, {}, 0, true /*omitCommand*/, bob);
+
+    auto res = bob.done();
+    ASSERT_TRUE(res.hasField("deadline")) << res.toString();
+    ASSERT_EQ(res.getField("deadline").Date(), expectedDeadline);
+
+    unittest::LogCaptureGuard logs;
+
+    curop->completeAndLogOperation(logv2::LogOptions{logv2::LogComponent::kTest},
+                                   nullptr,
+                                   boost::none,
+                                   boost::none,
+                                   true /*forceLog*/);
+
+
+    static constexpr long long kSlowQueryLogId = 51803;
+    ASSERT_GTE(logs.countBSONContainingSubset(BSON("id" << kSlowQueryLogId)), 1);
+    for (const auto& logObj : logs.getBSON()) {
+        if (logObj.getField("id").numberLong() != kSlowQueryLogId) {
+            continue;
+        }
+
+        BSONObj attrs = logObj.getField("attr").Obj();
+        ASSERT_EQ(attrs.getField("deadline").Date(), expectedDeadline);
+    }
+}
+
 TEST(CurOpTest, SlowLogFinishesWithDuration) {
     // Best effort test to try and verify that durationMillis is the last field reported by
     // report(). This doesn't populate every possible fields but makes some attempt to ensure
@@ -917,13 +1160,53 @@ TEST(CurOpTest, SlowLogFinishesWithDuration) {
     curop->done();
     curop->calculateCpuTime();
 
-    auto pattrs = std::make_unique<logv2::DynamicAttributes>();
-    opDebug.report(opCtx.get(), &lockStats, {}, 0, pattrs.get());
+    logv2::DynamicAttributes pattrs;
+    Date_t deadline = opCtx->getDeadline();
+    opDebug.report(opCtx.get(), &lockStats, {}, 0, &deadline, &pattrs);
 
-    logv2::TypeErasedAttributeStorage attrs{*pattrs};
+    logv2::TypeErasedAttributeStorage attrs{pattrs};
     ASSERT_GTE(attrs.size(), 1);
     std::string lastName = (attrs.end() - 1)->name;
     ASSERT_EQ("durationMillis", lastName);
+}
+
+TEST(CurOpTest, OpDebugAllowsMultipleQueryStatsInfos) {
+    QueryTestServiceContext serviceContext;
+    auto opCtx = serviceContext.makeOperationContext();
+    CurOp* curOp = CurOp::get(*opCtx);
+    OpDebug& opDebug = curOp->debug();
+
+    // Create a new set of metrics for an operation at index 10.
+    const size_t opIndex = 10;
+    OpDebug::QueryStatsInfo& qsi = opDebug.setQueryStatsInfoAtOpIndex(opIndex);
+
+    // If we fetch the info with the getter, it should be the same object.
+    OpDebug::QueryStatsInfo& qsi2 = opDebug.getQueryStatsInfo(opIndex);
+    ASSERT_EQ(&qsi, &qsi2);
+
+    // The new set of metrics should be distinct from the one for the main operation.
+    OpDebug::QueryStatsInfo& mainQsi = opDebug.getQueryStatsInfo();
+    ASSERT_NE(&qsi, &mainQsi);
+}
+
+TEST(CurOpTest, OpDebugAllowsMultipleAdditiveMetrics) {
+    QueryTestServiceContext serviceContext;
+    auto opCtx = serviceContext.makeOperationContext();
+    CurOp* curOp = CurOp::get(*opCtx);
+    OpDebug& opDebug = curOp->debug();
+
+    // Create a new set of metrics for an operation at index 10.
+    const size_t opIndex = 10;
+    OpDebug::QueryStatsInfo& qsi = opDebug.setQueryStatsInfoAtOpIndex(opIndex);
+    OpDebug::AdditiveMetrics& am = qsi.additiveMetrics;
+
+    // If we fetch the metrics with the getter, it whould be the same object.
+    OpDebug::AdditiveMetrics& am2 = opDebug.getAdditiveMetrics(opIndex);
+    ASSERT_EQ(&am, &am2);
+
+    // The new set of metrics should be distinct from the one for the main operation.
+    OpDebug::AdditiveMetrics& mainAm = opDebug.getAdditiveMetrics();
+    ASSERT_NE(&mainAm, &am);
 }
 
 }  // namespace

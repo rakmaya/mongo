@@ -203,10 +203,13 @@ Status ReplSetConfig::_initialize(bool forInitiate,
     _addInternalWriteConcernModes();
     _initializeConnectionString();
 
-    // Count how many members can vote
+    // Count how many members can vote and how many members have maintenance ports available.
     for (const MemberConfig& m : getMembers()) {
         if (m.getNumVotes() > 0) {
             ++_votingMemberCount;
+        }
+        if (m.getMaintenancePort()) {
+            ++_maintenancePortCount;
         }
     }
 
@@ -252,7 +255,7 @@ Status ReplSetConfig::_validate(bool allowSplitHorizonIP) const {
         const MemberConfig& memberI = getMembers()[i];
 
         // Check that no horizon mappings contain IP addresses
-        if (!disableSplitHorizonIPCheck && !allowSplitHorizonIP) {
+        if (!disableSplitHorizonIPCheck.load() && !allowSplitHorizonIP) {
             for (auto&& mapping : memberI.getHorizonMappings()) {
                 // Ignore the default horizon -- this can be an IP
                 if (mapping.first == SplitHorizon::kDefaultHorizon) {
@@ -332,6 +335,19 @@ Status ReplSetConfig::_validate(bool allowSplitHorizonIP) const {
                                   << " == " << kMembersFieldName << "." << j << "."
                                   << MemberConfig::kHostFieldName
                                   << " == " << memberI.getHostAndPort().toString());
+            }
+            if (memberI.getHostAndPortMaintenance() == memberJ.getHostAndPortMaintenance()) {
+                return Status(ErrorCodes::BadValue,
+                              str::stream()
+                                  << "Found two member configurations with same "
+                                  << MemberConfig::kMaintenancePortFieldName
+                                  << " field and same hostname, " << kMembersFieldName << "." << i
+                                  << "." << MemberConfig::kMaintenancePortFieldName
+                                  << " == " << kMembersFieldName << "." << j << "."
+                                  << MemberConfig::kMaintenancePortFieldName << " == "
+                                  << memberI.getMaintenancePort() << " and " << kMembersFieldName
+                                  << "." << i << ".hostname == " << kMembersFieldName << "." << j
+                                  << ".hostname == " << memberI.getHostAndPort().host());
             }
         }
     }
@@ -545,12 +561,12 @@ const MemberConfig* ReplSetConfig::findMemberByID(int id) const {
     return nullptr;
 }
 
-int ReplSetConfig::findMemberIndexByHostAndPort(const HostAndPort& hap) const {
+int ReplSetConfig::findMemberIndexByHostAndPort(const HostAndPort& hap, bool strict) const {
     int x = 0;
     for (std::vector<MemberConfig>::const_iterator it = getMembers().begin();
          it != getMembers().end();
          ++it) {
-        if (it->getHostAndPort() == hap) {
+        if (it->getHostAndPortMaintenance() == hap || (!strict && it->getHostAndPort() == hap)) {
             return x;
         }
         ++x;
@@ -558,8 +574,9 @@ int ReplSetConfig::findMemberIndexByHostAndPort(const HostAndPort& hap) const {
     return -1;
 }
 
-const MemberConfig* ReplSetConfig::findMemberByHostAndPort(const HostAndPort& hap) const {
-    int idx = findMemberIndexByHostAndPort(hap);
+const MemberConfig* ReplSetConfig::findMemberByHostAndPort(const HostAndPort& hap,
+                                                           bool strict) const {
+    int idx = findMemberIndexByHostAndPort(hap, strict);
     return idx != -1 ? &getMemberAt(idx) : nullptr;
 }
 

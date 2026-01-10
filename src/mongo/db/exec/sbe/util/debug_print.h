@@ -32,6 +32,7 @@
 #include "mongo/base/string_data.h"
 #include "mongo/db/exec/sbe/values/slot.h"
 #include "mongo/db/exec/sbe/values/value.h"
+#include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/util/modules.h"
 #include "mongo/util/str.h"
 
@@ -43,11 +44,20 @@ namespace mongo {
 namespace sbe {
 class PlanStage;
 
+/**
+ * Utility struct to parameterize debug printing code. Passed as const reference through the SBE
+ * stage printing functions.
+ */
+struct DebugPrintInfo {
+    const bool printBytecode = false;
+    int32_t callDepth = 0;
+    // Some aggregation pipeline stages manifest as more than one SBE stage. Provide a 50% buffer
+    // before capping the printing depth.
+    const int32_t maxCallDepth = 3 * internalPipelineLengthLimit.loadRelaxed() / 2;
+};
+
 class DebugPrinter {
 public:
-    // Keyword to identify optional slots that are missing.
-    static constexpr StringData kNoneKeyword = "none"_sd;
-
     struct Block {
         enum Command {
             cmdIncIndent,
@@ -122,17 +132,18 @@ public:
                    std::make_move_iterator(blocks.begin()),
                    std::make_move_iterator(blocks.end()));
     }
-    std::string print(const PlanStage& s);
+    std::string print(const PlanStage& s, DebugPrintInfo& debugPrintInfo);
     std::string print(const std::vector<Block>& blocks);
 
 private:
     bool _colorConsole;
 
-    void addIndent(int ident, std::string& s) {
-        for (int i = 0; i < ident; ++i) {
+    void addIndent(int indent, std::string& s) {
+        for (int i = 0; i < indent; ++i) {
             s.append("    ");
         }
     }
 };
+
 }  // namespace sbe
 }  // namespace mongo

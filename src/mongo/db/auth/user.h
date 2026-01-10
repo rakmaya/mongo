@@ -47,6 +47,7 @@
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/base64.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/read_through_cache.h"
 
 #include <algorithm>
@@ -62,7 +63,7 @@
 #include <boost/optional/optional.hpp>
 
 
-namespace mongo {
+namespace MONGO_MOD_PUBLIC mongo {
 
 /**
  * Represents the properties required to request a UserHandle.
@@ -450,15 +451,6 @@ public:
     Status validateRestrictions(OperationContext* opCtx) const;
 
     /**
-     * Generates a BSON representation of the User object with all the information needed for
-     * usersInfo.
-     */
-    void reportForUsersInfo(BSONObjBuilder* builder,
-                            bool showCredentials,
-                            bool showPrivileges,
-                            bool showAuthenticationRestrictions) const;
-
-    /**
      * Returns true if the User object has at least one different direct or indirect role from the
      * otherUser.
      */
@@ -499,8 +491,9 @@ private:
 using UserCache = ReadThroughCache<UserRequest::UserRequestCacheKey,
                                    User,
                                    CacheNotCausallyConsistent,
+                                   stdx::mutex,
                                    std::shared_ptr<UserRequest>,
                                    SharedUserAcquisitionStats>;
 using UserHandle = UserCache::ValueHandle;
 
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUBLIC mongo

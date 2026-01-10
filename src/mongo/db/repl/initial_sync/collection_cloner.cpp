@@ -39,9 +39,6 @@
 #include "mongo/db/dbmessage.h"
 #include "mongo/db/index/index_constants.h"
 #include "mongo/db/index_builds/index_builds_coordinator.h"
-#include "mongo/db/local_catalog/clustered_collection_util.h"
-#include "mongo/db/local_catalog/ddl/list_indexes_gen.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
 #include "mongo/db/multitenancy_gen.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/count_command_gen.h"
@@ -52,6 +49,9 @@
 #include "mongo/db/repl/repl_server_parameters_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/ddl/list_indexes_gen.h"
+#include "mongo/db/shard_role/shard_catalog/clustered_collection_util.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
 #include "mongo/db/storage/storage_engine.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/tenant_id.h"
@@ -125,7 +125,7 @@ CollectionCloner::CollectionCloner(const NamespaceString& sourceNss,
       _sourceNss(sourceNss),
       _collectionOptions(collectionOptions),
       _sourceDbAndUuid(NamespaceString::kEmpty),
-      _collectionClonerBatchSize(collectionClonerBatchSize),
+      _collectionClonerBatchSize(collectionClonerBatchSize.load()),
       _collStatsStage("collStats", this, &CollectionCloner::collStatsStage),
       _countStage("count", this, &CollectionCloner::countStage),
       _listIndexesStage("listIndexes", this, &CollectionCloner::listIndexesStage),
@@ -447,7 +447,8 @@ void CollectionCloner::runQuery() {
         findCmd.setRawData(true);
     }
 
-    ExhaustMode exhaustMode = collectionClonerUsesExhaust ? ExhaustMode::kOn : ExhaustMode::kOff;
+    ExhaustMode exhaustMode =
+        collectionClonerUsesExhaust.load() ? ExhaustMode::kOn : ExhaustMode::kOff;
 
     if (_collectionOptions.recordIdsReplicated) {
         // The below projection returns a stream of documents in the format

@@ -55,6 +55,7 @@
 #include "mongo/util/functional.h"
 #include "mongo/util/future.h"
 #include "mongo/util/future_impl.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/time_support.h"
 
@@ -71,7 +72,7 @@
 namespace mongo {
 namespace executor {
 
-class NetworkInterfaceTL : public NetworkInterface {
+class MONGO_MOD_NEEDS_REPLACEMENT NetworkInterfaceTL : public NetworkInterface {
 public:
     NetworkInterfaceTL(std::string instanceName,
                        std::shared_ptr<AsyncClientFactory> factory,
@@ -121,7 +122,7 @@ public:
                     Milliseconds timeout,
                     Status status) override;
 
-    const AsyncClientFactory& getClientFactory_forTest() const {
+    MONGO_MOD_NEEDS_REPLACEMENT const AsyncClientFactory& getClientFactory_forTest() const {
         return *_clientFactory;
     }
 
@@ -238,17 +239,7 @@ private:
     struct ExhaustCommandState final : public CommandStateBase {
         using CommandStateBase::CommandStateBase;
         ~ExhaustCommandState() override = default;
-
         ExecutorFuture<RemoteCommandResponse> sendRequestImpl(RemoteCommandRequest toSend) override;
-
-        void continueExhaustRequest(StatusWith<RemoteCommandResponse> swResponse);
-
-        // Protects against race between reactor thread restarting stopwatch during exhaust
-        // request and main thread reading stopwatch elapsed time during shutdown.
-        stdx::mutex stopwatchMutex;
-
-        Promise<RemoteCommandResponse> finalResponsePromise;
-        RemoteCommandOnReplyFn onReplyFn;
     };
 
     struct AlarmState {

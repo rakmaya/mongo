@@ -32,7 +32,6 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/client.h"
 #include "mongo/db/field_ref.h"
-#include "mongo/db/global_catalog/router_role_api/router_role.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/expression_context.h"
@@ -41,7 +40,9 @@
 #include "mongo/db/query/write_ops/write_ops.h"
 #include "mongo/db/query/write_ops/write_ops_gen.h"
 #include "mongo/db/query/write_ops/write_ops_parsers.h"
+#include "mongo/db/router_role/router_role.h"
 #include "mongo/db/versioning_protocol/shard_version.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/uuid.h"
 
 #include <memory>
@@ -61,7 +62,7 @@ namespace mongo {
  * CommonProcessInterface provides base implementations of any MongoProcessInterface methods
  * whose code is largely identical on mongoD and mongoS.
  */
-class CommonProcessInterface : public MongoProcessInterface {
+class MONGO_MOD_PUBLIC CommonProcessInterface : public MongoProcessInterface {
 public:
     using MongoProcessInterface::MongoProcessInterface;
     ~CommonProcessInterface() override = default;
@@ -135,12 +136,14 @@ public:
     };
 
     /**
-     * Returns true if the field names of 'keyPattern' are exactly those in 'uniqueKeyPaths', and
-     * each of the elements of 'keyPattern' is numeric, i.e. not "text", "$**", or any other special
-     * type of index.
+     * Checks if the given index on 'nss' have properties that will guarantee that a document with
+     * non-array values for each of 'fieldPaths' will have at most one matching document in 'nss'.
      */
-    static bool keyPatternNamesExactPaths(const BSONObj& keyPattern,
-                                          const std::set<FieldPath>& uniqueKeyPaths);
+    static SupportingUniqueIndex supportsUniqueKey(const IndexDescriptor* indexDescriptor,
+                                                   const CollatorInterface* indexCollator,
+                                                   const CollatorInterface* queryCollator,
+                                                   const ShardKeyPattern* shardKeyPattern,
+                                                   const std::set<FieldPath>& uniqueKeyPaths);
 
     /**
      * Converts the fields from a ShardKeyPattern to a vector of FieldPaths, including the _id if

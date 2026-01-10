@@ -37,6 +37,7 @@
 #include "mongo/bson/column/simple8b_builder.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/platform/int128.h"
+#include "mongo/util/modules.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -45,13 +46,12 @@
 #include <variant>
 #include <vector>
 
-#include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace bsoncolumn {
 /**
- * Deconstructed BSONElement without type and fieldname in the contigous buffer.
+ * Deconstructed BSONElement without type and fieldname in the contiguous buffer.
  */
 struct Element {
     Element() : type(BSONType::eoo), size(0) {}
@@ -269,9 +269,6 @@ struct EncodingState {
                                    F controlBlockWriter,
                                    const Allocator&);
     void _initializeFromPrevious(const Allocator&);
-    template <class F>
-    ptrdiff_t _incrementSimple8bCount(allocator_aware::BufBuilder<Allocator>& buffer,
-                                      F controlBlockWriter);
 
     // Encoders for 64bit and 128bit types.
     std::variant<Encoder64, Encoder128> _encoder;
@@ -291,7 +288,7 @@ struct EncodingState {
  * Class to build BSON Subtype 7 (Column) binaries.
  */
 template <class Allocator = std::allocator<void>>
-class BSONColumnBuilder {
+class MONGO_MOD_PUBLIC BSONColumnBuilder {
 public:
     template <typename A = Allocator>
     BSONColumnBuilder() : BSONColumnBuilder{A{}} {}
@@ -438,14 +435,14 @@ private:
      * Internal state of the BSONColumnBuilder. Can be copied to restore a previous state after
      * finalize.
      */
-    struct InternalState {
+    struct MONGO_MOD_FILE_PRIVATE InternalState {
         explicit InternalState(const Allocator&);
 
         MONGO_COMPILER_NO_UNIQUE_ADDRESS Allocator allocator;
 
         using Regular = bsoncolumn::EncodingState<Allocator>;
 
-        struct SubObjState {
+        struct MONGO_MOD_FILE_PRIVATE SubObjState {
             using ControlBlock = std::pair<ptrdiff_t, size_t>;
             using ControlBlockAllocator =
                 typename std::allocator_traits<Allocator>::template rebind_alloc<ControlBlock>;
@@ -478,7 +475,7 @@ private:
             InterleavedControlBlockWriter controlBlockWriter();
         };
 
-        struct Interleaved {
+        struct MONGO_MOD_FILE_PRIVATE Interleaved {
             enum class Mode {
                 // The reference object is being determined. New sub fields are attempted to be
                 // merged in to the existing reference object candidate.
@@ -521,7 +518,7 @@ private:
         int lastBufLength = 0;
         // Finalized state of last control byte written out by the previous intermediate() call.
         uint8_t lastControl;
-        uint8_t lastControlOffset = 0;
+        uint16_t lastControlOffset = 0;
     };
 
     // Internal helper to perform reopen/initialization of this class from a BSONColumn binary.

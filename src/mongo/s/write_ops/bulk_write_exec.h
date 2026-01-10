@@ -36,10 +36,10 @@
 #include "mongo/db/commands/query_cmd/bulk_write_gen.h"
 #include "mongo/db/commands/query_cmd/bulk_write_parser.h"
 #include "mongo/db/fle_crud.h"
-#include "mongo/db/global_catalog/router_role_api/ns_targeter.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/optime.h"
+#include "mongo/db/router_role/ns_targeter.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/db/write_concern_options.h"
@@ -47,6 +47,7 @@
 #include "mongo/s/write_ops/batch_write_op.h"
 #include "mongo/s/write_ops/bulk_write_reply_info.h"
 #include "mongo/s/write_ops/write_op.h"
+#include "mongo/s/write_ops/write_op_helper.h"
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/util/modules.h"
 
@@ -74,6 +75,17 @@ public:
                        const std::vector<std::unique_ptr<NSTargeter>>& targeters,
                        bool updatedShardKey);
 
+    /**
+     * Set of methods to determine whether this 'BulkWriteExecStats' object should be ignored or
+     * not (that is, whether it should not be used to update targeting or query counter stats).
+     */
+    void markIgnore() {
+        _ignore = true;
+    }
+    bool getIgnore() const {
+        return _ignore;
+    }
+
 private:
     // Indexed by the namespace index.
     stdx::unordered_map<size_t, int> _numShardsOwningChunks;
@@ -82,6 +94,7 @@ private:
         size_t,
         stdx::unordered_map<BatchedCommandRequest::BatchType, stdx::unordered_set<ShardId>>>
         _targetedShardsPerNsAndBatchType;
+    bool _ignore = false;
 };
 
 /**
@@ -100,27 +113,6 @@ BulkWriteReplyInfo execute(OperationContext* opCtx,
 BulkWriteCommandReply createEmulatedErrorReply(const Status& error,
                                                int errorCount,
                                                const boost::optional<TenantId>& tenantId);
-
-class BulkCommandSizeEstimator final : public BatchCommandSizeEstimatorBase {
-public:
-    explicit BulkCommandSizeEstimator(OperationContext* opCtx,
-                                      const BulkWriteCommandRequest& clientRequest);
-
-    int getBaseSizeEstimate() const final;
-    int getOpSizeEstimate(int opIdx, const ShardId& shardId) const final;
-    void addOpToBatch(int opIdx, const ShardId& shardId) final;
-
-private:
-    const BulkWriteCommandRequest& _clientRequest;
-    const bool _isRetryableWriteOrInTransaction;
-    const int _baseSizeEstimate;
-
-    // targetWriteOps() can target writes to different shards which will end up being executed
-    // inside different child batches. We need to keep a map of shardId to a set of all of the
-    // nsInfo indexes we have account for the size of. We only want to count each nsInfoIdx once
-    // per child batch.
-    absl::flat_hash_map<ShardId, absl::flat_hash_set<int>> _accountedForNsInfos;
-};
 
 /**
  * The BulkWriteOp class manages the lifecycle of a bulkWrite request received by mongos. Each op in

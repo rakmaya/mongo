@@ -105,6 +105,10 @@ public:
         return 0;
     }
 
+    void setSize(long long numRecords, long long dataSize) override {
+        // Do nothing.
+    }
+
     virtual bool isCapped() const {
         // Record stores for capped collections should inherit from 'DevNullRecordStore::Capped',
         // which overrides this to true.
@@ -226,7 +230,8 @@ private:
                                               const RecordId& loc,
                                               const RecordData& oldRec,
                                               const char* damageSource,
-                                              const DamageVector& damages) override {
+                                              const DamageVector& damages,
+                                              const SeekableRecordCursor* cursor) override {
         MONGO_UNREACHABLE;
     }
 
@@ -463,7 +468,7 @@ std::unique_ptr<RecordStore> DevNullKVEngine::getRecordStore(OperationContext* o
                                                              StringData ident,
                                                              const RecordStore::Options& options,
                                                              boost::optional<UUID> uuid) {
-    if (ident == ident::kMbdCatalog) {
+    if (ident == ident::kMdbCatalog) {
         return std::make_unique<EphemeralForTestRecordStore>(uuid, ident, &_catalogInfo);
     } else if (options.isOplog) {
         return std::make_unique<DevNullRecordStore::Oplog>(*uuid, ident, options.oplogMaxSize);

@@ -10,22 +10,29 @@
  *   uses_parallel_shell,
  *   # This test relies on query commands returning specific batch-sized responses.
  *   assumes_no_implicit_cursor_exhaustion,
+ *   # This test sets a server parameter via setParameterOnAllNonConfigNodes. To keep the host list
+ *   # consistent, no add/remove shard operations should occur during the test.
+ *   assumes_stable_shard_list,
  * ]
  */
 
-import {DiscoverTopology} from "jstests/libs/discover_topology.js";
 import {configureFailPoint} from "jstests/libs/fail_point_util.js";
 import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 import {findMatchingLogLine} from "jstests/libs/log.js";
 import {funWithArgs} from "jstests/libs/parallel_shell_helpers.js";
-import {setParameterOnAllHosts} from "jstests/noPassthrough/libs/server_parameter_helpers.js";
+import {setParameterOnAllNonConfigNodes} from "jstests/noPassthrough/libs/server_parameter_helpers.js";
+
+// Using a getMore in a parallel shell is unsupported when the test is run against a pool of routers.
+// The in-memory table used for pinning a mongos to a cursor is not accessible across shells.
+// pinToSingleMongos due to getMore on a parallel shell.
+TestData.pinToSingleMongos = true;
 
 function getServerParameter(knob) {
     return assert.commandWorked(db.adminCommand({getParameter: 1, [knob]: 1}))[knob];
 }
 
 function setServerParameter(knob, value) {
-    setParameterOnAllHosts(DiscoverTopology.findNonConfigNodes(db.getMongo()), knob, value);
+    setParameterOnAllNonConfigNodes(db.getMongo(), knob, value);
 }
 
 function setupCollection(coll) {

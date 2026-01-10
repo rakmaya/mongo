@@ -198,11 +198,12 @@ void initializeAccessorsVector(absl::InlinedVector<value::OwnedValueAccessor, 3>
 
 // Help debugPrinter to print an optional slot.
 void addDebugOptionalSlotIdentifier(std::vector<DebugPrinter::Block>& ret,
-                                    const boost::optional<value::SlotId>& slot) {
+                                    const boost::optional<value::SlotId>& slot,
+                                    const char* name) {
     if (slot) {
         DebugPrinter::addIdentifier(ret, slot.value());
-    } else {
-        DebugPrinter::addIdentifier(ret, DebugPrinter::kNoneKeyword);
+        ret.emplace_back("=");
+        DebugPrinter::addKeyword(ret, name);
     }
 }
 
@@ -383,7 +384,7 @@ PlanState SearchCursorStage::doGetNext() {
         }
 
         if (!_isStoredSource && _idSlot &&
-            _idAccessor.getViewOfValue().first == value::TypeTags::Nothing) {
+            _idAccessor.getViewOfValue().tag == value::TypeTags::Nothing) {
             // For non-storedSource case, document without _id field is not valid.
             continue;
         }
@@ -499,23 +500,20 @@ const SpecificStats* SearchCursorStage::getSpecificStats() const {
     return &_specificStats;
 }
 
-std::vector<DebugPrinter::Block> SearchCursorStage::debugPrint() const {
-    auto ret = PlanStage::debugPrint();
-
-    addDebugOptionalSlotIdentifier(ret, _idSlot);
-    addDebugOptionalSlotIdentifier(ret, _resultSlot);
+void SearchCursorStage::doDebugPrint(std::vector<DebugPrinter::Block>& ret,
+                                     DebugPrintInfo& debugPrintInfo) const {
+    addDebugOptionalSlotIdentifier(ret, _idSlot, "id");
+    addDebugOptionalSlotIdentifier(ret, _resultSlot, "result");
 
     addDebugSlotVector(ret, _metadataSlots);
     addDebugSlotVector(ret, _fieldSlots);
 
     ret.emplace_back(std::to_string(_remoteCursorId));
-    ret.emplace_back(_isStoredSource ? "true" : "false");
-    addDebugOptionalSlotIdentifier(ret, _sortSpecSlot);
-    addDebugOptionalSlotIdentifier(ret, _limitSlot);
-    addDebugOptionalSlotIdentifier(ret, _sortKeySlot);
-    addDebugOptionalSlotIdentifier(ret, _collatorSlot);
-
-    return ret;
+    ret.emplace_back(_isStoredSource ? "storedSource" : "!storedSource");
+    addDebugOptionalSlotIdentifier(ret, _sortSpecSlot, "sortSpec");
+    addDebugOptionalSlotIdentifier(ret, _limitSlot, "limit");
+    addDebugOptionalSlotIdentifier(ret, _sortKeySlot, "sortKey");
+    addDebugOptionalSlotIdentifier(ret, _collatorSlot, "collator");
 }
 
 size_t SearchCursorStage::estimateCompileTimeSize() const {

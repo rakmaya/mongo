@@ -34,11 +34,11 @@
 #include "mongo/db/global_catalog/ddl/shard_key_util.h"
 #include "mongo/db/global_catalog/ddl/sharded_ddl_commands_gen.h"
 #include "mongo/db/global_catalog/shard_key_pattern.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/db_raii.h"
-#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/db_raii.h"
+#include "mongo/db/shard_role/shard_role.h"
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/topology/sharding_state.h"
 #include "mongo/logv2/log.h"
@@ -94,7 +94,7 @@ public:
                 uassert(ErrorCodes::NamespaceNotSharded,
                         str::stream()
                             << "Can't execute " << Request::kCommandName
-                            << "on unsharded collection " << redact(ns().toStringForErrorMsg()),
+                            << " on unsharded collection " << redact(ns().toStringForErrorMsg()),
                         coll.getShardingDescription().isSharded());
 
                 shardkeyutil::validateShardKeyIndexExistsOrCreateIfPossible(

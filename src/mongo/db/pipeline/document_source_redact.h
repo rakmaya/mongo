@@ -41,6 +41,7 @@
 #include "mongo/db/pipeline/variables.h"
 #include "mongo/db/query/compiler/dependency_analysis/expression_dependencies.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
+#include "mongo/util/modules.h"
 
 #include <memory>
 #include <set>
@@ -51,11 +52,13 @@
 
 namespace mongo {
 
-class DocumentSourceRedact final : public DocumentSource {
+DEFINE_LITE_PARSED_STAGE_DEFAULT_DERIVED(Redact);
+
+class MONGO_MOD_NEEDS_REPLACEMENT DocumentSourceRedact final : public DocumentSource {
 public:
     static constexpr StringData kStageName = "$redact"_sd;
     const char* getSourceName() const final;
-    boost::intrusive_ptr<DocumentSource> optimize() final;
+    boost::intrusive_ptr<DocumentSource> optimize();
 
     static const Id& id;
 
@@ -83,8 +86,8 @@ public:
      * Attempts to duplicate the redact-safe portion of a subsequent $match before the $redact
      * stage.
      */
-    DocumentSourceContainer::iterator doOptimizeAt(DocumentSourceContainer::iterator itr,
-                                                   DocumentSourceContainer* container) final;
+    DocumentSourceContainer::iterator optimizeAt(DocumentSourceContainer::iterator itr,
+                                                 DocumentSourceContainer* container);
 
     static boost::intrusive_ptr<DocumentSource> createFromBson(
         BSONElement elem, const boost::intrusive_ptr<ExpressionContext>& expCtx);

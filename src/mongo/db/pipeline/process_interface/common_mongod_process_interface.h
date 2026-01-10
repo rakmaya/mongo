@@ -38,10 +38,10 @@
 #include "mongo/db/database_name.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/shard_filterer.h"
-#include "mongo/db/local_catalog/shard_role_api/resource_yielder.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/pipeline/catalog_resource_handle.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/field_path.h"
 #include "mongo/db/pipeline/javascript_execution.h"
@@ -49,13 +49,16 @@
 #include "mongo/db/pipeline/pipeline_factory.h"
 #include "mongo/db/pipeline/process_interface/common_process_interface.h"
 #include "mongo/db/pipeline/process_interface/mongo_process_interface.h"
+#include "mongo/db/pipeline/shard_role_transaction_resources_stasher_for_pipeline.h"
 #include "mongo/db/pipeline/storage_stats_spec_gen.h"
 #include "mongo/db/query/client_cursor/generic_cursor_gen.h"
 #include "mongo/db/query/collation/collator_interface.h"
+#include "mongo/db/query/multiple_collection_accessor.h"
 #include "mongo/db/query/write_ops/write_ops_exec.h"
 #include "mongo/db/query/write_ops/write_ops_gen.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/repl/optime.h"
+#include "mongo/db/shard_role/resource_yielder.h"
 #include "mongo/db/storage/backup_cursor_state.h"
 #include "mongo/db/storage/key_format.h"
 #include "mongo/db/storage/record_store.h"
@@ -128,22 +131,24 @@ public:
                                         const NamespaceString& nss) override;
     query_shape::CollectionType getCollectionType(OperationContext* opCtx,
                                                   const NamespaceString& nss) override;
+
+    std::unique_ptr<Pipeline> attachCursorSourceToPipelineForLocalReadWithCatalog(
+        std::unique_ptr<Pipeline> pipeline,
+        const MultipleCollectionAccessor& collections,
+        const boost::intrusive_ptr<CatalogResourceHandle>& catalogResourceHandle) final;
+
     std::unique_ptr<Pipeline> attachCursorSourceToPipelineForLocalRead(
         std::unique_ptr<Pipeline> pipeline,
         boost::optional<const AggregateCommandRequest&> aggRequest = boost::none,
-        bool shouldUseCollectionDefaultCollator = false,
-        ExecShardFilterPolicy shardFilterPolicy = AutomaticShardFiltering{}) final;
+        bool shouldUseCollectionDefaultCollator = false) final;
 
     std::unique_ptr<Pipeline> finalizeAndAttachCursorToPipelineForLocalRead(
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
         std::unique_ptr<Pipeline> pipeline,
         bool attachCursorAfterOptimizing,
-        std::function<void(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                           Pipeline* pipeline,
-                           CollectionMetadata collData)> finalizePipeline = nullptr,
+        std::function<void(Pipeline* pipeline)> optimizePipeline = nullptr,
         bool shouldUseCollectionDefaultCollator = false,
-        boost::optional<const AggregateCommandRequest&> aggRequest = boost::none,
-        ExecShardFilterPolicy shardFilterPolicy = AutomaticShardFiltering{}) final;
+        boost::optional<const AggregateCommandRequest&> aggRequest = boost::none) final;
 
     std::string getShardName(OperationContext* opCtx) const final;
 

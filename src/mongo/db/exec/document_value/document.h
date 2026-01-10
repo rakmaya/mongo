@@ -44,13 +44,13 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/bufreader.h"
 #include "mongo/util/intrusive_counter.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/string_map.h"
 
 #include <cstring>
 #include <initializer_list>
 #include <iosfwd>
 #include <string>
-#include <type_traits>
 #include <typeinfo>
 #include <utility>
 #include <vector>
@@ -61,7 +61,7 @@
 #include <boost/smart_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
-namespace mongo {
+namespace MONGO_MOD_PUBLIC mongo {
 class BSONObj;
 
 class FieldIterator;
@@ -357,6 +357,11 @@ public:
      */
     void toBsonWithMetaData(BSONObjBuilder* builder) const;
 
+    /**
+     * Like the 'toBson()' method, but includes only metadata.
+     */
+    void toBsonWithMetaDataOnly(BSONObjBuilder* builder) const;
+
     template <typename BSONTraits = BSONObj::DefaultSizeTrait>
     BSONObj toBsonWithMetaData() const {
         if (isTriviallyConvertibleWithMetadata()) {
@@ -369,6 +374,23 @@ public:
         validateDocumentBSONSize(docBSONObj, BSONTraits::MaxSize);
         return docBSONObj;
     }
+
+    template <typename BSONTraits = BSONObj::DefaultSizeTrait>
+    BSONObj toBsonWithMetaDataOnly() const {
+        BSONObjBuilder bb;
+        toBsonWithMetaDataOnly(&bb);
+        BSONObj docBSONObj = bb.obj<BSONTraits>();
+        validateDocumentBSONSize(docBSONObj, BSONTraits::MaxSize);
+        return docBSONObj;
+    }
+
+    /**
+     * Creates a Document from a BSONObj and its associated metadata BSONObj.
+     * Used by extension aggregation stage to construct Documents that include metadata to
+     * send to the host.
+     */
+    static Document createDocumentWithMetadata(const BSONObj& documentBSON,
+                                               const BSONObj& metadataBSON);
 
     /**
      * Like Document(BSONObj) but treats top-level fields with special names as metadata.
@@ -973,4 +995,4 @@ inline MutableValue MutableValue::getField(Position pos) {
 inline MutableValue MutableValue::getField(StringData key) {
     return MutableDocument(*this).getField(key);
 }
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUBLIC mongo

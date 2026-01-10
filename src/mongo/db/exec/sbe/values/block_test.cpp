@@ -34,12 +34,13 @@
 #include "mongo/db/exec/sbe/sbe_block_test_helpers.h"
 #include "mongo/db/exec/sbe/sbe_unittest.h"
 #include "mongo/db/exec/sbe/values/block_interface.h"
+#include "mongo/db/exec/sbe/values/bson.h"
 #include "mongo/db/exec/sbe/values/bson_block.h"
 #include "mongo/db/exec/sbe/values/cell_interface.h"
 #include "mongo/db/exec/sbe/values/scalar_mono_cell_block.h"
 #include "mongo/db/exec/sbe/values/ts_block.h"
 #include "mongo/db/exec/sbe/values/value.h"
-#include "mongo/idl/server_parameter_test_controller.h"
+#include "mongo/db/timeseries/timeseries_constants.h"
 #include "mongo/unittest/death_test.h"
 #include "mongo/unittest/unittest.h"
 
@@ -126,13 +127,6 @@ std::string posInfoToString(const std::vector<int32_t>& posInfo) {
 
 class BsonBlockDecodingTest : public mongo::unittest::Test {
 public:
-    void run() {
-        auto base = static_cast<mongo::unittest::Test*>(this);
-
-        // Run the tests using the block-based BSON implementation for extracting paths.
-        base->run();
-    }
-
     // Given an object that matches what we might see in the data field of a bucket, produce the
     // corresonding vector of objects.
     std::vector<BSONObj> columnsToObjs(BSONObj bsonColumns) {
@@ -1339,8 +1333,8 @@ TEST_F(ValueBlockTest, ArgMinMaxGetAt) {
         // Homogeneous blocks with Nothings call ValueBlock::getAt() which extracts first.
         block->pushNothing();
         block->pushNothing();
-        ASSERT_EQ(block->at(3).first, value::TypeTags::Nothing);
-        ASSERT_EQ(block->at(4).first, value::TypeTags::Nothing);
+        ASSERT_EQ(block->at(3).tag, value::TypeTags::Nothing);
+        ASSERT_EQ(block->at(4).tag, value::TypeTags::Nothing);
     }
 
     {
@@ -1368,7 +1362,8 @@ TEST_F(ValueBlockTest, ArgMinMaxGetAt) {
     }
 }
 
-DEATH_TEST_REGEX_F(ValueBlockTest, OutOfBoundsAt, "Tripwire assertion.*11089617") {
+using ValueBlockTestDeathTest = ValueBlockTest;
+DEATH_TEST_REGEX_F(ValueBlockTestDeathTest, OutOfBoundsAt, "Tripwire assertion.*11089617") {
     auto block = value::MonoBlock::makeNothingBlock(1);
     ASSERT_THAT(block->at(0),
                 ValueEq(std::pair{value::TypeTags::Nothing, value::bitcastFrom<int64_t>(0)}));
@@ -1376,7 +1371,7 @@ DEATH_TEST_REGEX_F(ValueBlockTest, OutOfBoundsAt, "Tripwire assertion.*11089617"
     auto _ = block->at(1);
 }
 
-DEATH_TEST_REGEX_F(ValueBlockTest, OutOfBoundsAt2, "Tripwire assertion.*11089618") {
+DEATH_TEST_REGEX_F(ValueBlockTestDeathTest, OutOfBoundsAt2, "Tripwire assertion.*11089618") {
     auto block = std::make_unique<value::Int64Block>();
     block->push_back(static_cast<int64_t>(10));
     auto& valueBlock = static_cast<value::ValueBlock&>(*block);

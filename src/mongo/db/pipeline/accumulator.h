@@ -44,6 +44,7 @@
 #include "mongo/platform/decimal128.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/intrusive_counter.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/summation.h"
 
 #include <functional>
@@ -81,7 +82,7 @@ enum class AccumulatorDocumentsNeeded {
     kLastOutputDocument,
 };
 
-class AccumulatorState : public RefCountable {
+class MONGO_MOD_PUBLIC AccumulatorState : public RefCountable {
 public:
     using Factory = std::function<boost::intrusive_ptr<AccumulatorState>()>;
 
@@ -155,9 +156,9 @@ public:
                                boost::intrusive_ptr<Expression> argument,
                                const SerializationOptions& options = {}) const {
         ExpressionConstant const* ec = dynamic_cast<ExpressionConstant const*>(initializer.get());
-        invariant(ec);
-        invariant(ec->getValue().nullish());
-
+        tassert(11294826, "Expecting initializer expression to be a constant", ec);
+        tassert(
+            11294825, "Expecting initializer expression to be nullish", ec->getValue().nullish());
         return DOC(getOpName() << argument->serialize(options));
     }
 

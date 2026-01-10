@@ -37,11 +37,9 @@
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/update/update_executor.h"
 #include "mongo/util/intrusive_counter.h"
+#include "mongo/util/modules.h"
 
-#include <map>
 #include <memory>
-#include <string>
-#include <utility>
 #include <vector>
 
 #include <boost/none.hpp>
@@ -72,6 +70,7 @@ public:
     ApplyResult applyUpdate(ApplyParams applyParams) const final;
 
     Value serialize() const final;
+    Value serialize(const SerializationOptions& opts) const;
 
     bool getCheckExistenceForDiffInsertOperations() const final {
         return _checkExistenceForDiffInsertOperations;

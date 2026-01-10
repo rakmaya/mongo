@@ -41,6 +41,7 @@
 #include "mongo/logv2/log.h"
 #include "mongo/platform/random.h"
 #include "mongo/unittest/unittest.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/time_support.h"
 
 #include <cstddef>
@@ -77,8 +78,10 @@ public:
     void release() override {
         ASSERT_EQ(*_executorHoldsStorageEngineState, false);
     }
-    void checkCanServeReads(OperationContext* opCtx, const PlanExecutor& exec) override {
-        // No-op.
+
+    boost::intrusive_ptr<ShardRoleTransactionResourcesStasherForPipeline> getStasher()
+        const override {
+        MONGO_UNREACHABLE;
     }
 
 private:

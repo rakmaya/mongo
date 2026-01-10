@@ -50,16 +50,18 @@
 
 namespace mongo {
 
+DECLARE_STAGE_PARAMS_DERIVED_DEFAULT(Documents);
+
 namespace DocumentSourceDocuments {
-class LiteParsed : public LiteParsedDocumentSource {
+class LiteParsed : public LiteParsedDocumentSourceDefault<LiteParsed> {
 public:
     static std::unique_ptr<LiteParsed> parse(const NamespaceString& nss,
                                              const BSONElement& spec,
                                              const LiteParserOptions& options) {
-        return std::make_unique<LiteParsed>(spec.fieldName());
+        return std::make_unique<LiteParsed>(spec);
     }
 
-    LiteParsed(std::string parseTimeName) : LiteParsedDocumentSource(std::move(parseTimeName)) {}
+    LiteParsed(const BSONElement& spec) : LiteParsedDocumentSourceDefault(spec) {}
 
     stdx::unordered_set<NamespaceString> getInvolvedNamespaces() const final {
         return stdx::unordered_set<NamespaceString>();
@@ -79,6 +81,10 @@ public:
 
     bool generatesOwnDataOnce() const final {
         return true;
+    }
+
+    std::unique_ptr<StageParams> getStageParams() const final {
+        return std::make_unique<DocumentsStageParams>(_originalBson);
     }
 };
 

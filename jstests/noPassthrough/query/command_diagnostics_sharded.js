@@ -210,6 +210,7 @@ function runTests(onMongos = false) {
             deletes: [{q: query, limit: 1}],
         },
         expectedDiagnosticInfo: [
+            // When UWE is enabled, the shard gets a bulkWrite command instead.
             `{\'currentOp\': { op: \\"remove\\", ns: \\"${ns}\\"`,
             "'opDescription': ",
             shardKeyLog,
@@ -225,6 +226,7 @@ function runTests(onMongos = false) {
             updates: [{q: query, u: {a: 2, b: 2}}],
         },
         expectedDiagnosticInfo: [
+            // When UWE is enabled, the shard gets a bulkWrite command instead.
             `{\'currentOp\': { op: \\"update\\", ns: \\"${ns}\\"`,
             "'opDescription': ",
             shardKeyLog,
@@ -263,10 +265,8 @@ function runTests(onMongos = false) {
             "update: 1",
             "filter: { a: 1.0, b: 1.0 }",
             "updateMods: { a: 1.0 }",
-            onMongos
-                ? (`'test.differentNamespace': omitted: collection isn't sharded`,
-                  `'test.command_diagnostics_sharded': { a: 1.0, b: 1.0, c: 1.0 }`)
-                : shardKeyLog,
+            onMongos ? `'test.${jsTestName()}': {${shardKeyLog}}` : shardKeyLog,
+            onMongos ? `'test.differentNamespace': {'shardKeyPattern': omitted: collection isn't sharded}` : "",
         ],
     });
 

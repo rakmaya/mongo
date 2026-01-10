@@ -74,6 +74,9 @@
 #include <fmt/format.h>
 
 namespace mongo {
+
+DECLARE_STAGE_PARAMS_DERIVED_DEFAULT(Out);
+
 /**
  * Implementation for the $out aggregation stage.
  */
@@ -85,7 +88,7 @@ public:
      * A "lite parsed" $out stage is similar to other stages involving foreign collections except in
      * some cases the foreign collection is allowed to be sharded.
      */
-    class LiteParsed final : public LiteParsedDocumentSourceForeignCollection {
+    class LiteParsed final : public LiteParsedDocumentSourceForeignCollection<LiteParsed> {
     public:
         using LiteParsedDocumentSourceForeignCollection::LiteParsedDocumentSourceForeignCollection;
 
@@ -124,6 +127,10 @@ public:
 
         bool isWriteStage() const override {
             return true;
+        }
+
+        std::unique_ptr<StageParams> getStageParams() const override {
+            return std::make_unique<OutStageParams>(_originalBson);
         }
     };
 

@@ -30,6 +30,7 @@
 #pragma once
 
 #include "mongo/db/rss/persistence_provider.h"
+#include "mongo/util/modules.h"
 
 namespace mongo::rss {
 
@@ -45,7 +46,13 @@ public:
     /**
      * We do not have any additional WT config to add.
      */
-    std::string getWiredTigerConfig(int) const override;
+    std::string getWiredTigerConfig() const override;
+
+    /**
+     * No additional settings required by the provider for tables from the main WiredTiger storage
+     * engine instance.
+     */
+    std::string getMainWiredTigerTableSettings() const override;
 
     /**
      * Replicated catalog identifiers aren't compatible with attached storage as of right now, as a
@@ -53,6 +60,11 @@ public:
      * replicated collection created on another node.
      */
     bool shouldUseReplicatedCatalogIdentifiers() const override;
+
+    /**
+     * Attached storage does not require that indexes are built by the primary.
+     */
+    bool mustUsePrimaryDrivenIndexBuilds() const override;
 
     /**
      * Attached storage does not require replicated RecordIds to function correctly.
@@ -91,6 +103,8 @@ public:
      */
     bool shouldForceUpdateWithFullDocument() const override;
 
+    bool supportsCursorReuseForExpressPathQueries() const override;
+
     /**
      * We can support local, fully unreplicated collections.
      */
@@ -115,6 +129,27 @@ public:
      * We can support oplog cap maintainer thread and oplog sampling.
      */
     bool supportsOplogSampling() const override;
+
+    /**
+     * We can support table verify.
+     */
+    bool supportsTableVerify() const override;
+
+    /**
+     * We can enable it only for testing purposes.
+     */
+    bool shouldDisableTransactionUpdateCoalescing() const override;
+
+    /**
+     * The minimum FCV required for disaggregated storage clusters.
+     */
+    multiversion::FeatureCompatibilityVersion getMinimumRequiredFCV() const override;
+
+
+    /**
+     * The default memory_page_max value to set on WT for the oplog in string format.
+     */
+    const char* getWTMemoryPageMaxForOplogStrValue() const override;
 };
 
 }  // namespace mongo::rss

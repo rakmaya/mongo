@@ -29,14 +29,17 @@
 
 #include "mongo/db/query/compiler/ce/sampling/sampling_estimator_impl.h"
 
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonelement_comparator.h"
 #include "mongo/db/exec/matcher/matcher.h"
 #include "mongo/db/exec/sbe/makeobj_spec.h"
+#include "mongo/db/exec/sbe/stages/generic_scan.h"
 #include "mongo/db/exec/sbe/stages/limit_skip.h"
 #include "mongo/db/exec/sbe/stages/loop_join.h"
 #include "mongo/db/exec/sbe/stages/project.h"
+#include "mongo/db/exec/sbe/stages/random_scan.h"
 #include "mongo/db/exec/sbe/stages/scan.h"
 #include "mongo/db/exec/sbe/stages/stages.h"
-#include "mongo/db/index/btree_key_generator.h"
 #include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/compiler/ce/ce_common.h"
@@ -51,6 +54,8 @@
 #include "mongo/util/assert_util.h"
 
 #include <cmath>
+
+#include <boost/container/flat_set.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQueryCE
 
@@ -152,30 +157,57 @@ double getZScore(SamplingConfidenceIntervalEnum confidenceInterval) {
 std::unique_ptr<sbe::PlanStage> makeScanStage(const CollectionPtr& collection,
                                               boost::optional<sbe::value::SlotId> recordSlot,
                                               boost::optional<sbe::value::SlotId> recordIdSlot,
-                                              boost::optional<sbe::value::SlotId> seekRecordIdSlot,
+                                              boost::optional<sbe::value::SlotId> minRecordIdSlot,
                                               bool useRandomCursor,
                                               PlanYieldPolicy* sbeYieldPolicy) {
     sbe::value::SlotVector scanFieldSlots;
     std::vector<std::string> scanFieldNames;
-    sbe::ScanCallbacks callbacks{};
-    return sbe::makeS<sbe::ScanStage>(collection->uuid(),
-                                      collection->ns().dbName(),
-                                      recordSlot,
-                                      recordIdSlot,
-                                      boost::none /* snapshotIdSlot */,
-                                      boost::none /* indexIdentSlot */,
-                                      boost::none /* indexKeySlot */,
-                                      boost::none /* keyPatternSlot */,
-                                      scanFieldNames,
-                                      scanFieldSlots,
-                                      seekRecordIdSlot,
-                                      boost::none /* minRecordIdSlot */,
-                                      boost::none /* maxRecordIdSlot */,
-                                      true /* forward */,
-                                      sbeYieldPolicy,
-                                      0 /* nodeId */,
-                                      callbacks,
-                                      useRandomCursor);
+    sbe::ScanOpenCallback scanOpenCallback{};
+    if (useRandomCursor) {
+        return sbe::makeS<sbe::RandomScanStage>(collection->uuid(),
+                                                collection->ns().dbName(),
+                                                recordSlot,
+                                                recordIdSlot,
+                                                boost::none /* snapshotIdSlot */,
+                                                boost::none /* indexIdentSlot */,
+                                                boost::none /* indexKeySlot */,
+                                                boost::none /* keyPatternSlot */,
+                                                scanFieldNames,
+                                                scanFieldSlots,
+                                                sbeYieldPolicy,
+                                                0 /* nodeId */);
+    } else if (minRecordIdSlot) {
+        return sbe::makeS<sbe::ScanStage>(collection->uuid(),
+                                          collection->ns().dbName(),
+                                          recordSlot,
+                                          recordIdSlot,
+                                          boost::none /* snapshotIdSlot */,
+                                          boost::none /* indexIdentSlot */,
+                                          boost::none /* indexKeySlot */,
+                                          boost::none /* keyPatternSlot */,
+                                          scanFieldNames,
+                                          scanFieldSlots,
+                                          minRecordIdSlot,
+                                          boost::none /* maxRecordIdSlot */,
+                                          true /* forward */,
+                                          sbeYieldPolicy,
+                                          0 /* nodeId */,
+                                          std::move(scanOpenCallback));
+    }
+    return sbe::makeS<sbe::GenericScanStage>(collection->uuid(),
+                                             collection->ns().dbName(),
+                                             recordSlot,
+                                             recordIdSlot,
+                                             boost::none /* snapshotIdSlot */,
+                                             boost::none /* indexIdentSlot */,
+                                             boost::none /* indexKeySlot */,
+                                             boost::none /* keyPatternSlot */,
+                                             scanFieldNames,
+                                             scanFieldSlots,
+                                             true /* forward */,
+                                             sbeYieldPolicy,
+                                             0 /* nodeId */,
+                                             std::move(scanOpenCallback));
 }
 
 /**
@@ -200,7 +232,7 @@ std::unique_ptr<sbe::PlanStage> makeProjectStage(std::unique_ptr<sbe::PlanStage>
     std::vector<std::string> topLevelSampleFieldNamesVec{topLevelSampleFieldNames.begin(),
                                                          topLevelSampleFieldNames.end()};
     auto spec =
-        std::make_unique<sbe::MakeObjSpec>(FieldListScope::kClosed,
+        std::make_unique<sbe::MakeObjSpec>(sbe::MakeObjSpec::FieldListScope::kClosed,
                                            std::move(topLevelSampleFieldNamesVec),
                                            std::move(fieldActions),
                                            sbe::MakeObjSpec::NonObjInputBehavior::kReturnNothing);
@@ -246,41 +278,6 @@ std::unique_ptr<CanonicalQuery> SamplingEstimatorImpl::makeEmptyCanonicalQuery(
          .parsedFind = ParsedFindCommandParams{.findCommand = std::move(findCommand)}});
 
     return std::move(statusWithCQ.getValue());
-}
-
-std::vector<BSONObj> SamplingEstimatorImpl::getIndexKeys(const IndexBounds& bounds,
-                                                         const BSONObj& doc) {
-    std::vector<const char*> fieldNames;
-    fieldNames.reserve(bounds.fields.size());
-    for (size_t i = 0; i < bounds.fields.size(); ++i) {
-        fieldNames.push_back(bounds.fields[i].name.c_str());
-    }
-    std::vector<BSONElement> keysElements{fieldNames.size(), BSONElement{}};
-
-    auto bTreeKeyGenerator =
-        std::make_unique<BtreeKeyGenerator>(fieldNames,
-                                            keysElements,
-                                            false /*isSparse*/,
-                                            key_string::Version::kLatestVersion,
-                                            Ordering::allAscending());
-
-    MultikeyPaths multikeyPaths;
-    SharedBufferFragmentBuilder pooledBufferBuilder(BufBuilder::kDefaultInitSizeBytes);
-    KeyStringSet keyStrings;
-
-    bTreeKeyGenerator->getKeys(pooledBufferBuilder,
-                               doc,
-                               false /*skipMultikey*/,
-                               &keyStrings,
-                               &multikeyPaths,
-                               nullptr /*collator*/,
-                               boost::none);
-
-    std::vector<BSONObj> indexKeys;
-    for (auto&& keyString : keyStrings) {
-        indexKeys.push_back(key_string::toBson(keyString, Ordering::make(BSONObj())));
-    }
-    return indexKeys;
 }
 
 bool SamplingEstimatorImpl::matches(const Interval& interval, BSONElement val) {
@@ -330,38 +327,6 @@ bool SamplingEstimatorImpl::matches(const OrderedIntervalList& oil, BSONElement 
     return false;
 }
 
-bool SamplingEstimatorImpl::doesKeyMatchBounds(const IndexBounds& bounds,
-                                               const BSONObj& key) const {
-    BSONObjIterator it(key);
-    for (auto&& oil : bounds.fields) {
-        if (!matches(oil, *it)) {
-            return false;
-        }
-        ++it;
-    }
-    return true;
-}
-
-size_t SamplingEstimatorImpl::numberKeysMatch(const IndexBounds& bounds,
-                                              const BSONObj& doc,
-                                              bool skipDuplicateMatches) const {
-    const auto keys = getIndexKeys(bounds, doc);
-    size_t count = 0;
-    for (auto&& key : keys) {
-        if (doesKeyMatchBounds(bounds, key)) {
-            count++;
-            if (skipDuplicateMatches) {
-                return count;
-            }
-        }
-    }
-    return count;
-}
-
-bool SamplingEstimatorImpl::doesDocumentMatchBounds(const IndexBounds& bounds,
-                                                    const BSONObj& doc) const {
-    return numberKeysMatch(bounds, doc, true /* skipDuplicateMatches */) > 0;
-}
 
 size_t SamplingEstimatorImpl::calculateSampleSize(SamplingConfidenceIntervalEnum ci,
                                                   double marginOfError) {
@@ -377,7 +342,7 @@ SamplingEstimatorImpl::generateRandomSamplingPlan(PlanYieldPolicy* sbeYieldPolic
     auto staticData = std::make_unique<stage_builder::PlanStageStaticData>();
     sbe::value::SlotIdGenerator ids;
     staticData->resultSlot = ids.generate();
-    const CollectionPtr& collection = _collections.getMainCollection();
+    const CollectionPtr& collection = _collections.lookupCollection(_nss);
     auto stage = makeScanStage(
         collection, staticData->resultSlot, boost::none, boost::none, true, sbeYieldPolicy);
 
@@ -410,7 +375,7 @@ SamplingEstimatorImpl::generateChunkSamplingPlan(PlanYieldPolicy* sbeYieldPolicy
     auto staticData = std::make_unique<stage_builder::PlanStageStaticData>();
     sbe::value::SlotIdGenerator ids;
     staticData->resultSlot = ids.generate();
-    const CollectionPtr& collection = _collections.getMainCollection();
+    const CollectionPtr& collection = _collections.lookupCollection(_nss);
     auto chunkSize = static_cast<int64_t>(_sampleSize / *_numChunks);
 
     boost::optional<sbe::value::SlotId> outerRid = ids.generate();
@@ -471,10 +436,12 @@ void SamplingEstimatorImpl::executeSamplingQueryAndSample(
     std::pair<std::unique_ptr<sbe::PlanStage>, mongo::stage_builder::PlanStageData>& plan,
     std::unique_ptr<CanonicalQuery> cq,
     std::unique_ptr<PlanYieldPolicySBE> sbeYieldPolicy) {
+    sbe::DebugPrintInfo debugPrintInfo{};
     LOGV2_DEBUG(10670302,
                 5,
                 "SamplingCE Sampling SBE plan",
-                "SBE Plan"_attr = sbe::DebugPrinter{}.print(plan.first.get()->debugPrint()));
+                "SBE Plan"_attr =
+                    sbe::DebugPrinter{}.print(plan.first.get()->debugPrint(debugPrintInfo)));
     // Prepare the SBE plan for execution.
     prepareSlotBasedExecutableTree(_opCtx,
                                    plan.first.get(),
@@ -491,7 +458,7 @@ void SamplingEstimatorImpl::executeSamplingQueryAndSample(
                                                              std::move(plan),
                                                              _collections,
                                                              QueryPlannerParams::DEFAULT,
-                                                             _collections.getMainCollection()->ns(),
+                                                             _nss,
                                                              std::move(sbeYieldPolicy),
                                                              false /* isFromPlanCache */,
                                                              false /* cachedPlanHash */)
@@ -510,14 +477,13 @@ void SamplingEstimatorImpl::executeSamplingQueryAndSample(
 
 void SamplingEstimatorImpl::generateFullCollScanSample() {
     // Create a CanonicalQuery for the CollScan plan.
-    const auto& ns = _collections.getMainCollection()->ns();
-    auto cq = makeEmptyCanonicalQuery(ns, _opCtx);
-    auto sbeYieldPolicy = PlanYieldPolicySBE::make(_opCtx, _yieldPolicy, _collections, ns);
+    auto cq = makeEmptyCanonicalQuery(_nss, _opCtx);
+    auto sbeYieldPolicy = PlanYieldPolicySBE::make(_opCtx, _yieldPolicy, _collections, _nss);
 
     auto staticData = std::make_unique<stage_builder::PlanStageStaticData>();
     sbe::value::SlotIdGenerator ids;
     staticData->resultSlot = ids.generate();
-    const CollectionPtr& collection = _collections.getMainCollection();
+    const CollectionPtr& collection = _collections.lookupCollection(_nss);
 
     auto stage = makeScanStage(
         collection, staticData->resultSlot, boost::none, boost::none, false, sbeYieldPolicy.get());
@@ -546,10 +512,9 @@ void SamplingEstimatorImpl::generateFullCollScanSample() {
 
 void SamplingEstimatorImpl::generateRandomSample(size_t sampleSize) {
     // Create a CanonicalQuery for the sampling plan.
-    const auto& ns = _collections.getMainCollection()->ns();
-    auto cq = makeEmptyCanonicalQuery(ns, _opCtx);
+    auto cq = makeEmptyCanonicalQuery(_nss, _opCtx);
     _sampleSize = sampleSize;
-    auto sbeYieldPolicy = PlanYieldPolicySBE::make(_opCtx, _yieldPolicy, _collections, ns);
+    auto sbeYieldPolicy = PlanYieldPolicySBE::make(_opCtx, _yieldPolicy, _collections, _nss);
 
     auto plan = generateRandomSamplingPlan(sbeYieldPolicy.get());
     executeSamplingQueryAndSample(plan, std::move(cq), std::move(sbeYieldPolicy));
@@ -564,10 +529,9 @@ void SamplingEstimatorImpl::generateRandomSample() {
 
 void SamplingEstimatorImpl::generateChunkSample(size_t sampleSize) {
     // Create a CanonicalQuery for the sampling plan.
-    const auto& ns = _collections.getMainCollection()->ns();
-    auto cq = makeEmptyCanonicalQuery(ns, _opCtx);
+    auto cq = makeEmptyCanonicalQuery(_nss, _opCtx);
     _sampleSize = sampleSize;
-    auto sbeYieldPolicy = PlanYieldPolicySBE::make(_opCtx, _yieldPolicy, _collections, ns);
+    auto sbeYieldPolicy = PlanYieldPolicySBE::make(_opCtx, _yieldPolicy, _collections, _nss);
 
     auto plan = generateChunkSamplingPlan(sbeYieldPolicy.get());
     executeSamplingQueryAndSample(plan, std::move(cq), std::move(sbeYieldPolicy));
@@ -607,14 +571,13 @@ void SamplingEstimatorImpl::generateSample(ce::ProjectionParams projectionParams
 
 void SamplingEstimatorImpl::generateSampleBySeqScanningForTesting() {
     // Create a CanonicalQuery for the sampling plan.
-    const auto& ns = _collections.getMainCollection()->ns();
-    auto cq = makeEmptyCanonicalQuery(ns, _opCtx);
-    auto sbeYieldPolicy = PlanYieldPolicySBE::make(_opCtx, _yieldPolicy, _collections, ns);
+    auto cq = makeEmptyCanonicalQuery(_nss, _opCtx);
+    auto sbeYieldPolicy = PlanYieldPolicySBE::make(_opCtx, _yieldPolicy, _collections, _nss);
 
     auto staticData = std::make_unique<stage_builder::PlanStageStaticData>();
     sbe::value::SlotIdGenerator ids;
     staticData->resultSlot = ids.generate();
-    const CollectionPtr& collection = _collections.getMainCollection();
+    const CollectionPtr& collection = _collections.lookupCollection(_nss);
     // Scan the first '_sampleSize' documents sequentially from the start of the target collection
     // in order to generate a repeatable sample.
     auto stage = makeScanStage(
@@ -733,11 +696,10 @@ CardinalityEstimate SamplingEstimatorImpl::estimateKeysScanned(const IndexBounds
         checkSampleContainsIndexBoundsFields(_topLevelSampleFieldNames, bounds);
     }
 
-
     size_t count = 0;
-    for (auto&& doc : _sample) {
-        count += numberKeysMatch(bounds, doc);
-    }
+
+    forNumberKeysMatch(bounds, _sample, [&](size_t matchCnt) { count += matchCnt; });
+
     CardinalityEstimate estimate{CardinalityType{(count * getCollCard()) / _sampleSize},
                                  EstimationSource::Sampling};
     LOGV2_DEBUG(9756605,
@@ -785,14 +747,12 @@ CardinalityEstimate SamplingEstimatorImpl::estimateRIDs(const IndexBounds& bound
         checkSampleContainsIndexBoundsFields(_topLevelSampleFieldNames, bounds);
     }
     size_t count = 0;
-    for (auto&& doc : _sample) {
-        if (doesDocumentMatchBounds(bounds, doc)) {
-            // If 'expr' is null, we are simply estimating the cardinality by IndexBounds.
-            if (expr == nullptr || exec::matcher::matchesBSON(expr, doc, nullptr)) {
-                count++;
-            }
+    forDocumentsMatchingBounds(bounds, _sample, [&](const BSONObj& document) {
+        // If 'expr' is null, we are simply estimating the cardinality by IndexBounds.
+        if (expr == nullptr || exec::matcher::matchesBSON(expr, document, nullptr)) {
+            count++;
         }
-    }
+    });
     CardinalityEstimate estimate{CardinalityType{(count * getCollCard()) / _sampleSize},
                                  EstimationSource::Sampling};
     LOGV2_DEBUG(9756606,
@@ -806,6 +766,7 @@ CardinalityEstimate SamplingEstimatorImpl::estimateRIDs(const IndexBounds& bound
 
 SamplingEstimatorImpl::SamplingEstimatorImpl(OperationContext* opCtx,
                                              const MultipleCollectionAccessor& collections,
+                                             const NamespaceString& nss,
                                              PlanYieldPolicy::YieldPolicy yieldPolicy,
                                              size_t sampleSize,
                                              SamplingStyle samplingStyle,
@@ -813,6 +774,7 @@ SamplingEstimatorImpl::SamplingEstimatorImpl(OperationContext* opCtx,
                                              CardinalityEstimate collectionCard)
     : _opCtx(opCtx),
       _collections(collections),
+      _nss(nss),
       _yieldPolicy(yieldPolicy),
       _samplingStyle(samplingStyle),
       _sampleSize(sampleSize),
@@ -821,6 +783,7 @@ SamplingEstimatorImpl::SamplingEstimatorImpl(OperationContext* opCtx,
 
 SamplingEstimatorImpl::SamplingEstimatorImpl(OperationContext* opCtx,
                                              const MultipleCollectionAccessor& collections,
+                                             const NamespaceString& nss,
                                              PlanYieldPolicy::YieldPolicy yieldPolicy,
                                              SamplingStyle samplingStyle,
                                              CardinalityEstimate collectionCard,
@@ -829,6 +792,7 @@ SamplingEstimatorImpl::SamplingEstimatorImpl(OperationContext* opCtx,
                                              boost::optional<int> numChunks)
     : SamplingEstimatorImpl(opCtx,
                             collections,
+                            nss,
                             yieldPolicy,
                             calculateSampleSize(ci, marginOfError),
                             samplingStyle,
@@ -885,7 +849,7 @@ CardinalityEstimate SamplingEstimatorImpl::estimateNDV(
 }
 
 std::unique_ptr<SamplingEstimator> SamplingEstimatorImpl::makeDefaultSamplingEstimator(
-    CanonicalQuery& cq,
+    const CanonicalQuery& cq,
     CardinalityEstimate collCard,
     PlanYieldPolicy::YieldPolicy yieldPolicy,
     const MultipleCollectionAccessor& collections) {
@@ -893,6 +857,7 @@ std::unique_ptr<SamplingEstimator> SamplingEstimatorImpl::makeDefaultSamplingEst
     return std::unique_ptr<ce::SamplingEstimatorImpl>(
         new ce::SamplingEstimatorImpl(cq.getOpCtx(),
                                       collections,
+                                      cq.nss(),
                                       yieldPolicy,
                                       getSamplingStyle(qkc.getInternalQuerySamplingCEMethod()),
                                       collCard,

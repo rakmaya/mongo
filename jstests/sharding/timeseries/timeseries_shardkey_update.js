@@ -100,6 +100,7 @@ setUpShardedCluster();
     // MaxKey).
     const coll = prepareShardedCollection({collName: getCallerName(1), initialDocList: docs, includeMeta: true});
 
+    // TODO SERVER-114994 findAndModify support in UWE.
     // This findAndModify command tries to update doc5_b_f104 into {_id: 5, meta: "A", f: 104}. The
     // owning shard would be the shard that owns (MinKey, meta: "A"].
     const findOneAndUpdateCmd = {

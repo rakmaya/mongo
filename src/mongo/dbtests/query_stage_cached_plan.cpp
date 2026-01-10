@@ -28,28 +28,21 @@
  */
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/status.h"
-#include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/json.h"
 #include "mongo/db/client.h"
-#include "mongo/db/collection_crud/collection_write_path.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/dbdirectclient.h"
+#include "mongo/db/dbhelpers.h"
 #include "mongo/db/exec/classic/cached_plan.h"
 #include "mongo/db/exec/classic/mock_stage.h"
 #include "mongo/db/exec/classic/plan_stage.h"
 #include "mongo/db/exec/classic/working_set.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/matcher/matcher.h"
-#include "mongo/db/local_catalog/database.h"
-#include "mongo/db/local_catalog/database_holder.h"
-#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/matcher/expression.h"
+#include "mongo/db/index_builds/index_build_test_helpers.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/expression_context.h"
@@ -57,23 +50,22 @@
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/collection_query_info.h"
 #include "mongo/db/query/find_command.h"
-#include "mongo/db/query/get_executor.h"
 #include "mongo/db/query/mock_yield_policies.h"
 #include "mongo/db/query/plan_cache/classic_plan_cache.h"
 #include "mongo/db/query/plan_cache/plan_cache.h"
 #include "mongo/db/query/plan_cache/plan_cache_key_factory.h"
-#include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/query_planner_params.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/lock_manager/d_concurrency.h"
+#include "mongo/db/shard_role/shard_catalog/database_holder.h"
 #include "mongo/db/storage/snapshot.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/dbtests/dbtests.h"  // IWYU pragma: keep
 #include "mongo/platform/atomic_word.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/intrusive_counter.h"
 #include "mongo/util/scopeguard.h"
 
 #include <cmath>
@@ -81,10 +73,8 @@
 #include <memory>
 #include <utility>
 
-#include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <fmt/format.h>
 
 namespace mongo {
 
@@ -130,7 +120,7 @@ public:
     }
 
     void addIndex(const BSONObj& obj) {
-        ASSERT_OK(dbtests::createIndex(&_opCtx, nss.ns_forTest(), obj));
+        ASSERT_OK(createIndex(&_opCtx, nss.ns_forTest(), obj));
     }
 
     void dropIndex(DBDirectClient& client, BSONObj keyPattern) {
@@ -152,10 +142,7 @@ public:
 
     void insertDocument(const CollectionAcquisition& collection, BSONObj obj) {
         WriteUnitOfWork wuow(&_opCtx);
-
-        OpDebug* const nullOpDebug = nullptr;
-        ASSERT_OK(collection_internal::insertDocument(
-            &_opCtx, collection.getCollectionPtr(), InsertStatement(obj), nullOpDebug));
+        ASSERT_OK(Helpers::insert(&_opCtx, collection.getCollectionPtr(), obj));
         wuow.commit();
     }
 

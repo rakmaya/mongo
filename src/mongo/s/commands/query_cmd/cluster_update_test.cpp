@@ -36,6 +36,7 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/sharding_environment/cluster_command_test_fixture.h"
 #include "mongo/executor/remote_command_request.h"
+#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/unittest/unittest.h"
 
 #include <functional>
@@ -85,7 +86,11 @@ protected:
 };
 
 TEST_F(ClusterUpdateTest, NoErrors) {
-    testNoErrors(kUpdateCmdTargeted, kUpdateCmdScatterGather);
+    for (auto uweKnobValue : {false, true}) {
+        RAIIServerParameterControllerForTest uweController("featureFlagUnifiedWriteExecutor",
+                                                           uweKnobValue);
+        testNoErrors(kUpdateCmdTargeted, kUpdateCmdScatterGather);
+    }
 }
 
 TEST_F(ClusterUpdateTest, AttachesAtClusterTimeForSnapshotReadConcern) {
@@ -105,7 +110,12 @@ TEST_F(ClusterUpdateTest, CorrectMetrics) {
     b.append("getmore", 0);
     b.append("command", 0);
 
-    testOpcountersAreCorrect(kUpdateCmdTargeted, /* expectedValue */ b.obj());
+    const BSONObj obj = b.obj();
+    for (auto uweKnobValue : {false, true}) {
+        RAIIServerParameterControllerForTest uweController("featureFlagUnifiedWriteExecutor",
+                                                           uweKnobValue);
+        testOpcountersAreCorrect(kUpdateCmdTargeted, /* expectedValue */ obj);
+    }
 }
 
 TEST_F(ClusterUpdateTest, RejectsCmdAggregateNamespace) {

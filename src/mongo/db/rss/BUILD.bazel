@@ -14,9 +14,6 @@ mongo_cc_library(
     srcs = [
         "replicated_storage_service.cpp",
     ],
-    hdrs = [
-        "replicated_storage_service.h",
-    ],
     deps = [
         "//src/mongo:base",
         "//src/mongo/db:service_context",
@@ -27,9 +24,6 @@ mongo_cc_library(
 
 mongo_cc_library(
     name = "persistence_provider",
-    hdrs = [
-        "persistence_provider.h",
-    ],
     deps = [
         "//src/mongo:base",
         "//src/mongo/db:service_context",
@@ -38,9 +32,6 @@ mongo_cc_library(
 
 mongo_cc_library(
     name = "service_lifecycle",
-    hdrs = [
-        "service_lifecycle.h",
-    ],
     deps = [
         "//src/mongo:base",
         "//src/mongo/db:service_context",
@@ -55,7 +46,7 @@ mongo_cc_library(
         "//src/mongo/db/rss:persistence_provider",
         "//src/mongo/db/rss/attached_storage:attached_persistence_provider",
     ] + select({
-        "//bazel/config:build_atlas_enabled": [
+        "//bazel/config:build_atlas_required_settings": [
             "//src/mongo/db/modules/atlas/src/disagg_storage:disaggregated_persistence_provider",
         ],
         "//conditions:default": [],
@@ -69,7 +60,7 @@ mongo_cc_library(
         "//src/mongo/db/rss:service_lifecycle",
         "//src/mongo/db/rss/attached_storage:attached_service_lifecycle",
     ] + select({
-        "//bazel/config:build_atlas_enabled": [
+        "//bazel/config:build_atlas_required_settings": [
             "//src/mongo/db/modules/atlas/src/disagg_storage:disaggregated_service_lifecycle",
         ],
         "//conditions:default": [],

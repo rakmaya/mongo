@@ -27,6 +27,12 @@
  *    it in the license file.
  */
 
+#include "mongo/base/string_data.h"
+#include "mongo/util/modules.h"
+
+#include <string>
+#include <variant>
+
 #pragma once
 namespace mongo::sbe::value {
 

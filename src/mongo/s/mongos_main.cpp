@@ -51,20 +51,15 @@
 #include "mongo/db/auth/user_cache_invalidator_job.h"
 #include "mongo/db/change_stream_options_manager.h"
 #include "mongo/db/client.h"
-#include "mongo/db/cluster_parameters/cluster_server_parameter_refresher.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/exec/scoped_timer.h"
 #include "mongo/db/extension/host/load_extension.h"
 #include "mongo/db/ftdc/ftdc_mongos.h"
-#include "mongo/db/global_catalog/catalog_cache/catalog_cache.h"
-#include "mongo/db/global_catalog/catalog_cache/config_server_catalog_cache_loader.h"
-#include "mongo/db/global_catalog/catalog_cache/config_server_catalog_cache_loader_impl.h"
 #include "mongo/db/global_catalog/ddl/sessions_collection_sharded.h"
 #include "mongo/db/global_catalog/sharding_catalog_client.h"
 #include "mongo/db/initialize_server_global_state.h"
 #include "mongo/db/keys_collection_client.h"
 #include "mongo/db/keys_collection_client_sharded.h"
-#include "mongo/db/local_catalog/shard_role_api/resource_yielders.h"
 #include "mongo/db/logical_time_validator.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/process_health/fault_manager.h"
@@ -72,6 +67,9 @@
 #include "mongo/db/query/search/mongot_options.h"
 #include "mongo/db/query/search/search_task_executors.h"
 #include "mongo/db/read_write_concern_defaults.h"
+#include "mongo/db/router_role/routing_cache/catalog_cache.h"
+#include "mongo/db/router_role/routing_cache/config_server_catalog_cache_loader.h"
+#include "mongo/db/router_role/routing_cache/config_server_catalog_cache_loader_impl.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/kill_sessions.h"
@@ -84,6 +82,7 @@
 #include "mongo/db/session/session.h"
 #include "mongo/db/session/session_catalog.h"
 #include "mongo/db/session/session_killer.h"
+#include "mongo/db/shard_role/resource_yielders.h"
 #include "mongo/db/sharding_environment/client/shard_factory.h"
 #include "mongo/db/sharding_environment/client/shard_remote.h"
 #include "mongo/db/sharding_environment/client/sharding_connection_hook.h"
@@ -94,6 +93,8 @@
 #include "mongo/db/sharding_environment/sharding_initialization.h"
 #include "mongo/db/sharding_environment/version_mongos.h"
 #include "mongo/db/startup_warnings_common.h"
+#include "mongo/db/stats/system_buckets_metrics.h"
+#include "mongo/db/topology/cluster_parameters/cluster_server_parameter_refresher.h"
 #include "mongo/db/topology/mongos_topology_coordinator.h"
 #include "mongo/db/topology/shard_registry.h"
 #include "mongo/db/topology/sharding_state.h"
@@ -541,6 +542,28 @@ void cleanupTask(const ShutdownTaskArgs& shutdownArgs) {
 #endif
 }
 
+void initializeCommandHooks(ServiceContext* service) {
+    class MongosCommandInvocationHooks final : public CommandInvocationHooks {
+    public:
+        void onBeforeRun(OperationContext* opCtx, CommandInvocation* invocation) override {
+            _transportHook.onBeforeRun(opCtx, invocation);
+            _systemBucketsHook.onBeforeRun(opCtx, invocation);
+        }
+
+        void onAfterRun(OperationContext* opCtx,
+                        CommandInvocation* invocation,
+                        rpc::ReplyBuilderInterface* response) override {
+            _transportHook.onAfterRun(opCtx, invocation, response);
+            _systemBucketsHook.onAfterRun(opCtx, invocation, response);
+        }
+
+        transport::IngressHandshakeMetricsCommandHooks _transportHook{};
+        SystemBucketsMetricsCommandHooks _systemBucketsHook{};
+    };
+
+    CommandInvocationHooks::set(service, std::make_unique<MongosCommandInvocationHooks>());
+}
+
 Status initializeSharding(
     OperationContext* opCtx,
     std::shared_ptr<ReplicaSetChangeNotifier::Listener>* replicaSetChangeListener,
@@ -699,6 +722,11 @@ ServiceContext::ConstructorActionRegisterer registerWireSpec{
     }};
 }  // namespace
 
+auto makeTransportLayer(ServiceContext* svcCtx) {
+    return transport::TransportLayerManagerImpl::make(
+        svcCtx, globalMongotParams.useGRPC, std::make_unique<ClientTransportObserverMongos>());
+}
+
 ExitCode runMongosServer(ServiceContext* serviceContext) {
     BSONObjBuilder startupTimeElapsedBuilder;
     BSONObjBuilder startupInfoBuilder;
@@ -746,38 +774,12 @@ ExitCode runMongosServer(ServiceContext* serviceContext) {
         ->setServiceEntryPoint(std::make_unique<ServiceEntryPointRouterRole>());
 
     {
-        const auto loadBalancerPort = load_balancer_support::getLoadBalancerPort();
-        if (loadBalancerPort && *loadBalancerPort == serverGlobalParams.port) {
-            LOGV2_ERROR(6067901,
-                        "Load balancer port must be different from the normal ingress port.",
-                        "port"_attr = serverGlobalParams.port);
-            quickExit(ExitCode::badOptions);
-        }
-
-        bool useEgressGRPC = false;
-        if (globalMongotParams.useGRPC) {
-#ifdef MONGO_CONFIG_GRPC
-            uassert(9925000,
-                    "Egress GRPC for search is not enabled",
-                    feature_flags::gEgressGrpcForSearch.isEnabled());
-            useEgressGRPC = true;
-#else
-            LOGV2_ERROR(
-                10049100,
-                "useGRPCForSearch is only supported on Linux platforms built with TLS support.");
-            quickExit(ExitCode::badOptions);
-#endif
-        }
-
         SectionScopedTimer scopedTimer(serviceContext->getFastClockSource(),
                                        TimedSectionId::setUpTransportLayer,
                                        &startupTimeElapsedBuilder);
-        auto tl = transport::TransportLayerManagerImpl::createWithConfig(
-            &serverGlobalParams,
-            serviceContext,
-            useEgressGRPC,
-            loadBalancerPort,
-            std::make_unique<ClientTransportObserverMongos>());
+
+        auto tl = makeTransportLayer(serviceContext);
+
         if (auto res = tl->setup(); !res.isOK()) {
             LOGV2_ERROR(22856, "Error setting up transport layer", "error"_attr = res);
             return ExitCode::netError;
@@ -855,8 +857,7 @@ ExitCode runMongosServer(ServiceContext* serviceContext) {
                       "error"_attr = redact(ex));
     }
 
-    CommandInvocationHooks::set(serviceContext,
-                                std::make_unique<transport::IngressHandshakeMetricsCommandHooks>());
+    initializeCommandHooks(serviceContext);
 
     // Must happen before FTDC, because Periodic Metadata Collustion calls getClusterParameter
     ClusterServerParameterRefresher::start(serviceContext, opCtx);

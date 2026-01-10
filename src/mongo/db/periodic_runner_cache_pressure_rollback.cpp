@@ -29,13 +29,13 @@
 #include "mongo/db/periodic_runner_cache_pressure_rollback.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/db/admission/execution_control_parameters_gen.h"
+#include "mongo/db/admission/execution_control/execution_control_parameters_gen.h"
 #include "mongo/db/client.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/kill_sessions_local.h"
 #include "mongo/db/session/session_catalog.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/stats/single_transaction_stats.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
@@ -63,7 +63,8 @@ using Argument =
     decltype(TransactionParticipant::observeCachePressureQueryPeriodMilliseconds)::Argument;
 
 bool underCachePressure(OperationContext* opCtx) {
-    auto ticketingSystem = admission::TicketingSystem::get(opCtx->getServiceContext());
+    auto ticketingSystem =
+        admission::execution_control::TicketingSystem::get(opCtx->getServiceContext());
     return opCtx->getServiceContext()->getStorageEngine()->underCachePressure(
         ticketingSystem->numOfTicketsUsed());
 }

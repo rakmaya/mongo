@@ -75,7 +75,7 @@ user credentials and roles. The authorization session is then used to check perm
 On a server with authentication enabled, all but a small handful of commands require clients to
 authenticate before performing any action. This typically occurs with a 1 to 3 round trip
 conversation using the `saslStart` and `saslContinue` commands, or though a single call to the
-`authenticate` command. See [SASL](#SASL) and [X.509](#X509) below for the details of these
+`authenticate` command. See [SASL](#SASL) and [X.509](../../util/net/README.md#X509) below for the details of these
 exchanges.
 
 ### SASL
@@ -92,7 +92,7 @@ does not, however, define where the user credentials can be stored. With some `S
 `PLAIN` for example, the credentials can be stored in the database itself or in `LDAP`.
 
 Before running authentication, the server initializes an
-[`AuthenticationSession`](https://github.com/mongodb/mongo/blob/master/src/mongo/db/auth/authentication_session.h)
+[`AuthenticationSession`](/src/mongo/db/auth/authentication_session.h)
 on the `Client`. This session persists information between authentications steps and is released
 when authentication concludes, either successfully or unsuccessfully.
 
@@ -119,7 +119,7 @@ encountered.
 
 To reduce connection overhead time, clients may begin and possibly complete their authentication
 exchange as part of the
-[`CmdHello`](<(https://github.com/mongodb/mongo/blob/r4.7.0/src/mongo/db/repl/replication_info.cpp#L234)>)
+[`CmdHello`](https://github.com/mongodb/mongo/blob/r4.7.0/src/mongo/db/repl/replication_info.cpp#L234)
 exchange. In this mode, the body of the `saslStart` or `authenticate` command used for
 authentication may be embedded into the `hello` command under the field `{speculativeAuthenticate:
 $bodyOfAuthCmd}`.
@@ -298,7 +298,7 @@ The only purpose of an arbiter is to participate in elections for replica set pr
 does not have a copy of data set, including system tables which contain user and role definitions,
 and therefore can not authenticate local users. It is possible to authenticate to arbiter using
 external authentication methods such as cluster authentication or
-[x.509 authentication](#x509atn) and acquire a role using [x.509 authorization](#x509azn).
+x.509 authentication and acquire a role using [x.509 authorization](#x509azn).
 
 It is also possible to connect to an arbiter with limited access using the
 [localhost auth bypass](#lhabp). If the localhost auth bypass is disabled using the
@@ -494,7 +494,7 @@ address `192.168.70.80` will satisfy (or not) the following individual rules.
 // Fails as the client source is in range, but the serverAddress is not.
 { clientSource: "172.16.0.0/12", serverAddress: "10.0.0.0/8" }
 
-// Succeeds as both addresses are in rage.
+// Succeeds as both addresses are in range.
 { clientSource: "172.16.70.0/25", serverAddress: "192.168.70.80" }
 
 // Succeeds as client address is in one of the allowed ranges.
@@ -608,8 +608,8 @@ A resource pattern is a combination of a [MatchType](action_type.idl) with a `Na
 | `kMatchNever`                          | _Unexpressable_                              | A base type only used internally to indicate that the privilege specified by the ResourcePattern can not match any real resource                              |
 | `kMatchClusterResource`                | `{ cluster : true }`                         | Commonly used with host and cluster management actions such as `ActionType::addShard`, `ActionType::setParameter`, or `ActionType::shutdown`.                 |
 | `kMatchAnyResource`                    | `{ anyResource: true }`                      | Matches all storage resources, even [non-normal namespaces](#normal-namespace) such as `db.system.views`.                                                     |
-| `kMatchAnyNormalResource`              | `{ db: '', collection: '' }`                 | Matches all [normal](#normal-namespace) storage resources. Used with [builtin role](builtin_roles.cpp) `readWriteAnyDatabase`.                                |
-| `kMatchDatabaseName`                   | `{ db: 'dbname', collection: '' }`           | Matches all [normal](#normal-namespace) storage resources for a specific named database. Used with [builtin role](builtin_roles.cpp) `readWrite`.             |
+| `kMatchAnyNormalResource`              | `{ db: '', collection: '' }`                 | Matches all [normal](#normal-namespace) storage resources. Used with [builtin role](builtin_roles.tpl.cpp) `readWriteAnyDatabase`.                            |
+| `kMatchDatabaseName`                   | `{ db: 'dbname', collection: '' }`           | Matches all [normal](#normal-namespace) storage resources for a specific named database. Used with [builtin role](builtin_roles.tpl.cpp) `readWrite`.         |
 | `kMatchCollectionName`                 | `{ db: '', collection: 'collname' }`         | Matches all storage resources, normal or not, which have the exact collection suffix '`collname`'. For example, to provide read-only access to `*.system.js`. |
 | `kMatchExactNamespace`                 | `{ db: 'dbname', collection: 'collname' }`   | Matches the exact namespace '`dbname`.`collname`'.                                                                                                            |
 | `kMatchAnySystemBucketResource`        | `{ db: '', system_buckets: '' }`             | Matches the namespace pattern `*.system.buckets.*`.                                                                                                           |
@@ -876,18 +876,18 @@ exceptions are `getMore` and `explain` since they inherit their checks from othe
 
 Refer to the following links for definitions of the Classes referenced in this document:
 
-| Class                            | File                                                                                                                                                  | Description                                                                                                                              |
-| -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| `ActionType`                     | [mongo/db/auth/action_type.h](https://github.com/mongodb/mongo/blob/r4.4.0/src/mongo/db/auth/action_type.h)                                           | High level categories of actions which may be performed against a given resource (e.g. `find`, `insert`, `update`, etc...)               |
-| `AuthenticationSession`          | [mongo/db/auth/authentication_session.h](https://github.com/mongodb/mongo/blob/master/src/mongo/db/auth/authentication_session.h)                     | Session object to persist Authentication state                                                                                           |
-| `AuthorizationContract`          | [mongo/db/auth/authorization_contract.h](https://github.com/mongodb/mongo/blob/r4.9.0-rc0/src/mongo/db/auth/authorization_contract.h)                 | Contract generated by IDL                                                                                                                |
-| `AuthorizationManager`           | [mongo/db/auth/authorization_manager.h](https://github.com/mongodb/mongo/blob/r4.4.0/src/mongo/db/auth/authorization_manager.h)                       | Interface to external state providers                                                                                                    |
-| `AuthorizationSession`           | [mongo/db/auth/authorization_session.h](https://github.com/mongodb/mongo/blob/r4.4.0/src/mongo/db/auth/authorization_session.h)                       | Representation of currently authenticated and authorized users on the `Client` connection                                                |
-| `AuthzManagerExternalStateLocal` | [.../authorization_baackend_local.h](https://github.com/mongodb/mongo/blob/master/src/mongo/db/auth/authorization_backend_local.h)                    | `Local` implementation of user/role provider                                                                                             |
-| `AuthzManagerExternalStateLDAP`  | [.../authorization_baackend_ldap.h](https://github.com/mongodb/mongo/blob/master/src/mongo/db/modules/enterprise/src/ldap/authorization_backend_ldap.h) | `LDAP` implementation of users/role provider                                                                                             |
-| `Client`                         | [mongo/db/client.h](https://github.com/mongodb/mongo/blob/r4.4.0/src/mongo/db/client.h)                                                               | An active client session, typically representing a remote driver or shell                                                                |
-| `Privilege`                      | [mongo/db/auth/privilege.h](https://github.com/mongodb/mongo/blob/r4.4.0/src/mongo/db/auth/privilege.h)                                               | A set of `ActionType`s permitted on a particular `resource'                                                                              |
-| `ResourcePattern`                | [mongo/db/auth/resource_pattern.h](https://github.com/mongodb/mongo/blob/r4.4.0/src/mongo/db/auth/resource_pattern.h)                                 | A reference to a namespace, db, collection, or cluster to apply a set of `ActionType` privileges to                                      |
-| `RoleName`                       | [mongo/db/auth/role_name.h](https://github.com/mongodb/mongo/blob/r4.4.0/src/mongo/db/auth/role_name.h)                                               | A typed tuple containing a named role on a particular database                                                                           |
-| `User`                           | [mongo/db/auth/user.h](https://github.com/mongodb/mongo/blob/r4.4.0/src/mongo/db/auth/user.h)                                                         | A representation of a authorization user, including all direct and subordinte roles and their privileges and authentication restrictions |
-| `UserName`                       | [mongo/db/auth/user_name.h](https://github.com/mongodb/mongo/blob/r4.4.0/src/mongo/db/auth/user_name.h)                                               | A typed tuple containing a named user on a particular database                                                                           |
+| Class                            | File                                                                                                       | Description                                                                                                                              |
+| -------------------------------- | ---------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `ActionType`                     | [mongo/db/auth/action_type.h](action_type.h)                                                               | High level categories of actions which may be performed against a given resource (e.g. `find`, `insert`, `update`, etc...)               |
+| `AuthenticationSession`          | [mongo/db/auth/authentication_session.h](/src/mongo/db/auth/authentication_session.h)                      | Session object to persist Authentication state                                                                                           |
+| `AuthorizationContract`          | [mongo/db/auth/authorization_contract.h](authorization_contract.h)                                         | Contract generated by IDL                                                                                                                |
+| `AuthorizationManager`           | [mongo/db/auth/authorization_manager.h](authorization_manager.h)                                           | Interface to external state providers                                                                                                    |
+| `AuthorizationSession`           | [mongo/db/auth/authorization_session.h](authorization_session.h)                                           | Representation of currently authenticated and authorized users on the `Client` connection                                                |
+| `AuthzManagerExternalStateLocal` | [mongo/db/auth/authorization_backend_local.h](/src/mongo/db/auth/authorization_backend_local.h)            | `Local` implementation of user/role provider                                                                                             |
+| `AuthzManagerExternalStateLDAP`  | [.../authorization_backend_ldap.h](/src/mongo/db/modules/enterprise/src/ldap/authorization_backend_ldap.h) | `LDAP` implementation of users/role provider                                                                                             |
+| `Client`                         | [mongo/db/client.h](/src/mongo/db/client.h)                                                                | An active client session, typically representing a remote driver or shell                                                                |
+| `Privilege`                      | [mongo/db/auth/privilege.h](privilege.h)                                                                   | A set of `ActionType`s permitted on a particular `resource'                                                                              |
+| `ResourcePattern`                | [mongo/db/auth/resource_pattern.h](resource_pattern.h)                                                     | A reference to a namespace, db, collection, or cluster to apply a set of `ActionType` privileges to                                      |
+| `RoleName`                       | [mongo/db/auth/role_name.h](role_name.h)                                                                   | A typed tuple containing a named role on a particular database                                                                           |
+| `User`                           | [mongo/db/auth/user.h](user.h)                                                                             | A representation of a authorization user, including all direct and subordinte roles and their privileges and authentication restrictions |
+| `UserName`                       | [mongo/db/auth/user_name.h](user_name.h)                                                                   | A typed tuple containing a named user on a particular database                                                                           |

@@ -51,7 +51,8 @@ variables:
       - func: "save code coverage data"
       - func: "save mongo coredumps"
       - func: "generate hang analyzer tasks"
-      - func: "save failed unittests"
+      - func: "attach bazel invocation text"
+      - func: "save failed tests"
       - func: "save bazel headers"
       - func: "save bazel jvm dump"
       - func: "save bazel exec logs"
@@ -67,9 +68,9 @@ variables:
             src/gcov-intermediate-files.tgz
             src/*.core src/*.mdmp src/*.core.gz src/*.mdmp.gz
             mongo-coredumps.json
-            src/dist-unittests/bin/*
-            src/dist-unittests/lib/*
-            mongo-unittests.tgz
+            src/dist-tests/bin/*
+            src/dist-tests/lib/*
+            mongo-tests.tgz
             src/debugger*.*
             src/mongo-hanganalyzer.tgz
             diskstats.tgz
@@ -137,24 +138,6 @@ tasks:
           target: >-
             //src/mongo/platform:visibility1_test
 
-  - name: bazel_archive_and_run_dist_test
-    tags: ["assigned_to_jira_team_devprod_build", "bazel_check", "auxiliary"]
-    depends_on:
-      - name: version_expansions_gen
-        variant: generate-tasks-for-version
-    exec_timeout_secs: 32400 # 9 hours
-    commands:
-      - func: "bazel compile"
-        vars:
-          targets: archive-dist-test
-          bazel_args: --config=opt --separate_debug=True
-      - func: "run tests"
-        vars:
-          suite: core
-          install_dir: bazel-bin/install/bin
-          resmoke_jobs_max: 4 # No cap on number of jobs.
-          exec_timeout_secs: 32400 # 9 hours
-
   - name: hydrate_bazel_profile_fastbuild
     tags:
       [
@@ -188,6 +171,7 @@ tasks:
     depends_on:
       - name: version_expansions_gen
         variant: generate-tasks-for-version
+    patchable: false
     commands:
       - func: "bazel compile"
         vars:
@@ -240,7 +224,6 @@ tasks:
       - func: "bazel compile"
         vars:
           targets: //src/...
-          # TODO(SERVER-99213): limit to --jobs 32 once fission is enabled by default in CI
           bazel_args: >-
             --config=opt
             --define GIT_COMMIT_HASH=nogitversion
@@ -343,6 +326,27 @@ tasks:
           bazel_args: --config=clang-tidy --mongo_toolchain_version=${clang_tidy_toolchain|v5} --keep_going
       - func: "generate clang-tidy report"
 
+  - name: run_symbol_checker
+    tags:
+      [
+        "assigned_to_jira_team_devprod_build",
+        "development_critical_single_variant",
+        "requires_large_host",
+      ]
+    exec_timeout_secs: 1800 # 30 mins
+    depends_on:
+      - name: version_expansions_gen
+        variant: generate-tasks-for-version
+      - name: archive_dist_test
+    commands:
+      - func: "do bazel setup"
+      - func: "enable run_for_symbol_check expansions"
+      - func: "bazel compile"
+        vars:
+          targets: //src/...
+          bazel_args: --config=evg --config=symbol-checker
+      - func: "generate symbol-check report"
+
   - name: run_bazel_compiledb
     tags:
       [
@@ -362,20 +366,6 @@ tasks:
       - func: bazel run
         vars:
           target: //evergreen:validate_compile_commands
-
-  - name: run_bazel_program_windows
-    tags: ["assigned_to_jira_team_devprod_build", "auxiliary", "bazel_check"]
-    depends_on:
-      - name: version_expansions_gen
-        variant: generate-tasks-for-version
-    commands:
-      - func: "bazel run"
-        vars:
-          target: >-
-            //src/mongo/platform:visibility1_test
-          # TODO DEVPROD-2508 remove dbg flags when compilation_mode is synced with build_mode automatically
-          args: >-
-            --compilation_mode=dbg
 
   - name: compile_upload_benchmarks
     tags: ["assigned_to_jira_team_devprod_build", "auxiliary"]
@@ -432,19 +422,6 @@ tasks:
           content_type: application/tar
           display_name: Benchmarks Debug
 
-  ## compile_all - build all bazel targets ##
-  - name: compile_all_future_git_tag_multiversion
-    tags: ["assigned_to_jira_team_devprod_build", "auxiliary"]
-    depends_on:
-      - name: version_expansions_future_git_tag_multiversion_gen
-    commands:
-      - func: "bazel compile"
-        vars:
-          targets: //src/...
-          bazel_args: >-
-            --config=evg
-          compiling_for_test: true
-
   - name: compile_all_but_not_unittests
     tags: ["assigned_to_jira_team_devprod_build", "auxiliary"]
     depends_on:
@@ -462,20 +439,6 @@ tasks:
             --linkopt=-s
           task_compile_flags: ${compile_all_but_not_unittests_flags|--linkopt=-s}
 
-  ## compile_unittests ##
-  - name: compile_unittests_future_git_tag_multiversion
-    tags: ["assigned_to_jira_team_devprod_build", "auxiliary"]
-    depends_on:
-      - name: version_expansions_future_git_tag_multiversion_gen
-    commands:
-      - func: "bazel compile"
-        vars:
-          targets: install-mongo_unittest
-          bazel_args: >-
-            --config=evg
-            --include_autogenerated_targets=True
-          compiling_for_test: true
-
   - name: compile_libraries_for_unittests
     tags: ["assigned_to_jira_team_devprod_build", "auxiliary"]
     depends_on:
@@ -492,31 +455,6 @@ tasks:
           bazel_args: >-
             --config=evg
             --build_tag_filters=mongo_library
-
-  ## run_unittests ##
-  - name: run_unittests_future_git_tag_multiversion
-    tags: ["assigned_to_jira_team_devprod_build", "auxiliary"]
-    depends_on:
-      - name: compile_unittests_future_git_tag_multiversion
-    commands:
-      - func: "f_expansions_write"
-      - func: "run diskstats"
-      - func: "f_expansions_write"
-      - func: "monitor process threads"
-      - func: "collect system resource info"
-      - func: "enable bazel test report creation"
-      - func: "f_expansions_write"
-      - func: "bazel test"
-        vars:
-          targets: //src/mongo/...
-          compiling_for_test: true
-          task_compile_flags: ${unittest_compile_flags}
-          test_timeout_sec: 600
-          bazel_args: >-
-            --config=evg
-            --include_autogenerated_targets=True
-            --test_tag_filters=mongo_unittest,-intermediate_debug
-            --build_tag_filters=mongo_unittest
 
   ##compile_and_archive_libfuzzertests - build libfuzzertests ##
   - name: compile_and_archive_libfuzzertests
@@ -546,8 +484,7 @@ tasks:
           display_name: "LibFuzzer Tests"
 
   ## compile_dbtest ##
-  - &compile_dbtest
-    name: compile_dbtest
+  - name: compile_dbtest
     tags: ["assigned_to_jira_team_devprod_build", "auxiliary"]
     depends_on:
       - name: archive_dist_test
@@ -558,14 +495,8 @@ tasks:
           bazel_args: >-
             --config=evg
 
-  - <<: *compile_dbtest
-    name: compile_dbtest_future_git_tag_multiversion
-    depends_on:
-      - name: version_expansions_future_git_tag_multiversion_gen
-
   ## run_dbtest ##
-  - &run_dbtest
-    name: run_dbtest
+  - name: run_dbtest
     tags: ["assigned_to_jira_team_devprod_build", "auxiliary", "bazel_check"]
     depends_on:
       - name: compile_dbtest
@@ -580,13 +511,7 @@ tasks:
           suite: dbtest
           install_dir: bazel-bin/install/bin
 
-  - <<: *run_dbtest
-    name: run_dbtest_future_git_tag_multiversion
-    depends_on:
-      - name: compile_dbtest_future_git_tag_multiversion
-
-  - &archive_dbtest
-    name: archive_dbtest
+  - name: archive_dbtest
     tags: ["assigned_to_jira_team_devprod_build", "auxiliary", "bazel_check"]
     depends_on:
       - name: compile_dbtest
@@ -608,11 +533,6 @@ tasks:
           content_type: application/tar
           display_name: dbtest binary - Execution ${execution}
           optional: true
-
-  - <<: *archive_dbtest
-    name: archive_dbtest_future_git_tag_multiversion
-    depends_on:
-      - name: compile_dbtest_future_git_tag_multiversion
 
   - name: compile_integration_test
     tags: ["assigned_to_jira_team_devprod_build", "auxiliary"]
@@ -1277,9 +1197,13 @@ tasks:
           content_type: application/tar
           display_name: gcc_pgo
           optional: true
+      - func: "f_expansions_write"
       - command: subprocess.exec
         params:
           binary: bash
+          include_expansions_in_env:
+            - MONGO_PR_BOT_APP_ID
+            - MONGO_PR_BOT_PRIVATE_KEY
           args:
             - "src/evergreen/run_python_script.sh"
             - "buildscripts/profile_data_pr.py"
@@ -1288,8 +1212,71 @@ tasks:
             - "https://mdb-build-public.s3.us-east-1.amazonaws.com/profiling_data/pgo/mongod_${revision}_${build_arch}_gcc_lto_pgo_${version}.tgz"
             - "${branch_name}"
             - "SERVER-110427-${revision}"
-            - "${MONGO_PR_BOT_APP_ID}"
-            - "${MONGO_PR_BOT_PRIVATE_KEY}"
+  - name: publish_crypt_packages
+    run_on: rhel8.7-small
+    tags: [
+        "assigned_to_jira_team_devprod_build",
+        "auxiliary",
+        "incompatible_aubsan",
+        "incompatible_community",
+        "incompatible_development_variant",
+        "incompatible_mac",
+        "incompatible_tsan",
+        "incompatible_windows",
+        #  "publish_crypt",
+        #  "release_critical",
+        #  "requires_compile_variant",
+      ]
+    # This should prevent this task from running in patch builds, where we
+    # don't want to publish packages.
+    patchable: false
+    stepback: false
+    disable: true # TODO(SERVER-114245) Remove this to re-enable the task
+    # Same dependencies as "push" below
+    depends_on:
+      - name: crypt_push
+      - name: crypt_lib_package
+    commands:
+      - command: manifest.load
+      - func: "git get project and add git tag"
+      - func: "get and apply version expansions"
+      - func: "f_expansions_write"
+      - func: "kill processes"
+      - func: "cleanup environment"
+      - func: "set up venv"
+      - func: "fetch packages"
+      - func: "f_expansions_write"
+      - func: "set up remote credentials"
+        vars:
+          aws_key_remote: ${repo_aws_key}
+          aws_secret_remote: ${repo_aws_secret}
+      - func: "set up notary client credentials"
+      - func: "f_expansions_write"
+      - command: subprocess.exec
+        params:
+          binary: bash
+          silent: true
+          args:
+            - "./src/evergreen/container_registry_login.sh"
+      - command: s3.get
+        params:
+          aws_key: ${aws_key}
+          aws_secret: ${aws_secret}
+          local_file: packages.tgz
+          remote_file: ${project}/${build_variant}/${revision}/artifacts/${build_id}-packages.tgz
+          bucket: mciuploads
+      - command: subprocess.exec
+        params:
+          binary: bash
+          env:
+            AWS_ACCESS_KEY_ID: ${upload_lock_access_key_id}
+            AWS_SECRET_ACCESS_KEY: ${upload_lock_secret_access_key}
+            UPLOAD_LOCK_IMAGE: ${upload_lock_image}
+            UPLOAD_BUCKET: ${upload_lock_bucket}
+            AWS_REGION: ${upload_lock_region}
+            EVERGREEN_TASK_ID: ${task_id}
+          args:
+            - "./src/evergreen/packages_crypt_publish.sh"
 
 ################################################
 #                 Task Groups                  #
@@ -1309,7 +1296,6 @@ task_groups:
     name: run_bazel_TG
     tasks:
       - run_bazel_program
-      - bazel_archive_and_run_dist_test
 
   # We want to run these sequentially to put less load on the cluster
   - <<: *compile_task_group_template
@@ -1333,16 +1319,6 @@ task_groups:
     max_hosts: -1
     tasks:
       - build_source_graph_index
-
-  - <<: *compile_bazel_task_group_template
-    name: compile_bazel_windows_TG
-    tasks:
-      - run_bazel_program_windows
-
-  - <<: *compile_bazel_task_group_template
-    name: compile_bazel_macos_TG
-    tasks:
-      - compile_dist_test_quick
 
   - <<: *compile_task_group_template
     name: compile_upload_benchmarks_TG
@@ -1391,12 +1367,6 @@ task_groups:
     tasks:
       - archive_dist_test_future_git_tag_multiversion
       - archive_dist_test_debug_future_git_tag_multiversion
-      - compile_unittests_future_git_tag_multiversion
-      - run_unittests_future_git_tag_multiversion
-      - compile_dbtest_future_git_tag_multiversion
-      - run_dbtest_future_git_tag_multiversion
-      - archive_dbtest_future_git_tag_multiversion
-      - compile_all_future_git_tag_multiversion
 
   - <<: *compile_task_group_template
     name: compile_test_and_package_serial_TG
@@ -1464,6 +1434,12 @@ task_groups:
       # TODO(SERVER-86426): Figure out a workable long-term solution to benchmark debug symbols
       # - compile_upload_benchmarks_debug
       - compile_all_but_not_unittests
+
+  - <<: *compile_task_group_template
+    name: run_unit_tests_no_rbe_incompatible_TG
+    max_hosts: 1
+    tasks:
+      - unit_tests
 
   - <<: *compile_task_group_template
     name: run_unit_tests_TG

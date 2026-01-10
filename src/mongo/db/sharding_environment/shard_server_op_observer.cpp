@@ -39,22 +39,21 @@
 #include "mongo/db/global_catalog/ddl/sharding_recovery_service.h"
 #include "mongo/db/global_catalog/type_shard_collection.h"
 #include "mongo/db/global_catalog/type_shard_identity.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
-#include "mongo/db/local_catalog/shard_role_catalog/collection_critical_section_document_gen.h"
-#include "mongo/db/local_catalog/shard_role_catalog/collection_metadata.h"
-#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_runtime.h"
-#include "mongo/db/local_catalog/shard_role_catalog/database_sharding_runtime.h"
-#include "mongo/db/local_catalog/shard_role_catalog/operation_sharding_state.h"
-#include "mongo/db/local_catalog/shard_role_catalog/shard_filtering_metadata_refresh.h"
-#include "mongo/db/local_catalog/shard_role_catalog/type_oplog_catalog_metadata_gen.h"
 #include "mongo/db/repl/member_state.h"
 #include "mongo/db/repl/replication_coordinator.h"
-#include "mongo/db/replica_set_endpoint_sharding_state.h"
 #include "mongo/db/s/balancer_stats_registry.h"
 #include "mongo/db/s/migration_source_manager.h"
 #include "mongo/db/s/range_deletion_task_gen.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/collection_critical_section_document_gen.h"
+#include "mongo/db/shard_role/shard_catalog/collection_metadata.h"
+#include "mongo/db/shard_role/shard_catalog/collection_sharding_runtime.h"
+#include "mongo/db/shard_role/shard_catalog/database_sharding_runtime.h"
+#include "mongo/db/shard_role/shard_catalog/operation_sharding_state.h"
+#include "mongo/db/shard_role/shard_catalog/shard_filtering_metadata_refresh.h"
+#include "mongo/db/shard_role/shard_catalog/type_oplog_catalog_metadata_gen.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/sharding_environment/sharding_initialization_mongod.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/tenant_id.h"
@@ -225,21 +224,6 @@ void ShardServerOpObserver::onInserts(OperationContext* opCtx,
                             }
                         });
                 }
-            }
-        }
-
-        if (replica_set_endpoint::isFeatureFlagEnabledIgnoreFCV() &&
-            serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer) &&
-            nss == NamespaceString::kConfigsvrShardsNamespace) {
-            // The feature flag check here needs to ignore the FCV since the
-            // ReplicaSetEndpointShardingState needs to be maintained even before the FCV is fully
-            // upgraded.
-            if (auto shardId = insertedDoc["_id"].str(); shardId == ShardId::kConfigServerId) {
-                shard_role_details::getRecoveryUnit(opCtx)->onCommit(
-                    [](OperationContext* opCtx, boost::optional<Timestamp>) {
-                        replica_set_endpoint::ReplicaSetEndpointShardingState::get(opCtx)
-                            ->setIsConfigShard(true);
-                    });
             }
         }
 
@@ -554,21 +538,6 @@ void ShardServerOpObserver::onDelete(OperationContext* opCtx,
         }
     }
 
-    if (replica_set_endpoint::isFeatureFlagEnabledIgnoreFCV() &&
-        serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer) &&
-        nss == NamespaceString::kConfigsvrShardsNamespace) {
-        // The feature flag check here needs to ignore the FCV since the
-        // ReplicaSetEndpointShardingState needs to be maintained even before the FCV is fully
-        // upgraded.
-        if (auto shardId = documentId["_id"].str(); shardId == ShardId::kConfigServerId) {
-            shard_role_details::getRecoveryUnit(opCtx)->onCommit([](OperationContext* opCtx,
-                                                                    boost::optional<Timestamp>) {
-                replica_set_endpoint::ReplicaSetEndpointShardingState::get(opCtx)->setIsConfigShard(
-                    false);
-            });
-        }
-    }
-
     if (nss == NamespaceString::kCollectionCriticalSectionsNamespace) {
         const auto& deletedDoc = documentId;
         const auto collCSDoc = CollectionCriticalSectionDocument::parse(
@@ -688,7 +657,7 @@ void ShardServerOpObserver::onCreateCollection(
     if (!opCtx->writesAreReplicated()) {
         // On secondaries node of sharded cluster we force the cleanup of the filtering metadata in
         // order to remove anything that was left from any previous collection instance. This could
-        // happen by first having an UNSHARDED version for a collection that didn't exist followed
+        // happen by first having an UNTRACKED version for a collection that didn't exist followed
         // by a movePrimary to the current shard.
         if (ShardingState::get(opCtx)->enabled()) {
             auto scopedCsr = CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(
@@ -699,13 +668,13 @@ void ShardServerOpObserver::onCreateCollection(
         return;
     }
 
-    // Collections which are always UNSHARDED have a fixed CSS, which never changes, so we don't
+    // Collections which are always UNTRACKED have a fixed CSS, which never changes, so we don't
     // need to do anything
     if (collectionName.isNamespaceAlwaysUntracked()) {
         return;
     }
 
-    // Temp collections are always UNSHARDED
+    // Temp collections are always UNTRACKED
     if (options.temp) {
         CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(opCtx, collectionName)
             ->setFilteringMetadata(opCtx, CollectionMetadata::UNTRACKED());

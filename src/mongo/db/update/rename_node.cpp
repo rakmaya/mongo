@@ -27,8 +27,9 @@
  *    it in the license file.
  */
 
-#include <boost/container/small_vector.hpp>
 // IWYU pragma: no_include "boost/intrusive/detail/iterator.hpp"
+#include "mongo/db/update/rename_node.h"
+
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
@@ -41,7 +42,6 @@
 #include "mongo/db/update/field_checker.h"
 #include "mongo/db/update/modifier_node.h"
 #include "mongo/db/update/path_support.h"
-#include "mongo/db/update/rename_node.h"
 #include "mongo/db/update/runtime_update_path.h"
 #include "mongo/db/update/unset_node.h"
 #include "mongo/db/update/update_executor.h"
@@ -88,7 +88,8 @@ public:
     void produceSerializationMap(
         FieldRef* currentPath,
         std::map<std::string, std::vector<std::pair<std::string, BSONObj>>>*
-            operatorOrientedUpdates) const final {}
+            operatorOrientedUpdates,
+        const SerializationOptions& opts) const final {}
 
     void acceptVisitor(UpdateNodeVisitor* visitor) final {
         visitor->visit(this);
@@ -118,7 +119,10 @@ private:
         return "$set";
     }
 
-    BSONObj operatorValue() const final {
+    BSONObj operatorValue(const SerializationOptions& opts) const final {
+        // Note that RenameNode::produceSerializationMap(...) does its own $rename operator
+        // serialization and does not take into account the serialization of this modifier node.
+        // Therefore, there is no additional serialization logic needed for this dummy operator.
         return BSON("" << _elemToSet.getValue());
     }
 

@@ -40,8 +40,6 @@
 #include "mongo/logv2/log.h"
 #include "mongo/util/assert_util.h"
 
-#include <variant>
-
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
@@ -71,7 +69,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> make(
                 std::move(nss),
                 yieldPolicy,
                 cachedPlanHash,
-                QueryPlanner::CostBasedRankerResult{},
+                QueryPlanner::PlanRankingResult{},
                 {} /* planStageQsnMap */,
                 {} /* cbrRejectedPlanStages */);
 }
@@ -98,7 +96,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> make(
                 std::move(nss),
                 yieldPolicy,
                 boost::none /* cachedPlanHash */,
-                QueryPlanner::CostBasedRankerResult{},
+                QueryPlanner::PlanRankingResult{},
                 {} /* planStageQsnMap */,
                 {} /* cbrRejectedPlanStages */);
 }
@@ -115,7 +113,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> make(
     NamespaceString nss,
     PlanYieldPolicy::YieldPolicy yieldPolicy,
     boost::optional<size_t> cachedPlanHash,
-    QueryPlanner::CostBasedRankerResult cbrResult,
+    QueryPlanner::PlanRankingResult planRankingResult,
     stage_builder::PlanStageToQsnMap planStageQsnMap,
     std::vector<std::unique_ptr<PlanStage>> cbrRejectedPlanStages) {
     try {
@@ -130,7 +128,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> make(
                                              std::move(nss),
                                              yieldPolicy,
                                              cachedPlanHash,
-                                             std::move(cbrResult),
+                                             std::move(planRankingResult),
                                              std::move(planStageQsnMap),
                                              std::move(cbrRejectedPlanStages));
         PlanExecutor::Deleter planDeleter(opCtx);
@@ -152,15 +150,17 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> make(
     std::unique_ptr<PlanYieldPolicySBE> yieldPolicy,
     bool planIsFromCache,
     boost::optional<size_t> cachedPlanHash,
+    bool usedJoinOpt,
     std::unique_ptr<RemoteCursorMap> remoteCursors,
     std::unique_ptr<RemoteExplainVector> remoteExplains,
     std::unique_ptr<MultiPlanStage> classicRuntimePlannerStage) {
     auto&& [rootStage, data] = root;
+    sbe::DebugPrintInfo debugPrintInfo{};
     LOGV2_DEBUG(4822860,
                 5,
                 "SBE plan",
                 "slots"_attr = redact(data.debugString()),
-                "stages"_attr = redact(sbe::DebugPrinter{}.print(*rootStage)));
+                "stages"_attr = redact(sbe::DebugPrinter{}.print(*rootStage, debugPrintInfo)));
 
     return {{new PlanExecutorSBE(opCtx,
                                  std::move(cq),
@@ -179,7 +179,8 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> make(
                                  std::move(remoteCursors),
                                  std::move(remoteExplains),
                                  std::move(classicRuntimePlannerStage),
-                                 collections),
+                                 collections,
+                                 usedJoinOpt),
              PlanExecutor::Deleter{opCtx}}};
 }
 
@@ -194,11 +195,12 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> make(
     std::unique_ptr<RemoteCursorMap> remoteCursors,
     std::unique_ptr<RemoteExplainVector> remoteExplains,
     boost::optional<size_t> cachedPlanHash) {
+    sbe::DebugPrintInfo debugPrintInfo{};
     LOGV2_DEBUG(4822861,
                 5,
                 "SBE plan",
                 "slots"_attr = redact(candidate.data.stageData.debugString()),
-                "stages"_attr = redact(sbe::DebugPrinter{}.print(*candidate.root)));
+                "stages"_attr = redact(sbe::DebugPrinter{}.print(*candidate.root, debugPrintInfo)));
 
     return {{new PlanExecutorSBE(opCtx,
                                  std::move(cq),

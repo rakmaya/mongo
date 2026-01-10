@@ -115,8 +115,7 @@ The FCV can be set using the `setFeatureCompatibilityVersion` admin command to o
 
 Each `mongod` release will support the following upgrade/downgrade paths:
 
-- Last-Continuous → Latest
-  - Note that we do not support downgrading to or from Last-Continuous.
+- Last-Continuous ←→ Latest
 - Last-LTS ←→ Latest
 - Last-LTS → Last-Continuous
   - This upgrade-only transition is only possible when requested by the [config server](https://docs.mongodb.com/manual/core/sharded-cluster-config-servers/).
@@ -186,11 +185,11 @@ for more information on how to add upgrade/downgrade code to the command.
 
     - First, we do any actions to prepare for upgrade/downgrade that must be taken before the global lock.
       For example, we cancel serverless migrations in this step.
-    - Then, the global lock is acquired in shared
-      mode and then released immediately. This creates a barrier and guarantees safety for operations
-      that acquire the global lock either in exclusive or intent exclusive mode. If these operations begin
-      and acquire the global lock prior to the FCV change, they will proceed in the context of the old
-      FCV, and will guarantee to finish before the FCV change takes place. For the operations that begin
+    - Then, the global lock is acquired in shared mode and then released immediately. This creates
+      a barrier and guarantees safety for operations that acquire the global lock either in
+      exclusive or intent exclusive mode. If these operations begin and acquire the global lock
+      prior to the FCV change, they may proceed in the context of the old FCV, but setFCV waits
+      for them to finish before proceeding to the metadata cleanup. For the operations that begin
       after the FCV change, they will see the updated FCV and behave accordingly. This also means that
       in order to make this barrier truly safe, **in any given operation, we should only check the
       feature flag/FCV after acquiring the appropriate locks**. See the [section about setFCV locks](#setfcv-locks)
@@ -237,6 +236,11 @@ for more information on how to add upgrade/downgrade code to the command.
     fields of the FCV document are deleted while the `version` field is updated to
     reflect the new upgraded or downgraded state. This update is also done using `writeConcern: majority`.
     The new in-memory FCV value will be updated to reflect the on-disk changes.
+
+    - After the transition, the global lock is again acquired in shared mode and then released immediately.
+      This creates a barrier for operations that acquire the global lock either in exclusive or intent exclusive mode,
+      and guarantees that we wait until operations that may run on the context of the old FCV to
+      finish before we proceed with the tasks that can only be done after the FCV is fully upgraded/downgraded.
 
     - Note that for an FCV upgrade, we do an extra step to run `_finalizeUpgrade` **after** updating
       the FCV document to fully upgraded. This is for any tasks that cannot be done until after the
@@ -370,22 +374,21 @@ There are three locks used in the setFCV command:
   - Other operations should [take this lock in shared mode](https://github.com/mongodb/mongo/blob/bd8a8d4d880577302c777ff961f359b03435126a/src/mongo/db/commands/feature_compatibility_version.cpp#L594-L599)
     if they want to ensure that the FCV state _does not change at all_ during the operation.
     See [example](https://github.com/mongodb/mongo/blob/bd8a8d4d880577302c777ff961f359b03435126a/src/mongo/db/s/config/sharding_catalog_manager_collection_operations.cpp#L489-L490)
-- [Global lock]
+- [Global lock](/src/mongo/db/shard_role/lock_manager/d_concurrency.h)
   - The setFCV command [takes this lock in S mode and then releases it immediately](https://github.com/mongodb/mongo/blob/418028cf4dcf416d5ab87552721ed3559bce5507/src/mongo/db/commands/set_feature_compatibility_version_command.cpp#L551-L557)
-    after we are in the upgrading/downgrading state,
-    but before we transition from the upgrading/downgrading state to the fully upgraded/downgraded
-    state.
+    shortly after the FCV transitions to a new value (either to the upgrading/downgrading state,
+    or to the fully upgrade/downgraded state).
   - The lock creates a barrier for operations taking the global IX or X locks.
   - This is to ensure that the FCV does not _fully_ transition between the upgraded and downgraded
     versions (or vice versa) during these other operations. This is because either:
-    _ The global IX/X locked operation will start after the FCV change, see the
-    upgrading/downgrading to the new FCV and act accordingly.
-    _ The global IX/X locked operation began prior to the FCV change. The operation will proceed
-    in the context of the old FCV, and will guarantee to finish before upgrade/downgrade
-    procedures begin right after this barrier
+    _ The global IX/X locked operation will start after the FCV change, see the new FCV and act
+    accordingly.
+    _ The global IX/X locked operation began prior to the FCV change. The operation may proceed
+    in the context of the old FCV, but setFCV waits for them to finish before upgrade/downgrade
+    metadata cleanup procedures begin right after this barrier.
   - This also means that in order to make this barrier truly safe, if we want to ensure that the
-    FCV does not change during our operation, **you must take the global IX or X lock first, and
-    then check the feature flag/FCV value after that point**
+    FCV can not go through multiple transitions during our operation, **you must take the global
+    IX or X lock first, and then check the feature flag/FCV value after that point**
 
 _Code spelunking starting points:_
 
@@ -742,8 +745,8 @@ team in #server-featureflags and add the Replication team as a reviewer to your 
     This is because before FCVs are upgraded on master, we will temporarily have two builds that
     have the same version (the newly cut branch and master). If the two builds differ on which
     feature flags are enabled, this will lead to test failures in certain multiversion suites.
-  - Project team should run a full patch build against all the ! builders to minimize the impact
-    on the Build Baron process.
+  - Project team should run a full "required" alias patch. Double check that all tasks for all build
+    variants prefixed with "!" are selected.
   - If there are downstream teams that will break when this flag is enabled then enabling the
     feature by default will need to wait until those teams have affirmed they have adapted their
     product.
@@ -868,11 +871,29 @@ A feature flag has the following properties:
       [SERVER-102169](https://jira.mongodb.org/browse/SERVER-102169) for further discussion.
   - If you enable this property, the feature flag description must contain the text
     '(Enable on transitional FCV): ' followed by a justification for why the use of the property is safe.
-- fcv_context_unaware: boolean
-  - Optional. Can only be specified for FCV-gated feature flags (`fcv_gated: true`). Default value is `false`.
-  - `true` for feature flags that have not yet been adapted to the new feature flag API introduced in SERVER-99351.
-    Those feature flags are compiled to a C++ type that allows checking them without considering Operation FCV.
-    Do not set this property on new flags.
+- check_against_fcv: (`operation_fcv_or_fcv_snapshot`|`operation_fcv_only`|`legacy_fcv_snapshot_only`)
+
+  - Optional. Can only be specified for FCV-gated feature flags (`fcv_gated: true`).
+
+    Specifies whether an [Operation FCV](#operation-fcv) (`VersionContext`), a snapshot of the
+    server FCV (`FCVSnapshot`), or either, can be used to check if the feature flag is enabled.
+    This supports gradual migration of feature flag checks to Operation FCV.
+
+    Each value generates a C++ type with a different signature for feature flag checks.
+    Default value is `operation_fcv_or_fcv_snapshot`.
+
+  - `operation_fcv_or_fcv_snapshot`: Allow checking the feature flag either against an Operation
+    FCV or an snapshot of the server FCV. The Operation FCV is used if present, but otherwise
+    it falls back to the server FCV.
+    - Checked as: `gFeatureFlagToaster.isEnabled(VersionContext, FCVSnapshot)`.
+  - `operation_fcv_only`: Only allow checking the feature flag only against Operation FCV.
+    If all users of this feature flag support Operation FCV, this can be used to enforce it,
+    as well as not having to manually acquire and pass in snapshots of the server FCV.
+    - Checked as: `gFeatureFlagToaster.isEnabled(VersionContext)`.
+  - `legacy_fcv_snapshot_only` for feature flags that have not yet been adapted to the new
+    feature flag API introduced in [SERVER-99351](https://jira.mongodb.org/browse/SERVER-99351).
+    Those feature flags can be checked without considering Operation FCV. Do not set on new flags.
+    - Checked as: `gFeatureFlagToaster.isEnabled(FCVSnapshot)`.
 
 To turn on a feature flag for testing when starting up a server, we would use the following command
 line (for the Toaster feature):
@@ -921,7 +942,7 @@ A feature whose behavior applies to a query can use the `IncrementalFeatureRollo
 to the query's `ExpressionContext` for this purpose.
 
 ```c++
-if (expCtx->getIfrContext().getSavedFlagValue(featureFlagSpork)) {
+if (expCtx->getIfrContext()->getSavedFlagValue(featureFlagSpork)) {
     // The feature flag is enabled. Implement the new behavior.
 } else {
     // The feature flag is disabled. Implement the backwards-compatible behavior.
@@ -1023,10 +1044,28 @@ enabled/disabled during that time, which would result in only part of the operat
 For more details see [SERVER-88965](https://jira.mongodb.org/browse/SERVER-88965) and its linked
 issues.
 
-This rule also applies to sharded operations, which span multiple `OperationContext` instances across different nodes.
-There is an ongoing effort to streamline this scenario through _operation FCV_, where, upon operation start,
-the FCV is snapshotted into a `VersionContext` decoration and used for all feature flag checks through its runtime.
-Currently, _operation FCV_ is only used by DDLs on a sharded cluster.
+### Operation FCV
+
+There is an ongoing effort to provide operations a stable view of FCV and FCV-gated feature flags.
+Instead of acquiring short-lived snapshots of the in-memory FCV (`FCVSnapshot`), a single snapshot
+(_Operation FCV_) is acquired and held in the `VersionContext` decoration of the `OperationContext`.
+
+Under this model, the rules for feature flag checks are simplified as follows:
+
+- Operations can check feature flags multiple times, obtaining the same result.
+- Operations can check feature flags during oplog application.
+  - The Operation FCV is replicated in the oplog, so secondaries apply the op using the same FCV
+    snapshot as the primary did ([SERVER-102965](https://jira.mongodb.org/browse/SERVER-102965)).
+- Local operations can check feature flags without holding the global lock, and reuse the result of
+  that check across multiple global lock acquisitions.
+  - setFCV waits for `OperationContext`s with an old Operation FCV to complete before cleaning up Server metadata
+    ([SERVER-111447](https://jira.mongodb.org/browse/SERVER-111447)).
+- For distributed operations, the result can be reused across multiple `OperationContext`s.
+  - setFCV waits for `ShardingDDLCoordinator`s with an old Operation FCV to complete before
+    the config server coordinates Server metadata cleanup ([SERVER-101537](https://jira.mongodb.org/browse/SERVER-101537)).
+
+Operation FCV is currently only used by DDLs on a sharded cluster (`ShardingDDLCoordinator`) and
+by some replica set DDLs (e.g. `create`), but it's intended to eventually extend to all operations.
 
 ### Feature Flag Gating in Tests
 
@@ -1089,7 +1128,7 @@ if (FeatureFlagUtil.isPresentAndEnabled(db, "Toaster")) {
 
 - If a feature flag needs to be disabled on an "all feature flags" build variant, you can add it
   to the escape hatch here: buildscripts/resmokeconfig/fully_disabled_feature_flags.yml
-  ([master branch link](https://github.com/mongodb/mongo/blob/master/buildscripts/resmokeconfig/fully_disabled_feature_flags.yml)).
+  ([master branch link](/buildscripts/resmokeconfig/fully_disabled_feature_flags.yml)).
 - It is not advisable to override the server parameter in the test (e.g. through the nodeOptions
   parameter of a ReplSetTest configuration) because this will make it inconvenient to control the
   feature flag through the CI configuration.
@@ -1111,7 +1150,7 @@ if (FeatureFlagUtil.isPresentAndEnabled(db, "Toaster")) {
   have any failures on the feature flag buildvariant which should be fixed first.
 
 - If you want to test upgrade/downgrade behavior for an FCV-gated feature flag, please refer to
-  [this test](https://github.com/mongodb/mongo/blob/master/jstests/multiVersion/genericBinVersion/example_fcv_upgrade_downgrade_test.js) as an example.
+  [this test](/jstests/multiVersion/genericBinVersion/example_fcv_upgrade_downgrade_test.js) as an example.
 
 # Overview of Multiversion and Upgrade/Downgrade Testing
 
@@ -1200,8 +1239,9 @@ on a higher binary version and crash, which would be caught by these types of su
 - To make sure all generic FCV references are
   indeed meant to exist across LTS binary versions, **_a comment containing “(Generic FCV reference):”
   is required within 10 lines before a generic FCV reference._**
-- If you want to ensure that the FCV will not change during your operation, you must take the global
-  IX or X lock first, and then check the feature flag/FCV value after that point.
+- Operations that check the FCV or FCV-gated feature flags must take the global IX or X lock before
+  doing so. This ensures that operation won't outlast a full upgrade/downgrade,
+  and that the operation serializes correctly with the metadata cleanup steps of setFCV.
 - Except when using a binary-compatible feature flag, an operation should not check a feature flag
   more than once, because the flag's state may change between checks.
 - Any projects/tickets that use and enable an FCV-gated feature flag **_must_** leave that feature flag in the

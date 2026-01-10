@@ -46,6 +46,11 @@ __bmd_checkpoint_pack_raw(WT_BLOCK_DISAGG *block_disagg, WT_SESSION_IMPL *sessio
         WT_RET(__wt_buf_init(session, &ckpt->raw, WT_BLOCK_CHECKPOINT_BUFFER));
         endp = ckpt->raw.mem;
         __wt_page_header_byteswap((void *)root_image->data);
+        /*
+         * In disaggregated storage, checkpoint cookie is the same as address cookie of the root
+         * page, and currently we rely on this assumption to discard older checkpoint root page when
+         * the checkpoint becomes redundant.
+         */
         WT_RET(__wti_block_disagg_write_internal(
           session, block_disagg, root_image, block_meta, &size, &checksum, true, true));
         __wt_page_header_byteswap((void *)root_image->data);
@@ -100,11 +105,11 @@ __wti_block_disagg_checkpoint(WT_BM *bm, WT_SESSION_IMPL *session, WT_ITEM *root
 }
 
 /*
- * __wti_block_disagg_checkpoint_resolve --
- *     Resolve the checkpoint.
+ * __block_disagg_checkpoint_resolve --
+ *     Resolve the checkpoint. Assumes that the relevant locks are already acquired.
  */
-int
-__wti_block_disagg_checkpoint_resolve(WT_BM *bm, WT_SESSION_IMPL *session, bool failed)
+static int
+__block_disagg_checkpoint_resolve(WT_BM *bm, WT_SESSION_IMPL *session, bool failed)
 {
     WT_BLOCK_DISAGG *block_disagg;
     WT_CONFIG_ITEM cval;
@@ -121,6 +126,13 @@ __wti_block_disagg_checkpoint_resolve(WT_BM *bm, WT_SESSION_IMPL *session, bool 
 
     md_cursor = NULL;
     md_key = NULL;
+
+    /*
+     * This requires schema lock to ensure that we capture a consistent snapshot of metadata entries
+     * related to the given shared table, e.g., the various file, colgroup, table, and layered
+     * entries.
+     */
+    WT_ASSERT_SPINLOCK_OWNED(session, &conn->schema_lock);
 
     if (failed)
         return (0);
@@ -141,6 +153,13 @@ __wti_block_disagg_checkpoint_resolve(WT_BM *bm, WT_SESSION_IMPL *session, bool 
      * of the shared metadata table in the system-level metadata (similar to the turtle file).
      */
     if (strcmp(block_disagg->name, WT_DISAGG_METADATA_FILE) == 0) {
+        /*
+         * Gather any updated key encryption information so it can be written into the shared
+         * metadata table.
+         */
+        if (conn->key_provider != NULL)
+            WT_ERR(__wt_disagg_put_crypt_helper(session));
+
         /* Get the config we want to print to the metadata file */
         WT_ERR(__wt_config_getones(session, md_value, "checkpoint", &cval));
         checkpoint_timestamp = conn->disaggregated_storage.cur_checkpoint_timestamp;
@@ -177,6 +196,18 @@ err:
     if (md_cursor != NULL)
         WT_TRET(__wt_metadata_cursor_release(session, &md_cursor));
 
+    return (ret);
+}
+
+/*
+ * __wti_block_disagg_checkpoint_resolve --
+ *     Resolve the checkpoint.
+ */
+int
+__wti_block_disagg_checkpoint_resolve(WT_BM *bm, WT_SESSION_IMPL *session, bool failed)
+{
+    WT_DECL_RET;
+    WT_WITH_SCHEMA_LOCK(session, ret = __block_disagg_checkpoint_resolve(bm, session, failed));
     return (ret);
 }
 

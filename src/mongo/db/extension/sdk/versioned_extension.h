@@ -49,8 +49,7 @@ struct VersionedExtensionGreaterComparator {
         const ::MongoExtensionAPIVersion versionB = b.version;
 
         // Sorts from highest version to lowest version.
-        return std::tie(versionA.major, versionA.minor, versionA.patch) >
-            std::tie(versionB.major, versionB.minor, versionB.patch);
+        return std::tie(versionA.major, versionA.minor) > std::tie(versionB.major, versionB.minor);
     }
 };
 
@@ -71,10 +70,10 @@ public:
     }
 
     VersionedExtension getVersionedExtension(
-        const ::MongoExtensionAPIVersionVector* hostVersions) const {
-        userAssert(10930201,
-                   "Cannot register duplicate versions of the same extension",
-                   !_hasDuplicateVersion);
+        std::span<const ::MongoExtensionAPIVersion> hostVersions) const {
+        sdk_uassert(10930201,
+                    "Cannot register duplicate versions of the same extension",
+                    !_hasDuplicateVersion);
 
         // Loop from highest version to lowest and return the first compatible extension.
         for (const auto& versionedExtension : _versionedExtensions) {
@@ -83,8 +82,8 @@ public:
             }
         }
 
-        userAsserted(10930202,
-                     "There are no registered extensions compatible with the host version");
+        sdk_uasserted(10930202,
+                      "There are no registered extensions compatible with the host version");
         return VersionedExtension{.version = MONGODB_EXTENSION_API_VERSION,
                                   .factoryFunc = ExtensionFactoryFunc()};
     }

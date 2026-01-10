@@ -35,11 +35,11 @@
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
 #include "mongo/db/client.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/rss/replicated_storage_service.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/recovery_unit_test_harness.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_cursor_helpers.h"
@@ -113,7 +113,9 @@ public:
         std::replace(ident.begin(), ident.end(), '.', '-');
         NamespaceString nss = NamespaceString::createNamespaceString_forTest(ns);
         auto& provider = rss::ReplicatedStorageService::get(opCtx).getPersistenceProvider();
-        const auto res = _engine->createRecordStore(provider, nss, ident, RecordStore::Options{});
+        auto& ru = *shard_role_details::getRecoveryUnit(opCtx);
+        const auto res =
+            _engine->createRecordStore(provider, ru, nss, ident, RecordStore::Options{});
         return _engine->getRecordStore(opCtx, nss, ident, RecordStore::Options{}, UUID::gen());
     }
 
@@ -481,7 +483,8 @@ TEST_F(WiredTigerRecoveryUnitTestFixture, SnapshotIsolation) {
 }
 
 
-DEATH_TEST_REGEX_F(WiredTigerRecoveryUnitTestFixture,
+using WiredTigerRecoveryUnitTestFixtureDeathTest = WiredTigerRecoveryUnitTestFixture;
+DEATH_TEST_REGEX_F(WiredTigerRecoveryUnitTestFixtureDeathTest,
                    PrepareTimestampOlderThanStableTimestamp,
                    "prepare timestamp .* is not newer than the stable timestamp") {
     ru1->beginUnitOfWork(clientAndCtx1.second->readOnly());
@@ -491,7 +494,7 @@ DEATH_TEST_REGEX_F(WiredTigerRecoveryUnitTestFixture,
     ru1->prepareUnitOfWork();
 }
 
-DEATH_TEST_REGEX_F(WiredTigerRecoveryUnitTestFixture,
+DEATH_TEST_REGEX_F(WiredTigerRecoveryUnitTestFixtureDeathTest,
                    CommitTimestampOlderThanPrepareTimestamp,
                    "commit timestamp .* is less than the prepare timestamp") {
     ru1->beginUnitOfWork(clientAndCtx1.second->readOnly());
@@ -1125,7 +1128,7 @@ TEST_F(WiredTigerRecoveryUnitTestFixture, CacheSizeEstimatesTransactionBytes) {
     ASSERT_EQ(ru1->getCacheDirtyBytes(), 0);
 }
 
-DEATH_TEST_REGEX_F(WiredTigerRecoveryUnitTestFixture,
+DEATH_TEST_REGEX_F(WiredTigerRecoveryUnitTestFixtureDeathTest,
                    MultiTimestampConstraints,
                    "Fatal assertion.*4877100") {
     Timestamp ts1(1, 1);
@@ -1163,7 +1166,7 @@ DEATH_TEST_REGEX_F(WiredTigerRecoveryUnitTestFixture,
     writeTest();
 }
 
-DEATH_TEST_F(WiredTigerRecoveryUnitTestFixture,
+DEATH_TEST_F(WiredTigerRecoveryUnitTestFixtureDeathTest,
              SetDurableTimestampTwice,
              "Trying to reset durable timestamp when it was already set.") {
     Timestamp ts1(3, 3);
@@ -1172,7 +1175,7 @@ DEATH_TEST_F(WiredTigerRecoveryUnitTestFixture,
     ru1->setDurableTimestamp(ts2);
 }
 
-DEATH_TEST_F(WiredTigerRecoveryUnitTestFixture,
+DEATH_TEST_F(WiredTigerRecoveryUnitTestFixtureDeathTest,
              RollbackHandlerAbortsOnTxnOpen,
              "rollback handler reopened transaction") {
     ASSERT(ru1->getSession());
@@ -1183,7 +1186,7 @@ DEATH_TEST_F(WiredTigerRecoveryUnitTestFixture,
     }
 }
 
-DEATH_TEST_F(WiredTigerRecoveryUnitTestFixture,
+DEATH_TEST_F(WiredTigerRecoveryUnitTestFixtureDeathTest,
              MayNotChangeReadSourceWhilePinned,
              "Cannot change ReadSource as it is pinned.") {
 

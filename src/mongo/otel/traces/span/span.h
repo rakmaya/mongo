@@ -33,12 +33,13 @@
 #include "mongo/config.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/otel/telemetry_context.h"
+#include "mongo/util/modules.h"
 
 #include <memory>
 
 namespace mongo {
 namespace otel {
-namespace traces {
+namespace MONGO_MOD_PUBLIC traces {
 
 #ifdef MONGO_CONFIG_OTEL
 
@@ -81,6 +82,14 @@ public:
      */
     static Span start(OperationContext* opCtx, const std::string& name, bool keepSpan = false);
 
+    /**
+     * Similar to `start`, but only starts and returns a Span if there is an existing Span in the
+     * provided `opCtx`'s TelemetryContext. If there is no existing Span, a no-op Span is returned.
+     */
+    static Span startIfExistingTraceParent(OperationContext* opCtx,
+                                           const std::string& name,
+                                           bool keepSpan = false);
+
     static std::shared_ptr<TelemetryContext> createTelemetryContext();
 
     ~Span();
@@ -94,6 +103,14 @@ public:
      * contain PII.
      */
     void setAttribute(StringData key, int value);
+
+    /**
+     * Caller should use `TRACING_SPAN_ATTR` instead of calling `setAttribute` directly.
+     *
+     * Adds a string attribute with `key` and `value` to this Span. This attribute MUST NOT
+     * contain PII.
+     */
+    void setAttribute(StringData key, StringData value);
 
     /**
      * Set the status associated with this Span. If the status's code is non-zero the OpenTelemetry
@@ -131,16 +148,25 @@ public:
         return Span{};
     }
 
+    static Span startIfExistingTraceParent(OperationContext* opCtx,
+                                           const std::string& name,
+                                           bool keepSpan = false) {
+        return Span{};
+    }
+
     static std::shared_ptr<TelemetryContext> createTelemetryContext() {
         return std::make_shared<TelemetryContext>();
     }
 
+    ~Span() {}
+
     void setAttribute(StringData, int) {}
+    void setAttribute(StringData, StringData) {}
     void setError(const Status&) {}
 };
 
 #endif
 
-}  // namespace traces
+}  // namespace MONGO_MOD_PUBLIC traces
 }  // namespace otel
 }  // namespace mongo

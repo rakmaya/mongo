@@ -38,6 +38,7 @@
 #include "mongo/logv2/log.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/str.h"
 #include "mongo/util/uuid.h"
 
@@ -52,6 +53,8 @@
 #include <boost/optional.hpp>
 #include <fmt/format.h>
 
+MONGO_MOD_PUBLIC;
+
 namespace mongo {
 
 class NamespaceString : private DatabaseName {
@@ -60,9 +63,9 @@ public:
     constexpr static size_t MaxUserNsCollectionLen = 255;
     constexpr static size_t MaxInternalNsCollectionLen = 511;
 
-    // The maximum namespace length of sharded collections is less than that of unsharded ones since
+    // The maximum namespace length of tracked collections is less than that of untracked ones since
     // the namespace of the cached chunks metadata, local to each shard, is composed by the
-    // namespace of the related sharded collection (i.e., config.cache.chunks.<ns>).
+    // namespace of the related tracked collection (i.e., config.cache.chunks.<ns>).
     constexpr static size_t MaxUserNsShardedCollectionLen =
         235;  // 255 - len(ChunkType::ShardNSPrefix)
 
@@ -170,31 +173,32 @@ public:
      *
      * MUST only be used for tests.
      */
-    static NamespaceString createNamespaceString_forTest(StringData ns) {
+    MONGO_MOD_PUBLIC static NamespaceString createNamespaceString_forTest(StringData ns) {
         return NamespaceString(boost::none, ns);
     }
 
-    static NamespaceString createNamespaceString_forTest(const DatabaseName& dbName) {
+    MONGO_MOD_PUBLIC static NamespaceString createNamespaceString_forTest(
+        const DatabaseName& dbName) {
         return NamespaceString(dbName);
     }
 
-    static NamespaceString createNamespaceString_forTest(StringData db, StringData coll) {
+    MONGO_MOD_PUBLIC static NamespaceString createNamespaceString_forTest(StringData db,
+                                                                          StringData coll) {
         return NamespaceString(boost::none, db, coll);
     }
 
-    static NamespaceString createNamespaceString_forTest(const DatabaseName& dbName,
-                                                         StringData coll) {
+    MONGO_MOD_PUBLIC static NamespaceString createNamespaceString_forTest(
+        const DatabaseName& dbName, StringData coll) {
         return NamespaceString(dbName, coll);
     }
 
-    static NamespaceString createNamespaceString_forTest(const boost::optional<TenantId>& tenantId,
-                                                         StringData ns) {
+    MONGO_MOD_PUBLIC static NamespaceString createNamespaceString_forTest(
+        const boost::optional<TenantId>& tenantId, StringData ns) {
         return NamespaceString(tenantId, ns);
     }
 
-    static NamespaceString createNamespaceString_forTest(const boost::optional<TenantId>& tenantId,
-                                                         StringData db,
-                                                         StringData coll) {
+    MONGO_MOD_PUBLIC static NamespaceString createNamespaceString_forTest(
+        const boost::optional<TenantId>& tenantId, StringData db, StringData coll) {
         return NamespaceString(tenantId, db, coll);
     }
 
@@ -303,7 +307,7 @@ public:
     /**
      * This function must only be used in unit tests.
      */
-    StringData db_forTest() const MONGO_COMPILER_LIFETIME_BOUND {
+    MONGO_MOD_PUBLIC StringData db_forTest() const MONGO_COMPILER_LIFETIME_BOUND {
         return db_deprecated();
     }
 
@@ -325,7 +329,7 @@ public:
         return ConstDataRange(nss.data(), nss.size());
     }
 
-    StringData ns_forTest() const MONGO_COMPILER_LIFETIME_BOUND {
+    MONGO_MOD_PUBLIC StringData ns_forTest() const MONGO_COMPILER_LIFETIME_BOUND {
         return ns();
     }
 
@@ -334,7 +338,7 @@ public:
      *
      * MUST only be used for tests.
      */
-    std::string toString_forTest() const {
+    MONGO_MOD_PUBLIC std::string toString_forTest() const {
         return toString();
     }
 
@@ -356,7 +360,7 @@ public:
      *
      * MUST only be used for tests.
      */
-    std::string toStringWithTenantId_forTest() const {
+    MONGO_MOD_PUBLIC std::string toStringWithTenantId_forTest() const {
         return toStringWithTenantId();
     }
 
@@ -795,6 +799,8 @@ private:
     static constexpr uint8_t kDatabaseNameOffsetEndMask = 0x7F;
 };
 
+using NamespaceHashSet = absl::flat_hash_set<NamespaceString>;
+
 /**
  * This class is intended to be used by commands which can accept either a collection name or
  * database + collection UUID. It will never be initialized with both.
@@ -945,7 +951,7 @@ inline bool NamespaceString::validCollectionName(StringData coll) {
     return true;
 }
 
-inline std::string stringify_forTest(const NamespaceString& nss) {
+MONGO_MOD_PUBLIC inline std::string stringify_forTest(const NamespaceString& nss) {
     return toStringForLogging(nss);
 }
 

@@ -32,6 +32,7 @@
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/json.h"
+#include "mongo/db/exec/agg/document_source_to_stage_registry.h"
 #include "mongo/db/exec/agg/mock_stage.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/document_value_test_util.h"
@@ -39,6 +40,7 @@
 #include "mongo/db/pipeline/aggregation_context_fixture.h"
 #include "mongo/db/pipeline/document_source_group.h"
 #include "mongo/db/pipeline/document_source_sort.h"
+#include "mongo/db/pipeline/optimization/optimize.h"
 #include "mongo/db/query/explain_options.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
@@ -48,7 +50,6 @@
 #include <memory>
 #include <vector>
 
-#include "src/mongo/db/exec/agg/document_source_to_stage_registry.h"
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
@@ -69,12 +70,7 @@ public:
         ASSERT_EQUALS(result.size(), 2UL);
 
         if (toOptimize) {
-            std::transform(result.begin(),
-                           result.end(),
-                           result.begin(),
-                           [](intrusive_ptr<DocumentSource> d) -> intrusive_ptr<DocumentSource> {
-                               return (*d).optimize();
-                           });
+            pipeline_optimization::optimizeEachStage(*getExpCtx(), &result);
         }
 
         const auto* groupStage = dynamic_cast<DocumentSourceGroup*>(result.front().get());
@@ -137,14 +133,7 @@ TEST_F(BucketReturnsGroupAndSort,
     result_opt.resize(result.size());
 
     ASSERT_THROWS_CODE(
-        std::transform(result.begin(),
-                       result.end(),
-                       result_opt.begin(),
-                       [](intrusive_ptr<DocumentSource> d) -> intrusive_ptr<DocumentSource> {
-                           return (*d).optimize();
-                       }),
-        AssertionException,
-        40069);
+        pipeline_optimization::optimizeEachStage(*getExpCtx(), &result), AssertionException, 40069);
 }
 
 TEST_F(BucketReturnsGroupAndSort, BucketWithAllConstantsIsCorrectlyOptimizedAfterSwitch) {

@@ -14,13 +14,10 @@ mongo_cc_library(
     srcs = [
         "aead_encryption.cpp",
     ],
-    hdrs = [
-        "aead_encryption.h",
-    ],
     deps = [
         ":fle_fields",
         ":sha_block",
-        ":symmetric_crypto",  # TODO(SERVER-93876): Remove.
+        ":symmetric_crypto",
     ],
 )
 
@@ -43,13 +40,9 @@ mongo_cc_library(
         "encryption_fields_validation.cpp",
         "fle_numeric.cpp",
     ],
-    hdrs = [
-        "encryption_fields_validation.h",
-        "fle_numeric.h",
-    ],
     deps = [
-        "//src/mongo/db:common",  # TODO(SERVER-93876): Remove.
-        "//src/mongo/db:server_base",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/db:common",
+        "//src/mongo/db:server_base",
         "//src/mongo/db:server_feature_flags",
         "//src/mongo/db/pipeline:value_idl",
     ],
@@ -61,13 +54,10 @@ mongo_cc_library(
         "fle_field_schema_gen",
         "fle_fields_util.cpp",
     ],
-    hdrs = [
-        "fle_fields_util.h",
-    ],
     deps = [
         ":encrypted_field_config",
         ":fle_tokens",
-        "//src/mongo/db:server_base",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/db:server_base",
     ],
 )
 
@@ -78,15 +68,6 @@ mongo_cc_library(
         "libbsonvalue.cpp",
         "mongocryptbuffer.cpp",
         "mongocryptstatus.cpp",
-    ],
-    hdrs = [
-        "fle_util.h",
-        "libbsonvalue.h",
-        "mongocrypt_definitions.h",
-        "mongocryptbuffer.h",
-        "mongocryptstatus.h",
-        "//src/mongo/base:data_type_validated.h",  # Validated<BSONObj>
-        "//src/mongo/rpc:object_check.h",  # Validated<BSONObj>
     ],
     local_defines = [
         "MLIB_USER",
@@ -109,38 +90,29 @@ mongo_cc_library(
         "fle_stats_gen",
         "fle_tags.cpp",
     ],
-    hdrs = [
-        "encryption_fields_util.h",
-        "fle_crypto.h",
-        "fle_crypto_predicate.h",
-        "fle_crypto_types.h",
-        "fle_stats.h",
-        "fle_tags.h",
-    ],
     local_defines = [
         "MLIB_USER",
     ],
     deps = [
-        # TODO(SERVER-93876): Remove many of these.
+        ":aead_encryption",
+        ":encrypted_field_config",
+        ":fle_fields",
+        ":fle_tokens",
+        ":mongocryptutil",
+        ":sha_block",
         "//src/mongo/base:secure_allocator",
         "//src/mongo/bson/util:bson_extract",
-        "//src/mongo/db/commands/server_status:server_status_core",
-        "//src/mongo/db/exec/document_value",
-        "//src/mongo/db/query:query_knobs",
         "//src/mongo/db:common",
         "//src/mongo/db:server_base",
         "//src/mongo/db:server_feature_flags",
         "//src/mongo/db:wire_version",
-        "//src/mongo/idl:cluster_server_parameter",
+        "//src/mongo/db/commands/server_status:server_status_core",
+        "//src/mongo/db/exec/document_value",
+        "//src/mongo/db/query:query_knobs",
+        "//src/mongo/db/topology/cluster_parameters:cluster_server_parameter",
         "//src/mongo/shell:kms_idl",
         "//src/mongo/util:testing_options",
         "//src/third_party/libmongocrypt:mongocrypt",
-        ":aead_encryption",
-        ":encrypted_field_config",
-        ":fle_tokens",
-        ":fle_fields",
-        ":mongocryptutil",
-        ":sha_block",
     ],
 )
 
@@ -148,7 +120,7 @@ idl_generator(
     name = "fle_options_gen",
     src = "fle_options.idl",
     deps = [
-        "//src/mongo/db/cluster_parameters:cluster_server_parameter_gen",
+        "//src/mongo/db/topology/cluster_parameters:cluster_server_parameter_gen",
     ],
 )
 
@@ -177,11 +149,6 @@ mongo_cc_library(
     srcs = [
         "fle_tokens.cpp",
         ":fle_tokens_gen",
-    ],
-    hdrs = [
-        "fle_key_types.h",
-        "fle_tokens.h",
-        "//src/mongo:core_headers",
     ],
     local_defines = [
         "MLIB_USER",
@@ -240,11 +207,6 @@ mongo_cc_library(
     srcs = [
         "sha1_block.cpp",
     ],
-    hdrs = [
-        "hash_block.h",
-        "sha1_block.h",
-        "//src/mongo:core_headers",
-    ],
     deps = [
         "//src/mongo:base",
         "//src/mongo/util:secure_compare_memory",
@@ -255,11 +217,6 @@ mongo_cc_library(
     name = "sha256_block",
     srcs = [
         "sha256_block.cpp",
-    ],
-    hdrs = [
-        "hash_block.h",
-        "sha256_block.h",
-        "//src/mongo:core_headers",
     ],
     deps = [
         "//src/mongo:base",
@@ -287,6 +244,7 @@ mongo_cc_library(
     hdrs = [
         "sha512_block.h",
     ],
+    auto_header = False,
     local_defines = select({
         "//bazel/config:mongo_crypto_tom": ["LTC_NO_PROTOTYPES"],
         "//conditions:default": [],
@@ -314,7 +272,8 @@ mongo_cc_library(
     srcs = [
         "symmetric_crypto.cpp",
         "symmetric_key.cpp",
-    ] + select({
+    ],
+    srcs_select = [{
         "//bazel/config:mongo_crypto_{}".format(mongo_crypto): ["symmetric_crypto_{}.cpp".format(mongo_crypto)]
         for mongo_crypto in [
             "windows",
@@ -324,12 +283,7 @@ mongo_cc_library(
         ]
     } | {
         "//conditions:default": [],
-    }),
-    hdrs = [
-        "block_packer.h",
-        "symmetric_crypto.h",
-        "symmetric_key.h",
-    ],
+    }],
     deps = [
         "//src/mongo/base:secure_allocator",
         "//src/mongo/util:secure_zero_memory",
@@ -352,7 +306,8 @@ mongo_cc_library(
         "jwks_fetcher_impl.cpp",
         "jws_validated_token.cpp",
         ":jwt_parameters_gen",
-    ] + select({
+    ],
+    srcs_select = [{
         "//bazel/config:ssl_provider_{}".format(provider): [
             "jws_validator_{}.cpp".format(provider),
         ]
@@ -362,14 +317,7 @@ mongo_cc_library(
             "windows",
             "none",
         ]
-    }),
-    hdrs = [
-        "jwk_manager.h",
-        "jwks_fetcher.h",
-        "jwks_fetcher_impl.h",
-        "jws_validated_token.h",
-        "jws_validator.h",
-    ],
+    }],
     deps = [
         ":jwt_types",
         "//src/mongo:base",
@@ -383,12 +331,18 @@ mongo_cc_library(
 mongo_cc_library(
     name = "jwk_manager_test_framework",
     srcs = [],
-    hdrs = [
-        "jwk_manager_test_framework.h",
-        "jwks_fetcher_mock.h",
+    deps = [
+    ],
+)
+
+mongo_cc_library(
+    name = "fle_crypto_test_utils",
+    srcs = [
+        "fle_crypto_test_utils.cpp",
     ],
     deps = [
-        "//src/mongo/idl:server_parameter_test_controller",
+        ":fle_crypto",
+        "//src/mongo/db/query/write_ops",
     ],
 )
 
@@ -410,27 +364,17 @@ mongo_cc_unit_test(
         "sha256_block_test.cpp",
         "sha512_block_test.cpp",
         "symmetric_crypto_test.cpp",
-    ] + select({
+    ],
+    srcs_select = [{
         "//bazel/config:mongo_crypto_openssl": ["jwt_test.cpp"],
         "//conditions:default": [],
-    }),
-    private_hdrs = [
-        "//src/mongo/crypto/test_vectors:edges_decimal128.cstruct.h",
-        "//src/mongo/crypto/test_vectors:edges_double.cstruct.h",
-        "//src/mongo/crypto/test_vectors:edges_int32.cstruct.h",
-        "//src/mongo/crypto/test_vectors:edges_int64.cstruct.h",
-        "//src/mongo/crypto/test_vectors:mincover_decimal128.cstruct.h",
-        "//src/mongo/crypto/test_vectors:mincover_decimal128_precision.cstruct.h",
-        "//src/mongo/crypto/test_vectors:mincover_double.cstruct.h",
-        "//src/mongo/crypto/test_vectors:mincover_double_precision.cstruct.h",
-        "//src/mongo/crypto/test_vectors:mincover_int32.cstruct.h",
-        "//src/mongo/crypto/test_vectors:mincover_int64.cstruct.h",
-    ],
+    }],
     tags = ["mongo_unittest_eighth_group"],
     deps = [
         ":aead_encryption",
         ":encrypted_field_config",
         ":fle_crypto",
+        ":fle_crypto_test_utils",
         ":fle_fields",
         ":jwk_manager_test_framework",
         ":jwt",
@@ -438,8 +382,8 @@ mongo_cc_unit_test(
         ":sha_block",
         "//src/mongo:base",
         "//src/mongo/base:secure_allocator",
-        "//src/mongo/db:service_context_non_d",
         "//src/mongo/db:service_context_test_fixture",
+        "//src/mongo/db/shard_role:service_context_non_d",
         "//src/mongo/shell:kms_idl",
         "//src/mongo/util:clock_source_mock",
         "//src/mongo/util:testing_options",
@@ -454,7 +398,6 @@ mongo_cc_unit_test(
         "jws_validated_token_test.cpp",
         "jws_validator_test.cpp",
     ],
-    private_hdrs = [":jwks_fetcher_mock.h"],
     tags = ["mongo_unittest_fourth_group"],
     target_compatible_with = select({
         "//bazel/config:mongo_crypto_openssl": [],

@@ -43,11 +43,11 @@
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/bson/util/builder_fwd.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/record_id_helpers.h"
 #include "mongo/db/server_recovery.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/collection_truncate_markers.h"
 #include "mongo/db/storage/damage_vector.h"
 #include "mongo/db/storage/duplicate_key_error_info.h"
@@ -132,8 +132,9 @@ void checkOplogFormatVersion(WiredTigerRecoveryUnit& ru, const std::string& uri)
 }
 
 void appendNumericStats(WiredTigerSession& s, const std::string& uri, BSONObjBuilder& bob) {
-    Status status =
-        WiredTigerUtil::exportTableToBSON(s, "statistics:" + uri, "statistics=(fast)", bob);
+    std::stringstream ss;
+    ss << "statistics=(" << wiredTigerGlobalOptions.statisticsSetting << ")";
+    Status status = WiredTigerUtil::exportTableToBSON(s, "statistics:" + uri, ss.str(), bob);
     if (!status.isOK()) {
         bob.append("error", "unable to retrieve statistics");
         bob.append("code", static_cast<int>(status.code()));
@@ -230,9 +231,7 @@ std::string WiredTigerRecordStore::generateCreateString(
     // override values in the prefix, but not values in the suffix.
     str::stream ss;
     ss << "type=file,";
-    // Setting this larger than 10m can hurt latencies and throughput degradation if this
-    // is the oplog.  See SERVER-16247
-    ss << "memory_page_max=10m,";
+    ss << "memory_page_max=" << wtTableConfig.memoryPageMax << ",";
     // Choose a higher split percent, since most usage is append only. Allow some space
     // for workloads where updates increase the size of documents.
     ss << "split_pct=90,";
@@ -513,7 +512,13 @@ StatusWith<int64_t> WiredTigerRecordStore::wtCompact(OperationContext* opCtx,
         return Status(ErrorCodes::Interrupted,
                       str::stream() << "Compaction interrupted on " << getURI());
     }
-    invariantWTOK(ret, *s);
+
+    if (ret == ENOENT) {
+        return Status(ErrorCodes::NamespaceNotFound,
+                      str::stream() << "Can't compact missing URI " << uri);
+    }
+
+    invariantWTOK(ret, *s, uri);
 
     return options.dryRun ? WiredTigerUtil::getIdentCompactRewrittenExpectedSize(*s, uri) : 0;
 }
@@ -884,12 +889,14 @@ bool WiredTigerRecordStore::updateWithDamagesSupported() const {
     return !_forceUpdateWithFullDocument;
 }
 
-StatusWith<RecordData> WiredTigerRecordStore::_updateWithDamages(OperationContext* opCtx,
-                                                                 RecoveryUnit& ru,
-                                                                 const RecordId& id,
-                                                                 const RecordData& oldRec,
-                                                                 const char* damageSource,
-                                                                 const DamageVector& damages) {
+StatusWith<RecordData> WiredTigerRecordStore::_updateWithDamages(
+    OperationContext* opCtx,
+    RecoveryUnit& ru,
+    const RecordId& id,
+    const RecordData& oldRec,
+    const char* damageSource,
+    const DamageVector& damages,
+    const SeekableRecordCursor* cursor) {
     const int nentries = damages.size();
     DamageVector::const_iterator where = damages.begin();
     const DamageVector::const_iterator end = damages.cend();
@@ -903,14 +910,23 @@ StatusWith<RecordData> WiredTigerRecordStore::_updateWithDamages(OperationContex
 
     auto& wtRu = WiredTigerRecoveryUnit::get(ru);
 
-    auto cursorParams = getWiredTigerCursorParams(wtRu, tableId(), /*allowOverwrite=*/true);
-    WiredTigerCursor curwrap(std::move(cursorParams), getURI(), *wtRu.getSession());
-
-    wtRu.assertInActiveTxn();
-    WT_CURSOR* c = curwrap.get();
-    invariant(c);
+    WT_CURSOR* c = nullptr;
+    boost::optional<WiredTigerCursor> curwrap;
     CursorKey key = makeCursorKey(id, keyFormat());
-    setKey(c, &key);
+    if (!cursor) {
+        auto cursorParams = getWiredTigerCursorParams(wtRu, tableId(), /*allowOverwrite=*/true);
+        curwrap.emplace(std::move(cursorParams), getURI(), *wtRu.getSession());
+        wtRu.assertInActiveTxn();
+        c = curwrap->get();
+        setKey(c, &key);
+    } else {
+        // Make sure the cursor is already positioned.
+        const WiredTigerRecordStoreCursor* wtC =
+            reinterpret_cast<const WiredTigerRecordStoreCursor*>(cursor);
+        c = wtC->get();
+        tassert(10522601, "expected nonnull underlying cursor", c);
+        tassert(10522602, "expected cursor to be positioned", getKey(c, keyFormat()) == id);
+    }
 
     // The test harness calls us with empty damage vectors which WiredTiger doesn't allow.
     if (nentries == 0)
@@ -1223,8 +1239,8 @@ RecordId WiredTigerRecordStore::getLargestKey(OperationContext* opCtx, RecoveryU
                         err_msg));
     } else if (ret != WT_NOTFOUND) {
         if (ret == ENOTSUP) {
-            auto creationMetadata =
-                WiredTigerUtil::getMetadataCreate(sessRaii, getURI()).getValue();
+            auto res = WiredTigerUtil::getMetadataCreate(sessRaii, getURI());
+            const std::string& creationMetadata = res.getValue();
             if (creationMetadata.find("lsm=") != std::string::npos) {
                 LOGV2_FATAL(
                     6627200,
@@ -1297,20 +1313,8 @@ void WiredTigerRecordStore::_changeNumRecordsAndDataSize(RecoveryUnit& ru,
     updateAndStoreSizeInfo(numRecordDiff, dataSizeDiff);
 }
 
-void WiredTigerRecordStore::setNumRecords(long long numRecords) {
+void WiredTigerRecordStore::setSize(long long numRecords, long long dataSize) {
     _sizeInfo->numRecords.store(std::max(numRecords, 0ll));
-
-    if (!_sizeStorer) {
-        return;
-    }
-
-    // Flush the updated number of records to disk immediately.
-    _sizeStorer->store(getURI(), _sizeInfo);
-    bool syncToDisk = true;
-    _sizeStorer->flush(syncToDisk);
-}
-
-void WiredTigerRecordStore::setDataSize(long long dataSize) {
     _sizeInfo->dataSize.store(std::max(dataSize, 0ll));
 
     if (!_sizeStorer) {

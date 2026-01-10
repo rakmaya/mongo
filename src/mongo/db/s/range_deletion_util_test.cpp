@@ -37,12 +37,6 @@
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/global_catalog/chunk_manager.h"
 #include "mongo/db/global_catalog/type_collection_common_types_gen.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/create_collection.h"
-#include "mongo/db/local_catalog/shard_role_catalog/collection_metadata.h"
-#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_runtime.h"
-#include "mongo/db/local_catalog/shard_role_catalog/operation_sharding_state.h"
 #include "mongo/db/logical_time.h"
 #include "mongo/db/persistent_task_store.h"
 #include "mongo/db/query/collation/collator_interface.h"
@@ -51,9 +45,15 @@
 #include "mongo/db/repl/replication_coordinator_mock.h"
 #include "mongo/db/repl/wait_for_majority_service.h"
 #include "mongo/db/s/range_deletion_task_gen.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_metadata.h"
+#include "mongo/db/shard_role/shard_catalog/collection_sharding_runtime.h"
+#include "mongo/db/shard_role/shard_catalog/create_collection.h"
+#include "mongo/db/shard_role/shard_catalog/operation_sharding_state.h"
 #include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/db/sharding_environment/shard_server_test_fixture.h"
-#include "mongo/db/vector_clock/vector_clock.h"
+#include "mongo/db/topology/vector_clock/vector_clock.h"
 #include "mongo/db/versioning_protocol/chunk_version.h"
 #include "mongo/db/versioning_protocol/database_version.h"
 #include "mongo/executor/thread_pool_task_executor.h"
@@ -134,7 +134,7 @@ public:
                        ChunkRange{BSON(kShardKey << MINKEY), BSON(kShardKey << MAXKEY)},
                        ChunkVersion({epoch, Timestamp(1, 1)}, {1, 0}),
                        ShardId("dummyShardId")}});
-        ChunkManager cm(makeStandaloneRoutingTableHistory(std::move(rt)), boost::none);
+        CurrentChunkManager cm(makeStandaloneRoutingTableHistory(std::move(rt)));
         AutoGetDb autoDb(_opCtx, kNss.dbName(), MODE_IX);
         Lock::CollectionLock collLock(_opCtx, kNss, MODE_IX);
         CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(_opCtx, kNss)
@@ -234,9 +234,10 @@ RangeDeletionTask createDeletionTask(OperationContext* opCtx,
                                      const UUID& uuid,
                                      ShardKey min,
                                      ShardKey max,
+                                     const UUID& migrationId,
                                      ShardId donorShard = ShardId("donorShard"),
                                      bool pending = true) {
-    auto task = RangeDeletionTask(UUID::gen(),
+    auto task = RangeDeletionTask(migrationId,
                                   nss,
                                   uuid,
                                   donorShard,
@@ -250,6 +251,19 @@ RangeDeletionTask createDeletionTask(OperationContext* opCtx,
 
     return task;
 }
+
+
+template <typename ShardKey>
+RangeDeletionTask createDeletionTask(OperationContext* opCtx,
+                                     const NamespaceString& nss,
+                                     const UUID& uuid,
+                                     ShardKey min,
+                                     ShardKey max,
+                                     ShardId donorShard = ShardId("donorShard"),
+                                     bool pending = true) {
+    return createDeletionTask(opCtx, nss, uuid, min, max, UUID::gen(), donorShard, pending);
+}
+
 }  // namespace
 
 /**
@@ -672,4 +686,113 @@ TEST_F(RangeDeleterTest, PreMigrationShardVersionUpgradeDowngradeTest) {
         return true;
     });
 }
+
+TEST_F(RangeDeleterTest, PersistRangeDeletionTaskLocallyHappyPath) {
+    auto opCtx = operationContext();
+    const auto uuid = UUID::gen();
+    PersistentTaskStore<RangeDeletionTask> store(NamespaceString::kRangeDeletionNamespace);
+    RangeDeletionTask task = createDeletionTask(
+        opCtx, NamespaceString::createNamespaceString_forTest("one"), uuid, 0, 10);
+    rangedeletionutil::persistRangeDeletionTaskLocally(opCtx, task, defaultMajorityWriteConcern());
+    ASSERT_EQ(store.count(opCtx), 1);
+}
+
+TEST_F(RangeDeleterTest, PersistRangeDeletionTaskLocallyDoesNotPersistDuplicateRangesWhenFlagSet) {
+    auto opCtx = operationContext();
+    const auto uuid = UUID::gen();
+    PersistentTaskStore<RangeDeletionTask> store(NamespaceString::kRangeDeletionNamespace);
+    RangeDeletionTask task = createDeletionTask(
+        opCtx, NamespaceString::createNamespaceString_forTest("one"), uuid, 0, 10);
+    rangedeletionutil::persistRangeDeletionTaskLocally(
+        opCtx,
+        task,
+        defaultMajorityWriteConcern(),
+        true /* doNotPersistIfDocCoveringSameRangeAlreadyExists */);
+    ASSERT_EQ(store.count(opCtx), 1);
+
+    RangeDeletionTask taskOnSameRange = createDeletionTask(
+        opCtx, NamespaceString::createNamespaceString_forTest("one"), uuid, 0, 10);
+    rangedeletionutil::persistRangeDeletionTaskLocally(
+        opCtx,
+        taskOnSameRange,
+        defaultMajorityWriteConcern(),
+        true /* doNotPersistIfDocCoveringSameRangeAlreadyExists */);
+    ASSERT_EQ(store.count(opCtx), 1);
+}
+
+TEST_F(RangeDeleterTest, PersistRangeDeletionTaskLocallyFailsDuplicateKey) {
+    auto opCtx = operationContext();
+    const auto uuid = UUID::gen();
+    const auto migrationId = UUID::gen();
+    PersistentTaskStore<RangeDeletionTask> store(NamespaceString::kRangeDeletionNamespace);
+    RangeDeletionTask task = createDeletionTask(
+        opCtx, NamespaceString::createNamespaceString_forTest("one"), uuid, 0, 10, migrationId);
+    rangedeletionutil::persistRangeDeletionTaskLocally(opCtx, task, defaultMajorityWriteConcern());
+    ASSERT_EQ(store.count(opCtx), 1);
+
+    RangeDeletionTask taskWithDuplicateMigrationId = createDeletionTask(
+        opCtx, NamespaceString::createNamespaceString_forTest("one"), uuid, 20, 30, migrationId);
+
+    ASSERT_THROWS_CODE(rangedeletionutil::persistRangeDeletionTaskLocally(
+                           opCtx, taskWithDuplicateMigrationId, defaultMajorityWriteConcern()),
+                       DBException,
+                       31375);
+}
+
+TEST_F(RangeDeleterTest, CreateAndPersistRangeDeletionTask) {
+    auto opCtx = operationContext();
+    const auto uuid = UUID::gen();
+    const auto migrationId = UUID::gen();
+    PersistentTaskStore<RangeDeletionTask> store(NamespaceString::kRangeDeletionNamespace);
+
+    rangedeletionutil::createAndPersistRangeDeletionTask(
+        opCtx,
+        migrationId,
+        NamespaceString::createNamespaceString_forTest("one"),
+        uuid,
+        ShardId("donorShard"),
+        ChunkRange{BSON("_id" << 0), BSON("_id" << 10)},
+        CleanWhenEnum::kNow,
+        true,
+        boost::none,
+        boost::none,
+        defaultMajorityWriteConcern());
+
+    ASSERT_EQ(store.count(opCtx), 1);
+
+    auto storedTask = rangedeletionutil::getRangeDeletionTask(
+        opCtx, uuid, ChunkRange{BSON("_id" << 0), BSON("_id" << 10)});
+    ASSERT_TRUE(storedTask.has_value());
+    ASSERT_EQ(storedTask->getId(), migrationId);
+}
+
+TEST_F(RangeDeleterTest, GetRangeDeletionTask) {
+    auto opCtx = operationContext();
+    const auto uuid = UUID::gen();
+    const auto migrationId = UUID::gen();
+    PersistentTaskStore<RangeDeletionTask> store(NamespaceString::kRangeDeletionNamespace);
+
+    rangedeletionutil::createAndPersistRangeDeletionTask(
+        opCtx,
+        migrationId,
+        NamespaceString::createNamespaceString_forTest("one"),
+        uuid,
+        ShardId("donorShard"),
+        ChunkRange{BSON("_id" << 0), BSON("_id" << 10)},
+        CleanWhenEnum::kNow,
+        true,
+        boost::none,
+        boost::none,
+        defaultMajorityWriteConcern());
+
+    ASSERT_EQ(store.count(opCtx), 1);
+
+    auto retrievedTask = rangedeletionutil::getRangeDeletionTask(
+        opCtx, uuid, ChunkRange{BSON("_id" << 0), BSON("_id" << 10)});
+
+    ASSERT_TRUE(retrievedTask.has_value());
+
+    ASSERT_EQ(retrievedTask->getNss(), NamespaceString::createNamespaceString_forTest("one"));
+}
+
 }  // namespace mongo

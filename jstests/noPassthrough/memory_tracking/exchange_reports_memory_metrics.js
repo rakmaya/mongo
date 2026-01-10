@@ -21,7 +21,16 @@ import {iterateMatchingLogLines} from "jstests/libs/log.js";
 import {funWithArgs} from "jstests/libs/parallel_shell_helpers.js";
 import {verifyProfilerMetrics, verifySlowQueryLogMetrics} from "jstests/libs/query/memory_tracking_utils.js";
 
-const conn = MongoRunner.runMongod();
+const serverParams = {
+    setParameter: {
+        // Needed to avoid spilling to disk, which changes memory metrics.
+        allowDiskUseByDefault: false,
+        // Needed so that chunked memory tracking reaches CurOp
+        internalQueryMaxWriteToCurOpMemoryUsageBytes: 256,
+    },
+};
+
+const conn = MongoRunner.runMongod(serverParams);
 assert.neq(null, conn, "mongod was unable to start up");
 
 const db = conn.getDB("test");
@@ -129,6 +138,7 @@ for (let i = 0; i < cursorIds.length; i++) {
         const verifyOptions = {
             expectMemoryMetrics: args.featureFlagEnabled && args.shellIndex === 0,
             expectedNumGetMores: logLines.length,
+            skipInUseTrackedMemBytesCheck: true,
             skipFindInitialRequest: true,
             // The peak metric may not show up for early getMore() logs, since memory metrics are
             // only propagated up to CurOp when the first consumer happens to execute the

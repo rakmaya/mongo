@@ -42,14 +42,6 @@
 #include "mongo/db/fle_crud.h"
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/index/index_constants.h"
-#include "mongo/db/local_catalog/clustered_collection_options_gen.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/db_raii.h"
-#include "mongo/db/local_catalog/index_catalog.h"
-#include "mongo/db/local_catalog/index_catalog_entry.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
-#include "mongo/db/local_catalog/lock_manager/exception_util.h"
-#include "mongo/db/local_catalog/shard_role_api/resource_yielder.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/expression_context.h"
@@ -69,6 +61,14 @@
 #include "mongo/db/session/session.h"
 #include "mongo/db/session/session_catalog.h"
 #include "mongo/db/session/session_catalog_mongod.h"
+#include "mongo/db/shard_role/lock_manager/exception_util.h"
+#include "mongo/db/shard_role/resource_yielder.h"
+#include "mongo/db/shard_role/shard_catalog/clustered_collection_options_gen.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/db_raii.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog_entry.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
 #include "mongo/db/storage/index_entry_comparison.h"
 #include "mongo/db/storage/key_string/key_string.h"
 #include "mongo/db/storage/record_data.h"
@@ -529,78 +529,66 @@ std::vector<std::vector<FLEEdgeCountInfo>> getTagsFromStorage(
     const NamespaceStringOrUUID& nsOrUUID,
     const std::vector<std::vector<FLEEdgePrfBlock>>& escDerivedFromDataTokens,
     FLETagQueryInterface::TagQueryType type) {
+    const auto collectionAcquisition = acquireCollectionMaybeLockFree(
+        opCtx,
+        CollectionAcquisitionRequest::fromOpCtx(opCtx, nsOrUUID, AcquisitionPrerequisites::kRead));
 
-    auto opStr = "getTagsFromStorage"_sd;
-    return writeConflictRetry(
-        opCtx, opStr, nsOrUUID, [&]() -> std::vector<std::vector<FLEEdgeCountInfo>> {
-            const auto collectionAcquisition = acquireCollectionMaybeLockFree(
-                opCtx,
-                CollectionAcquisitionRequest::fromOpCtx(
-                    opCtx, nsOrUUID, AcquisitionPrerequisites::kRead));
+    const auto& collectionPtr = collectionAcquisition.getCollectionPtr();
 
-            const auto& collectionPtr = collectionAcquisition.getCollectionPtr();
+    // If there is no collection, run through the algorithm with a special reader that only
+    // returns empty documents. This simplifies the implementation of other readers.
+    if (!collectionAcquisition.exists()) {
+        MissingCollectionReader reader;
+        return ESCCollection::getTags(reader, escDerivedFromDataTokens, type);
+    }
 
-            // If there is no collection, run through the algorithm with a special reader that only
-            // returns empty documents. This simplifies the implementation of other readers.
-            if (!collectionAcquisition.exists()) {
-                MissingCollectionReader reader;
-                return ESCCollection::getTags(reader, escDerivedFromDataTokens, type);
-            }
+    // numRecords is signed so guard against negative numbers
+    auto docCountSigned = collectionPtr->numRecords(opCtx);
+    uint64_t docCount = docCountSigned < 0 ? 0 : static_cast<uint64_t>(docCountSigned);
 
-            // numRecords is signed so guard against negative numbers
-            auto docCountSigned = collectionPtr->numRecords(opCtx);
-            uint64_t docCount = docCountSigned < 0 ? 0 : static_cast<uint64_t>(docCountSigned);
+    std::unique_ptr<SeekableRecordCursor> cursor = collectionPtr->getCursor(opCtx, true);
 
-            std::unique_ptr<SeekableRecordCursor> cursor = collectionPtr->getCursor(opCtx, true);
+    // If clustered collection, we have simpler searches
+    if (collectionPtr->isClustered() &&
+        collectionPtr->getClusteredInfo()
+                ->getIndexSpec()
+                .getKey()
+                .firstElement()
+                .fieldNameStringData() == "_id"_sd) {
 
-            // If clustered collection, we have simpler searches
-            if (collectionPtr->isClustered() &&
-                collectionPtr->getClusteredInfo()
-                        ->getIndexSpec()
-                        .getKey()
-                        .firstElement()
-                        .fieldNameStringData() == "_id"_sd) {
+        StorageEngineClusteredCollectionReader reader(opCtx, docCount, nsOrUUID, cursor.get());
 
-                StorageEngineClusteredCollectionReader reader(
-                    opCtx, docCount, nsOrUUID, cursor.get());
+        return ESCCollection::getTags(reader, escDerivedFromDataTokens, type);
+    }
 
-                return ESCCollection::getTags(reader, escDerivedFromDataTokens, type);
-            }
+    // Non-clustered case, we need to look a index entry in _id index and then the
+    // collection
+    auto indexCatalog = collectionPtr->getIndexCatalog();
 
-            // Non-clustered case, we need to look a index entry in _id index and then the
-            // collection
-            auto indexCatalog = collectionPtr->getIndexCatalog();
+    const auto indexEntry = indexCatalog->findIndexByName(
+        opCtx, IndexConstants::kIdIndexName, IndexCatalog::InclusionPolicy::kReady);
+    if (!indexEntry) {
+        uasserted(ErrorCodes::IndexNotFound,
+                  str::stream() << "Index not found, ns:" << toStringForLogging(nsOrUUID)
+                                << ", index: " << IndexConstants::kIdIndexName);
+    }
 
-            const IndexDescriptor* indexDescriptor = indexCatalog->findIndexByName(
-                opCtx, IndexConstants::kIdIndexName, IndexCatalog::InclusionPolicy::kReady);
-            if (!indexDescriptor) {
-                uasserted(ErrorCodes::IndexNotFound,
-                          str::stream() << "Index not found, ns:" << toStringForLogging(nsOrUUID)
-                                        << ", index: " << IndexConstants::kIdIndexName);
-            }
+    if (indexEntry->descriptor()->isPartial()) {
+        uasserted(ErrorCodes::IndexOptionsConflict,
+                  str::stream() << "Partial index is not allowed for this operation, ns:"
+                                << toStringForLogging(nsOrUUID)
+                                << ", index: " << IndexConstants::kIdIndexName);
+    }
 
-            if (indexDescriptor->isPartial()) {
-                uasserted(ErrorCodes::IndexOptionsConflict,
-                          str::stream() << "Partial index is not allowed for this operation, ns:"
-                                        << toStringForLogging(nsOrUUID)
-                                        << ", index: " << IndexConstants::kIdIndexName);
-            }
+    auto indexCatalogEntry = indexEntry->shared_from_this();
 
-            auto indexCatalogEntry = indexDescriptor->getEntry()->shared_from_this();
+    auto sdi = indexCatalogEntry->accessMethod()->asSortedData();
+    auto indexCursor = sdi->newCursor(opCtx, *shard_role_details::getRecoveryUnit(opCtx), true);
 
-            auto sdi = indexCatalogEntry->accessMethod()->asSortedData();
-            auto indexCursor =
-                sdi->newCursor(opCtx, *shard_role_details::getRecoveryUnit(opCtx), true);
+    StorageEngineIndexCollectionReader reader(
+        opCtx, docCount, nsOrUUID, cursor.get(), sdi->getSortedDataInterface(), indexCursor.get());
 
-            StorageEngineIndexCollectionReader reader(opCtx,
-                                                      docCount,
-                                                      nsOrUUID,
-                                                      cursor.get(),
-                                                      sdi->getSortedDataInterface(),
-                                                      indexCursor.get());
-
-            return ESCCollection::getTags(reader, escDerivedFromDataTokens, type);
-        });
+    return ESCCollection::getTags(reader, escDerivedFromDataTokens, type);
 }
 
 }  // namespace mongo

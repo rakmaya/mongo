@@ -96,10 +96,8 @@ PlanState ProjectStage::getNext() {
     if (state == PlanState::ADVANCED) {
         // Run the project expressions here.
         for (auto& p : _fields) {
-            auto [owned, tag, val] = _bytecode.run(p.second.first.get());
-
             // Set the accessors.
-            p.second.second.reset(owned, tag, val);
+            p.second.second.reset(_bytecode.run(p.second.first.get()));
         }
     }
 
@@ -133,9 +131,8 @@ const SpecificStats* ProjectStage::getSpecificStats() const {
     return nullptr;
 }
 
-std::vector<DebugPrinter::Block> ProjectStage::debugPrint() const {
-    auto ret = PlanStage::debugPrint();
-
+void ProjectStage::doDebugPrint(std::vector<DebugPrinter::Block>& ret,
+                                DebugPrintInfo& debugPrintInfo) const {
     ret.emplace_back("[`");
     bool first = true;
     for (auto&& [slot, expr] : _projects) {
@@ -151,8 +148,18 @@ std::vector<DebugPrinter::Block> ProjectStage::debugPrint() const {
     ret.emplace_back("`]");
 
     DebugPrinter::addNewLine(ret);
-    DebugPrinter::addBlocks(ret, _children[0]->debugPrint());
-    return ret;
+
+    if (debugPrintInfo.printBytecode) {
+        int i = 0;
+        for (auto& p : _fields) {
+            std::stringstream title;
+            title << "FIELD_" << i;
+            PlanStage::debugPrintBytecode(ret, p.second.first, title.str().c_str());
+            i++;
+        }
+    }
+
+    DebugPrinter::addBlocks(ret, _children[0]->debugPrint(debugPrintInfo));
 }
 
 size_t ProjectStage::estimateCompileTimeSize() const {

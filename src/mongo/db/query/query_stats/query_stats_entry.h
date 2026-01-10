@@ -86,6 +86,14 @@ struct QueryExecEntry {
     AggregatedMetric<int64_t> maxAcquisitionDelinquencyMillis;
 
     /**
+     * Aggregates the execution control stats.
+     */
+    AggregatedMetric<int64_t> totalTimeQueuedMicros;
+    AggregatedMetric<uint64_t> totalAdmissions;
+    AggregatedBool wasLoadShed;
+    AggregatedBool wasDeprioritized;
+
+    /**
      * Aggregates the checkForInterrupt stats including getMore requests.
      */
     AggregatedMetric<uint64_t> numInterruptChecksPerSec;
@@ -93,7 +101,9 @@ struct QueryExecEntry {
 };
 
 struct QueryPlannerEntry {
-    void toBSON(BSONObjBuilder& queryStatsBuilder, bool buildAsSubsection) const;
+    void toBSON(BSONObjBuilder& queryStatsBuilder,
+                bool buildAsSubsection,
+                bool includeCBRMetrics) const;
 
     /**
      * Aggregates the number of queries that used a sort stage including getMore requests.
@@ -114,6 +124,11 @@ struct QueryPlannerEntry {
      * Aggregates the number of queries that used the plan cache including getMore requests.
      */
     AggregatedBool fromPlanCache;
+
+    /**
+     * Aggregates the planning time in microseconds including getMore requests.
+     */
+    AggregatedMetric<int64_t> planningTimeMicros;
 };
 
 struct WritesEntry {
@@ -156,7 +171,9 @@ struct QueryStatsEntry {
     QueryStatsEntry(std::unique_ptr<const Key> key_)
         : firstSeenTimestamp(Date_t::now()), key(std::move(key_)) {}
 
-    BSONObj toBSON(bool buildSubsections = false, bool includeWriteMetrics = false) const;
+    BSONObj toBSON(bool buildSubsections = false,
+                   bool includeWriteMetrics = false,
+                   bool includeCBRMetrics = false) const;
 
     /**
      * Timestamp for when this query shape was added to the store. Set on construction.

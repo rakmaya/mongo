@@ -27,9 +27,31 @@ mongo_cc_library(
 mongo_cc_library(
     name = "mongos_docs_needed_bounds",
     srcs = ["document_source_visitor_docs_needed_bounds.cpp"],
-    private_hdrs = ["//src/mongo/db/pipeline/visitors:document_source_visitor_registry_mongos.h"],
     deps = [
         "//src/mongo/db/pipeline:docs_needed_bounds_visitor",
         "//src/mongo/s/query/exec:router_exec_stage",
+    ],
+)
+
+mongo_cc_library(
+    name = "sharding_helpers",
+    srcs = [
+        "shard_targeting_collation_helpers.cpp",
+    ],
+    no_undefined_ref_DO_NOT_USE = False,
+    deps = [
+        "//src/mongo:base",
+        "//src/mongo/db:common",
+        "//src/mongo/db/query/collation:collator_interface",
+    ],
+)
+
+mongo_cc_library(
+    name = "shard_targeting_helpers",
+    srcs = [
+        "shard_targeting_helpers.cpp",
+    ],
+    deps = [
+        "//src/mongo/s:sharding_router_api",
     ],
 )

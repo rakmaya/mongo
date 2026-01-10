@@ -30,10 +30,10 @@
 #include "mongo/db/extension/host/load_extension.h"
 
 #include "mongo/db/commands/test_commands_enabled.h"
-#include "mongo/db/extension/host/host_services.h"
+#include "mongo/db/extension/host/host_portal.h"
 #include "mongo/db/extension/host/load_stub_parsers.h"
-#include "mongo/db/extension/host_connector/extension_handle.h"
-#include "mongo/db/extension/host_connector/host_services_adapter.h"
+#include "mongo/db/extension/host_connector/adapter/host_services_adapter.h"
+#include "mongo/db/extension/host_connector/handle/extension_handle.h"
 #include "mongo/db/extension/public/api.h"
 #include "mongo/db/extension/shared/extension_status.h"
 #include "mongo/db/query/query_feature_flags_gen.h"
@@ -42,7 +42,6 @@
 #include "mongo/db/wire_version.h"
 #include "mongo/logv2/log.h"
 #include "mongo/platform/shared_library.h"
-#include "mongo/util/scopeguard.h"
 #include "mongo/util/str.h"
 #include "mongo/util/testing_proctor.h"
 
@@ -121,25 +120,18 @@ host_connector::ExtensionHandle getMongoExtension(SharedLibrary& extensionLib,
 stdx::unordered_map<std::string, LoadedExtension> ExtensionLoader::loadedExtensions;
 
 bool loadExtensions(const std::vector<std::string>& extensionNames) {
-    const bool featureFlagExtensionsAPIEnabled =
-        feature_flags::gFeatureFlagExtensionsAPI.isEnabled();
-
-    ON_BLOCK_EXIT([&] {
-        if (featureFlagExtensionsAPIEnabled) {
-            registerUnloadedExtensionStubParsers();
+    if (!feature_flags::gFeatureFlagExtensionsAPI.isEnabled()) {
+        if (!extensionNames.empty()) {
+            LOGV2_ERROR(10668500,
+                        "Extensions are not allowed with the current configuration. You may need "
+                        "to enable featureFlagExtensionsAPI.");
+            return false;
         }
-    });
-
-    if (extensionNames.empty()) {
         return true;
     }
 
-    if (!featureFlagExtensionsAPIEnabled) {
-        LOGV2_ERROR(10668500,
-                    "Extensions are not allowed with the current configuration. You may need to "
-                    "enable featureFlagExtensionsAPI.");
-        return false;
-    }
+    // Register fallback stub parsers before loading extensions.
+    registerUnloadedExtensionStubParsers();
 
     for (const auto& extension : extensionNames) {
         LOGV2(10668501, "Loading extension", "extensionName"_attr = extension);
@@ -227,7 +219,7 @@ void ExtensionLoader::load(const std::string& name, const ExtensionConfig& confi
     host_connector::ExtensionHandle extHandle = getMongoExtension(*extensionLib, extensionPath);
     // Validate that the major and minor versions from the extension implementation are compatible
     // with the host API version.
-    assertVersionCompatibility(&MONGO_EXTENSION_API_VERSIONS_SUPPORTED, extHandle.getVersion());
+    assertVersionCompatibility(&MONGO_EXTENSION_API_VERSIONS_SUPPORTED, extHandle->getVersion());
 
     // Get the max wire version of the server. During unit testing, return max wire version 0.
     const auto& maxWireVersion = TestingProctor::instance().isEnabled()
@@ -236,8 +228,12 @@ void ExtensionLoader::load(const std::string& name, const ExtensionConfig& confi
                .getIncomingInternalClient()
                .maxWireVersion);
 
-    HostPortal portal{extHandle.getVersion(), maxWireVersion, YAML::Dump(config.extOptions)};
-    extHandle.initialize(portal, host_connector::HostServicesAdapter::get());
+    std::unique_ptr<HostPortal> hostPortal = std::make_unique<HostPortal>();
+    host_connector::HostPortalAdapter portal{extHandle->getVersion(),
+                                             maxWireVersion,
+                                             YAML::Dump(config.extOptions),
+                                             std::move(hostPortal)};
+    extHandle->initialize(&portal, &host_connector::HostServicesAdapter::get());
 }
 
 stdx::unordered_map<std::string, ExtensionConfig> ExtensionLoader::getLoadedExtensions() {

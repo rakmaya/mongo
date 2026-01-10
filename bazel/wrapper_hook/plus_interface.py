@@ -1,3 +1,4 @@
+import difflib
 import os
 import pathlib
 import platform
@@ -7,6 +8,8 @@ import sys
 import time
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent.parent
+WRAPPER_CONFIG_MODE_FILE = f"{REPO_ROOT}/.tmp/mongo_wrapper_config_mode"
+
 sys.path.append(str(REPO_ROOT))
 
 from bazel.wrapper_hook.compiledb import generate_compiledb
@@ -60,8 +63,47 @@ def check_bazel_command_type(args):
             return arg
 
 
+def swap_default_config(args, command, config_mode, compiledb_target, clang_tidy):
+    # Remember the user's last specified config mode to prevent invalidating cache on run or lint commands.
+    if os.path.exists(f"{REPO_ROOT}/.bazelrc.local"):
+        return config_mode
+
+    try:
+        if config_mode is None:
+            if os.path.exists(WRAPPER_CONFIG_MODE_FILE):
+                # Reset to fastbuild if it's been more than 2 days since the file was written,
+                # since we don't want users to stay locked on dbg/opt if they forgot to change it back
+                two_days_since_last_command = (
+                    os.path.getmtime(WRAPPER_CONFIG_MODE_FILE) < time.time() - 60 * 60 * 24 * 2
+                )
+                invalidating_invocation = (
+                    command == "build" and not compiledb_target and not clang_tidy
+                )
+                if two_days_since_last_command or invalidating_invocation:
+                    os.remove(WRAPPER_CONFIG_MODE_FILE)
+                else:
+                    with open(WRAPPER_CONFIG_MODE_FILE, "r", encoding="utf-8") as f:
+                        config_mode = f.read().strip()
+                        args.insert(3, f"--config={config_mode}")
+                        green = "\033[0;32m"
+                        no_color = "\033[0m"
+                        print("=====")
+                        print(
+                            f"{green}INFO:{no_color} No config mode specified, using last specified config option: --config={config_mode}"
+                        )
+                        print("=====")
+        else:
+            if not os.path.exists(os.path.dirname(WRAPPER_CONFIG_MODE_FILE)):
+                os.makedirs(os.path.dirname(WRAPPER_CONFIG_MODE_FILE))
+            with open(WRAPPER_CONFIG_MODE_FILE, "w", encoding="utf-8") as f:
+                f.write(config_mode)
+    except Exception as _:
+        print(f"Failed to read/write config mode file at {WRAPPER_CONFIG_MODE_FILE}")
+    return config_mode
+
+
 def test_runner_interface(
-    args, autocomplete_query, get_buildozer_output=get_buildozer_output, enterprise=True
+    args, autocomplete_query, get_buildozer_output=get_buildozer_output, enterprise=True, atlas=True
 ):
     start = time.time()
 
@@ -69,6 +111,7 @@ def test_runner_interface(
     plus_starts = ("+", ":+", "//:+")
     skip_plus_interface = True
     compiledb_target = False
+    clang_tidy = False
     lint_target = False
     persistent_compdb = True
     compiledb_targets = ["//:compiledb", ":compiledb", "compiledb"]
@@ -93,6 +136,7 @@ def test_runner_interface(
     if os.environ.get("CI") is not None:
         persistent_compdb = False
 
+    config_mode = None
     for arg in args:
         if arg in compiledb_targets:
             compiledb_target = True
@@ -102,11 +146,21 @@ def test_runner_interface(
             replacements[arg] = []
             persistent_compdb = False
             skip_plus_interface = False
+        if "--config=" in arg:
+            val = arg.split("=")[1]
+            if val in {"opt", "dbg", "fastbuild", "dbg_aubsan", "dbg_tsan"}:
+                config_mode = val
+            if val == "clang-tidy":
+                clang_tidy = True
         if arg.startswith(plus_starts):
             skip_plus_interface = False
 
+    config_mode = swap_default_config(
+        args, current_bazel_command, config_mode, compiledb_target, clang_tidy
+    )
+
     if compiledb_target:
-        generate_compiledb(args[0], persistent_compdb, enterprise)
+        generate_compiledb(args[0], persistent_compdb, enterprise, atlas)
 
     if lint_target:
         for lint_arg in lint_targets:
@@ -116,7 +170,11 @@ def test_runner_interface(
                 pass
         run_rules_lint(args[0], args[command_start_index:])
 
-        return ["run", "lint", "--", "ALL_PASSING"]
+        return (
+            ["run", "lint"]
+            + ([f"--config={config_mode}"] if config_mode else [])
+            + ["--", "ALL_PASSING"]
+        )
 
     if skip_plus_interface and not autocomplete_query:
         return args[1:]
@@ -183,7 +241,20 @@ def test_runner_interface(
                     ):
                         bin_targets.append(bin_target)
                         real_target = bin_target
-                replacements[arg] = [real_target]
+                if not real_target:
+                    # Target not found - suggest similar ones and pass through
+                    suggestions = difflib.get_close_matches(test_name, sources_to_bin.keys(), n=5)
+                    error_msg = f"WARNING: Target '{arg}' not found"
+                    if suggestions:
+                        error_msg += "\n\nDid you mean one of these?\n"
+                        for suggestion in suggestions:
+                            error_msg += f"  +{suggestion}\n"
+                    else:
+                        error_msg += " and no similar targets."
+                    print(error_msg, file=sys.stderr)
+                    # Pass through the argument unchanged: it might be an important argument
+                else:
+                    replacements[arg] = [real_target]
             else:
                 # defer source targets to see if we can skip redundant tests
                 source_targets[test_name] = [arg, real_target]

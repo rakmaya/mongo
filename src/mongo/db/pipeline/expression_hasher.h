@@ -119,6 +119,10 @@ public:
         kSize,
         kReverseArray,
         kSortArray,
+        kTopN,
+        kTop,
+        kBottomN,
+        kBottom,
         kSlice,
         kIsArray,
         kInternalFindAllValuesAtPath,
@@ -206,7 +210,10 @@ public:
         kUUID,
         kOID,
         kTestFeatureFlagLatest,
-        kTestFeatureFlagLastLTS
+        kTestFeatureFlagLastLTS,
+        kSerializeEJSON,
+        kDeserializeEJSON,
+        kHash
     };
 
     explicit ExpressionHashVisitor(H hashState) : _hashState(std::move(hashState)) {}
@@ -528,6 +535,22 @@ public:
 
     void visit(const ExpressionSortArray* expr) final {
         combine(OpType::kSortArray);
+    }
+
+    void visit(const ExpressionTopN* expr) final {
+        combine(OpType::kTopN);
+    }
+
+    void visit(const ExpressionTop* expr) final {
+        combine(OpType::kTop);
+    }
+
+    void visit(const ExpressionBottomN* expr) final {
+        combine(OpType::kBottomN);
+    }
+
+    void visit(const ExpressionBottom* expr) final {
+        combine(OpType::kBottom);
     }
 
     void visit(const ExpressionSlice* expr) final {
@@ -883,6 +906,18 @@ public:
 
     void visit(const ExpressionTestFeatureFlagLastLTS* expr) final {
         combine(OpType::kTestFeatureFlagLastLTS);
+    }
+
+    void visit(const ExpressionSerializeEJSON* expr) final {
+        combine(OpType::kSerializeEJSON);
+    }
+
+    void visit(const ExpressionDeserializeEJSON* expr) final {
+        combine(OpType::kDeserializeEJSON);
+    }
+
+    void visit(const ExpressionHash* expr) final {
+        combine(OpType::kHash);
     }
 
     H moveHashState() {

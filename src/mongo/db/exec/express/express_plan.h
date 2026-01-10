@@ -39,12 +39,6 @@
 #include "mongo/db/exec/write_stage_common.h"
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/index/index_constants.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/document_validation.h"
-#include "mongo/db/local_catalog/index_catalog_entry.h"
-#include "mongo/db/local_catalog/lock_manager/exception_util.h"
-#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
-#include "mongo/db/local_catalog/shard_role_catalog/scoped_collection_metadata.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/collation/collation_index_key.h"
@@ -55,7 +49,15 @@
 #include "mongo/db/query/write_ops/update_request.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/record_id_helpers.h"
+#include "mongo/db/rss/replicated_storage_service.h"
 #include "mongo/db/session/logical_session_id.h"
+#include "mongo/db/shard_role/lock_manager/exception_util.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/document_validation.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog_entry.h"
+#include "mongo/db/shard_role/shard_catalog/operation_sharding_state.h"
+#include "mongo/db/shard_role/shard_catalog/scoped_collection_metadata.h"
+#include "mongo/db/shard_role/shard_role.h"
 #include "mongo/db/storage/damage_vector.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/snapshot.h"
@@ -63,6 +65,7 @@
 #include "mongo/db/update/update_driver.h"
 #include "mongo/db/update/update_oplog_entry_serialization.h"
 #include "mongo/db/update/update_util.h"
+#include "mongo/util/modules.h"
 
 #include <type_traits>
 #include <utility>
@@ -349,8 +352,10 @@ public:
         _stats->incNumKeysExamined(1);
 
         Snapshotted<BSONObj> obj;
-        bool found = accessCollection(collection).findDoc(opCtx, rid, &obj);
-        if (!found) {
+        auto cursor = accessCollection(collection).getCursor(opCtx);
+        boost::optional<Record> record = cursor->seekExact(rid);
+
+        if (!record.has_value()) {
             logRecordNotFound(opCtx,
                               rid,
                               _queryFilter,
@@ -360,9 +365,26 @@ public:
             return Exhausted();
         }
 
+        record->data.makeOwned();
+        obj = Snapshotted<BSONObj>(shard_role_details::getRecoveryUnit(opCtx)->getSnapshotId(),
+                                   record->data.releaseToBson());
+
         _stats->incNumDocumentsFetched(1);
 
-        auto progress = continuation(collection, std::move(rid), std::move(obj));
+        // Reusing the cursor lowers write latency. For YCSB-style workloads, this causes the
+        // cache to run dirtier. This results in increased preemption of application threads to
+        // do eviction. With disaggregated storage, eviction has a higher cost (queued to go to
+        // storage layer services, WT must keep the page until page materialization). This results
+        // in higher variance for YCSB throughput, making it difficult to measure incremental
+        // performance improvements. For now, disable cursor reuse to unblock progress on
+        // disaggregated storage performance.
+
+        auto& provider = rss::ReplicatedStorageService::get(opCtx).getPersistenceProvider();
+        if (!provider.supportsCursorReuseForExpressPathQueries()) {
+            cursor = nullptr;
+        }
+
+        auto progress = continuation(collection, std::move(rid), std::move(obj), cursor.get());
 
         // Only advance the iterator if the continuation completely processed its item, as indicated
         // by its return value.
@@ -411,10 +433,10 @@ private:
     static const IndexCatalogEntry* getIndexCatalogEntryForIdIndex(OperationContext* opCtx,
                                                                    const Collection& collection) {
         const IndexCatalog* catalog = collection.getIndexCatalog();
-        const IndexDescriptor* desc = catalog->findIdIndex(opCtx);
-        tassert(8884401, "Missing _id index on non-clustered collection", desc);
+        const auto entry = catalog->findIdIndex(opCtx);
+        tassert(8884401, "Missing _id index on non-clustered collection", entry);
 
-        return catalog->getEntry(desc);
+        return entry;
     }
 
     BSONObj _queryFilter;  // Owned BSON.
@@ -460,14 +482,19 @@ public:
             _queryFilter["_id"], accessCollection(collection).getDefaultCollator()));
 
         Snapshotted<BSONObj> obj;
-        bool found = accessCollection(collection).findDoc(opCtx, rid, &obj);
-        if (!found) {
+        auto cursor = accessCollection(collection).getCursor(opCtx);
+        boost::optional<Record> record = cursor->seekExact(rid);
+        if (!record.has_value()) {
             _exhausted = true;
             return Exhausted();
         }
         _stats->incNumDocumentsFetched(1);
 
-        auto progress = continuation(collection, std::move(rid), std::move(obj));
+        record->data.makeOwned();
+        obj = Snapshotted<BSONObj>(shard_role_details::getRecoveryUnit(opCtx)->getSnapshotId(),
+                                   record->data.releaseToBson());
+
+        auto progress = continuation(collection, std::move(rid), std::move(obj), cursor.get());
 
         // Only advance the iterator if the continuation completely processed its item, as indicated
         // by its return value.
@@ -682,7 +709,8 @@ public:
             return Ready();
         }
 
-        auto progress = continuation(collection, *keyEntry.getRecordId(), std::move(obj));
+        auto progress =
+            continuation(collection, *keyEntry.getRecordId(), std::move(obj), nullptr /*cursor*/);
 
         // Only advance the iterator if the continuation completely processed its item, as indicated
         // by its return value.
@@ -733,12 +761,12 @@ private:
                                                                      const std::string& indexIdent,
                                                                      const std::string& indexName) {
         const IndexCatalog* catalog = collection.getIndexCatalog();
-        const IndexDescriptor* desc = catalog->findIndexByIdent(opCtx, indexIdent);
+        const auto entry = catalog->findIndexByIdent(opCtx, indexIdent);
         uassert(ErrorCodes::QueryPlanKilled,
                 fmt::format("query plan killed :: index {} dropped", indexName),
-                desc);
+                entry);
 
-        return catalog->getEntry(desc);
+        return entry;
     }
 
     BSONElement _filterValue;  // Unowned BSON.
@@ -872,6 +900,7 @@ public:
                        const RecordId& rid,
                        Snapshotted<BSONObj> obj,
                        bool shouldWriteToOrphan,
+                       const SeekableRecordCursor* cursor,
                        Continuation continuation) {
         // This should be impossible, because an ExpressPlan does not release a snapshot from the
         // time it reads a record id to the time it has finished all operations on the associated
@@ -886,7 +915,7 @@ public:
             exceptionRecoveryPolicy,
             UpdateOperation::name,
             [&]() {
-                newObj = updateById(opCtx, collection, obj, rid, shouldWriteToOrphan);
+                newObj = updateById(opCtx, collection, obj, rid, shouldWriteToOrphan, cursor);
                 if (_returnDocs == UpdateRequest::ReturnDocOption::RETURN_OLD) {
                     newObj = obj.value();
                 }
@@ -910,7 +939,8 @@ public:
                        const CollectionAcquisition& collection,
                        const Snapshotted<BSONObj>& oldObj,
                        const RecordId& rid,
-                       bool shouldWriteToOrphan) const {
+                       bool shouldWriteToOrphan,
+                       const SeekableRecordCursor* cursor) const {
         BSONObj logObj;
         bool docWasModified = false;
         FieldRefSet immutablePaths;
@@ -1026,7 +1056,8 @@ public:
                     diff.has_value() ? &*diff : collection_internal::kUpdateAllIndexes,
                     &indexesAffected,
                     &CurOp::get(opCtx)->debug(),
-                    &args));
+                    &args,
+                    cursor));
 
                 tassert(8375906,
                         "Old and new snapshot ids must not change after update",
@@ -1113,6 +1144,7 @@ public:
                        const RecordId& rid,
                        Snapshotted<BSONObj> obj,
                        bool shouldWriteToOrphan,
+                       const SeekableRecordCursor* cursor,
                        Continuation continuation) {
         // This should be impossible, because an ExpressPlan does not release a snapshot from the
         // time it reads a record id to the time it has finished all operations on the associated
@@ -1184,6 +1216,7 @@ public:
                        const RecordId& rid,
                        Snapshotted<BSONObj> obj,
                        bool shouldWriteToOrphan,
+                       const SeekableRecordCursor* cursor,
                        Continuation continuation) {
         size_t numDocsDeleted = 1;
         _stats->incDeletedStats(numDocsDeleted);
@@ -1216,6 +1249,7 @@ public:
                        const RecordId&,
                        Snapshotted<BSONObj> obj,
                        bool,
+                       const SeekableRecordCursor*,
                        Continuation continuation) {
         // Great job writing everyone! Let's grab an early lunch.
         return continuation(std::move(obj.value()));
@@ -1282,7 +1316,11 @@ public:
     template <class Continuation>
     PlanProgress proceed(OperationContext* opCtx, Continuation continuation) {
         return _iterator.consumeOne(
-            opCtx, [&](const auto& collection, RecordId rid, Snapshotted<BSONObj> obj) {
+            opCtx,
+            [&](const auto& collection,
+                RecordId rid,
+                Snapshotted<BSONObj> obj,
+                const SeekableRecordCursor* cursor) {
                 // Continue execution with one (rid, obj) pair from the iterator.
                 return applyShardFilter(
                     _shardFilter,
@@ -1298,6 +1336,7 @@ public:
                             rid,
                             std::move(obj),
                             shouldWriteToOrphan,
+                            cursor,
                             [&](BSONObj outObj) {
                                 // Continue execution after the write operation succeeds.
                                 return applyProjection(

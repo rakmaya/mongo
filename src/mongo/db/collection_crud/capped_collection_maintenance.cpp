@@ -32,15 +32,15 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/curop.h"
-#include "mongo/db/local_catalog/collection_options.h"
-#include "mongo/db/local_catalog/index_catalog.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/op_observer/op_observer_util.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/logical_session_id.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/collection_options.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/storage/record_data.h"
 #include "mongo/db/storage/record_store.h"
@@ -54,13 +54,11 @@
 #include <memory>
 #include <utility>
 
-#include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
-namespace mongo {
-namespace collection_internal {
+namespace mongo::collection_internal {
 namespace {
 
 struct CappedCollectionState {
@@ -177,7 +175,9 @@ void cappedDeleteUntilBelowConfiguredMaximum(OperationContext* opCtx,
             if (collection->isChangeStreamPreAndPostImagesEnabled()) {
                 args.changeStreamPreAndPostImagesEnabledForCollection = true;
             }
-
+            if (collection->areRecordIdsReplicated()) {
+                args.replicatedRecordId = record->id;
+            }
             // Reserves an optime for the deletion and sets the timestamp for future writes.
             opObserver->onDelete(opCtx, collection, kUninitializedStmtId, doc, documentKey, args);
         }
@@ -198,8 +198,8 @@ void cappedDeleteUntilBelowConfiguredMaximum(OperationContext* opCtx,
             opCtx, *shard_role_details::getRecoveryUnit(opCtx), toDelete);
 
         if (opDebug) {
-            opDebug->additiveMetrics.incrementKeysDeleted(keysDeleted);
-            opDebug->additiveMetrics.incrementNdeleted(1);
+            opDebug->getAdditiveMetrics().incrementKeysDeleted(keysDeleted);
+            opDebug->getAdditiveMetrics().incrementNdeleted(1);
         }
         serviceOpCounters(opCtx).gotDelete();
     }
@@ -213,5 +213,4 @@ void cappedDeleteUntilBelowConfiguredMaximum(OperationContext* opCtx,
         });
 }
 
-}  // namespace collection_internal
-}  // namespace mongo
+}  // namespace mongo::collection_internal

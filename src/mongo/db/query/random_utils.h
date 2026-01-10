@@ -30,7 +30,15 @@
 #pragma once
 
 #include "mongo/platform/random.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
 
+#include <random>
+
+/**
+ * TODO SERVER-114887: Determine if other modules should depend on this.
+ */
+MONGO_MOD_PUBLIC;
 namespace mongo::random_utils {
 /**
  * Returns a random number generator that is a static object initialized once per thread.
@@ -38,10 +46,11 @@ namespace mongo::random_utils {
 PseudoRandom& getRNG();
 
 /**
- * Helper for generating pseudo-random order of vector.
+ * Helper for generating pseudo-random order of vector *in tests* in place of std::shuffle for
+ * consistent, platform-independent results.
  *
- * For example, used in testing with a fixed seed to ensure a consistent random order that is
- * platform-independent.
+ * Warning: The implementation below uses modulo as a simple, platform-independent way to get a
+ * close-to-uniform distribution.
  */
 class PseudoRandomGenerator {
 public:
@@ -57,6 +66,11 @@ public:
             std::size_t j = (gen() + 1) % i;
             std::swap(vec[i - 1], vec[j]);
         }
+    }
+
+    // Helper to generate integer values randomly distributed in the range [min, max].
+    auto generateUniformInt(int min, int max) {
+        return (gen() % (max - min + 1)) + min;
     }
 
 private:

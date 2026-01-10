@@ -41,16 +41,11 @@
 #include "mongo/client/dbclient_cursor.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/dbhelpers.h"
-#include "mongo/db/global_catalog/catalog_cache/catalog_cache.h"
 #include "mongo/db/global_catalog/chunk_manager.h"
 #include "mongo/db/global_catalog/type_chunk.h"
 #include "mongo/db/global_catalog/type_collection_common_types_gen.h"
 #include "mongo/db/index_builds/index_builds_coordinator_mock.h"
 #include "mongo/db/keypattern.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_options.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/lock_manager/locker.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/op_observer/op_observer_registry.h"
 #include "mongo/db/persistent_task_store.h"
@@ -63,6 +58,7 @@
 #include "mongo/db/repl/replication_coordinator_mock.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/repl/storage_interface_mock.h"
+#include "mongo/db/router_role/routing_cache/catalog_cache.h"
 #include "mongo/db/s/migration_destination_manager.h"
 #include "mongo/db/s/resharding/donor_oplog_id_gen.h"
 #include "mongo/db/s/resharding/resharding_change_event_o2_field_gen.h"
@@ -74,6 +70,10 @@
 #include "mongo/db/s/resharding/resharding_service_test_helpers.h"
 #include "mongo/db/s/resharding/resharding_util.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/lock_manager/locker.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_options.h"
 #include "mongo/db/sharding_environment/sharding_test_fixture_common.h"
 #include "mongo/db/versioning_protocol/chunk_version.h"
 #include "mongo/db/versioning_protocol/database_version.h"
@@ -227,9 +227,8 @@ public:
                                                true /* allowMigrations */,
                                                chunks);
         return CollectionRoutingInfo{
-            ChunkManager(
-                ShardingTestFixtureCommon::makeStandaloneRoutingTableHistory(std::move(rt)),
-                boost::none /* clusterTime */),
+            CurrentChunkManager(
+                ShardingTestFixtureCommon::makeStandaloneRoutingTableHistory(std::move(rt))),
             DatabaseTypeValueHandle(DatabaseType{
                 nss.dbName(), _someDonorId, DatabaseVersion(UUID::gen(), Timestamp(1, 1))})};
     }
@@ -517,24 +516,40 @@ private:
     std::shared_ptr<ExternalStateForTestImpl> _externalStateImpl;
 };
 
+struct AbortOptions {
+    bool isUserCancelled = false;
+
+    BSONObj toBSON() const {
+        BSONObjBuilder bob;
+        bob.append("isUserCancelled", isUserCancelled);
+        return bob.obj();
+    }
+};
+
 struct TestOptions {
     bool isAlsoDonor;
     bool skipCloningAndApplying;
     bool skipCloning;
+    bool skipBuildingIndexes = false;
     bool noChunksToCopy;
     bool storeOplogFetcherProgress = true;
     bool performVerification = true;
     bool driveCloneNoRefresh;
+    boost::optional<AbortOptions> abortOptions;
 
     BSONObj toBSON() const {
         BSONObjBuilder bob;
         bob.append("isAlsoDonor", isAlsoDonor);
         bob.append("skipCloningAndApplying", skipCloningAndApplying);
         bob.append("skipCloning", skipCloning);
+        bob.append("skipBuildingIndexes", skipBuildingIndexes);
         bob.append("noChunksToCopy", noChunksToCopy);
         bob.append("storeOplogFetcherProgress", storeOplogFetcherProgress);
         bob.append("performVerification", performVerification);
         bob.append("driveCloneNoRefresh", driveCloneNoRefresh);
+        if (abortOptions) {
+            bob.append("abortOptions", abortOptions->toBSON());
+        }
         return bob.obj();
     }
 };
@@ -556,8 +571,19 @@ std::vector<TestOptions> makeBasicTestOptions() {
                     RAIIServerParameterControllerForTest cloneNoRefreshFeatureFlagController(
                         "featureFlagReshardingCloneNoRefresh", driveCloneNoRefresh);
 
-                    testOptions.push_back(
-                        {isAlsoDonor, skipCloningAndApplying, skipCloning, driveCloneNoRefresh});
+                    bool noChunksToCopy = skipCloningAndApplying || skipCloning;
+
+                    // TODO (SERVER-115222): skipBuildingIndexes is false unless
+                    // explicitly set to true in unit tests. Leaving it off so that unit test
+                    // time doesn't grow unnecessarily. Update this once we audit necessary
+                    // test combinations.
+                    bool skipBuildingIndexes = false;
+                    testOptions.push_back({isAlsoDonor,
+                                           skipCloningAndApplying,
+                                           skipCloning,
+                                           skipBuildingIndexes,
+                                           noChunksToCopy,
+                                           driveCloneNoRefresh});
                 }
             }
         }
@@ -583,9 +609,16 @@ std::vector<TestOptions> makeAllTestOptions() {
                                     cloneNoRefreshFeatureFlagController(
                                         "featureFlagReshardingCloneNoRefresh", driveCloneNoRefresh);
 
+                                // TODO (SERVER-115222): skipBuildingIndexes is false unless
+                                // explicitly set to true in unit tests. Leaving it off so that unit
+                                // tests time doesn't grow unnecessarily. Update this once we audit
+                                // necessary test combinations.
+                                bool skipBuildingIndexes = false;
+
                                 testOptions.push_back({isAlsoDonor,
                                                        skipCloningAndApplying,
                                                        skipCloning,
+                                                       skipBuildingIndexes,
                                                        noChunksToCopy,
                                                        storeOplogFetcherProgress,
                                                        performVerification,
@@ -775,6 +808,7 @@ public:
         doc.setCommonReshardingMetadata(std::move(commonMetadata));
         doc.setSkipCloningAndApplying(testOptions.skipCloningAndApplying);
         doc.setSkipCloning(testOptions.skipCloning);
+        doc.setSkipBuildingIndexes(testOptions.skipBuildingIndexes);
         doc.setStoreOplogFetcherProgress(testOptions.storeOplogFetcherProgress);
         doc.setPerformVerification(testOptions.performVerification);
         return doc;
@@ -852,6 +886,17 @@ public:
         }
     }
 
+    void notifyCriticalSectionStarted(OperationContext* opCtx,
+                                      RecipientStateMachine& recipient,
+                                      const ReshardingRecipientDocument& recipientDoc) {
+        if (recipientDoc.getSkipCloningAndApplying().value_or(false)) {
+            // A recipient only explicitly waits for the critical section to start before
+            // transitioning to "strict-consistency" when it skips cloning and applying.
+            ASSERT_OK(recipient.awaitInApplyingOrError().getNoThrow());
+            recipient.onCriticalSectionStarted();
+        }
+    }
+
     void notifyReshardingCommitting(OperationContext* opCtx,
                                     RecipientStateMachine& recipient,
                                     const ReshardingRecipientDocument& recipientDoc) {
@@ -865,12 +910,13 @@ public:
         auto status = recipient.awaitChangeStreamsMonitorStartedForTest().getNoThrow(opCtx);
         if (recipientDoc.getPerformVerification() && !recipientDoc.getSkipCloningAndApplying()) {
             ASSERT_OK(status);
+
+            if (!_noChunksToCopy) {
+                // Only mock writes during the 'applying' state if the recipient has chunks to copy.
+                writeToCollection(opCtx, recipientDoc, _numInserts, _numDeletes, _numUpdates);
+            }
         } else {
             ASSERT_EQ(status, ErrorCodes::IllegalOperation);
-        }
-        if (!_noChunksToCopy) {
-            // Only mock writes during the 'applying' state if the recipient has chunks to copy.
-            writeToCollection(opCtx, recipientDoc, _numInserts, _numDeletes, _numUpdates);
         }
     }
 
@@ -900,7 +946,7 @@ public:
         auto recipientColl = acquireCollection(
             opCtx,
             CollectionAcquisitionRequest(NamespaceString::kRecipientReshardingOperationsNamespace,
-                                         PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                         PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
                                          repl::ReadConcernArgs::get(opCtx),
                                          AcquisitionPrerequisites::kRead),
             MODE_IS);
@@ -1348,15 +1394,24 @@ protected:
         RecipientStateMachine::insertStateDocument(opCtx.get(), doc);
         auto recipient = RecipientStateMachine::getOrCreate(opCtx.get(), _service, doc.toBSON());
         notifyToStartCloning(opCtx.get(), *recipient, doc);
-
+        if ((state == RecipientStateEnum::kCloning || state == RecipientStateEnum::kApplying) &&
+            testOptions.skipCloningAndApplying) {
+            // If skipCloningAndApplying is enabled and the mock error is in the 'cloning' or
+            // 'applying' state, the resharding operation will still run to completion.
+            notifyCriticalSectionStarted(opCtx.get(), *recipient, doc);
+        }
         ASSERT_OK(recipient->awaitInStrictConsistencyOrError().getNoThrow());
 
         auto persistedDoc = getPersistedRecipientDocument(opCtx.get(), doc.getReshardingUUID());
         if ((state == RecipientStateEnum::kCloning || state == RecipientStateEnum::kApplying) &&
             testOptions.skipCloningAndApplying) {
+            // If skipCloningAndApplying is enabled and the mock error is in the 'cloning' or
+            // 'applying' state, the resharding operation will still run to completion.
             ASSERT_EQ(persistedDoc.getMutableState().getState(),
                       RecipientStateEnum::kStrictConsistency);
         } else if (state == RecipientStateEnum::kCloning && testOptions.skipCloning) {
+            // If skipCloning is enabled and the mock error is in the 'cloning', the resharding
+            // operation will still get past the cloning state.
             ASSERT_NE(persistedDoc.getMutableState().getState(), RecipientStateEnum::kCloning);
         } else {
             ASSERT_EQ(persistedDoc.getMutableState().getState(), RecipientStateEnum::kError);
@@ -1441,8 +1496,10 @@ TEST_F(ReshardingRecipientServiceTest, CanTransitionThroughEachStateToCompletion
                                                           RecipientStateEnum::kStrictConsistency};
 
         notifyToStartCloning(opCtx.get(), *recipient, doc);
-        stateTransitionsGuard.wait(RecipientStateEnum::kStrictConsistency);
         awaitChangeStreamsMonitorStarted(opCtx.get(), *recipient, doc);
+        notifyCriticalSectionStarted(opCtx.get(), *recipient, doc);
+
+        stateTransitionsGuard.wait(RecipientStateEnum::kStrictConsistency);
         stateTransitionsGuard.unset(RecipientStateEnum::kStrictConsistency);
 
         awaitChangeStreamsMonitorCompleted(opCtx.get(), *recipient, doc);
@@ -1575,6 +1632,7 @@ TEST_F(ReshardingRecipientServiceTest, StepDownStepUpEachTransition) {
                 }
                 case RecipientStateEnum::kStrictConsistency: {
                     awaitChangeStreamsMonitorStarted(opCtx.get(), *recipient, doc);
+                    notifyCriticalSectionStarted(opCtx.get(), *recipient, doc);
                     break;
                 }
                 case RecipientStateEnum::kDone: {
@@ -1718,8 +1776,10 @@ TEST_F(ReshardingRecipientServiceTest, OpCtxKilledWhileRestoringMetrics) {
         ASSERT_FALSE(isPausedOrShutdown);
         recipient = *maybeRecipient;
 
-        stateTransitionsGuard.wait(RecipientStateEnum::kStrictConsistency);
         awaitChangeStreamsMonitorStarted(opCtx.get(), *recipient, doc);
+        notifyCriticalSectionStarted(opCtx.get(), *recipient, doc);
+
+        stateTransitionsGuard.wait(RecipientStateEnum::kStrictConsistency);
         stateTransitionsGuard.unset(RecipientStateEnum::kStrictConsistency);
 
         awaitChangeStreamsMonitorCompleted(opCtx.get(), *recipient, doc);
@@ -1729,7 +1789,8 @@ TEST_F(ReshardingRecipientServiceTest, OpCtxKilledWhileRestoringMetrics) {
     }
 }
 
-DEATH_TEST_REGEX_F(ReshardingRecipientServiceTest, CommitFn, "4457001.*tripwire") {
+using ReshardingRecipientServiceTestDeathTest = ReshardingRecipientServiceTest;
+DEATH_TEST_REGEX_F(ReshardingRecipientServiceTestDeathTest, CommitFn, "4457001.*tripwire") {
     for (const auto& testOptions : makeBasicTestOptions()) {
         LOGV2(9297802,
               "Running case",
@@ -1744,6 +1805,9 @@ DEATH_TEST_REGEX_F(ReshardingRecipientServiceTest, CommitFn, "4457001.*tripwire"
             recipient->commit(), DBException, ErrorCodes::ReshardCollectionInProgress);
 
         notifyToStartCloning(opCtx.get(), *recipient, doc);
+        awaitChangeStreamsMonitorStarted(opCtx.get(), *recipient, doc);
+        notifyCriticalSectionStarted(opCtx.get(), *recipient, doc);
+
         recipient->awaitInStrictConsistencyOrError().get();
         recipient->commit();
 
@@ -1753,13 +1817,13 @@ DEATH_TEST_REGEX_F(ReshardingRecipientServiceTest, CommitFn, "4457001.*tripwire"
 
 TEST_F(ReshardingRecipientServiceTest, DropsTemporaryReshardingCollectionOnAbort) {
     for (const auto& testOptions : makeBasicTestOptions()) {
-        LOGV2(5551107,
+        LOGV2(11543200,
               "Running case",
               "test"_attr = unittest::getTestName(),
               "testOptions"_attr = testOptions);
 
-        boost::optional<PauseDuringStateTransitions> doneTransitionGuard;
-        doneTransitionGuard.emplace(controller(), RecipientStateEnum::kDone);
+        boost::optional<PauseDuringStateTransitions> stateTransitionsGuard;
+        stateTransitionsGuard.emplace(controller(), RecipientStateEnum::kCloning);
 
         auto doc = makeRecipientDocument(testOptions);
         auto instanceId =
@@ -1768,8 +1832,6 @@ TEST_F(ReshardingRecipientServiceTest, DropsTemporaryReshardingCollectionOnAbort
         auto opCtx = makeOperationContext();
 
         if (testOptions.isAlsoDonor) {
-            // If the recipient is also a donor, the original collection should already exist on
-            // this shard.
             createSourceCollection(opCtx.get(), doc);
         }
 
@@ -1777,25 +1839,12 @@ TEST_F(ReshardingRecipientServiceTest, DropsTemporaryReshardingCollectionOnAbort
         auto recipient = RecipientStateMachine::getOrCreate(opCtx.get(), _service, doc.toBSON());
 
         notifyToStartCloning(opCtx.get(), *recipient, doc);
+
+        // Wait until cloning starts to ensure temp collection exists.
+        stateTransitionsGuard->wait(RecipientStateEnum::kCloning);
         recipient->abort(false);
 
-        doneTransitionGuard->wait(RecipientStateEnum::kDone);
-        stepDown();
-
-        ASSERT_EQ(recipient->getCompletionFuture().getNoThrow(),
-                  ErrorCodes::InterruptedDueToReplStateChange);
-
-        recipient.reset();
-        stepUp(opCtx.get());
-
-        auto [maybeRecipient, isPausedOrShutdown] =
-            RecipientStateMachine::lookup(opCtx.get(), _service, instanceId);
-        ASSERT_TRUE(maybeRecipient);
-        ASSERT_FALSE(isPausedOrShutdown);
-        recipient = *maybeRecipient;
-
-        doneTransitionGuard.reset();
-        recipient->abort(false);
+        stateTransitionsGuard.reset();
 
         ASSERT_OK(recipient->getCompletionFuture().getNoThrow());
         checkRecipientDocumentRemoved(opCtx.get());
@@ -1806,7 +1855,7 @@ TEST_F(ReshardingRecipientServiceTest, DropsTemporaryReshardingCollectionOnAbort
                 acquireCollection(opCtx.get(),
                                   CollectionAcquisitionRequest(
                                       doc.getSourceNss(),
-                                      PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                      PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
                                       repl::ReadConcernArgs::get(opCtx.get()),
                                       AcquisitionPrerequisites::kRead),
                                   MODE_IS);
@@ -1820,7 +1869,100 @@ TEST_F(ReshardingRecipientServiceTest, DropsTemporaryReshardingCollectionOnAbort
                 acquireCollection(opCtx.get(),
                                   CollectionAcquisitionRequest(
                                       doc.getTempReshardingNss(),
-                                      PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                      PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
+                                      repl::ReadConcernArgs::get(opCtx.get()),
+                                      AcquisitionPrerequisites::kRead),
+                                  MODE_IS);
+            ASSERT_FALSE(coll.exists());
+        }
+    }
+}
+
+TEST_F(ReshardingRecipientServiceTest, DropsTemporaryReshardingCollectionOnAbortWithFailover) {
+    for (const auto& testOptions : makeBasicTestOptions()) {
+        LOGV2(5551107,
+              "Running case",
+              "test"_attr = unittest::getTestName(),
+              "testOptions"_attr = testOptions);
+
+        auto cleanupFp = globalFailPointRegistry().find("reshardingPauseRecipientBeforeCleanup");
+        auto cleanupFpTimesEntered = cleanupFp->setMode(FailPoint::alwaysOn);
+
+        boost::optional<PauseDuringStateTransitions> stateTransitionsGuard;
+        stateTransitionsGuard.emplace(controller(), RecipientStateEnum::kCloning);
+
+        auto doc = makeRecipientDocument(testOptions);
+        auto instanceId =
+            BSON(ReshardingRecipientDocument::kReshardingUUIDFieldName << doc.getReshardingUUID());
+
+        auto opCtx = makeOperationContext();
+
+        if (testOptions.isAlsoDonor) {
+            createSourceCollection(opCtx.get(), doc);
+        }
+
+        RecipientStateMachine::insertStateDocument(opCtx.get(), doc);
+        auto recipient = RecipientStateMachine::getOrCreate(opCtx.get(), _service, doc.toBSON());
+
+        notifyToStartCloning(opCtx.get(), *recipient, doc);
+
+        // Wait until cloning starts to ensure temp collection exists.
+        stateTransitionsGuard->wait(RecipientStateEnum::kCloning);
+        recipient->abort(false);
+        stateTransitionsGuard.reset();
+
+        cleanupFp->waitForTimesEntered(cleanupFpTimesEntered + 1);
+        stepDown();
+        cleanupFp->setMode(FailPoint::off);
+
+        ASSERT_EQ(recipient->getCompletionFuture().getNoThrow(),
+                  ErrorCodes::InterruptedDueToReplStateChange);
+
+        // TODO (SERVER-115139): Remove this failpoint after making the recipient able to reliably
+        // handle the case where abort request comes in before the cancellation source is
+        // initialized.
+        auto InitCancelStateFp =
+            globalFailPointRegistry().find("reshardingPauseRecipientAfterInitCancelState");
+        auto initCancelStateFpTimesEntered = InitCancelStateFp->setMode(FailPoint::alwaysOn);
+
+        recipient.reset();
+        stepUp(opCtx.get());
+
+        auto [maybeRecipient, isPausedOrShutdown] =
+            RecipientStateMachine::lookup(opCtx.get(), _service, instanceId);
+        ASSERT_TRUE(maybeRecipient);
+        ASSERT_FALSE(isPausedOrShutdown);
+        recipient = *maybeRecipient;
+
+        InitCancelStateFp->waitForTimesEntered(initCancelStateFpTimesEntered + 1);
+        InitCancelStateFp->setMode(FailPoint::off);
+
+        recipient->abort(false);
+
+        ASSERT_OK(recipient->getCompletionFuture().getNoThrow());
+        checkRecipientDocumentRemoved(opCtx.get());
+
+        if (testOptions.isAlsoDonor) {
+            // Verify original collection still exists after aborting.
+            auto coll =
+                acquireCollection(opCtx.get(),
+                                  CollectionAcquisitionRequest(
+                                      doc.getSourceNss(),
+                                      PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
+                                      repl::ReadConcernArgs::get(opCtx.get()),
+                                      AcquisitionPrerequisites::kRead),
+                                  MODE_IS);
+            ASSERT_TRUE(coll.exists());
+            ASSERT_EQ(coll.uuid(), doc.getSourceUUID());
+        }
+
+        // Verify the temporary collection no longer exists.
+        {
+            auto coll =
+                acquireCollection(opCtx.get(),
+                                  CollectionAcquisitionRequest(
+                                      doc.getTempReshardingNss(),
+                                      PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
                                       repl::ReadConcernArgs::get(opCtx.get()),
                                       AcquisitionPrerequisites::kRead),
                                   MODE_IS);
@@ -1861,7 +2003,7 @@ TEST_F(ReshardingRecipientServiceTest, RenamesTemporaryReshardingCollectionWhenD
                     acquireCollection(opCtx.get(),
                                       CollectionAcquisitionRequest(
                                           doc.getTempReshardingNss(),
-                                          PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                          PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
                                           repl::ReadConcernArgs::get(opCtx.get()),
                                           AcquisitionPrerequisites::kRead),
                                       MODE_IS);
@@ -1870,8 +2012,10 @@ TEST_F(ReshardingRecipientServiceTest, RenamesTemporaryReshardingCollectionWhenD
             }
             stateTransitionsGuard.unset(RecipientStateEnum::kApplying);
 
-            stateTransitionsGuard.wait(RecipientStateEnum::kStrictConsistency);
             awaitChangeStreamsMonitorStarted(opCtx.get(), *recipient, doc);
+            notifyCriticalSectionStarted(opCtx.get(), *recipient, doc);
+
+            stateTransitionsGuard.wait(RecipientStateEnum::kStrictConsistency);
             stateTransitionsGuard.unset(RecipientStateEnum::kStrictConsistency);
 
             awaitChangeStreamsMonitorCompleted(opCtx.get(), *recipient, doc);
@@ -1886,7 +2030,7 @@ TEST_F(ReshardingRecipientServiceTest, RenamesTemporaryReshardingCollectionWhenD
                     acquireCollection(opCtx.get(),
                                       CollectionAcquisitionRequest(
                                           doc.getSourceNss(),
-                                          PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                          PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
                                           repl::ReadConcernArgs::get(opCtx.get()),
                                           AcquisitionPrerequisites::kRead),
                                       MODE_IS);
@@ -1914,8 +2058,10 @@ TEST_F(ReshardingRecipientServiceTest, WritesNoopOplogEntryOnReshardDoneCatchUp)
         auto recipient = RecipientStateMachine::getOrCreate(rawOpCtx, _service, doc.toBSON());
 
         notifyToStartCloning(rawOpCtx, *recipient, doc);
-        stateTransitionsGuard.wait(RecipientStateEnum::kStrictConsistency);
         awaitChangeStreamsMonitorStarted(opCtx.get(), *recipient, doc);
+        notifyCriticalSectionStarted(opCtx.get(), *recipient, doc);
+
+        stateTransitionsGuard.wait(RecipientStateEnum::kStrictConsistency);
         stateTransitionsGuard.unset(RecipientStateEnum::kStrictConsistency);
 
         awaitChangeStreamsMonitorCompleted(opCtx.get(), *recipient, doc);
@@ -1976,9 +2122,10 @@ TEST_F(ReshardingRecipientServiceTest, WritesNoopOplogEntryForImplicitShardColle
         auto recipient = RecipientStateMachine::getOrCreate(rawOpCtx, _service, doc.toBSON());
 
         notifyToStartCloning(rawOpCtx, *recipient, doc);
+        awaitChangeStreamsMonitorStarted(opCtx.get(), *recipient, doc);
+        notifyCriticalSectionStarted(opCtx.get(), *recipient, doc);
 
         stateTransitionsGuard.wait(RecipientStateEnum::kStrictConsistency);
-        awaitChangeStreamsMonitorStarted(opCtx.get(), *recipient, doc);
         stateTransitionsGuard.unset(RecipientStateEnum::kStrictConsistency);
 
         awaitChangeStreamsMonitorCompleted(opCtx.get(), *recipient, doc);
@@ -2107,11 +2254,39 @@ TEST_F(ReshardingRecipientServiceTest, skipCloning) {
         auto recipient = RecipientStateMachine::getOrCreate(opCtx.get(), _service, doc.toBSON());
 
         notifyToStartCloning(opCtx.get(), *recipient, doc);
+        notifyCriticalSectionStarted(opCtx.get(), *recipient, doc);
         ASSERT_OK(recipient->awaitInStrictConsistencyOrError().getNoThrow());
 
         notifyReshardingCommitting(opCtx.get(), *recipient, doc);
         ASSERT_OK(recipient->getCompletionFuture().getNoThrow());
     }
+}
+
+TEST_F(ReshardingRecipientServiceTest, SkipBuildingIndexesPhase) {
+    TestOptions testOptions{
+        .isAlsoDonor = false,
+        .skipCloningAndApplying = false,
+        .skipCloning = false,
+        .skipBuildingIndexes = true,
+        .noChunksToCopy = false,
+    };
+
+    auto doc = makeRecipientDocument(testOptions);
+    auto opCtx = makeOperationContext();
+    RecipientStateMachine::insertStateDocument(opCtx.get(), doc);
+    auto recipient = RecipientStateMachine::getOrCreate(opCtx.get(), _service, doc.toBSON());
+
+    notifyToStartCloning(opCtx.get(), *recipient, doc);
+    awaitChangeStreamsMonitorStarted(opCtx.get(), *recipient, doc);
+    notifyCriticalSectionStarted(opCtx.get(), *recipient, doc);
+    ASSERT_OK(recipient->awaitInStrictConsistencyOrError().getNoThrow());
+
+    // Verify the operation completed successfully - the metrics will be set, but the actual
+    // index building work was skipped. Similar to skipCloning tests, we just verify functional
+    // correctness rather than checking specific metric values.
+    awaitChangeStreamsMonitorCompleted(opCtx.get(), *recipient, doc);
+    notifyReshardingCommitting(opCtx.get(), *recipient, doc);
+    ASSERT_OK(recipient->getCompletionFuture().getNoThrow());
 }
 
 TEST_F(ReshardingRecipientServiceTest, MetricsSuccessfullyShutDownOnUserCancelation) {
@@ -2126,6 +2301,7 @@ TEST_F(ReshardingRecipientServiceTest, MetricsSuccessfullyShutDownOnUserCancelat
         auto recipient = RecipientStateMachine::getOrCreate(opCtx.get(), _service, doc.toBSON());
 
         notifyToStartCloning(opCtx.get(), *recipient, doc);
+        notifyCriticalSectionStarted(opCtx.get(), *recipient, doc);
 
         auto localTransitionToErrorFuture = recipient->awaitInStrictConsistencyOrError();
         ASSERT_OK(localTransitionToErrorFuture.getNoThrow());
@@ -2231,6 +2407,7 @@ TEST_F(ReshardingRecipientServiceTest, ReshardingMetricsBasic) {
                 }
                 case RecipientStateEnum::kStrictConsistency: {
                     awaitChangeStreamsMonitorStarted(opCtx.get(), *recipient, recipientDoc);
+                    notifyCriticalSectionStarted(opCtx.get(), *recipient, recipientDoc);
                     break;
                 }
                 case RecipientStateEnum::kDone: {
@@ -2335,6 +2512,7 @@ TEST_F(ReshardingRecipientServiceTest, RestoreMetricsAfterStepUp) {
                 }
                 case RecipientStateEnum::kStrictConsistency: {
                     awaitChangeStreamsMonitorStarted(opCtx.get(), *recipient, doc);
+                    notifyCriticalSectionStarted(opCtx.get(), *recipient, doc);
                     break;
                 }
                 case RecipientStateEnum::kDone: {
@@ -2435,8 +2613,10 @@ TEST_F(ReshardingRecipientServiceTest, RestoreMetricsAfterStepUpWithMissingProgr
         RecipientStateMachine::insertStateDocument(opCtx.get(), doc);
         auto recipient = RecipientStateMachine::getOrCreate(opCtx.get(), _service, doc.toBSON());
 
-        stateTransitionsGuard.wait(RecipientStateEnum::kStrictConsistency);
         awaitChangeStreamsMonitorStarted(opCtx.get(), *recipient, doc);
+        notifyCriticalSectionStarted(opCtx.get(), *recipient, doc);
+
+        stateTransitionsGuard.wait(RecipientStateEnum::kStrictConsistency);
         stateTransitionsGuard.unset(RecipientStateEnum::kStrictConsistency);
 
         awaitChangeStreamsMonitorCompleted(opCtx.get(), *recipient, doc);
@@ -2469,10 +2649,63 @@ TEST_F(ReshardingRecipientServiceTest, AbortWhileChangeStreamsMonitorInProgress)
     ASSERT_OK(recipient->getCompletionFuture().getNoThrow());
 }
 
+TEST_F(ReshardingRecipientServiceTest, AbortWhileWaitingForCriticalSectionStarted) {
+    for (auto& testOptions : makeBasicTestOptions()) {
+        if (!testOptions.skipCloningAndApplying) {
+            // A recipient only explicitly waits for the critical section to start before
+            // transitioning to "strict-consistency" when it skips cloning and applying.
+            continue;
+        }
+
+        for (bool isUserCancelled : {false, true}) {
+            testOptions.abortOptions.emplace(isUserCancelled);
+
+            LOGV2(11400403,
+                  "Running case",
+                  "test"_attr = unittest::getTestName(),
+                  "testOptions"_attr = testOptions);
+
+            auto waitForCriticalSectionFailPoint = globalFailPointRegistry().find(
+                "reshardingPauseRecipientBeforeWaitingForCriticalSection");
+            auto timesEnteredFailPoint =
+                waitForCriticalSectionFailPoint->setMode(FailPoint::alwaysOn);
+
+            auto doc = makeRecipientDocument(testOptions);
+            auto instanceId = BSON(ReshardingRecipientDocument::kReshardingUUIDFieldName
+                                   << doc.getReshardingUUID());
+
+            auto opCtx = makeOperationContext();
+            RecipientStateMachine::insertStateDocument(opCtx.get(), doc);
+            auto recipient =
+                RecipientStateMachine::getOrCreate(opCtx.get(), _service, doc.toBSON());
+
+            notifyToStartCloning(opCtx.get(), *recipient, doc);
+            auto changeStreamsMonitorStartedStatus =
+                recipient->awaitChangeStreamsMonitorStartedForTest().getNoThrow();
+            ASSERT_EQ(changeStreamsMonitorStartedStatus, ErrorCodes::IllegalOperation);
+
+            waitForCriticalSectionFailPoint->waitForTimesEntered(timesEnteredFailPoint + 1);
+            waitForCriticalSectionFailPoint->setMode(FailPoint::off);
+            // Wait for the recipient to start waiting on the promise for critical section started.
+            opCtx->sleepFor(Milliseconds(1));
+            recipient->abort(testOptions.abortOptions->isUserCancelled);
+
+            auto changeStreamsMonitorCompletedStatus =
+                recipient->awaitChangeStreamsMonitorCompletedForTest().getNoThrow();
+            ASSERT_EQ(changeStreamsMonitorCompletedStatus, ErrorCodes::IllegalOperation);
+            // TODO (SERVER-114077): Make sure that there can never be dangling
+            // _shardsvrRecipientCriticalSectionStarted threads when resharding gets aborted both
+            // implicitly and explicitly.
+            // ASSERT_EQ(recipient->awaitInStrictConsistencyOrError().getNoThrow(),
+            //           ErrorCodes::ReshardCollectionAborted);
+            ASSERT_OK(recipient->getCompletionFuture().getNoThrow());
+            checkRecipientDocumentRemoved(opCtx.get());
+        }
+    }
+}
+
 TEST_F(ReshardingRecipientServiceTest, AbortAfterStepUpWithAbortReasonFromCoordinator) {
     repl::primaryOnlyServiceTestStepUpWaitForRebuildComplete.setMode(FailPoint::alwaysOn);
-    const auto abortErrMsg = "Recieved abort from the resharding coordinator";
-
     for (const auto& testOptions : makeBasicTestOptions()) {
         LOGV2(8743301,
               "Running case",
@@ -2506,8 +2739,10 @@ TEST_F(ReshardingRecipientServiceTest, AbortAfterStepUpWithAbortReasonFromCoordi
 
             auto abortReason = persistedDoc.getMutableState().getAbortReason();
             ASSERT(abortReason);
-            ASSERT_EQ(abortReason->getIntField("code"), ErrorCodes::ReshardCollectionAborted);
-            ASSERT_EQ(abortReason->getStringField("errmsg"), abortErrMsg);
+            ASSERT_EQ(abortReason->getIntField("code"),
+                      resharding::kCoordinatorAbortedError.code());
+            ASSERT_EQ(abortReason->getStringField("errmsg"),
+                      resharding::kCoordinatorAbortedError.reason());
         }
 
         stepDown();
@@ -2601,8 +2836,10 @@ TEST_F(ReshardingRecipientServiceTest, TestVerifyCollectionOptionsHappyPath) {
         auto recipient = RecipientStateMachine::getOrCreate(opCtx.get(), _service, doc.toBSON());
 
         notifyToStartCloning(opCtx.get(), *recipient, doc);
-        stateTransitionsGuard.wait(RecipientStateEnum::kStrictConsistency);
         awaitChangeStreamsMonitorStarted(opCtx.get(), *recipient, doc);
+        notifyCriticalSectionStarted(opCtx.get(), *recipient, doc);
+
+        stateTransitionsGuard.wait(RecipientStateEnum::kStrictConsistency);
         stateTransitionsGuard.unset(RecipientStateEnum::kStrictConsistency);
 
         awaitChangeStreamsMonitorCompleted(opCtx.get(), *recipient, doc);
@@ -2679,8 +2916,10 @@ TEST_F(ReshardingRecipientServiceTest,
         tempReshardingCollectionOptions = BSONObjBuilder().append("viewOn", "bar").obj();
 
         notifyToStartCloning(opCtx.get(), *recipient, doc);
-        stateTransitionsGuard.wait(RecipientStateEnum::kStrictConsistency);
         awaitChangeStreamsMonitorStarted(opCtx.get(), *recipient, doc);
+        notifyCriticalSectionStarted(opCtx.get(), *recipient, doc);
+
+        stateTransitionsGuard.wait(RecipientStateEnum::kStrictConsistency);
         stateTransitionsGuard.unset(RecipientStateEnum::kStrictConsistency);
 
         awaitChangeStreamsMonitorCompleted(opCtx.get(), *recipient, doc);
@@ -2723,6 +2962,9 @@ TEST_F(ReshardingRecipientServiceTest, VerifyRecipientRetriesOnLockTimeoutError)
 
         notifyToStartCloning(opCtx.get(), *recipient, doc);
         for (const auto& phase : recipientPhases) {
+            if (phase == RecipientStateEnum::kStrictConsistency) {
+                notifyCriticalSectionStarted(opCtx.get(), *recipient, doc);
+            }
             phaseTransitionsGuard.wait(phase);
             sleepFor(Milliseconds(100));
             phaseTransitionsGuard.unset(phase);
@@ -2732,6 +2974,7 @@ TEST_F(ReshardingRecipientServiceTest, VerifyRecipientRetriesOnLockTimeoutError)
         keepRunning.store(false);
         lockThread.join();
 
+        notifyCriticalSectionStarted(opCtx.get(), *recipient, doc);
         notifyReshardingCommitting(opCtx.get(), *recipient, doc);
         ASSERT_OK(recipient->getCompletionFuture().getNoThrow());
     }

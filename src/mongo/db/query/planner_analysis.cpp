@@ -45,6 +45,8 @@
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/simple_bsonelement_comparator.h"
 #include "mongo/db/exec/document_value/document_metadata_fields.h"
+#include "mongo/db/exec/index_path_projection.h"
+#include "mongo/db/exec/projection_executor_utils.h"
 #include "mongo/db/index/multikey_paths.h"
 #include "mongo/db/index/s2_common.h"
 #include "mongo/db/index_names.h"
@@ -253,12 +255,12 @@ void makeCartesianProduct(const IndexBounds& bounds,
 
     // We dump the Cartesian product of bounds into prefixForScans, starting w/the first
     // field's points.
-    invariant(fieldsToExplode >= 1);
+    tassert(11321020, "fieldsToExplode must be greater than 0", fieldsToExplode > 0);
     const OrderedIntervalList& firstOil = bounds.fields[0];
-    invariant(firstOil.intervals.size() >= 1);
+    tassert(11321021, "firstOil.intervals must not be empty", !firstOil.intervals.empty());
     for (size_t i = 0; i < firstOil.intervals.size(); ++i) {
         const Interval& ival = firstOil.intervals[i];
-        invariant(ival.isPoint());
+        tassert(11321022, "all ivals must be points", ival.isPoint());
         PointPrefix pfix;
         pfix.push_back(ival);
         PrefixIndices pfixIndices;
@@ -270,11 +272,11 @@ void makeCartesianProduct(const IndexBounds& bounds,
     for (size_t i = 1; i < fieldsToExplode; ++i) {
         vector<pair<PointPrefix, PrefixIndices>> newPrefixForScans;
         const OrderedIntervalList& oil = bounds.fields[i];
-        invariant(oil.intervals.size() >= 1);
+        tassert(11321023, "oil.intervals must not be empty", !oil.intervals.empty());
         // For each point interval in that field (all ivals must be points)...
         for (size_t j = 0; j < oil.intervals.size(); ++j) {
             const Interval& ival = oil.intervals[j];
-            invariant(ival.isPoint());
+            tassert(11321024, "all ivals must be points", ival.isPoint());
             // Make a new scan by appending it to all scans in prefixForScans.
             for (size_t k = 0; k < prefixForScans.size(); ++k) {
                 auto pfix = prefixForScans[k].first;
@@ -329,11 +331,20 @@ bool explodeNode(const QuerySolutionNode* node,
     for (size_t i = 0; i < prefixForScans.size(); ++i) {
         const PointPrefix& prefix = prefixForScans[i].first;
         const PrefixIndices& prefixIndices = prefixForScans[i].second;
-        invariant(prefix.size() == fieldsToExplode);
-        invariant(prefixIndices.size() == fieldsToExplode);
+        tassert(11321025,
+                fmt::format("'prefix.size()' must be equal to 'fieldsToExplode', but {} != {}",
+                            prefix.size(),
+                            fieldsToExplode),
+                prefix.size() == fieldsToExplode);
+        tassert(
+            11321026,
+            fmt::format("'prefixIndices.size()' must be equal to 'fieldsToExplode', but {} != {}",
+                        prefixIndices.size(),
+                        fieldsToExplode),
+            prefixIndices.size() == fieldsToExplode);
 
         // Copy boring fields into new child.
-        auto child = std::make_unique<IndexScanNode>(isn->index);
+        auto child = std::make_unique<IndexScanNode>(isn->nss, isn->index);
         child->direction = isn->direction;
         child->addKeyMetadata = isn->addKeyMetadata;
         child->queryCollator = isn->queryCollator;
@@ -345,7 +356,10 @@ bool explodeNode(const QuerySolutionNode* node,
             // the IETs are the correct shape (i.e. derived from an $in or $eq predicate) so that
             // they are safe to explode.
             for (size_t pidx = 0; pidx < prefixIndices.size(); pidx++) {
-                invariant(pidx < isn->iets.size());
+                tassert(11321027,
+                        fmt::format(
+                            "pidx={} is outside the iets bounds (size={})", pidx, isn->iets.size()),
+                        pidx < isn->iets.size());
                 const auto& iet = isn->iets[pidx];
                 auto needsExplodeNode = [&]() {
                     if (const auto* ietEval = iet.cast<interval_evaluation_tree::EvalNode>();
@@ -392,7 +406,7 @@ bool explodeNode(const QuerySolutionNode* node,
         // If the explosion is on a FetchNode, make a copy and add the 'isn' as a child.
         if (STAGE_FETCH == node->getType()) {
             auto origFetchNode = static_cast<const FetchNode*>(node);
-            auto newFetchNode = std::make_unique<FetchNode>();
+            auto newFetchNode = std::make_unique<FetchNode>(origFetchNode->nss);
 
             // Copy the FETCH's filter, if it exists.
             if (const auto origFetchFilter = origFetchNode->filter.get()) {
@@ -520,7 +534,7 @@ std::unique_ptr<QuerySolutionNode> analyzeProjection(
     if (!solnRoot->fetched() &&
         (projection.requiresDocument() ||
          !providesAllFields(projection.getRequiredFields(), *solnRoot))) {
-        auto fetch = std::make_unique<FetchNode>();
+        auto fetch = std::make_unique<FetchNode>(query.nss());
         fetch->children.push_back(std::move(solnRoot));
         solnRoot = std::move(fetch);
     }
@@ -596,7 +610,7 @@ std::unique_ptr<QuerySolutionNode> analyzeDistinct(const CanonicalQuery& query,
         // This was likely called from aggregation: add a FETCH stage to make sure we provide all
         // fields.
         if (!solnRoot->fetched()) {
-            auto fetch = std::make_unique<FetchNode>();
+            auto fetch = std::make_unique<FetchNode>(query.nss());
             fetch->children.push_back(std::move(solnRoot));
             solnRoot = std::move(fetch);
         }
@@ -682,7 +696,10 @@ std::unique_ptr<QuerySolutionNode> tryPushdownProjectBeneathSort(
     //
     // First, detach the bottom of the tree. This part is CHILD in the comment above.
     std::unique_ptr<QuerySolutionNode> restOfTree = std::move(sortNode->children[0]);
-    invariant(sortNode->children.size() == 1u);
+    tassert(11321028,
+            fmt::format("Expected sortNode to have exactly one child, but found {}",
+                        sortNode->children.size()),
+            sortNode->children.size() == 1u);
     sortNode->children.clear();
 
     // Next, detach the input from the projection and assume ownership of it.
@@ -690,10 +707,13 @@ std::unique_ptr<QuerySolutionNode> tryPushdownProjectBeneathSort(
     //   SORT
     // Or this if we have SKIP:
     //   SKIP => SORT
+    tassert(11321029,
+            fmt::format("Expected projectNode to have exactly one child, but found {}",
+                        projectNode->children.size()),
+            projectNode->children.size() == 1u);
     std::unique_ptr<QuerySolutionNode> ownedProjectionInput = std::move(projectNode->children[0]);
-    sortNode = nullptr;
-    invariant(projectNode->children.size() == 1u);
     projectNode->children.clear();
+    sortNode = nullptr;
 
     // Attach the lower part of the tree as the child of the projection.
     // We want to get the following structure:
@@ -929,6 +949,42 @@ std::tuple<boost::optional<IndexEntry>, bool> determineForeignIndexForRightSideO
 }
 
 // static
+bool QueryPlannerAnalysis::canUseIndexForRightSideOfLookupOnlyInClassic(
+    const std::string& foreignField, const std::vector<IndexEntry>& fullIndexList) {
+
+    bool hasOnlyClassicEligibleIndex = false;
+
+    for (size_t i = 0; i < fullIndexList.size(); ++i) {
+        const auto& index = fullIndexList[i];
+        LOGV2_DEBUG(
+            6408200, 3, "Relevant index", "indexNumber"_attr = i, "index"_attr = index.toString());
+
+        if (isIndexEligibleForRightSideOfLookupPushdown(index, foreignField)) {
+            // If the index has compatible collation then INLJ will be used.
+            // If the index has non-compatible collation and the query cannot spill DINLJ will be
+            // used. If the index has non-compatible collation and the query can spill HJ will be
+            // used.
+            return false;
+        } else if (index.type == INDEX_WILDCARD) {
+            // Obtain the projection executor from the parent wildcard IndexEntry.
+            auto* wildcardProjection = index.indexPathProjection;
+            tassert(6408201,
+                    "wildcardProjection must be non-null for Wildcard Indexes",
+                    wildcardProjection);
+
+            if (projection_executor_utils::applyProjectionToOneField(wildcardProjection->exec(),
+                                                                     foreignField)) {
+                // The wildCardProjection part of the index does not exclude the field, so classic
+                // can potentially use it
+                hasOnlyClassicEligibleIndex = true;
+            }
+        }
+    }
+
+    return hasOnlyClassicEligibleIndex;
+}
+
+// static
 QueryPlannerAnalysis::Strategy QueryPlannerAnalysis::determineLookupStrategy(
     const NamespaceString& foreignCollName,
     const std::string& foreignField,
@@ -1083,7 +1139,11 @@ bool QueryPlannerAnalysis::explodeForSort(const CanonicalQuery& query,
             const auto& oil = bounds.fields[boundsIdx];
             boost::optional<interval_evaluation_tree::IET> iet;
             if (!isn->iets.empty()) {
-                invariant(boundsIdx < isn->iets.size());
+                tassert(11321030,
+                        fmt::format("boundsIdx={} falls outside the iets bounds (size={})",
+                                    boundsIdx,
+                                    isn->iets.size()),
+                        boundsIdx < isn->iets.size());
                 iet = isn->iets[boundsIdx];
             }
             if (!isOilExplodable(oil, iet)) {
@@ -1316,7 +1376,7 @@ std::unique_ptr<QuerySolutionNode> QueryPlannerAnalysis::analyzeSort(
         });
 
         if (!sortIsCovered) {
-            auto fetch = std::make_unique<FetchNode>();
+            auto fetch = std::make_unique<FetchNode>(query.nss());
             fetch->children.push_back(std::move(solnRoot));
             solnRoot = std::move(fetch);
         }
@@ -1401,7 +1461,7 @@ std::unique_ptr<QuerySolution> QueryPlannerAnalysis::analyzeDataAccess(
             }
 
             if (fetch) {
-                auto fetchNode = std::make_unique<FetchNode>();
+                auto fetchNode = std::make_unique<FetchNode>(query.nss());
                 fetchNode->children.push_back(std::move(solnRoot));
                 solnRoot = std::move(fetchNode);
             }
@@ -1454,7 +1514,7 @@ std::unique_ptr<QuerySolution> QueryPlannerAnalysis::analyzeDataAccess(
 
         // If there's no projection, we must fetch, as the user wants the entire doc.
         if (!solnRoot->fetched() && !query.isCountLike()) {
-            auto fetch = std::make_unique<FetchNode>();
+            auto fetch = std::make_unique<FetchNode>(query.nss());
             fetch->children.push_back(std::move(solnRoot));
             solnRoot = std::move(fetch);
         }
@@ -1546,7 +1606,7 @@ bool QueryPlannerAnalysis::turnIxscanIntoCount(QuerySolution* soln) {
             std::swap(startKeyInclusive, endKeyInclusive);
         }
 
-        auto csn = std::make_unique<CountScanNode>(isn->index);
+        auto csn = std::make_unique<CountScanNode>(isn->nss, isn->index);
         csn->startKey = csnStartKey;
         csn->startKeyInclusive = startKeyInclusive;
         csn->endKey = csnEndKey;

@@ -11,9 +11,6 @@ exports_files(
 
 mongo_cc_library(
     name = "cluster_find_util",
-    hdrs = [
-        "cluster_find_util.h",
-    ],
     deps = [
         "//src/mongo:base",
         "//src/mongo/db:server_base",
@@ -32,9 +29,6 @@ mongo_cc_library(
     srcs = [
         "jparse_util.cpp",
     ],
-    hdrs = [
-        "jparse_util.h",
-    ],
     deps = [
         "//src/mongo:base",
         "//src/mongo/db/query/datetime:date_time_support",
@@ -46,8 +40,17 @@ mongo_cc_library(
     srcs = [
         "string_util.cpp",
     ],
-    hdrs = [
-        "string_util.h",
+    deps = [
+        "//src/mongo:base",
+    ],
+)
+
+mongo_cc_library(
+    name = "throughput_gauge",
+    srcs = [
+    ],
+    deps = [
+        "//src/mongo:base",
     ],
 )
 
@@ -55,18 +58,12 @@ mongo_cc_library(
     name = "stop_token",
     srcs = [
     ],
-    hdrs = [
-        "stop_token.h",
-    ],
 )
 
 mongo_cc_library(
     name = "validate_id",
     srcs = [
         "validate_id.cpp",
-    ],
-    hdrs = [
-        "validate_id.h",
     ],
     deps = [
         "//src/mongo:base",
@@ -78,33 +75,69 @@ mongo_cc_library(
     srcs = [
         "rank_fusion_util.cpp",
     ],
+    deps = [
+        "//src/mongo:base",
+        "//src/mongo/db/query:query_knobs",
+    ],
+)
+
+mongo_cc_library(
+    name = "field_set",
+    srcs = [
+        "field_set.cpp",
+    ],
     hdrs = [
-        "rank_fusion_util.h",
+        "field_set.h",
     ],
     deps = [
         "//src/mongo:base",
-        "//src/mongo:core_headers_library",
-        "//src/mongo/db/query:query_knobs",
+    ],
+)
+
+mongo_cc_library(
+    name = "query_util_bitset",
+    srcs = [
+    ],
+    hdrs = [
+        "bitset_util.h",
+    ],
+)
+
+mongo_cc_library(
+    name = "query_util_disjoint_set",
+    srcs = [
+        "disjoint_set.cpp",
+    ],
+    hdrs = [
+        "disjoint_set.h",
     ],
 )
 
 mongo_cc_unit_test(
     name = "query_util_test",
     srcs = [
+        "bitset_util_test.cpp",
         "cartesian_product_test.cpp",
         "deferred_test.cpp",
+        "disjoint_set_test.cpp",
         "hash_roaring_set_test.cpp",
         "jparse_util_test.cpp",
         "memory_util_test.cpp",
+        "retry_test.cpp",
+        "stop_token_test.cpp",
         "string_util_test.cpp",
+        "throughput_gauge_test.cpp",
         "validate_id_test.cpp",
     ],
-    private_hdrs = [":cartesian_product.h"],
     tags = [
         "mongo_unittest_third_group",
     ],
     deps = [
         ":jparse_util",
+        ":query_util_bitset",
+        ":query_util_disjoint_set",
+        ":throughput_gauge",
         "//src/mongo/db:query_exec",
+        "//src/mongo/util:clock_source_mock",
     ],
 )

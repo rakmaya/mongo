@@ -40,8 +40,6 @@
 #include "mongo/bson/bsonelement.h"
 #include "mongo/db/basic_types_gen.h"
 #include "mongo/db/curop.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_catalog.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/expression_context.h"
@@ -53,6 +51,8 @@
 #include "mongo/db/query/collation/collation_spec.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/server_options.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_catalog.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
 #include "mongo/db/views/view_graph.h"
@@ -111,8 +111,8 @@ StatusWith<stdx::unordered_set<NamespaceString>> validatePipeline(OperationConte
                       .build();
 
     try {
-        auto pipeline =
-            Pipeline::parse(viewDef.pipeline(), std::move(expCtx), [&](const Pipeline& pipeline) {
+        auto pipeline = Pipeline::parseFromLiteParsed(
+            liteParsedPipeline, std::move(expCtx), [&](const Pipeline& pipeline) {
                 // Validate that the view pipeline does not contain any ineligible stages.
                 const auto& sources = pipeline.getSources();
                 const auto firstPersistentStage =

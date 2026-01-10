@@ -31,8 +31,8 @@
 
 #include "mongo/db/index/expression_keys_private.h"
 #include "mongo/db/index/expression_params.h"
-#include "mongo/db/local_catalog/index_catalog_entry.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog_entry.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
 #include "mongo/util/assert_util.h"
 
 #include <utility>
@@ -74,7 +74,7 @@ void HashAccessMethod::doGetKeys(OperationContext* opCtx,
                                        obj,
                                        _keyPattern,
                                        _hashVersion,
-                                       entry->descriptor()->isSparse(),
+                                       entry->descriptor()->isSetSparseByUser(),
                                        _collator,
                                        keys,
                                        getSortedDataInterface()->getKeyStringVersion(),

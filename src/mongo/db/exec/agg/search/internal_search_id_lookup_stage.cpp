@@ -29,12 +29,17 @@
 
 #include "mongo/db/exec/agg/search/internal_search_id_lookup_stage.h"
 
+#include "mongo/db/curop_failpoint_helpers.h"
 #include "mongo/db/exec/agg/document_source_to_stage_registry.h"
 #include "mongo/db/exec/agg/pipeline_builder.h"
-#include "mongo/db/pipeline/catalog_resource_handle.h"
 #include "mongo/db/pipeline/pipeline_factory.h"
+#include "mongo/logv2/log.h"
+#include "mongo/util/fail_point.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 namespace mongo {
+MONGO_FAIL_POINT_DEFINE(hangBeforeResultsInInternalSearchIdLookup);
 
 boost::intrusive_ptr<exec::agg::Stage> documentSourceInternalSearchIdLookupToStageFn(
     const boost::intrusive_ptr<DocumentSource>& source) {
@@ -47,13 +52,11 @@ boost::intrusive_ptr<exec::agg::Stage> documentSourceInternalSearchIdLookupToSta
         documentSource->getExpCtx(),
         documentSource->_limit,
         documentSource->_catalogResourceHandle,
-        documentSource->_shardFilterPolicy,
         documentSource->_searchIdLookupMetrics,
         documentSource->_viewPipeline
             ? documentSource->_viewPipeline->clone(documentSource->getExpCtx())
             : nullptr);
 }
-
 
 namespace exec::agg {
 
@@ -65,15 +68,14 @@ InternalSearchIdLookUpStage::InternalSearchIdLookUpStage(
     StringData stageName,
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     long long limit,
-    const boost::intrusive_ptr<CatalogResourceHandle>& catalogResourceHandle,
-    ExecShardFilterPolicy shardFilterPolicy,
+    const boost::intrusive_ptr<DSInternalSearchIdLookUpCatalogResourceHandle>&
+        catalogResourceHandle,
     const std::shared_ptr<SearchIdLookupMetrics>& searchIdLookupMetrics,
     std::unique_ptr<mongo::Pipeline> viewPipeline)
     : Stage(stageName, expCtx),
       _stageName(stageName),
       _limit(limit),
       _catalogResourceHandle(catalogResourceHandle),
-      _shardFilterPolicy(shardFilterPolicy),
       _searchIdLookupMetrics(searchIdLookupMetrics),
       _viewPipeline(std::move(viewPipeline)) {}
 
@@ -99,13 +101,6 @@ GetNextResult InternalSearchIdLookUpStage::doGetNext() {
         return GetNextResult::makeEOF();
     }
 
-    // Ensure catalog resources are released if they were acquired.
-    bool catalogResourceHandleAcquired = false;
-    ON_BLOCK_EXIT([&]() {
-        if (catalogResourceHandleAcquired) {
-            _catalogResourceHandle->release();
-        }
-    });
     while (!result) {
         auto nextInput = pSource->getNext();
         if (!nextInput.isAdvanced()) {
@@ -117,10 +112,23 @@ GetNextResult InternalSearchIdLookUpStage::doGetNext() {
         auto documentId = inputDoc["_id"];
 
         if (!documentId.missing()) {
+            if (MONGO_unlikely(hangBeforeResultsInInternalSearchIdLookup.shouldFail())) {
+                CurOpFailpointHelpers::waitWhileFailPointEnabled(
+                    &hangBeforeResultsInInternalSearchIdLookup,
+                    pExpCtx->getOperationContext(),
+                    "hangBeforeResultsInInternalSearchIdLookup",
+                    []() {
+                        LOGV2(11147700,
+                              "Hanging aggregation due to "
+                              "'hangBeforeResultsInInternalSearchIdLookup' "
+                              "failpoint");
+                    });
+            }
+
             auto documentKey = Document({{"_id", documentId}});
 
-            uassert(31052,
-                    "Collection must have a UUID to use $_internalSearchIdLookup.",
+            tassert(31052,
+                    "Collection should exist when using $_internalSearchIdLookup",
                     pExpCtx->getUUID().has_value());
 
             // Find the document by performing a local read.
@@ -138,16 +146,18 @@ GetNextResult InternalSearchIdLookUpStage::doGetNext() {
                 pipeline->appendPipeline(_viewPipeline->clone(pExpCtx));
             }
 
-            // Acquire catalog resources once per doGetNext() call before preparing the pipeline.
-            // TODO SERVER-111401 We should always have a _catalogResourceHandle.
-            if (_catalogResourceHandle && !catalogResourceHandleAcquired) {
+            // Scope ScopedSetShardRole to ensure it's cleaned up before any future execution.
+            {
                 _catalogResourceHandle->acquire(pExpCtx->getOperationContext());
-                catalogResourceHandleAcquired = true;
+                auto collection = _catalogResourceHandle->getCollection();
+                pipeline = pExpCtx->getMongoProcessInterface()
+                               ->attachCursorSourceToPipelineForLocalReadWithCatalog(
+                                   std::move(pipeline),
+                                   MultipleCollectionAccessor{collection},
+                                   _catalogResourceHandle);
+                _catalogResourceHandle->release();
             }
 
-            pipeline =
-                pExpCtx->getMongoProcessInterface()->attachCursorSourceToPipelineForLocalRead(
-                    std::move(pipeline), boost::none, false, _shardFilterPolicy);
             auto execPipeline = buildPipeline(pipeline->freeze());
             result = execPipeline->getNext();
             if (auto next = execPipeline->getNext()) {
@@ -170,5 +180,6 @@ GetNextResult InternalSearchIdLookUpStage::doGetNext() {
     _searchIdLookupMetrics->incrementDocsReturnedByIdLookup();
     return output.freeze();
 }
+
 }  // namespace exec::agg
 }  // namespace mongo

@@ -65,6 +65,7 @@
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/intrusive_counter.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/pcre.h"
 #include "mongo/util/safe_num.h"
 #include "mongo/util/str.h"
@@ -197,7 +198,7 @@ enum class ExpressionDisabledReason {
                                       featureFlag,                     \
                                       getTestCommandsEnabled())
 
-class Expression : public RefCountable {
+class MONGO_MOD_PUBLIC Expression : public RefCountable {
 public:
     using Parser = std::function<boost::intrusive_ptr<Expression>(
         ExpressionContext* const, BSONElement, const VariablesParseState&)>;
@@ -457,7 +458,7 @@ private:
 /**
  * A constant expression. Repeated calls to evaluate() will always return the same thing.
  */
-class ExpressionConstant final : public Expression {
+class MONGO_MOD_NEEDS_REPLACEMENT ExpressionConstant final : public Expression {
 public:
     ExpressionConstant(ExpressionContext* expCtx, const Value& value);
 
@@ -898,7 +899,7 @@ public:
     }
 };
 
-class ExpressionAdd final : public ExpressionVariadic<ExpressionAdd> {
+class MONGO_MOD_NEEDS_REPLACEMENT ExpressionAdd final : public ExpressionVariadic<ExpressionAdd> {
 public:
     explicit ExpressionAdd(ExpressionContext* const expCtx)
         : ExpressionVariadic<ExpressionAdd>(expCtx) {}
@@ -1358,7 +1359,8 @@ public:
 };
 
 
-class ExpressionCond final : public ExpressionFixedArity<ExpressionCond, 3> {
+class MONGO_MOD_NEEDS_REPLACEMENT ExpressionCond final
+    : public ExpressionFixedArity<ExpressionCond, 3> {
 public:
     explicit ExpressionCond(ExpressionContext* const expCtx) : Base(expCtx) {}
 
@@ -1972,7 +1974,7 @@ public:
 };
 
 
-class ExpressionFieldPath : public Expression {
+class MONGO_MOD_NEEDS_REPLACEMENT ExpressionFieldPath : public Expression {
 public:
     /**
      * Checks whether this field path is exactly "$$ROOT".
@@ -3108,10 +3110,14 @@ public:
                      boost::intrusive_ptr<Expression> in,
                      const boost::optional<std::string>& idxName,
                      const boost::optional<Variables::Id>& idxId,
+                     const boost::optional<std::string>& thisName,
                      Variables::Id thisVar,
+                     const boost::optional<std::string>& valueName,
                      Variables::Id valueVar)
         : Expression(expCtx, {std::move(input), std::move(initial), std::move(in)}),
+          _thisName(thisName),
           _thisVar(thisVar),
+          _valueName(valueName),
           _valueVar(valueVar),
           _idxName(std::move(idxName)),
           _idxId(idxId) {
@@ -3168,7 +3174,9 @@ public:
                                                 cloneChild(_kIn),
                                                 _idxName,
                                                 _idxId,
+                                                _thisName,
                                                 _thisVar,
+                                                _valueName,
                                                 _valueVar);
     }
 
@@ -3177,8 +3185,14 @@ private:
     static constexpr size_t _kInitial = 1;
     static constexpr size_t _kIn = 2;
 
+    // Name of the variable provided in the 'as' argument, boost::none if not provided.
+    boost::optional<std::string> _thisName;
     Variables::Id _thisVar;
+
+    // Name of the variable provided in the 'valueAs' argument, boost::none if not provided.
+    boost::optional<std::string> _valueName;
     Variables::Id _valueVar;
+
     // Name of the variable provided in the 'arrayIndexAs' argument, boost::none if not provided.
     boost::optional<std::string> _idxName;
     // ID of the variable that represents the array index, boost::none if the feature is not
@@ -3752,6 +3766,209 @@ public:
     }
 };
 
+class ExpressionTopN final : public Expression {
+public:
+    static constexpr auto kName = "$topN"_sd;
+
+    ExpressionTopN(ExpressionContext* const expCtx,
+                   boost::intrusive_ptr<Expression> n,
+                   boost::intrusive_ptr<Expression> input,
+                   const PatternValueCmp& sortBy)
+        : Expression(expCtx, {std::move(n), std::move(input)}), _sortBy(sortBy) {}
+
+    Value evaluate(const Document& root, Variables* variables) const final;
+    [[nodiscard]] boost::intrusive_ptr<Expression> optimize() final;
+    static boost::intrusive_ptr<Expression> parse(ExpressionContext* expCtx,
+                                                  BSONElement expr,
+                                                  const VariablesParseState& vps);
+    Value serialize(const SerializationOptions& options = {}) const final;
+
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
+        return visitor->visit(this);
+    }
+
+    const char* getOpName() const;
+
+    BSONObj getSortPattern() const {
+        return _sortBy.sortPattern;
+    }
+
+    const Expression* getN() const {
+        return _children[_kN].get();
+    }
+
+    const Expression* getInput() const {
+        return _children[_kInput].get();
+    }
+
+    const PatternValueCmp& getSortBy() const {
+        return _sortBy;
+    }
+
+    boost::intrusive_ptr<Expression> clone() const final {
+        return make_intrusive<ExpressionTopN>(
+            getExpressionContext(), cloneChild(_kN), cloneChild(_kInput), _sortBy);
+    }
+
+private:
+    static constexpr size_t _kN = 0;
+    static constexpr size_t _kInput = 1;
+    PatternValueCmp _sortBy;
+};
+
+class ExpressionTop final : public Expression {
+public:
+    static constexpr auto kName = "$top"_sd;
+
+    ExpressionTop(ExpressionContext* const expCtx,
+                  boost::intrusive_ptr<Expression> input,
+                  const PatternValueCmp& sortBy)
+        : Expression(expCtx, {std::move(input)}), _sortBy(sortBy) {}
+
+    Value evaluate(const Document& root, Variables* variables) const final;
+    [[nodiscard]] boost::intrusive_ptr<Expression> optimize() final;
+    static boost::intrusive_ptr<Expression> parse(ExpressionContext* expCtx,
+                                                  BSONElement expr,
+                                                  const VariablesParseState& vps);
+    Value serialize(const SerializationOptions& options = {}) const final;
+
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
+        return visitor->visit(this);
+    }
+
+    const char* getOpName() const;
+
+    BSONObj getSortPattern() const {
+        return _sortBy.sortPattern;
+    }
+
+    const Expression* getInput() const {
+        return _children[_kInput].get();
+    }
+
+    const PatternValueCmp& getSortBy() const {
+        return _sortBy;
+    }
+
+    boost::intrusive_ptr<Expression> clone() const final {
+        return make_intrusive<ExpressionTop>(getExpressionContext(), cloneChild(_kInput), _sortBy);
+    }
+
+private:
+    static constexpr size_t _kInput = 0;
+    PatternValueCmp _sortBy;
+};
+
+class ExpressionBottomN final : public Expression {
+public:
+    static constexpr auto kName = "$bottomN"_sd;
+
+    ExpressionBottomN(ExpressionContext* const expCtx,
+                      boost::intrusive_ptr<Expression> n,
+                      boost::intrusive_ptr<Expression> input,
+                      const PatternValueCmp& sortBy)
+        : Expression(expCtx, {std::move(n), std::move(input)}), _sortBy(sortBy) {}
+
+    Value evaluate(const Document& root, Variables* variables) const final;
+    [[nodiscard]] boost::intrusive_ptr<Expression> optimize() final;
+    static boost::intrusive_ptr<Expression> parse(ExpressionContext* expCtx,
+                                                  BSONElement expr,
+                                                  const VariablesParseState& vps);
+    Value serialize(const SerializationOptions& options = {}) const final;
+
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
+        return visitor->visit(this);
+    }
+
+    const char* getOpName() const;
+
+    BSONObj getSortPattern() const {
+        return _sortBy.sortPattern;
+    }
+
+    const Expression* getN() const {
+        return _children[_kN].get();
+    }
+
+    const Expression* getInput() const {
+        return _children[_kInput].get();
+    }
+
+    const PatternValueCmp& getSortBy() const {
+        return _sortBy;
+    }
+
+    boost::intrusive_ptr<Expression> clone() const final {
+        return make_intrusive<ExpressionBottomN>(
+            getExpressionContext(), cloneChild(_kN), cloneChild(_kInput), _sortBy);
+    }
+
+private:
+    static constexpr size_t _kN = 0;
+    static constexpr size_t _kInput = 1;
+    PatternValueCmp _sortBy;
+};
+
+class ExpressionBottom final : public Expression {
+public:
+    static constexpr auto kName = "$bottom"_sd;
+
+    ExpressionBottom(ExpressionContext* const expCtx,
+                     boost::intrusive_ptr<Expression> input,
+                     const PatternValueCmp& sortBy)
+        : Expression(expCtx, {std::move(input)}), _sortBy(sortBy) {}
+
+    Value evaluate(const Document& root, Variables* variables) const final;
+    [[nodiscard]] boost::intrusive_ptr<Expression> optimize() final;
+    static boost::intrusive_ptr<Expression> parse(ExpressionContext* expCtx,
+                                                  BSONElement expr,
+                                                  const VariablesParseState& vps);
+    Value serialize(const SerializationOptions& options = {}) const final;
+
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
+        return visitor->visit(this);
+    }
+
+    const char* getOpName() const;
+
+    BSONObj getSortPattern() const {
+        return _sortBy.sortPattern;
+    }
+
+    const Expression* getInput() const {
+        return _children[_kInput].get();
+    }
+
+    const PatternValueCmp& getSortBy() const {
+        return _sortBy;
+    }
+
+    boost::intrusive_ptr<Expression> clone() const final {
+        return make_intrusive<ExpressionBottom>(
+            getExpressionContext(), cloneChild(_kInput), _sortBy);
+    }
+
+private:
+    static constexpr size_t _kInput = 0;
+    PatternValueCmp _sortBy;
+};
+
 class ExpressionSigmoid final {
 public:
     static boost::intrusive_ptr<Expression> parseExpressionSigmoid(ExpressionContext* expCtx,
@@ -4098,7 +4315,7 @@ private:
 };
 
 
-class ExpressionSwitch final : public Expression {
+class MONGO_MOD_NEEDS_REPLACEMENT ExpressionSwitch final : public Expression {
 public:
     using ExpressionPair =
         std::pair<boost::intrusive_ptr<Expression>&, boost::intrusive_ptr<Expression>&>;
@@ -4140,8 +4357,10 @@ public:
      * i-th branch of the switch.
      */
     std::pair<const Expression*, const Expression*> getBranch(int i) const {
-        invariant(i >= 0);
-        invariant(i < numBranches());
+        tassert(11282954,
+                str::stream() << "Expression branch index " << i << " is out of bounds [0; "
+                              << numBranches() << ")",
+                i >= 0 && i < numBranches());
         return {_children[i * 2].get(), _children[i * 2 + 1].get()};
     }
 
@@ -5829,6 +6048,135 @@ public:
     }
 };
 
+class ExpressionSerializeEJSON : public Expression {
+public:
+    explicit ExpressionSerializeEJSON(ExpressionContext* expCtx,
+                                      boost::intrusive_ptr<Expression> input,
+                                      boost::intrusive_ptr<Expression> relaxed,
+                                      boost::intrusive_ptr<Expression> onError);
+
+    static boost::intrusive_ptr<Expression> parse(ExpressionContext* expCtx,
+                                                  BSONElement exprElement,
+                                                  const VariablesParseState& vps);
+
+    Value serialize(const SerializationOptions& options = {}) const final;
+
+    Value evaluate(const Document& root, Variables* variables) const final;
+
+    [[nodiscard]] boost::intrusive_ptr<Expression> optimize() final;
+
+    const char* getOpName() const;
+
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
+        return visitor->visit(this);
+    }
+
+    boost::intrusive_ptr<Expression> clone() const final;
+
+    const Expression& getInput() const;
+    const Expression* getRelaxed() const;
+    const Expression* getOnError() const;
+
+private:
+    static constexpr StringData _kInput = "input"_sd;
+    static constexpr int _kInputIdx = 0;
+
+    static constexpr StringData _kRelaxed = "relaxed"_sd;
+    static constexpr int _kRelaxedIdx = 1;
+
+    static constexpr StringData _kOnError = "onError"_sd;
+    static constexpr int _kOnErrorIdx = 2;
+};
+
+class ExpressionDeserializeEJSON : public Expression {
+public:
+    explicit ExpressionDeserializeEJSON(ExpressionContext* expCtx,
+                                        boost::intrusive_ptr<Expression> input,
+                                        boost::intrusive_ptr<Expression> onError);
+
+    static boost::intrusive_ptr<Expression> parse(ExpressionContext* expCtx,
+                                                  BSONElement exprElement,
+                                                  const VariablesParseState& vps);
+
+    Value serialize(const SerializationOptions& options = {}) const final;
+
+    Value evaluate(const Document& root, Variables* variables) const final;
+
+    [[nodiscard]] boost::intrusive_ptr<Expression> optimize() final;
+
+    const char* getOpName() const;
+
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
+        return visitor->visit(this);
+    }
+
+    boost::intrusive_ptr<Expression> clone() const final;
+
+    const Expression& getInput() const;
+    const Expression* getOnError() const;
+
+private:
+    static constexpr StringData _kInput = "input"_sd;
+    static constexpr int _kInputIdx = 0;
+
+    static constexpr StringData _kOnError = "onError"_sd;
+    static constexpr int _kOnErrorIdx = 1;
+};
+
+// Represents the hashing algorithm used for $hash.
+#define HASH_ALGORITHM(F) \
+    F(md5)                \
+    F(sha256)             \
+    F(xxh64)
+QUERY_UTIL_NAMED_ENUM_DEFINE(HashAlgorithm, HASH_ALGORITHM);
+#undef HASH_ALGORITHM
+
+class ExpressionHash final : public Expression {
+public:
+    static constexpr StringData kInput = "input"_sd;
+    static constexpr StringData kAlgorithm = "algorithm"_sd;
+
+    explicit ExpressionHash(ExpressionContext* expCtx,
+                            boost::intrusive_ptr<Expression> input,
+                            boost::intrusive_ptr<Expression> algorithm);
+
+    static boost::intrusive_ptr<Expression> parse(ExpressionContext* expCtx,
+                                                  BSONElement exprElement,
+                                                  const VariablesParseState& vps);
+
+    Value serialize(const SerializationOptions& options = {}) const final;
+
+    Value evaluate(const Document& root, Variables* variables) const final;
+
+    [[nodiscard]] boost::intrusive_ptr<Expression> optimize() final;
+
+    const char* getOpName() const;
+
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
+        return visitor->visit(this);
+    }
+
+    boost::intrusive_ptr<Expression> clone() const final;
+
+    const Expression& getInput() const;
+    const Expression& getAlgorithm() const;
+
+private:
+    static constexpr size_t _kInputIdx = 0;
+    static constexpr size_t _kAlgorithmIdx = 1;
+};
 
 /**
  * ExpressionEncTextSearch is the base class for all encrypted text search expressions. The first

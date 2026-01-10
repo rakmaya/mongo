@@ -27,7 +27,7 @@
  *    it in the license file.
  */
 
-#include "replication_coordinator_noop.h"
+#include "mongo/db/repl/replication_coordinator_noop.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/util/assert_util.h"
@@ -298,6 +298,10 @@ HostAndPort ReplicationCoordinatorNoOp::getMyHostAndPort() const {
     MONGO_UNREACHABLE;
 }
 
+boost::optional<int> ReplicationCoordinatorNoOp::getMyMaintenancePort() const {
+    MONGO_UNREACHABLE;
+}
+
 StatusWith<BSONObj> ReplicationCoordinatorNoOp::prepareReplSetUpdatePositionCommand() const {
     MONGO_UNREACHABLE;
 }
@@ -309,6 +313,10 @@ Status ReplicationCoordinatorNoOp::processReplSetGetStatus(OperationContext* opC
 }
 
 void ReplicationCoordinatorNoOp::appendSecondaryInfoData(BSONObjBuilder*) {
+    MONGO_UNREACHABLE;
+}
+
+ThreadPool* ReplicationCoordinatorNoOp::getDbWorkThreadPool() const noexcept {
     MONGO_UNREACHABLE;
 }
 

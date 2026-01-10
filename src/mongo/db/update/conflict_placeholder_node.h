@@ -30,6 +30,7 @@
 #pragma once
 
 #include "mongo/db/update/update_leaf_node.h"
+#include "mongo/util/modules.h"
 
 #include <map>
 #include <memory>
@@ -71,7 +72,8 @@ public:
     void produceSerializationMap(
         FieldRef* currentPath,
         std::map<std::string, std::vector<std::pair<std::string, BSONObj>>>*
-            operatorOrientedUpdates) const final {}
+            operatorOrientedUpdates,
+        const SerializationOptions& opts) const final {}
 
     void acceptVisitor(UpdateNodeVisitor* visitor) final {
         visitor->visit(this);

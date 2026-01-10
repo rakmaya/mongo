@@ -117,13 +117,14 @@ function runReplacementUpdateTestsForHashedShardKey() {
     // Verify that the update only targeted shard0 and that the resulting document appears as
     // expected.
     assert.docEq([{_id: -100, a: -100, msg: "update_extracted_id_from_query"}], mongosColl.find({_id: -100}).toArray());
+    let profilerFilter = {op: "update", "command.u.msg": "update_extracted_id_from_query"};
     profilerHasSingleMatchingEntryOrThrow({
         profileDB: shard0DB,
-        filter: {op: "update", "command.u.msg": "update_extracted_id_from_query"},
+        filter: profilerFilter,
     });
     profilerHasZeroMatchingEntriesOrThrow({
         profileDB: shard1DB,
-        filter: {op: "update", "command.u.msg": "update_extracted_id_from_query"},
+        filter: profilerFilter,
     });
 
     // Perform an upsert replacement whose query is an exact match on _id and whose replacement
@@ -140,17 +141,14 @@ function runReplacementUpdateTestsForHashedShardKey() {
     // a successful update, i.e. one which did not report a stale config exception.
     assert.docEq([{_id: 101, a: 101, msg: "upsert_extracted_id_from_query"}], mongosColl.find({_id: 101}).toArray());
     assert.docEq([{_id: 101, a: 101, msg: "upsert_extracted_id_from_query"}], shard1DB.test.find({_id: 101}).toArray());
+    profilerFilter = {op: "update", "command.u.msg": "upsert_extracted_id_from_query"};
     profilerHasZeroMatchingEntriesOrThrow({
         profileDB: shard0DB,
-        filter: {op: "update", "command.u.msg": "upsert_extracted_id_from_query"},
+        filter: profilerFilter,
     });
     profilerHasSingleMatchingEntryOrThrow({
         profileDB: shard1DB,
-        filter: {
-            op: "update",
-            "command.u.msg": "upsert_extracted_id_from_query",
-            errName: {$exists: false},
-        },
+        filter: Object.assign({}, profilerFilter, {errName: {$exists: false}}),
     });
 }
 
@@ -173,13 +171,14 @@ function runReplacementUpdateTestsForCompoundShardKey() {
     // Verify that the update only targeted shard0 and that the resulting document appears as
     // expected.
     assert.docEq([{_id: -100, a: -100, msg: "update_extracted_id_from_query"}], mongosColl.find({_id: -100}).toArray());
+    const profilerFilter = {op: "update", "command.u.msg": "update_extracted_id_from_query"};
     profilerHasSingleMatchingEntryOrThrow({
         profileDB: shard0DB,
-        filter: {op: "update", "command.u.msg": "update_extracted_id_from_query"},
+        filter: profilerFilter,
     });
     profilerHasZeroMatchingEntriesOrThrow({
         profileDB: shard1DB,
-        filter: {op: "update", "command.u.msg": "update_extracted_id_from_query"},
+        filter: profilerFilter,
     });
 
     // Verify that an update whose query contains an exact match on _id but whose replacement

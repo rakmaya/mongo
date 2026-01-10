@@ -97,9 +97,7 @@ public:
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
         std::unique_ptr<Pipeline> pipeline,
         bool attachCursorAfterOptimizing,
-        std::function<void(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                           Pipeline* pipeline,
-                           CollectionMetadata collData)> finalizePipeline = nullptr,
+        std::function<void(Pipeline* pipeline)> optimizePipeline = nullptr,
         ShardTargetingPolicy shardTargetingPolicy = ShardTargetingPolicy::kAllowed,
         boost::optional<BSONObj> readConcern = boost::none,
         bool shouldUseCollectionDefaultCollator = false) final;
@@ -121,19 +119,15 @@ public:
     std::unique_ptr<Pipeline> attachCursorSourceToPipelineForLocalRead(
         std::unique_ptr<Pipeline> pipeline,
         boost::optional<const AggregateCommandRequest&> aggRequest = boost::none,
-        bool shouldUseCollectionDefaultCollator = false,
-        ExecShardFilterPolicy shardFilterPolicy = AutomaticShardFiltering{}) final;
+        bool shouldUseCollectionDefaultCollator = false) final;
 
     std::unique_ptr<Pipeline> finalizeAndAttachCursorToPipelineForLocalRead(
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
         std::unique_ptr<Pipeline> pipeline,
         bool attachCursorAfterOptimizing,
-        std::function<void(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                           Pipeline* pipeline,
-                           CollectionMetadata collData)> finalizePipeline = nullptr,
+        std::function<void(Pipeline* pipeline)> optimizePipeline = nullptr,
         bool shouldUseCollectionDefaultCollator = false,
-        boost::optional<const AggregateCommandRequest&> aggRequest = boost::none,
-        ExecShardFilterPolicy shardFilterPolicy = AutomaticShardFiltering{}) final;
+        boost::optional<const AggregateCommandRequest&> aggRequest = boost::none) final;
 
     boost::optional<Document> lookupSingleDocument(
         const boost::intrusive_ptr<ExpressionContext>& expCtx,

@@ -33,6 +33,7 @@
 #include "mongo/db/exec/sbe/stages/plan_stats.h"
 #include "mongo/db/query/plan_summary_stats.h"
 #include "mongo/db/query/query_stats/data_bearing_node_metrics.h"
+#include "mongo/util/modules.h"
 
 namespace mongo {
 /**
@@ -46,6 +47,9 @@ public:
     explicit PlanSummaryStatsVisitor(PlanSummaryStats& summary) : _summary(summary) {}
 
     void visit(tree_walker::MaybeConstPtr<true, sbe::ScanStats> stats) final {
+        _summary.totalDocsExamined += stats->numReads;
+    }
+    void visit(tree_walker::MaybeConstPtr<true, sbe::FetchStats> stats) final {
         _summary.totalDocsExamined += stats->numReads;
     }
     void visit(tree_walker::MaybeConstPtr<true, sbe::IndexScanStats> stats) final {

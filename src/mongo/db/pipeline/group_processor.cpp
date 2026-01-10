@@ -36,7 +36,7 @@
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/util/spill_util.h"
 #include "mongo/db/sorter/sorter_file_name.h"
-#include "mongo/db/sorter/sorter_template_defs.h"
+#include "mongo/db/sorter/sorter_template_defs.h"  // IWYU pragma: keep
 #include "mongo/db/stats/counters.h"
 
 namespace mongo {
@@ -116,30 +116,6 @@ namespace {
 
 using GroupsMap = GroupProcessorBase::GroupsMap;
 
-class SorterComparator {
-public:
-    SorterComparator(ValueComparator valueComparator) : _valueComparator(valueComparator) {}
-
-    int operator()(const Value& lhs, const Value& rhs) const {
-        return _valueComparator.compare(lhs, rhs);
-    }
-
-private:
-    ValueComparator _valueComparator;
-};
-
-class SpillSTLComparator {
-public:
-    SpillSTLComparator(ValueComparator valueComparator) : _valueComparator(valueComparator) {}
-
-    bool operator()(const GroupsMap::value_type* lhs, const GroupsMap::value_type* rhs) const {
-        return _valueComparator.evaluate(lhs->first < rhs->first);
-    }
-
-private:
-    ValueComparator _valueComparator;
-};
-
 }  // namespace
 
 void GroupProcessor::add(const Value& groupKey, const Document& root) {
@@ -167,8 +143,12 @@ void GroupProcessor::readyGroups() {
             spill();
         }
 
-        _sorterIterator = Sorter<Value, Value>::Iterator::merge(
-            _sortedFiles, SortOptions(), SorterComparator(_expCtx->getValueComparator()));
+        std::function<int(const Value&, const Value&)> comparator =
+            [valueComp = _expCtx->getValueComparator()](const Value& lhs, const Value& rhs) -> int {
+            return valueComp.compare(lhs, rhs);
+        };
+
+        _sorterIterator = sorter::merge<Value, Value>(_sortedFiles, SortOptions(), comparator);
 
         // prepare current to accumulate data
         _currentAccumulators.reserve(_accumulatedFields.size());
@@ -247,7 +227,13 @@ void GroupProcessor::spill() {
         ++spilledRecords;
     }
 
-    std::sort(ptrs.begin(), ptrs.end(), SpillSTLComparator(_expCtx->getValueComparator()));
+    std::function<int(const GroupsMap::value_type*, const GroupsMap::value_type*)> comparator =
+        [valueComp = _expCtx->getValueComparator()](const GroupsMap::value_type* lhs,
+                                                    const GroupsMap::value_type* rhs) -> int {
+        return valueComp.evaluate(lhs->first < rhs->first);
+    };
+
+    std::sort(ptrs.begin(), ptrs.end(), comparator);
 
     // Initialize '_file' in a lazy manner only when it is needed.
     if (!_file) {
@@ -255,18 +241,20 @@ void GroupProcessor::spill() {
         _file = std::make_shared<SorterFile>(sorter::nextFileName(_expCtx->getTempDir()),
                                              _spillStats.get());
     }
-    SortedFileWriter<Value, Value> writer(SortOptions().TempDir(_expCtx->getTempDir()), _file);
+    FileBasedSorterStorage<Value, Value> sorterStorage(_file, _expCtx->getTempDir());
+    std::unique_ptr<SortedStorageWriter<Value, Value>> writer =
+        sorterStorage.makeWriter(SortOptions().TempDir(_expCtx->getTempDir()));
     switch (_accumulatedFields.size()) {  // same as ptrs[i]->second.size() for all i.
         case 0:                           // no values, essentially a distinct
             for (size_t i = 0; i < ptrs.size(); i++) {
-                writer.addAlreadySorted(ptrs[i]->first, Value());
+                writer->addAlreadySorted(ptrs[i]->first, Value());
             }
             break;
 
         case 1:  // just one value, use optimized serialization as single Value
             for (size_t i = 0; i < ptrs.size(); i++) {
-                writer.addAlreadySorted(ptrs[i]->first,
-                                        ptrs[i]->second[0]->getValue(/*toBeMerged=*/true));
+                writer->addAlreadySorted(ptrs[i]->first,
+                                         ptrs[i]->second[0]->getValue(/*toBeMerged=*/true));
             }
             break;
 
@@ -276,11 +264,11 @@ void GroupProcessor::spill() {
                 for (size_t j = 0; j < ptrs[i]->second.size(); j++) {
                     accums.push_back(ptrs[i]->second[j]->getValue(/*toBeMerged=*/true));
                 }
-                writer.addAlreadySorted(ptrs[i]->first, Value(std::move(accums)));
+                writer->addAlreadySorted(ptrs[i]->first, Value(std::move(accums)));
             }
             break;
     }
-    _sortedFiles.emplace_back(writer.done());
+    _sortedFiles.emplace_back(sorterStorage.makeIterator(std::move(writer)));
 
     auto spilledDataStorageIncrease = _stats.spillingStats.updateSpillingStats(
         1, _memoryTracker.inUseTrackedMemoryBytes(), spilledRecords, _spillStats->bytesSpilled());

@@ -29,7 +29,7 @@
 
 #include "mongo/db/timeseries/collection_pre_conditions_util.h"
 
-#include "mongo/db/local_catalog/create_collection.h"
+#include "mongo/db/shard_role/shard_catalog/create_collection.h"
 #include "mongo/db/timeseries/timeseries_test_fixture.h"
 
 
@@ -113,7 +113,7 @@ TEST_F(TimeseriesCollectionPreConditionsUtilTest, CollectionCreatedAfterPreCondi
     const auto collectionAcquisition = acquireCollection(
         _opCtx,
         CollectionAcquisitionRequest(viewlessTsNss,
-                                     PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                     PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
                                      repl::ReadConcernArgs::get(_opCtx),
                                      AcquisitionPrerequisites::kRead),
         MODE_IS);
@@ -146,7 +146,7 @@ TEST_F(TimeseriesCollectionPreConditionsUtilTest, DetectWhenCollectionIsDroppedA
     const auto collectionAcquisition = acquireCollection(
         _opCtx,
         CollectionAcquisitionRequest(viewlessTsNss,
-                                     PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                     PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
                                      repl::ReadConcernArgs::get(_opCtx),
                                      AcquisitionPrerequisites::kRead),
         MODE_IS);

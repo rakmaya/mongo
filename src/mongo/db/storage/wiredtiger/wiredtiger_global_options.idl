@@ -27,6 +27,7 @@
 #
 
 global:
+    mod_visibility: private
     cpp_namespace: "mongo"
     cpp_includes:
         - "mongo/db/storage/wiredtiger/wiredtiger_global_options.h"
@@ -124,18 +125,6 @@ server_parameters:
         validator:
             gte: 0
             lte: 100
-        redact: false
-
-    wiredTigerFlattenLeafPageDelta:
-        description: >-
-            WiredTiger page read rewrites the leaf pages with deltas to a new disk image if 
-            successful. We will use a ternary where 0=Disabled, 1=Enabled if disaggregatedStorageEnabled is true, 2=Enabled unconditionally.
-        set_at: startup
-        cpp_varname: "wiredTigerGlobalOptions.flattenLeafPageDelta"
-        default: 1
-        validator:
-            gte: 0
-            lte: 2
         redact: false
 
     wiredTigerEvictionDirtyTargetGB:
@@ -597,6 +586,14 @@ configs:
         validator:
             callback: WiredTigerGlobalOptions::validateWiredTigerLiveRestoreReadSizeMB
         default: 1
+    "storage.wiredTiger.engineConfig.statistics":
+        description: "Statistics collection mode [all|cache_walk|fast|none|clear|tree_walk]"
+        arg_vartype: String
+        cpp_varname: "wiredTigerGlobalOptions.statisticsSetting"
+        short_name: wiredTigerStatisticsSetting
+        validator:
+            callback: WiredTigerGlobalOptions::validateStatisticsSetting
+        default: "fast"
 
     # WiredTiger collection options
     "storage.wiredTiger.collectionConfig.blockCompressor":

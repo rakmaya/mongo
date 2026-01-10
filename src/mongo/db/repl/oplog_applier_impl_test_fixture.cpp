@@ -37,22 +37,14 @@
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/index_builds/index_builds_coordinator.h"
 #include "mongo/db/index_builds/index_builds_manager.h"
-#include "mongo/db/local_catalog/database.h"
-#include "mongo/db/local_catalog/database_holder.h"
-#include "mongo/db/local_catalog/db_raii.h"
-#include "mongo/db/local_catalog/document_validation.h"
-#include "mongo/db/local_catalog/health_log.h"
-#include "mongo/db/local_catalog/health_log_interface.h"
-#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
-#include "mongo/db/local_catalog/lock_manager/exception_util.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/logical_time.h"
 #include "mongo/db/multi_key_path_tracker.h"
 #include "mongo/db/op_observer/op_observer_registry.h"
 #include "mongo/db/pipeline/change_stream_pre_and_post_images_options_gen.h"
 #include "mongo/db/query/internal_plans.h"
 #include "mongo/db/query/plan_yield_policy.h"
+#include "mongo/db/repl/dbcheck/health_log.h"
+#include "mongo/db/repl/dbcheck/health_log_interface.h"
 #include "mongo/db/repl/member_state.h"
 #include "mongo/db/repl/oplog_applier.h"
 #include "mongo/db/repl/oplog_entry_test_helpers.h"
@@ -61,12 +53,20 @@
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/repl/storage_interface_impl.h"
 #include "mongo/db/session/session_catalog_mongod.h"
+#include "mongo/db/shard_role/lock_manager/d_concurrency.h"
+#include "mongo/db/shard_role/lock_manager/exception_util.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/database.h"
+#include "mongo/db/shard_role/shard_catalog/database_holder.h"
+#include "mongo/db/shard_role/shard_catalog/db_raii.h"
+#include "mongo/db/shard_role/shard_catalog/document_validation.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/db/storage/mdb_catalog.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/tenant_id.h"
+#include "mongo/db/topology/vector_clock/vector_clock_mutable.h"
 #include "mongo/db/transaction/session_catalog_mongod_transaction_interface_impl.h"
-#include "mongo/db/vector_clock/vector_clock_mutable.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
@@ -416,6 +416,28 @@ Status OplogApplierImplTest::runOpsInitialSync(std::vector<OplogEntry> ops) {
             _opCtx.get(), lastApplied.getTimestamp(), orderedCommit);
     }
     return Status::OK();
+}
+
+long OplogApplierImplTest::getOplogSize() {
+    AutoGetOplogFastPath oplogRead(_opCtx.get(), OplogAccessMode::kRead);
+    const auto& oplog = oplogRead.getCollection();
+    return oplog->getRecordStore()->numRecords();
+}
+
+BSONObj getOplogDoc(OperationContext* opCtx, bool forward) {
+    AutoGetOplogFastPath oplogRead(opCtx, OplogAccessMode::kRead);
+    const auto& oplog = oplogRead.getCollection();
+    auto cursor = oplog->getRecordStore()->getCursor(
+        opCtx, *shard_role_details::getRecoveryUnit(opCtx), forward);
+    return cursor->next()->data.getOwned().toBson();
+}
+
+BSONObj OplogApplierImplTest::getFirstOplogDoc() {
+    return getOplogDoc(_opCtx.get(), /*forward=*/true);
+}
+
+BSONObj OplogApplierImplTest::getLastOplogDoc() {
+    return getOplogDoc(_opCtx.get(), /*forward=*/false);
 }
 
 void checkTxnTable(OperationContext* opCtx,

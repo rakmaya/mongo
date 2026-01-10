@@ -513,7 +513,7 @@ mongo::write_ops::InsertCommandRequest makeTimeseriesInsertOpFromBatch(
     // window metadata instead of measurement metadata. Data is transformed. We
     // need a different verifier function for HCIndex.
     if (!batch->isHCIndexBatch && gPerformTimeseriesCompressionIntermediateDataIntegrityCheckOnInsert.load() &&
-        (opCtx->getClient()->getPrng().nextInt32() % 100) <
+        static_cast<int>(opCtx->getClient()->getPrng().nextUInt32() % 100) <
             gPerformTimeseriesCompressionIntermediateDataIntegrityCheckOnInsertFrequency.load()) {
         auto verifierFunction = makeVerifierFunction(batch, OperationSource::kTimeseriesInsert);
         verifierFunction(bucketToInsert, BSONObj());
@@ -612,7 +612,7 @@ mongo::write_ops::UpdateOpEntry makeTimeseriesCompressedDiffEntry(
     // have a proper HCIndex write path verifier.
     if (!batch->isHCIndexBatch &&
         ((gPerformTimeseriesCompressionIntermediateDataIntegrityCheckOnInsert.load() &&
-         (opCtx->getClient()->getPrng().nextInt32() % 100) <
+         static_cast<int>(opCtx->getClient()->getPrng().nextUInt32() % 100) <
              gPerformTimeseriesCompressionIntermediateDataIntegrityCheckOnInsertFrequency.load()) ||
         (gPerformTimeseriesCompressionIntermediateDataIntegrityCheckOnReopening.load() &&
          batch->isReopened))) {

@@ -107,6 +107,10 @@ class ExpressionSimilarityEuclidean;
 class ExpressionSize;
 class ExpressionReverseArray;
 class ExpressionSortArray;
+class ExpressionTopN;
+class ExpressionTop;
+class ExpressionBottomN;
+class ExpressionBottom;
 class ExpressionSlice;
 class ExpressionIsArray;
 class ExpressionInternalFindAllValuesAtPath;
@@ -184,6 +188,9 @@ class ExpressionEncStrNormalizedEq;
 class ExpressionCreateObjectId;
 class ExpressionTestFeatureFlagLatest;
 class ExpressionTestFeatureFlagLastLTS;
+class ExpressionSerializeEJSON;
+class ExpressionDeserializeEJSON;
+class ExpressionHash;
 
 class AccumulatorAvg;
 class AccumulatorFirstN;
@@ -306,6 +313,10 @@ public:
     virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionSize>) = 0;
     virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionReverseArray>) = 0;
     virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionSortArray>) = 0;
+    virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionTopN>) = 0;
+    virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionTop>) = 0;
+    virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionBottomN>) = 0;
+    virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionBottom>) = 0;
     virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionSlice>) = 0;
     virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionIsArray>) = 0;
     virtual void visit(
@@ -423,6 +434,9 @@ public:
         expression_walker::MaybeConstPtr<IsConst, ExpressionTestFeatureFlagLatest>) = 0;
     virtual void visit(
         expression_walker::MaybeConstPtr<IsConst, ExpressionTestFeatureFlagLastLTS>) = 0;
+    virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionSerializeEJSON>) = 0;
+    virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionDeserializeEJSON>) = 0;
+    virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionHash>) = 0;
 };
 
 using ExpressionMutableVisitor = ExpressionVisitor<false>;
@@ -517,6 +531,10 @@ struct SelectiveConstExpressionVisitorBase : public ExpressionConstVisitor {
     void visit(const ExpressionSize*) override {}
     void visit(const ExpressionReverseArray*) override {}
     void visit(const ExpressionSortArray*) override {}
+    void visit(const ExpressionTopN*) override {}
+    void visit(const ExpressionTop*) override {}
+    void visit(const ExpressionBottomN*) override {}
+    void visit(const ExpressionBottom*) override {}
     void visit(const ExpressionSlice*) override {}
     void visit(const ExpressionIsArray*) override {}
     void visit(const ExpressionInternalFindAllValuesAtPath*) override {}
@@ -606,5 +624,8 @@ struct SelectiveConstExpressionVisitorBase : public ExpressionConstVisitor {
     void visit(const ExpressionCreateObjectId*) override {}
     void visit(const ExpressionTestFeatureFlagLatest*) override {}
     void visit(const ExpressionTestFeatureFlagLastLTS*) override {}
+    void visit(const ExpressionSerializeEJSON*) override {}
+    void visit(const ExpressionDeserializeEJSON*) override {}
+    void visit(const ExpressionHash*) override {}
 };
 }  // namespace mongo

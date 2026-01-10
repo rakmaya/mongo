@@ -34,11 +34,11 @@
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/global_catalog/type_chunk.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/s/migration_session_id.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/s/request_types/move_range_request_gen.h"
 #include "mongo/stdx/condition_variable.h"
@@ -46,6 +46,7 @@
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/concurrency/notification.h"
+#include "mongo/util/modules.h"
 
 #include <memory>
 #include <string>
@@ -75,7 +76,7 @@ class ScopedSplitMergeChunk;
  *   - Move || Split/Merge (same collection): The second operation will block behind the first
  *   - Move/Split/Merge || Split/Merge (for different collections): Can proceed concurrently
  */
-class ActiveMigrationsRegistry {
+class MONGO_MOD_NEEDS_REPLACEMENT ActiveMigrationsRegistry {
     ActiveMigrationsRegistry(const ActiveMigrationsRegistry&) = delete;
     ActiveMigrationsRegistry& operator=(const ActiveMigrationsRegistry&) = delete;
 
@@ -349,7 +350,7 @@ private:
  * Object of this class is returned from the registerSplitOrMergeChunk call of the active migrations
  * registry.
  */
-class ScopedSplitMergeChunk {
+class MONGO_MOD_PUBLIC ScopedSplitMergeChunk {
 public:
     ScopedSplitMergeChunk(ActiveMigrationsRegistry* registry, const NamespaceString& nss);
     ~ScopedSplitMergeChunk();

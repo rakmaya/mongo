@@ -37,7 +37,6 @@
 #include "mongo/db/exec/sbe/stages/stage_visitors.h"
 #include "mongo/db/query/stage_memory_limit_knobs/knobs.h"
 
-#include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
 
 namespace mongo::sbe {
@@ -153,11 +152,10 @@ void HashLookupUnwindStage::open(bool reOpen) {
     // Insert the inner side into the hash table.
     innerChild()->open(false);
     while (innerChild()->getNext() == PlanState::ADVANCED) {
-        value::MaterializedRow value{1 /* columns */};
+        value::FixedSizeRow<1 /*N*/> value;
 
         // Copy the projected value.
-        auto [tag, val] = _inInnerProjectAccessor->getCopyOfValue();
-        value.reset(0, true, tag, val);
+        value.reset(0, _inInnerProjectAccessor->getCopyOfValue());
 
         // This where we put the value in here. This can grow need to spill.
         size_t bufferIndex = _hashTable.bufferValueOrSpill(value);
@@ -198,11 +196,10 @@ PlanState HashLookupUnwindStage::getNext() {
 
         size_t matchIndex = _hashTable.htIter.getNextMatchingIndex();
         if (matchIndex != LookupHashTableIter::kNoMatchingIndex) {
-            boost::optional<std::pair<value::TypeTags, value::Value>> innerMatch =
+            boost::optional<value::TagValueView> innerMatch =
                 _hashTable.getValueAtIndex(matchIndex);
             if (innerMatch) {
-                _lookupStageOutputAccessor.reset(
-                    false /* owned */, innerMatch->first, innerMatch->second);
+                _lookupStageOutputAccessor.reset(*innerMatch);
                 return trackPlanState(PlanState::ADVANCED);
             }
         }
@@ -249,9 +246,8 @@ const SpecificStats* HashLookupUnwindStage::getSpecificStats() const {
     return _hashTable.getHashLookupStats();
 }
 
-std::vector<DebugPrinter::Block> HashLookupUnwindStage::debugPrint() const {
-    auto ret = PlanStage::debugPrint();
-
+void HashLookupUnwindStage::doDebugPrint(std::vector<DebugPrinter::Block>& ret,
+                                         DebugPrintInfo& debugPrintInfo) const {
     DebugPrinter::addIdentifier(ret, _lookupStageOutputSlot);
 
     if (_collatorSlot) {
@@ -263,7 +259,7 @@ std::vector<DebugPrinter::Block> HashLookupUnwindStage::debugPrint() const {
     DebugPrinter::addKeyword(ret, "outer");
     DebugPrinter::addIdentifier(ret, _outerKeySlot);
     ret.emplace_back(DebugPrinter::Block::cmdIncIndent);
-    DebugPrinter::addBlocks(ret, outerChild()->debugPrint());
+    DebugPrinter::addBlocks(ret, outerChild()->debugPrint(debugPrintInfo));
     ret.emplace_back(DebugPrinter::Block::cmdDecIndent);
 
     DebugPrinter::addKeyword(ret, "inner");
@@ -271,12 +267,10 @@ std::vector<DebugPrinter::Block> HashLookupUnwindStage::debugPrint() const {
     DebugPrinter::addIdentifier(ret, _innerProjectSlot);
 
     ret.emplace_back(DebugPrinter::Block::cmdIncIndent);
-    DebugPrinter::addBlocks(ret, innerChild()->debugPrint());
+    DebugPrinter::addBlocks(ret, innerChild()->debugPrint(debugPrintInfo));
     ret.emplace_back(DebugPrinter::Block::cmdDecIndent);
 
     ret.emplace_back(DebugPrinter::Block::cmdDecIndent);
-
-    return ret;
 }
 
 size_t HashLookupUnwindStage::estimateCompileTimeSize() const {

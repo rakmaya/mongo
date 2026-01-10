@@ -29,20 +29,12 @@
 
 #include "mongo/db/pipeline/document_source_change_stream_add_pre_image.h"
 
-#include "mongo/base/error_codes.h"
-#include "mongo/bson/bsonmisc.h"
-#include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsontypes.h"
-#include "mongo/db/namespace_string.h"
-#include "mongo/db/pipeline/change_stream_preimage_gen.h"
 #include "mongo/db/pipeline/process_interface/mongo_process_interface.h"
-#include "mongo/db/version_context.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/intrusive_counter.h"
 #include "mongo/util/str.h"
-
-#include <memory>
 
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
@@ -51,10 +43,13 @@
 
 namespace mongo {
 
-REGISTER_INTERNAL_DOCUMENT_SOURCE(_internalChangeStreamAddPreImage,
-                                  LiteParsedDocumentSourceChangeStreamInternal::parse,
-                                  DocumentSourceChangeStreamAddPreImage::createFromBson,
-                                  true);
+REGISTER_INTERNAL_LITE_PARSED_DOCUMENT_SOURCE(_internalChangeStreamAddPreImage,
+                                              ChangeStreamAddPreImageLiteParsed::parse);
+
+REGISTER_DOCUMENT_SOURCE_WITH_STAGE_PARAMS_DEFAULT(_internalChangeStreamAddPreImage,
+                                                   DocumentSourceChangeStreamAddPreImage,
+                                                   ChangeStreamAddPreImageStageParams);
+
 ALLOCATE_DOCUMENT_SOURCE_ID(_internalChangeStreamAddPreImage,
                             DocumentSourceChangeStreamAddPreImage::id)
 

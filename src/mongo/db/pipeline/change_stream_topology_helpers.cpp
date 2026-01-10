@@ -37,7 +37,7 @@
 #include "mongo/db/pipeline/document_source_change_stream.h"
 #include "mongo/db/pipeline/document_source_change_stream_gen.h"
 #include "mongo/db/pipeline/optimization/optimize.h"
-#include "mongo/db/pipeline/pipeline.h"
+#include "mongo/db/pipeline/pipeline_factory.h"
 #include "mongo/db/pipeline/sharded_agg_helpers.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/serialization_context.h"
@@ -62,16 +62,21 @@ BSONObj replaceResumeTokenAndVersionInCommand(
 
     MutableDocument changeStreamStage(
         pipeline[0][DocumentSourceChangeStream::kStageName].getDocument());
-    changeStreamStage[DocumentSourceChangeStreamSpec::kResumeAfterFieldName] = Value(resumeToken);
 
     if (changeStreamVersion.has_value()) {
         changeStreamStage[DocumentSourceChangeStreamSpec::kVersionFieldName] =
             Value(ChangeStreamReaderVersion_serializer(*changeStreamVersion));
     }
 
-    // If the command was initially specified with a startAtOperationTime, we need to remove it to
-    // use the new resume token.
+    // Provide 'resumeToken' as part 'startAfter' for resuming the changeStream. 'startAfter' and
+    // not 'resumeAfter' attribute is provided, to allow opening the change stream cursors  with an
+    // invalidation 'resumeToken' resume token.
+    // All other forms of resuming the change stream are set to null if provided in the original
+    // command.
+    changeStreamStage[DocumentSourceChangeStreamSpec::kStartAfterFieldName] = Value(resumeToken);
     changeStreamStage[DocumentSourceChangeStreamSpec::kStartAtOperationTimeFieldName] = Value();
+    changeStreamStage[DocumentSourceChangeStreamSpec::kResumeAfterFieldName] = Value();
+
     pipeline[0] =
         Value(Document{{DocumentSourceChangeStream::kStageName, changeStreamStage.freeze()}});
     MutableDocument newCmd(std::move(originalCmd));
@@ -84,9 +89,18 @@ BSONObj createUpdatedCommandForNewShard(
     Timestamp atClusterTime,
     const BSONObj& originalAggregateCommand,
     const boost::optional<ChangeStreamReaderVersionEnum>& changeStreamVersion) {
-    auto resumeTokenForNewShard =
-        ResumeToken::makeHighWaterMarkToken(atClusterTime, expCtx->getChangeStreamTokenVersion());
+    return createUpdatedCommandForNewShard(
+        expCtx,
+        ResumeToken::makeHighWaterMarkToken(atClusterTime, expCtx->getChangeStreamTokenVersion()),
+        originalAggregateCommand,
+        changeStreamVersion);
+}
 
+BSONObj createUpdatedCommandForNewShard(
+    const boost::intrusive_ptr<ExpressionContext>& expCtx,
+    const ResumeToken& resumeTokenForNewShard,
+    const BSONObj& originalAggregateCommand,
+    const boost::optional<ChangeStreamReaderVersionEnum>& changeStreamVersion) {
     // Create a new shard command object containing the new resume token, adding the 'resumeAfter'
     // field to the '$changeStream' spec. An example input 'originalAggregateCommand' is:
     // {"aggregate":"test","pipeline":[{"$changeStream":{"fullDocument":"default"}}],"cursor":{"batchSize":101}}
@@ -100,10 +114,10 @@ BSONObj createUpdatedCommandForNewShard(
 
     // Parse and optimize the pipeline. This will also insert all internal change stream stages into
     // the pipeline.
-    auto pipeline =
-        Pipeline::parseFromArray(shardCommand[AggregateCommandRequest::kPipelineFieldName], expCtx);
-
-    pipeline_optimization::optimizePipeline(*pipeline);
+    pipeline_factory::MakePipelineOptions opts{.alreadyOptimized = false,
+                                               .attachCursorSource = false};
+    auto pipeline = pipeline_factory::makePipeline(
+        shardCommand[AggregateCommandRequest::kPipelineFieldName], expCtx, opts);
 
     // Split the full pipeline to get the shard pipeline.
     auto splitPipelines = sharded_agg_helpers::SplitPipeline::split(std::move(pipeline));

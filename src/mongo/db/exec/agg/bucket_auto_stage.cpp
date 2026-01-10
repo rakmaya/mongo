@@ -36,7 +36,7 @@
 #include "mongo/db/pipeline/accumulator_multi.h"
 #include "mongo/db/pipeline/document_source_bucket_auto.h"
 #include "mongo/db/query/stage_memory_limit_knobs/knobs.h"
-#include "mongo/db/sorter/sorter_template_defs.h"
+#include "mongo/db/sorter/sorter_template_defs.h"  // IWYU pragma: keep
 #include "mongo/db/stats/counters.h"
 #include "mongo/util/assert_util.h"
 
@@ -94,19 +94,23 @@ SortOptions BucketAutoStage::makeSortOptions() {
     opts.MaxMemoryUsageBytes(_memoryTracker.maxAllowedMemoryUsageBytes());
     if (pExpCtx->getAllowDiskUse() && !pExpCtx->getInRouter()) {
         opts.TempDir(pExpCtx->getTempDir());
-        opts.FileStats(&_sorterFileStats);
     }
     return opts;
 }
 
 GetNextResult BucketAutoStage::populateSorter() {
     if (!_sorter) {
-        const auto& valueCmp = pExpCtx->getValueComparator();
-        auto comparator = [valueCmp](const Value& lhs, const Value& rhs) {
-            return valueCmp.compare(lhs, rhs);
+        auto opts = makeSortOptions();
+        std::function<int(const Value&, const Value&)> comparator =
+            [valueComp = pExpCtx->getValueComparator()](const Value& lhs, const Value& rhs) -> int {
+            return valueComp.compare(lhs, rhs);
         };
-
-        _sorter = Sorter<Value, Document>::make(makeSortOptions(), comparator);
+        _sorter = Sorter<Value, Document>::make(
+            opts,
+            comparator,
+            (opts.tempDir) ? std::make_shared<FileBasedSorterSpiller<Value, Document>>(
+                                 *opts.tempDir, &_sorterFileStats)
+                           : nullptr);
     }
 
     auto next = pSource->getNext();

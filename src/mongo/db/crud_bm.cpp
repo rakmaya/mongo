@@ -30,13 +30,6 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/global_settings.h"
 #include "mongo/db/index_builds/index_builds_coordinator_mongod.h"
-#include "mongo/db/local_catalog/collection_catalog_helper.h"
-#include "mongo/db/local_catalog/collection_impl.h"
-#include "mongo/db/local_catalog/database_holder_impl.h"
-#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_state.h"
-#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_state_factory_shard.h"
-#include "mongo/db/local_catalog/shard_role_catalog/database_sharding_state.h"
-#include "mongo/db/local_catalog/shard_role_catalog/database_sharding_state_factory_shard.h"
 #include "mongo/db/op_observer/op_observer_registry.h"
 #include "mongo/db/operation_id.h"
 #include "mongo/db/repl/replication_consistency_markers_impl.h"
@@ -50,12 +43,20 @@
 #include "mongo/db/service_entry_point_bm_fixture.h"
 #include "mongo/db/service_entry_point_shard_role.h"
 #include "mongo/db/session/session_catalog_mongod.h"
+#include "mongo/db/shard_role/shard_catalog/collection_catalog_helper.h"
+#include "mongo/db/shard_role/shard_catalog/collection_impl.h"
+#include "mongo/db/shard_role/shard_catalog/collection_sharding_state.h"
+#include "mongo/db/shard_role/shard_catalog/collection_sharding_state_factory_shard.h"
+#include "mongo/db/shard_role/shard_catalog/database_holder_impl.h"
+#include "mongo/db/shard_role/shard_catalog/database_sharding_state.h"
+#include "mongo/db/shard_role/shard_catalog/database_sharding_state_factory_shard.h"
 #include "mongo/db/storage/control/storage_control.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/db/topology/cluster_role.h"
 #include "mongo/db/topology/sharding_state.h"
 #include "mongo/db/transaction/session_catalog_mongod_transaction_interface_impl.h"
 #include "mongo/executor/network_interface_mock.h"
+#include "mongo/executor/thread_pool_task_executor.h"
 #include "mongo/util/concurrency/thread_pool.h"
 #include "mongo/util/duration.h"
 
@@ -158,6 +159,9 @@ void setupStorage(ServiceContext* svcCtx, ClusterRole role) {
 
 class CrudBenchmarkFixture : public ServiceEntryPointBenchmarkFixture {
 public:
+    static constexpr auto kCollection = "test"_sd;
+    static constexpr auto kDatabase = "test"_sd;
+
     void setUpServiceContext(ServiceContext* svcCtx) override {
         auto service = svcCtx->getService(getClusterRole());
         service->setServiceEntryPoint(std::make_unique<ServiceEntryPointShardRole>());
@@ -180,19 +184,6 @@ public:
         return ClusterRole::ShardServer;
     }
 
-    static auto makeFindOneById() {
-        return BSON("find" << kCollection << "$db" << kDatabase << "filter" << BSON("_id" << 1)
-                           << "limit" << 1 << "singleBatch" << true);
-    }
-
-    static auto makeUpdateOneById() {
-        return BSON(
-            "update" << kCollection << "$db" << kDatabase << "updates"
-                     << BSON_ARRAY(BSON("q" << BSON("_id" << 1) << "u"
-                                            << BSON("$set" << BSON("data" << "MongoDB Updated"))
-                                            << "multi" << false << "upsert" << false)));
-    }
-
 private:
     void _populateTestData(ServiceContext* svcCtx) {
         auto service = svcCtx->getService(getClusterRole());
@@ -206,19 +197,45 @@ private:
             doRequest(service->getServiceEntryPoint(), strand->getClientPointer(), msg);
         });
     }
-
-    static constexpr auto kCollection = "test"_sd;
-    static constexpr auto kDatabase = "test"_sd;
 };
 
 BENCHMARK_DEFINE_F(CrudBenchmarkFixture, BM_FIND_ONE)
 (benchmark::State& state) {
-    runBenchmark(state, makeFindOneById());
+    // clang-format off
+    BSONObj cmd = BSON(
+            "find" << kCollection
+            << "$db" << kDatabase
+            << "filter" << BSON("_id" << 1)
+            << "limit" << 1
+            << "singleBatch" << true);
+    // clang-format on
+    runBenchmark(state, [=] { return cmd; });
 }
 
 BENCHMARK_DEFINE_F(CrudBenchmarkFixture, BM_UPDATE_ONE)
 (benchmark::State& state) {
-    runBenchmark(state, makeUpdateOneById());
+    runBenchmark(state, [updateValue = int64_t{0}]() mutable {
+        // clang-format off
+        return BSON(
+            "update" << kCollection
+            << "$db" << kDatabase
+            << "updates" << BSON_ARRAY(
+                BSON(
+                    "q" << BSON(
+                        "_id" << 1
+                    )
+                    << "u" << BSON(
+                        "$set" << BSON(
+                            "data" << ++updateValue
+                        )
+                    )
+                    << "multi" << false
+                    << "upsert" << false
+                )
+            )
+        );
+        // clang-format on
+    });
 }
 
 BENCHMARK_REGISTER_F(CrudBenchmarkFixture, BM_FIND_ONE)->ThreadRange(1, kCommandBMMaxThreads);

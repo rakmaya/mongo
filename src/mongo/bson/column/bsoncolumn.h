@@ -40,6 +40,7 @@
 #include "mongo/bson/column/simple8b.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/platform/int128.h"
+#include "mongo/util/modules.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -78,7 +79,7 @@ namespace mongo {
  * Thread safety: The BSONColumn class is generally NOT thread-safe, unless declared otherwise. This
  * also applies to functions declared 'const'.
  */
-class BSONColumn {
+class MONGO_MOD_PUBLIC BSONColumn {
 public:
     BSONColumn(const char* buffer, size_t size);
     explicit BSONColumn(BSONElement bin);
@@ -172,13 +173,13 @@ public:
          * actual binary to allow interleaving where control bytes corresponds to separate decoding
          * states.
          */
-        struct DecodingState {
+        struct MONGO_MOD_PRIVATE DecodingState {
             DecodingState();
 
             /**
-             * Internal decoding state for types using 64bit aritmetic
+             * Internal decoding state for types using 64bit arithmetic
              */
-            struct Decoder64 {
+            struct MONGO_MOD_PRIVATE Decoder64 {
                 Decoder64();
 
                 BSONElement materialize(BSONElementStorage& allocator,
@@ -193,9 +194,9 @@ public:
             };
 
             /**
-             * Internal decoding state for types using 128bit aritmetic
+             * Internal decoding state for types using 128bit arithmetic
              */
-            struct Decoder128 {
+            struct MONGO_MOD_PRIVATE Decoder128 {
                 BSONElement materialize(BSONElementStorage& allocator,
                                         BSONElement last,
                                         StringData fieldName) const;
@@ -205,7 +206,7 @@ public:
                 int128_t lastEncodedValue = 0;
             };
 
-            struct LoadControlResult {
+            struct MONGO_MOD_PRIVATE LoadControlResult {
                 BSONElement element;
                 int size;
             };
@@ -230,14 +231,14 @@ public:
         /**
          * Internal state for regular decoding mode (decoding of scalars)
          */
-        struct Regular {
+        struct MONGO_MOD_FILE_PRIVATE Regular {
             DecodingState state;
         };
 
         /**
          * Internal state for interleaved decoding mode (decoding of objects/arrays)
          */
-        struct Interleaved {
+        struct MONGO_MOD_FILE_PRIVATE Interleaved {
             Interleaved(BSONObj refObj, BSONType referenceObjType, bool interleavedArrays);
 
             std::vector<DecodingState> states;
@@ -356,7 +357,7 @@ namespace bsoncolumn {
  */
 template <class CMaterializer, class Container>
 requires Materializer<CMaterializer>
-class Collector {
+class MONGO_MOD_PUBLIC Collector {
     using Element = typename CMaterializer::Element;
 
 public:
@@ -472,7 +473,7 @@ private:
     Element _last = CMaterializer::materializeMissing(*_allocator);
 };
 
-class BSONColumnBlockBased {
+class MONGO_MOD_PUBLIC BSONColumnBlockBased {
 
 public:
     BSONColumnBlockBased(const char* buffer, size_t size);
@@ -614,8 +615,9 @@ void BSONColumnBlockBased::decompress(boost::intrusive_ptr<BSONElementStorage> a
     while (ptr < end) {
         control = *ptr;
         if (control == stdx::to_underlying(BSONType::eoo)) {
-            uassert(
-                8517800, "BSONColumn data ended without reaching end of buffer", ptr + 1 == end);
+            uassert(ErrorCodes::InvalidBSONColumn,
+                    "BSONColumn data ended without reaching end of buffer",
+                    ptr + 1 == end);
             break;
         } else if (isUncompressedLiteralControlByte(control)) {
             // The BSONColumn encoding guarantees that the field name is just a single null byte.
@@ -632,7 +634,7 @@ void BSONColumnBlockBased::decompress(boost::intrusive_ptr<BSONElementStorage> a
                                   !BSONColumnBlockDecompressHelpers::containsScalars(obj),
                               "object literal with scalars in path-based decompress()");
                     for (auto&& pathPair : pathCollectors) {
-                        if (isRootPath(pathPair.first)) {
+                        if (internal::isRootPath(pathPair.first)) {
                             pathPair.second.template append<BSONObj>(literal);
                         } else {
                             pathPair.second.appendMissing();
@@ -661,7 +663,7 @@ void BSONColumnBlockBased::decompress(boost::intrusive_ptr<BSONElementStorage> a
                 ptr = newPtr;
             }
         } else if (isInterleavedStartControlByte(control)) {
-            BlockBasedInterleavedDecompressor decompressor{*allocator, ptr, end};
+            internal::BlockBasedInterleavedDecompressor decompressor{*allocator, ptr, end};
             ptr = decompressor.decompress(std::span{pathCollectors});
 
             // If there are any simple8b blocks after the interleaved section, handle them now.
@@ -678,7 +680,7 @@ void BSONColumnBlockBased::decompress(boost::intrusive_ptr<BSONElementStorage> a
                 ptr = newPtr;
             }
         } else {
-            uasserted(8517801, "Unexpected control byte value");
+            uasserted(ErrorCodes::InvalidBSONColumn, "Unexpected control byte value");
         }
     }
 }
@@ -686,4 +688,4 @@ void BSONColumnBlockBased::decompress(boost::intrusive_ptr<BSONElementStorage> a
 }  // namespace bsoncolumn
 }  // namespace mongo
 
-#include "bsoncolumn.inl"
+#include "mongo/bson/column/bsoncolumn.inl"

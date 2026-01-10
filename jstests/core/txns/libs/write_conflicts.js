@@ -63,11 +63,7 @@ export var WriteConflictHelpers = (function () {
             // total WCE metric by the number of shards involved. Similarly, BulkWriteOverride turns
             // a single op into multiple writes and causes multiple WCEs. The unified write executor
             // implements some writes as bulk writes internally.
-            if (
-                FixtureHelpers.isSharded(coll) ||
-                TestData.runningWithBulkWriteOverride ||
-                TestData.internalQueryUnifiedWriteExecutor
-            ) {
+            if (FixtureHelpers.isSharded(coll) || TestData.runningWithBulkWriteOverride) {
                 assert.gte(after, before + 1);
             } else {
                 assert.eq(after, before + 1);

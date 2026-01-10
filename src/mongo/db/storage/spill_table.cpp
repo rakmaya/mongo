@@ -29,8 +29,8 @@
 
 #include "mongo/db/storage/spill_table.h"
 
-#include "mongo/db/local_catalog/lock_manager/exception_util.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/shard_role/lock_manager/exception_util.h"
 #include "mongo/db/storage/disk_space_monitor.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/storage_engine.h"
@@ -327,6 +327,10 @@ Status SpillTable::rangeTruncate(OperationContext* opCtx,
 
 std::unique_ptr<StorageStats> SpillTable::computeOperationStatisticsSinceLastCall() {
     return _ru->computeOperationStatisticsSinceLastCall();
+}
+
+RecordStore* SpillTable::getRecordStore_forTest() {
+    return _rs.get();
 }
 
 Status SpillTable::_checkDiskSpace() const {

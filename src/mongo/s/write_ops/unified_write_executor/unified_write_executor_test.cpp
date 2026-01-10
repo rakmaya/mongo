@@ -30,6 +30,8 @@
 #include "mongo/s/write_ops/unified_write_executor/unified_write_executor.h"
 
 #include "mongo/db/sharding_environment/sharding_mongos_test_fixture.h"
+#include "mongo/s/commands/query_cmd/populate_cursor.h"
+#include "mongo/s/write_ops/unified_write_executor/write_op.h"
 #include "mongo/unittest/unittest.h"
 
 namespace mongo {
@@ -133,6 +135,66 @@ public:
                                  << "nDeleted" << nDeleted);
         });
     }
+
+    void expectInsertShardRequest(std::vector<BSONObj> opList, const NamespaceString& nss, int n) {
+        onCommandForPoolExecutor([&](const executor::RemoteCommandRequest& request) {
+            auto opMsg = static_cast<OpMsgRequest>(request);
+            BatchedCommandRequest bcr = BatchedCommandRequest::parseInsert(opMsg);
+            WriteCommandRef cmdRef(bcr);
+
+            ASSERT_EQ(opList.size(), cmdRef.getNumOps());
+
+            for (size_t i = 0; i < opList.size(); i++) {
+                auto bulkWriteOp = write_op_helpers::getOrMakeBulkWriteOp(cmdRef.getOp(i));
+                ASSERT_BSONOBJ_EQ(BulkWriteCRUDOp(bulkWriteOp).toBSON(), opList[i]);
+            }
+
+            ASSERT_EQ(nss, bcr.getNS());
+
+            return BSON("ok" << 1 << "n" << n);
+        });
+    }
+
+    void expectUpdateShardRequest(std::vector<BSONObj> opList,
+                                  const NamespaceString& nss,
+                                  int n,
+                                  int nModified) {
+        onCommandForPoolExecutor([&](const executor::RemoteCommandRequest& request) {
+            auto opMsg = static_cast<OpMsgRequest>(request);
+            BatchedCommandRequest bcr = BatchedCommandRequest::parseUpdate(opMsg);
+            WriteCommandRef cmdRef(bcr);
+
+            ASSERT_EQ(opList.size(), cmdRef.getNumOps());
+
+            for (size_t i = 0; i < opList.size(); i++) {
+                auto bulkWriteOp = write_op_helpers::getOrMakeBulkWriteOp(cmdRef.getOp(i));
+                ASSERT_BSONOBJ_EQ(BulkWriteCRUDOp(bulkWriteOp).toBSON(), opList[i]);
+            }
+
+            ASSERT_EQ(nss, bcr.getNS());
+
+            return BSON("ok" << 1 << "n" << n << "nModified" << nModified);
+        });
+    }
+
+    void expectDeleteShardRequest(std::vector<BSONObj> opList, const NamespaceString& nss, int n) {
+        onCommandForPoolExecutor([&](const executor::RemoteCommandRequest& request) {
+            auto opMsg = static_cast<OpMsgRequest>(request);
+            BatchedCommandRequest bcr = BatchedCommandRequest::parseDelete(opMsg);
+            WriteCommandRef cmdRef(bcr);
+
+            ASSERT_EQ(opList.size(), cmdRef.getNumOps());
+
+            for (size_t i = 0; i < opList.size(); i++) {
+                auto bulkWriteOp = write_op_helpers::getOrMakeBulkWriteOp(cmdRef.getOp(i));
+                ASSERT_BSONOBJ_EQ(BulkWriteCRUDOp(bulkWriteOp).toBSON(), opList[i]);
+            }
+
+            ASSERT_EQ(nss, bcr.getNS());
+
+            return BSON("ok" << 1 << "n" << n);
+        });
+    }
 };
 
 TEST_F(UnifiedWriteExecutorTest, BulkWriteBasic) {
@@ -144,7 +206,9 @@ TEST_F(UnifiedWriteExecutorTest, BulkWriteBasic) {
         {NamespaceInfoEntry(nss1), NamespaceInfoEntry(nss2)});
 
     auto future = launchAsync([&]() {
-        auto reply = bulkWrite(operationContext(), request);
+        Stats uweStats;
+        auto replyInfo = bulkWrite(operationContext(), request, uweStats);
+        auto reply = populateCursorReply(operationContext(), request, request.toBSON(), replyInfo);
         auto replyItems = reply.getCursor().getFirstBatch();
         ASSERT_EQ(replyItems.size(), 2);
         ASSERT_BSONOBJ_EQ(replyItems[0].toBSON(), BSON("ok" << 1.0 << "idx" << 0 << "n" << 1));
@@ -209,7 +273,8 @@ TEST_F(UnifiedWriteExecutorTest, BatchWriteBasic) {
 
 
     auto future = launchAsync([&]() {
-        auto resp = write(operationContext(), insertRequest);
+        Stats uweStats;
+        auto resp = write(operationContext(), insertRequest, uweStats);
         ASSERT(resp.getOk());
         ASSERT_FALSE(resp.isErrDetailsSet());
         ASSERT_EQ(resp.getN(), 2);
@@ -223,19 +288,10 @@ TEST_F(UnifiedWriteExecutorTest, BatchWriteBasic) {
     expectCollectionRoutingRequest(nss, shardId1);
 
     // Single insert batch.
-    expectBulkWriteShardRequest({BSON("insert" << 0 << "document" << BSON("x" << 1)),
-                                 BSON("insert" << 0 << "document" << BSON("x" << 2))} /* opList */,
-                                {nss} /* nssList */,
-                                shardId1 /* shardId */,
-                                {BSON("ok" << 1.0 << "idx" << 0 << "n" << 1),
-                                 BSON("ok" << 1.0 << "idx" << 1 << "n" << 1)} /* replyItems */,
-                                0 /* nErrors */,
-                                2 /* nInserted */,
-                                0 /* nMatched */,
-                                0 /* nModified */,
-                                0 /* nUpserted */,
-                                0 /* nDelete */
-    );
+    expectInsertShardRequest({BSON("insert" << 0 << "document" << BSON("x" << 1)),
+                              BSON("insert" << 0 << "document" << BSON("x" << 2))},
+                             nss,
+                             2);
 
     future.default_timed_get();
 
@@ -253,30 +309,23 @@ TEST_F(UnifiedWriteExecutorTest, BatchWriteBasic) {
         return updateOp;
     }());
 
-
     auto updateFuture = launchAsync([&]() {
-        auto resp = write(operationContext(), updateRequest);
+        Stats uweStats;
+        auto resp = write(operationContext(), updateRequest, uweStats);
         ASSERT(resp.getOk());
         ASSERT_FALSE(resp.isErrDetailsSet());
-        ASSERT_EQ(resp.getN(), 0);
+        ASSERT_EQ(resp.getN(), 1);
         ASSERT_EQ(resp.getNModified(), 1);
         ASSERT_FALSE(resp.isUpsertDetailsSet());
     });
 
     // Single update batch.
-    expectBulkWriteShardRequest(
+    expectUpdateShardRequest(
         {BSON("update" << 0 << "filter" << BSON("x" << 2) << "multi" << false << "updateMods"
-                       << BSON("x" << 3) << "upsert" << false)} /* opList */,
-        {nss} /* nssList */,
-        shardId1 /* shardId */,
-        {BSON("ok" << 1.0 << "idx" << 0 << "n" << 1)} /* replyItems */,
-        0 /* nErrors */,
-        0 /* nInserted */,
-        0 /* nMatched */,
-        1 /* nModified */,
-        0 /* nUpserted */,
-        0 /* nDelete */
-    );
+                       << BSON("x" << 3) << "upsert" << false)},
+        nss,
+        1,
+        1);
 
     updateFuture.default_timed_get();
 
@@ -293,7 +342,8 @@ TEST_F(UnifiedWriteExecutorTest, BatchWriteBasic) {
     }());
 
     auto deleteFuture = launchAsync([&]() {
-        auto resp = write(operationContext(), deleteRequest);
+        Stats uweStats;
+        auto resp = write(operationContext(), deleteRequest, uweStats);
         ASSERT(resp.getOk());
         ASSERT_FALSE(resp.isErrDetailsSet());
         ASSERT_EQ(resp.getN(), 1);
@@ -302,18 +352,8 @@ TEST_F(UnifiedWriteExecutorTest, BatchWriteBasic) {
     });
 
     // Single delete batch.
-    expectBulkWriteShardRequest(
-        {BSON("delete" << 0 << "filter" << BSON("x" << 3) << "multi" << false)} /* opList */,
-        {nss} /* nssList */,
-        shardId1 /* shardId */,
-        {BSON("ok" << 1.0 << "idx" << 0 << "n" << 1)} /* replyItems */,
-        0 /* nErrors */,
-        0 /* nInserted */,
-        0 /* nMatched */,
-        0 /* nModified */,
-        0 /* nUpserted */,
-        1 /* nDelete */
-    );
+    expectDeleteShardRequest(
+        {BSON("delete" << 0 << "filter" << BSON("x" << 3) << "multi" << false)}, nss, 1);
 
     deleteFuture.default_timed_get();
 }
@@ -325,7 +365,9 @@ TEST_F(UnifiedWriteExecutorTest, BulkWriteImplicitCollectionCreation) {
                                     {NamespaceInfoEntry(nss1)});
 
     auto future = launchAsync([&]() {
-        auto reply = bulkWrite(operationContext(), request);
+        Stats uweStats;
+        auto replyInfo = bulkWrite(operationContext(), request, uweStats);
+        auto reply = populateCursorReply(operationContext(), request, request.toBSON(), replyInfo);
         auto replyItems = reply.getCursor().getFirstBatch();
         ASSERT_EQ(replyItems.size(), 1);
         ASSERT_BSONOBJ_EQ(replyItems[0].toBSON(), BSON("ok" << 1.0 << "idx" << 0 << "n" << 1));
@@ -361,7 +403,7 @@ TEST_F(UnifiedWriteExecutorTest, BulkWriteImplicitCollectionCreation) {
         ASSERT_EQ(request.dbname, nss1.dbName());
         ASSERT_EQ(request.cmdObj.getField("_shardsvrCreateCollection").String(), nss1.coll());
         BSONObjBuilder shardVersionBuilder;
-        ShardVersion::UNSHARDED().serialize("", &shardVersionBuilder);
+        ShardVersion::UNTRACKED().serialize("", &shardVersionBuilder);
         return BSON("ok" << 1.0 << "collectionUUID" << UUID::gen() << "collectionVersion"
                          << shardVersionBuilder.obj().firstElement().Obj());
     });
@@ -395,7 +437,9 @@ TEST_F(UnifiedWriteExecutorTest, OrderedBulkWriteErrorsAndStops) {
     request.setOrdered(true);
 
     auto future = launchAsync([&]() {
-        auto reply = bulkWrite(operationContext(), request);
+        Stats uweStats;
+        auto replyInfo = bulkWrite(operationContext(), request, uweStats);
+        auto reply = populateCursorReply(operationContext(), request, request.toBSON(), replyInfo);
         auto replyItems = reply.getCursor().getFirstBatch();
         ASSERT_EQ(replyItems.size(), 1);
         ASSERT_BSONOBJ_EQ(replyItems[0].toBSON(),
@@ -432,6 +476,72 @@ TEST_F(UnifiedWriteExecutorTest, OrderedBulkWriteErrorsAndStops) {
 
     future.default_timed_get();
 }
+
+TEST_F(UnifiedWriteExecutorTest, UnorderedBulkWriteErrorsAndStops) {
+    const DatabaseName dbName = DatabaseName::createDatabaseName_forTest(boost::none, "test");
+    const NamespaceString nss1 = NamespaceString::createNamespaceString_forTest(dbName, "coll1");
+    const NamespaceString nss2 = NamespaceString::createNamespaceString_forTest(dbName, "coll2");
+    BulkWriteCommandRequest request(
+        {BulkWriteInsertOp(0, BSON("x" << 1)), BulkWriteInsertOp(1, BSON("x" << 2))},
+        {NamespaceInfoEntry(nss1), NamespaceInfoEntry(nss2)});
+    request.setOrdered(false);
+
+
+    auto future = launchAsync([&]() {
+        Stats uweStats;
+        auto replyInfo = bulkWrite(operationContext(), request, uweStats);
+        auto reply = populateCursorReply(operationContext(), request, request.toBSON(), replyInfo);
+        auto replyItems = reply.getCursor().getFirstBatch();
+        ASSERT_EQ(replyItems.size(), 2);
+        ASSERT_BSONOBJ_EQ(replyItems[0].toBSON(),
+                          BSON("ok" << 0.0 << "idx" << 0 << "code" << ErrorCodes::BadValue
+                                    << "errmsg" << "failed" << "n" << 0));
+        ASSERT_BSONOBJ_EQ(replyItems[1].toBSON(), BSON("ok" << 1.0 << "idx" << 1 << "n" << 1));
+        ASSERT_EQ(reply.getNErrors(), 1);
+        ASSERT_EQ(reply.getNInserted(), 1);
+        ASSERT_EQ(reply.getNMatched(), 0);
+        ASSERT_EQ(reply.getNModified(), 0);
+        ASSERT_EQ(reply.getNUpserted(), 0);
+        ASSERT_EQ(reply.getNDeleted(), 0);
+    });
+
+    // Load catalog cache from the config server
+    expectDatabaseRoutingRequest(dbName, shardId1);
+    expectCollectionRoutingRequest(nss1, shardId1);
+    expectCollectionRoutingRequest(nss2, shardId2);
+
+    // First batch, returns an error.
+    expectBulkWriteShardRequest(
+        {BSON("insert" << 0 << "document" << BSON("x" << 1))} /* opList */,
+        {nss1} /* nssList */,
+        shardId1 /* shardId */,
+        {BSON("ok" << 0.0 << "idx" << 0 << "code" << ErrorCodes::BadValue << "errmsg"
+                   << "failed"
+                   << "n" << 0)} /* replyItems */,
+        1 /* nErrors */,
+        0 /* nInserted */,
+        0 /* nMatched */,
+        0 /* nModified */,
+        0 /* nUpserted */,
+        0 /* nDelete */
+    );
+
+    // Second batch of ops for shard 2
+    expectBulkWriteShardRequest({BSON("insert" << 0 << "document" << BSON("x" << 2))} /* opList */,
+                                {nss2} /* nssList */,
+                                shardId2 /* shardId */,
+                                {BSON("ok" << 1.0 << "idx" << 0 << "n" << 1)} /* replyItems */,
+                                0 /* nErrors */,
+                                1 /* nInserted */,
+                                0 /* nMatched */,
+                                0 /* nModified */,
+                                0 /* nUpserted */,
+                                0 /* nDelete */
+    );
+
+    future.default_timed_get();
+}
+
 }  // namespace
 }  // namespace unified_write_executor
 }  // namespace mongo

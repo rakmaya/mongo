@@ -30,7 +30,6 @@
 #include "mongo/s/write_ops/unified_write_executor/write_batch_executor.h"
 
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/bson/json.h"
 #include "mongo/client/connection_string.h"
 #include "mongo/client/remote_command_targeter_mock.h"
 #include "mongo/db/global_catalog/type_shard.h"
@@ -52,9 +51,22 @@ public:
     const NamespaceString nss1 = NamespaceString::createNamespaceString_forTest("test", "coll1");
     const NamespaceString nss2 = NamespaceString::createNamespaceString_forTest("test", "coll2");
 
+    const bool nss0IsViewfulTimeseries = false;
+    const bool nss1IsViewfulTimeseries = true;
+    const bool nss2IsViewfulTimeseries = false;
+    const std::set<NamespaceString> nssIsViewfulTimeseries{nss1};
+
     const UUID uuid0 = UUID::gen();
     const UUID uuid1 = UUID::gen();
     const UUID uuid2 = UUID::gen();
+
+    const BSONObj emptyBulkWriteCommandReplyObj =
+        BSON("cursor" << BSON("firstBatch" << BSONArray() << "id" << 0LL << "ns" << "foo")
+                      << "nErrors" << 0 << "nDeleted" << 0 << "nInserted" << 0 << "nMatched" << 0
+                      << "nModified" << 0 << "nUpserted" << 0);
+
+    const BSONObj emptyFindAndModifyCommandReplyObj =
+        BSON("lastErrorObject" << BSON("n" << 0) << "value" << BSONNULL);
 
     void setUp() override {
         ShardingTestFixture::setUp();
@@ -85,12 +97,17 @@ public:
     NamespaceInfoEntry getNamespaceInfoEntry(const NamespaceString& nss,
                                              boost::optional<ShardVersion> shardVersion,
                                              boost::optional<DatabaseVersion> databaseVersion,
-                                             boost::optional<UUID> collectionUUID) {
+                                             boost::optional<UUID> collectionUUID,
+                                             bool isViewfulTimeseries = false) {
 
-        NamespaceInfoEntry entry(nss);
+        auto translatedNss = isViewfulTimeseries ? nss.makeTimeseriesBucketsNamespace() : nss;
+        NamespaceInfoEntry entry(translatedNss);
         entry.setShardVersion(shardVersion);
         entry.setDatabaseVersion(databaseVersion);
         entry.setCollectionUUID(collectionUUID);
+        if (isViewfulTimeseries) {
+            entry.setIsTimeseriesNamespace(true);
+        }
         return entry;
     }
 
@@ -105,7 +122,6 @@ public:
         boost::optional<bool> expectedErrorsOnly = boost::none,
         boost::optional<mongo::BSONObj> expectedLet = boost::none,
         boost::optional<mongo::IDLAnyTypeOwned> expectedComment = boost::none,
-        boost::optional<std::int64_t> expectedMaxTimeMS = boost::none,
         boost::optional<std::vector<StmtId>> expectedStmtIds = boost::none) {
         BSONObjBuilder builder;
         builder.appendElements(cmdObj);
@@ -133,6 +149,9 @@ public:
             if (expectedNsInfos[i].getShardVersion()) {
                 ASSERT_EQ(*expectedNsInfos[i].getShardVersion(), *nsInfo.getShardVersion());
             }
+            if (expectedNsInfos[i].getIsTimeseriesNamespace()) {
+                ASSERT_TRUE(nsInfo.getIsTimeseriesNamespace());
+            }
         }
 
         if (expectedLsid) {
@@ -158,21 +177,21 @@ public:
             ASSERT_EQ(expectedComment->getElement().checkAndGetStringData(),
                       cmdObj.getField("comment").checkAndGetStringData());
         }
-        if (expectedMaxTimeMS) {
-            ASSERT_EQ(*expectedMaxTimeMS, cmdObj.getField("maxTimeMS").number());
-        }
         if (expectedStmtIds) {
             ASSERT_EQ(expectedStmtIds->size(), bulkWrite.getStmtIds()->size());
             for (size_t i = 0; i < expectedStmtIds->size(); i++) {
                 ASSERT_EQ(expectedStmtIds->at(i), bulkWrite.getStmtIds()->at(i));
             }
         }
+
+        // Assert that the "maxTimeMs" field is not set.
+        ASSERT_TRUE(cmdObj.getField("maxTimeMS").eoo());
     }
 };
 
 TEST_F(WriteBatchExecutorTest, ExecuteSimpleWriteBatch) {
     const DatabaseVersion nss1DbVersion(UUID::gen(), Timestamp(1, 0));
-    const ShardEndpoint nss1Shard1(shardId1, ShardVersion::UNSHARDED(), nss1DbVersion);
+    const ShardEndpoint nss1Shard1(shardId1, ShardVersion::UNTRACKED(), nss1DbVersion);
     const ShardVersion nss2ShardVersion1 = ShardVersionFactory::make(
         ChunkVersion(CollectionGeneration{OID::gen(), Timestamp(1, 0)}, CollectionPlacement(1, 0)));
     const ShardVersion nss2ShardVersion2 = ShardVersionFactory::make(
@@ -207,6 +226,7 @@ TEST_F(WriteBatchExecutorTest, ExecuteSimpleWriteBatch) {
                  {nss1, nss1Shard1},
                  {nss2, nss2Shard1},
              },
+             nssIsViewfulTimeseries,
              {WriteOp(bulkRequest, 0), WriteOp(bulkRequest, 1), WriteOp(bulkRequest, 2)},
          }},
         {shardId2,
@@ -214,6 +234,7 @@ TEST_F(WriteBatchExecutorTest, ExecuteSimpleWriteBatch) {
              {
                  {nss2, nss2Shard2},
              },
+             nssIsViewfulTimeseries,
              {WriteOp(bulkRequest, 1)},
          }},
     }};
@@ -229,14 +250,13 @@ TEST_F(WriteBatchExecutorTest, ExecuteSimpleWriteBatch) {
         auto resps = executor.execute(operationContext(), rtx, {batch});
 
         ASSERT_TRUE(holds_alternative<SimpleWriteBatchResponse>(resps));
-        auto& responses = get<SimpleWriteBatchResponse>(resps);
+        auto& response = get<SimpleWriteBatchResponse>(resps);
 
         std::set<ShardId> expectedShardIds{shardId1, shardId2};
-        ASSERT_EQ(2, responses.size());
-        for (auto& [shardId, response] : responses) {
+        ASSERT_EQ(2, response.shardResponses.size());
+        for (auto& [shardId, response] : response.shardResponses) {
             ASSERT(expectedShardIds.contains(shardId));
-            ASSERT(response.swResponse.getStatus().isOK());
-            ASSERT_BSONOBJ_EQ(BSON("ok" << 1), response.swResponse.getValue().data);
+            ASSERT(response.isOK());
         }
     });
 
@@ -250,13 +270,15 @@ TEST_F(WriteBatchExecutorTest, ExecuteSimpleWriteBatch) {
                 BSON("delete" << 0 << "filter" << BSON("a" << 2) << "multi" << false),
             },
             {
-                getNamespaceInfoEntry(nss1, boost::none, nss1DbVersion, uuid1),
-                getNamespaceInfoEntry(nss2, nss2ShardVersion1, boost::none, uuid2),
+                getNamespaceInfoEntry(
+                    nss1, boost::none, nss1DbVersion, uuid1, nss1IsViewfulTimeseries),
+                getNamespaceInfoEntry(
+                    nss2, nss2ShardVersion1, boost::none, uuid2, nss2IsViewfulTimeseries),
             },
             lsid,
             txnNumber,
             operationContext()->getWriteConcern());
-        return BSON("ok" << 1);
+        return emptyBulkWriteCommandReplyObj;
     });
 
     onCommandForPoolExecutor([&](const executor::RemoteCommandRequest& request) {
@@ -267,12 +289,13 @@ TEST_F(WriteBatchExecutorTest, ExecuteSimpleWriteBatch) {
                               << BSON("$set" << BSON("b" << 1)) << "upsert" << false),
             },
             {
-                getNamespaceInfoEntry(nss2, nss2ShardVersion2, boost::none, uuid2),
+                getNamespaceInfoEntry(
+                    nss2, nss2ShardVersion2, boost::none, uuid2, nss2IsViewfulTimeseries),
             },
             lsid,
             txnNumber,
             operationContext()->getWriteConcern());
-        return BSON("ok" << 1);
+        return emptyBulkWriteCommandReplyObj;
     });
 
     future.default_timed_get();
@@ -280,7 +303,7 @@ TEST_F(WriteBatchExecutorTest, ExecuteSimpleWriteBatch) {
 
 TEST_F(WriteBatchExecutorTest, ExecuteSimpleWriteBatchSpecifiedWriteOptions) {
     const DatabaseVersion nss1DbVersion(UUID::gen(), Timestamp(1, 0));
-    const ShardEndpoint nss1Shard1(shardId1, ShardVersion::UNSHARDED(), nss1DbVersion);
+    const ShardEndpoint nss1Shard1(shardId1, ShardVersion::UNTRACKED(), nss1DbVersion);
 
     // We create a bulkRequest with an insert op that runs against
     // the same namespace nss1 and targets shard1.
@@ -296,6 +319,7 @@ TEST_F(WriteBatchExecutorTest, ExecuteSimpleWriteBatchSpecifiedWriteOptions) {
     auto batch = SimpleWriteBatch{{{shardId1,
                                     {
                                         {{nss1, nss1Shard1}},
+                                        nssIsViewfulTimeseries,
                                         {WriteOp(bulkRequest, 0)},
                                     }}}};
     auto lsid = LogicalSessionId(UUID::gen(), SHA256Block());
@@ -319,14 +343,13 @@ TEST_F(WriteBatchExecutorTest, ExecuteSimpleWriteBatchSpecifiedWriteOptions) {
 
         ASSERT_TRUE(holds_alternative<SimpleWriteBatchResponse>(resps));
 
-        auto& responses = get<SimpleWriteBatchResponse>(resps);
+        auto& response = get<SimpleWriteBatchResponse>(resps);
 
         std::set<ShardId> expectedShardIds{shardId1};
-        ASSERT_EQ(1, responses.size());
-        for (auto& [shardId, response] : responses) {
+        ASSERT_EQ(1, response.shardResponses.size());
+        for (auto& [shardId, response] : response.shardResponses) {
             ASSERT(expectedShardIds.contains(shardId));
-            ASSERT(response.swResponse.getStatus().isOK());
-            ASSERT_BSONOBJ_EQ(BSON("ok" << 1), response.swResponse.getValue().data);
+            ASSERT(response.isOK());
         }
     });
 
@@ -339,7 +362,8 @@ TEST_F(WriteBatchExecutorTest, ExecuteSimpleWriteBatchSpecifiedWriteOptions) {
                                    getNamespaceInfoEntry(nss1,
                                                          boost::none /* shardVersion */,
                                                          nss1DbVersion,
-                                                         boost::none /* collectionUUID */),
+                                                         boost::none /* collectionUUID */,
+                                                         nss1IsViewfulTimeseries),
                                },
                                lsid,
                                txnNumber,
@@ -347,9 +371,8 @@ TEST_F(WriteBatchExecutorTest, ExecuteSimpleWriteBatchSpecifiedWriteOptions) {
                                bulkRequest.getBypassDocumentValidation(),
                                bulkRequest.getErrorsOnly(),
                                bulkRequest.getLet(),
-                               bulkRequest.getComment(),
-                               bulkRequest.getMaxTimeMS());
-        return BSON("ok" << 1);
+                               bulkRequest.getComment());
+        return emptyBulkWriteCommandReplyObj;
     });
 
     future.default_timed_get();
@@ -357,7 +380,7 @@ TEST_F(WriteBatchExecutorTest, ExecuteSimpleWriteBatchSpecifiedWriteOptions) {
 
 TEST_F(WriteBatchExecutorTest, ExecuteSimpleWriteBatchBulkOpOptions) {
     const DatabaseVersion nss1DbVersion(UUID::gen(), Timestamp(1, 0));
-    const ShardEndpoint nss1Shard1(shardId1, ShardVersion::UNSHARDED(), nss1DbVersion);
+    const ShardEndpoint nss1Shard1(shardId1, ShardVersion::UNTRACKED(), nss1DbVersion);
 
     // We create a bulkRequest with an update op specifying hint, sort, and arrayFilters
     // options. It runs against the same namespace nss1 and targets shard1.
@@ -376,6 +399,7 @@ TEST_F(WriteBatchExecutorTest, ExecuteSimpleWriteBatchBulkOpOptions) {
     auto batch = SimpleWriteBatch{{{shardId1,
                                     {
                                         {{nss1, nss1Shard1}},
+                                        nssIsViewfulTimeseries,
                                         {WriteOp(bulkRequest, 0)},
                                     }}}};
     auto lsid = LogicalSessionId(UUID::gen(), SHA256Block());
@@ -390,14 +414,13 @@ TEST_F(WriteBatchExecutorTest, ExecuteSimpleWriteBatchBulkOpOptions) {
 
         ASSERT_TRUE(holds_alternative<SimpleWriteBatchResponse>(resps));
 
-        auto& responses = get<SimpleWriteBatchResponse>(resps);
+        auto& response = get<SimpleWriteBatchResponse>(resps);
 
         std::set<ShardId> expectedShardIds{shardId1};
-        ASSERT_EQ(1, responses.size());
-        for (auto& [shardId, response] : responses) {
+        ASSERT_EQ(1, response.shardResponses.size());
+        for (auto& [shardId, response] : response.shardResponses) {
             ASSERT(expectedShardIds.contains(shardId));
-            ASSERT(response.swResponse.getStatus().isOK());
-            ASSERT_BSONOBJ_EQ(BSON("ok" << 1), response.swResponse.getValue().data);
+            ASSERT(response.isOK());
         }
     });
 
@@ -414,12 +437,13 @@ TEST_F(WriteBatchExecutorTest, ExecuteSimpleWriteBatchBulkOpOptions) {
                 getNamespaceInfoEntry(nss1,
                                       boost::none /* shardVersion */,
                                       nss1DbVersion,
-                                      boost::none /* collectionUUID */),
+                                      boost::none /* collectionUUID */,
+                                      nss1IsViewfulTimeseries),
             },
             lsid,
             txnNumber,
             operationContext()->getWriteConcern());
-        return BSON("ok" << 1);
+        return emptyBulkWriteCommandReplyObj;
     });
 
     future.default_timed_get();
@@ -427,7 +451,7 @@ TEST_F(WriteBatchExecutorTest, ExecuteSimpleWriteBatchBulkOpOptions) {
 
 TEST_F(WriteBatchExecutorTest, ExecuteSimpleWriteBatchSetsStmtIds) {
     const DatabaseVersion nss1DbVersion(UUID::gen(), Timestamp(1, 0));
-    const ShardEndpoint nss1Shard1(shardId1, ShardVersion::UNSHARDED(), nss1DbVersion);
+    const ShardEndpoint nss1Shard1(shardId1, ShardVersion::UNTRACKED(), nss1DbVersion);
 
     // We create a bulkRequest with two insert ops that have stmtIds.
     BulkWriteInsertOp insertOp = BulkWriteInsertOp(1, BSON("a" << 0));
@@ -441,6 +465,7 @@ TEST_F(WriteBatchExecutorTest, ExecuteSimpleWriteBatchSetsStmtIds) {
     auto batch = SimpleWriteBatch{{{shardId1,
                                     {
                                         {{nss1, nss1Shard1}},
+                                        nssIsViewfulTimeseries,
                                         {WriteOp(bulkRequest, 0), WriteOp(bulkRequest, 1)},
                                     }}}};
     auto lsid = LogicalSessionId(UUID::gen(), SHA256Block());
@@ -455,14 +480,13 @@ TEST_F(WriteBatchExecutorTest, ExecuteSimpleWriteBatchSetsStmtIds) {
 
         ASSERT_TRUE(holds_alternative<SimpleWriteBatchResponse>(resps));
 
-        auto& responses = get<SimpleWriteBatchResponse>(resps);
+        auto& response = get<SimpleWriteBatchResponse>(resps);
 
         std::set<ShardId> expectedShardIds{shardId1};
-        ASSERT_EQ(1, responses.size());
-        for (auto& [shardId, response] : responses) {
+        ASSERT_EQ(1, response.shardResponses.size());
+        for (auto& [shardId, response] : response.shardResponses) {
             ASSERT(expectedShardIds.contains(shardId));
-            ASSERT(response.swResponse.getStatus().isOK());
-            ASSERT_BSONOBJ_EQ(BSON("ok" << 1), response.swResponse.getValue().data);
+            ASSERT(response.isOK());
         }
     });
 
@@ -477,7 +501,8 @@ TEST_F(WriteBatchExecutorTest, ExecuteSimpleWriteBatchSetsStmtIds) {
                 getNamespaceInfoEntry(nss1,
                                       boost::none /* shardVersion */,
                                       nss1DbVersion,
-                                      boost::none /* collectionUUID */),
+                                      boost::none /* collectionUUID */,
+                                      nss1IsViewfulTimeseries),
             },
             lsid,
             txnNumber,
@@ -486,9 +511,8 @@ TEST_F(WriteBatchExecutorTest, ExecuteSimpleWriteBatchSetsStmtIds) {
             boost::none,
             boost::none,
             boost::none,
-            boost::none,
             std::vector<StmtId>{0, 1});
-        return BSON("ok" << 1);
+        return emptyBulkWriteCommandReplyObj;
     });
 
     future.default_timed_get();
@@ -496,7 +520,7 @@ TEST_F(WriteBatchExecutorTest, ExecuteSimpleWriteBatchSetsStmtIds) {
 
 TEST_F(WriteBatchExecutorTest, ExecuteSimpleWriteBatchWithFindAndModifyRequest) {
     const DatabaseVersion nss1DbVersion(UUID::gen(), Timestamp(1, 0));
-    const ShardEndpoint nss1Shard1(shardId1, ShardVersion::UNSHARDED(), nss1DbVersion);
+    const ShardEndpoint nss1Shard1(shardId1, ShardVersion::UNTRACKED(), nss1DbVersion);
 
     auto query = BSON("a" << 1);
     auto sort = BSON("s" << 1);
@@ -512,6 +536,8 @@ TEST_F(WriteBatchExecutorTest, ExecuteSimpleWriteBatchWithFindAndModifyRequest) 
     auto hint = BSON("h" << 1);
     auto comment = "comment";
     auto let = BSON("l" << 1);
+    LegacyRuntimeConstants legacyRuntimeConstants(Date_t(), Timestamp(1764967761, 10));
+    auto stmtId = 0;
     write_ops::FindAndModifyCommandRequest findAndModifyRequest(nss1);
     findAndModifyRequest.setQuery(query);
     findAndModifyRequest.setSort(sort);
@@ -527,11 +553,13 @@ TEST_F(WriteBatchExecutorTest, ExecuteSimpleWriteBatchWithFindAndModifyRequest) 
     findAndModifyRequest.setHint(hint);
     findAndModifyRequest.setComment(IDLAnyTypeOwned(BSON("key" << comment)["key"]));
     findAndModifyRequest.setLet(let);
+    findAndModifyRequest.setLegacyRuntimeConstants(legacyRuntimeConstants);
     WriteCommandRef cmdRef(findAndModifyRequest);
 
     auto batch = SimpleWriteBatch{{{shardId1,
                                     {
                                         {{nss1, nss1Shard1}},
+                                        nssIsViewfulTimeseries,
                                         {WriteOp(findAndModifyRequest)},
                                     }}}};
     auto lsid = LogicalSessionId(UUID::gen(), SHA256Block());
@@ -546,14 +574,13 @@ TEST_F(WriteBatchExecutorTest, ExecuteSimpleWriteBatchWithFindAndModifyRequest) 
 
         ASSERT_TRUE(holds_alternative<SimpleWriteBatchResponse>(resps));
 
-        auto& responses = get<SimpleWriteBatchResponse>(resps);
+        auto& response = get<SimpleWriteBatchResponse>(resps);
 
         std::set<ShardId> expectedShardIds{shardId1};
-        ASSERT_EQ(1, responses.size());
-        for (auto& [shardId, response] : responses) {
+        ASSERT_EQ(1, response.shardResponses.size());
+        for (auto& [shardId, response] : response.shardResponses) {
             ASSERT(expectedShardIds.contains(shardId));
-            ASSERT(response.swResponse.getStatus().isOK());
-            ASSERT_BSONOBJ_EQ(BSON("ok" << 1), response.swResponse.getValue().data);
+            ASSERT(response.isOK());
         }
     });
 
@@ -562,19 +589,22 @@ TEST_F(WriteBatchExecutorTest, ExecuteSimpleWriteBatchWithFindAndModifyRequest) 
         nss1Shard1.shardVersion->serialize("", &builder);
         auto shardVersionBson = builder.obj().firstElement().Obj().getOwned();
 
-        ASSERT_BSONOBJ_EQ_UNORDERED(
-            BSON("findAndModify" << nss1.coll() << "query" << query << "fields" << fields << "sort"
-                                 << sort << "hint" << hint << "collation" << collation
-                                 << "arrayFilters" << BSON_ARRAY(arrayFilters) << "remove" << remove
-                                 << "update" << update << "lsid" << lsid.toBSON() << "upsert"
-                                 << upsert << "new" << newParam << "bypassDocumentValidation"
-                                 << bypassDocumentValidation << "let" << let << "maxTimeMS"
-                                 << maxTimeMS << "comment" << comment << "txnNumber" << txnNumber
-                                 << "databaseVersion" << nss1DbVersion.toBSON() << "shardVersion"
-                                 << shardVersionBson << "readConcern" << BSONObj() << "writeConcern"
-                                 << operationContext()->getWriteConcern().toBSON()),
-            request.cmdObj);
-        return BSON("ok" << 1);
+        auto expectedCmdObj = BSON(
+            "findAndModify" << nss1.makeTimeseriesBucketsNamespace().coll() << "query" << query
+                            << "fields" << fields << "sort" << sort << "hint" << hint << "collation"
+                            << collation << "arrayFilters" << BSON_ARRAY(arrayFilters) << "remove"
+                            << remove << "update" << update << "lsid" << lsid.toBSON() << "upsert"
+                            << upsert << "new" << newParam << "stmtId" << stmtId
+                            << "bypassDocumentValidation" << bypassDocumentValidation << "let"
+                            << let << "runtimeConstants" << legacyRuntimeConstants.toBSON()
+                            << "maxTimeMS" << maxTimeMS << "comment" << comment << "txnNumber"
+                            << txnNumber << "databaseVersion" << nss1DbVersion.toBSON()
+                            << "shardVersion" << shardVersionBson << "readConcern" << BSONObj()
+                            << "writeConcern" << operationContext()->getWriteConcern().toBSON()
+                            << "isTimeseriesNamespace" << true);
+        ASSERT_BSONOBJ_EQ_UNORDERED(expectedCmdObj, request.cmdObj);
+
+        return emptyFindAndModifyCommandReplyObj;
     });
 
     future.default_timed_get();

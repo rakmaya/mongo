@@ -41,6 +41,7 @@
 #include "mongo/db/pipeline/variables.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/stdx/unordered_set.h"
+#include "mongo/util/modules.h"
 
 #include <memory>
 #include <set>
@@ -53,6 +54,8 @@
 
 namespace mongo {
 
+DECLARE_STAGE_PARAMS_DERIVED_DEFAULT(ListCatalog);
+
 /**
  * Provides a document source interface to retrieve catalog metadata for collections and views.
  * Each document returned represents either:
@@ -63,16 +66,16 @@ class DocumentSourceListCatalog final : public DocumentSource {
 public:
     static constexpr StringData kStageName = "$listCatalog"_sd;
 
-    class LiteParsed final : public LiteParsedDocumentSource {
+    class LiteParsed final : public LiteParsedDocumentSourceDefault<LiteParsed> {
     public:
         static std::unique_ptr<LiteParsed> parse(const NamespaceString& nss,
                                                  const BSONElement& spec,
                                                  const LiteParserOptions& options) {
-            return std::make_unique<LiteParsed>(spec.fieldName(), nss);
+            return std::make_unique<LiteParsed>(spec, nss);
         }
 
-        explicit LiteParsed(std::string parseTimeName, NamespaceString ns)
-            : LiteParsedDocumentSource(std::move(parseTimeName)), _ns(std::move(ns)) {}
+        LiteParsed(const BSONElement& spec, NamespaceString ns)
+            : LiteParsedDocumentSourceDefault(spec), _ns(std::move(ns)) {}
 
         stdx::unordered_set<NamespaceString> getInvolvedNamespaces() const final {
             return stdx::unordered_set<NamespaceString>();
@@ -84,6 +87,10 @@ public:
 
         bool isInitialSource() const final {
             return true;
+        }
+
+        std::unique_ptr<StageParams> getStageParams() const final {
+            return std::make_unique<ListCatalogStageParams>(_originalBson);
         }
 
     private:

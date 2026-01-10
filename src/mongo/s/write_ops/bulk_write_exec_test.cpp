@@ -32,14 +32,12 @@
 #include "mongo/rpc/write_concern_error_detail.h"
 
 #include <boost/cstdint.hpp>
-#include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
 // IWYU pragma: no_include "cxxabi.h"
 // IWYU pragma: no_include "ext/alloc_traits.h"
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/json.h"
@@ -54,27 +52,24 @@
 #include "mongo/db/commands/query_cmd/bulk_write_crud_op.h"
 #include "mongo/db/commands/query_cmd/bulk_write_gen.h"
 #include "mongo/db/database_name.h"
-#include "mongo/db/global_catalog/catalog_cache/shard_cannot_refresh_due_to_locks_held_exception.h"
 #include "mongo/db/global_catalog/chunk_manager.h"
-#include "mongo/db/global_catalog/router_role_api/mock_ns_targeter.h"
 #include "mongo/db/global_catalog/type_shard.h"
 #include "mongo/db/query/write_ops/write_ops_parsers.h"
+#include "mongo/db/router_role/mock_ns_targeter.h"
+#include "mongo/db/router_role/routing_cache/shard_cannot_refresh_due_to_locks_held_exception.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/service_context_test_fixture.h"
 #include "mongo/db/session/logical_session_id_gen.h"
 #include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/db/sharding_environment/sharding_mongos_test_fixture.h"
 #include "mongo/db/versioning_protocol/chunk_version.h"
-#include "mongo/db/versioning_protocol/database_version.h"
 #include "mongo/db/versioning_protocol/shard_version.h"
 #include "mongo/db/versioning_protocol/shard_version_factory.h"
 #include "mongo/db/versioning_protocol/stale_exception.h"
 #include "mongo/executor/network_test_env.h"
 #include "mongo/executor/remote_command_request.h"
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/logv2/log.h"
 #include "mongo/s/session_catalog_router.h"
-#include "mongo/s/transaction_router.h"
 #include "mongo/s/would_change_owning_shard_exception.h"
 #include "mongo/s/write_ops/batch_write_op.h"
 #include "mongo/s/write_ops/batched_command_request.h"
@@ -84,21 +79,17 @@
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/exit.h"
-#include "mongo/util/fail_point.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/str.h"
 #include "mongo/util/uuid.h"
 
-#include <cstdint>
 #include <ctime>
 #include <map>
 #include <memory>
 #include <string>
-#include <system_error>
 #include <tuple>
 #include <utility>
-#include <variant>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -1578,7 +1569,8 @@ TEST_F(BulkWriteOpTest, NoteWriteOpFinalResponse_WriteConcernError) {
 // This isn't truly a death test but is written as one in order to isolate test execution in its
 // own process. This is needed because otherwise calling shutdownNoTerminate() would lead any
 // future tests run in the same process to also have the shutdown flag set.
-DEATH_TEST_F(BulkWriteOpTest, NoteWriteOpFinalResponse_ShutdownError, "8100600") {
+using BulkWriteOpTestDeathTest = BulkWriteOpTest;
+DEATH_TEST_F(BulkWriteOpTestDeathTest, NoteWriteOpFinalResponse_ShutdownError, "8100600") {
     ShardId shardIdA("shardA");
     NamespaceString nss = NamespaceString::createNamespaceString_forTest("foo.bar");
     BulkWriteCommandRequest request({BulkWriteInsertOp(0, BSON("x" << 1))},
@@ -1872,7 +1864,8 @@ TEST_F(BulkWriteOpTest, TestGetBaseChildBatchCommandSizeEstimate) {
     request.setDbName(DatabaseName::kAdmin);
 
     // Get a base size estimate.
-    auto baseSizeEstimate = BulkCommandSizeEstimator(_opCtx, request).getBaseSizeEstimate();
+    auto baseSizeEstimate =
+        write_op_helpers::BulkCommandSizeEstimator(_opCtx, request).getBaseSizeEstimate();
 
     BSONObjBuilder builder;
     request.serialize(&builder);
@@ -2157,7 +2150,10 @@ TEST_F(BulkWriteOpChildBatchErrorTest, LocalCallbackCanceledErrorNotInShutdown) 
 // This isn't truly a death test but is written as one in order to isolate test execution in its
 // own process. This is needed because otherwise calling shutdownNoTerminate() would lead any
 // future tests run in the same process to also have the shutdown flag set.
-DEATH_TEST_F(BulkWriteOpChildBatchErrorTest, LocalCallbackCanceledErrorInShutdown, "12345") {
+using BulkWriteOpChildBatchErrorTestDeathTest = BulkWriteOpChildBatchErrorTest;
+DEATH_TEST_F(BulkWriteOpChildBatchErrorTestDeathTest,
+             LocalCallbackCanceledErrorInShutdown,
+             "12345") {
     BulkWriteOp bulkWriteOp(_opCtx, request);
     auto targeted = targetOp(bulkWriteOp, request.getOrdered());
 

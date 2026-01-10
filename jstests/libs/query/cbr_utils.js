@@ -31,6 +31,13 @@ export function assertPlanNotCosted(plan) {
     assert(!plan.hasOwnProperty("costEstimate"), plan);
 }
 
+/**
+ * Assert the given plan was costed.
+ */
+export function assertPlanCosted(plan) {
+    assert(plan.hasOwnProperty("costEstimate"), plan);
+}
+
 export function getPlanRankerMode(db) {
     if (db !== null) {
         const getParam = db.adminCommand({
@@ -41,5 +48,18 @@ export function getPlanRankerMode(db) {
         return getParam.hasOwnProperty("planRankerMode") ? getParam.planRankerMode : "multiPlanning";
     } else {
         return TestData.setParameters.planRankerMode ? TestData.setParameters.planRankerMode : "multiPlanning";
+    }
+}
+
+export function getMultiplanningBatchSize() {
+    const result = db.adminCommand({
+        getParameter: 1,
+        internalQueryPlanEvaluationMaxResults: 1,
+    });
+
+    if (result.ok === 1) {
+        return result.internalQueryPlanEvaluationMaxResults;
+    } else {
+        throw new Error("Failed to retrieve multiplanning batch size: " + JSON.stringify(result));
     }
 }

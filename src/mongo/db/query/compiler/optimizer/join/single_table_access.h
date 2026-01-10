@@ -30,10 +30,13 @@
 #include "mongo/db/query/compiler/ce/sampling/sampling_estimator.h"
 #include "mongo/db/query/compiler/optimizer/cost_based_ranker/estimates_storage.h"
 #include "mongo/db/query/compiler/optimizer/join/join_graph.h"
-#include "mongo/db/query/compiler/optimizer/join/solution_storage.h"
+#include "mongo/db/query/compiler/optimizer/join/join_reordering_context.h"
 #include "mongo/db/query/multiple_collection_accessor.h"
+#include "mongo/util/modules.h"
 
-namespace mongo::optimizer {
+#pragma once
+
+namespace mongo::join_ordering {
 
 using SamplingEstimatorMap =
     stdx::unordered_map<NamespaceString, std::unique_ptr<ce::SamplingEstimator>>;
@@ -42,17 +45,16 @@ using SamplingEstimatorMap =
  * Struct containing results from 'singleTableAccessPlans()' function.
  */
 struct SingleTableAccessPlansResult {
-    join_ordering::QuerySolutionMap solns;
+    QuerySolutionMap solns;
     cost_based_ranker::EstimateMap estimate;
 };
 
 /**
  * Constructor for sampling estimators per collection access.
  */
-optimizer::SamplingEstimatorMap makeSamplingEstimators(
-    const MultipleCollectionAccessor& collections,
-    const mongo::join_ordering::JoinGraph& model,
-    PlanYieldPolicy::YieldPolicy yieldPolicy);
+SamplingEstimatorMap makeSamplingEstimators(const MultipleCollectionAccessor& collections,
+                                            const JoinGraph& model,
+                                            PlanYieldPolicy::YieldPolicy yieldPolicy);
 
 /**
  * Given a JoinGraph 'model' where each node links to a CanonicalQuery and a map of
@@ -64,7 +66,7 @@ optimizer::SamplingEstimatorMap makeSamplingEstimators(
 StatusWith<SingleTableAccessPlansResult> singleTableAccessPlans(
     OperationContext* opCtx,
     const MultipleCollectionAccessor& collections,
-    const mongo::join_ordering::JoinGraph& model,
+    const JoinGraph& model,
     const SamplingEstimatorMap& samplingEstimators);
 
-}  // namespace mongo::optimizer
+}  // namespace mongo::join_ordering

@@ -105,10 +105,11 @@ __wt_blkcache_read(WT_SESSION_IMPL *session, WT_ITEM *buf, WT_PAGE_BLOCK_META *b
     WT_BTREE *btree;
     WT_COMPRESSOR *compressor;
     WT_DECL_ITEM(etmp);
+    WT_DECL_ITEM(ip);
+    WT_DECL_ITEM(ip_orig);
     WT_DECL_ITEM(tmp);
     WT_DECL_RET;
     WT_ENCRYPTOR *encryptor;
-    WT_ITEM *ip, *ip_orig;
     WT_ITEM results[WT_DELTA_LIMIT + 1];
     WT_PAGE_BLOCK_META block_meta_tmp;
     const WT_PAGE_HEADER *dsk;
@@ -125,6 +126,7 @@ __wt_blkcache_read(WT_SESSION_IMPL *session, WT_ITEM *buf, WT_PAGE_BLOCK_META *b
     encryptor = btree->kencryptor == NULL ? NULL : btree->kencryptor->encryptor;
     blkcache_found = found = false;
     skip_cache_put = (blkcache->type == WT_BLKCACHE_UNCONFIGURED);
+    memset(results, 0, sizeof(results));
     results_count = 0;
 
     WT_ASSERT_ALWAYS(session, session->dhandle != NULL, "The block cache requires a dhandle");
@@ -225,7 +227,7 @@ __wt_blkcache_read(WT_SESSION_IMPL *session, WT_ITEM *buf, WT_PAGE_BLOCK_META *b
             WT_STAT_DSRC_INCR(session, compress_read);
         WT_STAT_CONN_DSRC_INCRV(session, cache_bytes_read, dsk->mem_size);
         WT_STAT_SESSION_INCRV(session, bytes_read, dsk->mem_size);
-        (void)__wt_atomic_add64(&S2C(session)->cache->bytes_read, dsk->mem_size);
+        (void)__wt_atomic_add_uint64_relaxed(&S2C(session)->cache->bytes_read, dsk->mem_size);
     }
 
     /*
@@ -327,7 +329,7 @@ verify:
 err:
     /* If we pulled the block from the block cache, decrement its reference count. */
     if (blkcache_found)
-        (void)__wt_atomic_subv32(&blkcache_item->ref_count, 1);
+        (void)__wt_atomic_sub_uint32_v(&blkcache_item->ref_count, 1);
 
     /* Free the temporary buffers allocated for disagg. */
     for (i = 0; i < results_count; i++)
@@ -431,7 +433,7 @@ __wt_blkcache_read_multi(WT_SESSION_IMPL *session, WT_ITEM **buf, size_t *buf_co
     /* Skip block cache for M2, just read the base + delta pack. */
     count = WT_ELEMENTS(results);
 
-    /* TODO clean up tmp usage? */
+    /* FIXME-WT-16291: clean up tmp usage? */
     if (bm->read_multiple == NULL) {
         WT_RET(__wt_calloc_def(session, 1, &tmp));
         WT_CLEAR(tmp[0]);
@@ -515,7 +517,7 @@ __wt_blkcache_read_multi(WT_SESSION_IMPL *session, WT_ITEM **buf, size_t *buf_co
 
         WT_STAT_CONN_DSRC_INCRV(session, cache_bytes_read, dsk->mem_size);
         WT_STAT_SESSION_INCRV(session, bytes_read, dsk->mem_size);
-        (void)__wt_atomic_add64(&S2C(session)->cache->bytes_read, dsk->mem_size);
+        (void)__wt_atomic_add_uint64_relaxed(&S2C(session)->cache->bytes_read, dsk->mem_size);
     }
 
     /* Decrypt. */
@@ -629,7 +631,7 @@ err:
 
     /* If we pulled the block from the block cache, decrement its reference count. */
     if (blkcache_found)
-        (void)__wt_atomic_subv32(&blkcache_item->ref_count, 1);
+        (void)__wt_atomic_sub_uint32_v(&blkcache_item->ref_count, 1);
 
     return (ret);
 }
@@ -809,7 +811,7 @@ __wt_blkcache_write(WT_SESSION_IMPL *session, WT_ITEM *buf, WT_PAGE_BLOCK_META *
     WT_STAT_CONN_DSRC_INCR(session, cache_write);
     WT_STAT_CONN_DSRC_INCRV(session, cache_bytes_write, mem_size);
     WT_STAT_SESSION_INCRV(session, bytes_write, mem_size);
-    (void)__wt_atomic_add64(&S2C(session)->cache->bytes_written, mem_size);
+    (void)__wt_atomic_add_uint64_relaxed(&S2C(session)->cache->bytes_written, mem_size);
 
     if (dsk != NULL) {
         if (dsk->type == WT_PAGE_COL_INT || dsk->type == WT_PAGE_ROW_INT) {

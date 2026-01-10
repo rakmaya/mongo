@@ -31,8 +31,6 @@
 
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/collection_crud/collection_write_path.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/catalog_test_fixture.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/query/compiler/ce/ce_test_utils.h"
@@ -40,6 +38,8 @@
 #include "mongo/db/query/compiler/physical_model/index_bounds/index_bounds.h"
 #include "mongo/db/query/compiler/stats/value_utils.h"
 #include "mongo/db/repl/oplog.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_test_fixture.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/modules.h"
@@ -58,16 +58,8 @@ public:
         return SamplingEstimatorImpl::calculateSampleSize(ci, marginOfError);
     }
 
-    double getCollCard() {
-        return SamplingEstimatorImpl::getCollCard();
-    }
-
     static bool matches(const OrderedIntervalList& oil, BSONElement val) {
         return SamplingEstimatorImpl::matches(oil, val);
-    }
-
-    static std::vector<BSONObj> getIndexKeys(const IndexBounds& bounds, const BSONObj& doc) {
-        return SamplingEstimatorImpl::getIndexKeys(bounds, doc);
     }
 
     // Help function to compute the margin of error for the given sample size. The z parameter
@@ -180,7 +172,7 @@ public:
         return CardinalityEstimate(CardinalityType{estimate}, source);
     }
 
-    void _doTest() override {}
+    void TestBody() override {}
 
     OperationContext* getOperationContext() const {
         return operationContext();
@@ -230,6 +222,14 @@ public:
         std::vector<std::pair<SamplingEstimatorImpl::SamplingStyle, boost::optional<int>>>
             samplingAlgoAndChunks,
         bool printResults = true);
+
+    void runNDVSamplingEstimatorTestConfiguration(
+        DataConfiguration dataConfig,
+        WorkloadConfiguration queryConfig,
+        int numIters,
+        std::vector<SampleSizeDef> sampleSizes,
+        std::vector<std::pair<SamplingEstimatorImpl::SamplingStyle, boost::optional<int>>>
+            samplingAlgoAndChunks);
 };
 
 /**
@@ -292,4 +292,9 @@ void printResult(DataConfiguration dataConfig,
  */
 IndexBounds getIndexBounds(const QueryConfiguration& queryConfig,
                            std::vector<std::pair<stats::SBEValue, stats::SBEValue>>& intervals);
+
+
+size_t numberKeysMatch(const IndexBounds& bounds,
+                       const BSONObj& document,
+                       bool skipDuplicateMatches = false);
 }  // namespace mongo::ce

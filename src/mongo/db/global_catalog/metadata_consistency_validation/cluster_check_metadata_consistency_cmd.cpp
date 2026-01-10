@@ -44,11 +44,9 @@
 #include "mongo/db/curop.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/generic_argument_util.h"
-#include "mongo/db/global_catalog/catalog_cache/catalog_cache.h"
 #include "mongo/db/global_catalog/ddl/sharded_ddl_commands_gen.h"
 #include "mongo/db/global_catalog/metadata_consistency_validation/check_metadata_consistency_gen.h"
 #include "mongo/db/global_catalog/metadata_consistency_validation/metadata_consistency_types_gen.h"
-#include "mongo/db/global_catalog/router_role_api/cluster_commands_helpers.h"
 #include "mongo/db/global_catalog/sharding_catalog_client.h"
 #include "mongo/db/global_catalog/type_database_gen.h"
 #include "mongo/db/namespace_string.h"
@@ -58,6 +56,8 @@
 #include "mongo/db/query/find_common.h"
 #include "mongo/db/query/query_request_helper.h"
 #include "mongo/db/repl/read_concern_level.h"
+#include "mongo/db/router_role/cluster_commands_helpers.h"
+#include "mongo/db/router_role/routing_cache/catalog_cache.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/sharding_environment/client/shard.h"
 #include "mongo/db/sharding_environment/grid.h"
@@ -226,9 +226,8 @@ public:
         ClusterClientCursorGuard _establishCursorOnDbPrimary(OperationContext* opCtx,
                                                              const NamespaceString& nss) {
 
-            sharding::router::DBPrimaryRouter router(opCtx->getServiceContext(), nss.dbName());
+            sharding::router::DBPrimaryRouter router(opCtx, nss.dbName());
             return router.route(
-                opCtx,
                 Request::kCommandName,
                 [&](OperationContext* opCtx, const CachedDatabaseInfo& dbInfo) {
                     ShardsvrCheckMetadataConsistency shardsvrRequest{nss};
@@ -239,7 +238,7 @@ public:
                                                                  dbInfo->getVersion());
                     // Attach db and shard version;
                     if (!dbInfo->getVersion().isFixed())
-                        shardsvrRequest.setShardVersion(ShardVersion::UNSHARDED());
+                        shardsvrRequest.setShardVersion(ShardVersion::UNTRACKED());
                     return _establishCursors(
                         opCtx, nss, {{dbInfo->getPrimary(), shardsvrRequest.toBSON()}});
                 });
@@ -323,8 +322,8 @@ public:
 
             auto&& opDebug = CurOp::get(opCtx)->debug();
             opDebug.nShards = ccc->getNumRemotes();
-            opDebug.additiveMetrics.nBatches = 1;
-            opDebug.additiveMetrics.nreturned = firstBatch.size();
+            opDebug.getAdditiveMetrics().nBatches = 1;
+            opDebug.getAdditiveMetrics().nreturned = firstBatch.size();
 
             if (cursorState == ClusterCursorManager::CursorState::Exhausted) {
                 opDebug.cursorExhausted = true;

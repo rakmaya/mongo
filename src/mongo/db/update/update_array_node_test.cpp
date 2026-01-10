@@ -28,10 +28,7 @@
  */
 
 
-#include "mongo/db/update/update_array_node.h"
-
 #include "mongo/bson/json.h"
-#include "mongo/db/exec/mutable_bson/algorithm.h"
 #include "mongo/db/exec/mutable_bson/mutable_bson_test_utils.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/query/compiler/parsers/matcher/expression_parser.h"
@@ -123,7 +120,8 @@ TEST_F(UpdateArrayNodeTest, UpdateIsAppliedToAllMatchingElements) {
     ASSERT_EQUALS("{a.0, a.2}", getModifiedPaths());
 }
 
-DEATH_TEST_REGEX_F(UpdateArrayNodeTest,
+using UpdateArrayNodeTestDeathTest = UpdateArrayNodeTest;
+DEATH_TEST_REGEX_F(UpdateArrayNodeTestDeathTest,
                    ArrayElementsMustNotBeDeserialized,
                    R"#(Invariant failure.*childElement.hasValue\(\))#") {
     auto update = fromjson("{$set: {'a.$[i].b': 0}}");

@@ -28,6 +28,8 @@
  */
 #pragma once
 
+#include "mongo/util/modules.h"
+
 #include <boost/intrusive_ptr.hpp>
 #include <boost/multi_index/hashed_index.hpp>
 #include <boost/multi_index/member.hpp>
@@ -46,7 +48,6 @@
 #include "mongo/util/str.h"
 
 #include <cstddef>
-#include <functional>
 #include <iterator>
 #include <utility>
 #include <vector>

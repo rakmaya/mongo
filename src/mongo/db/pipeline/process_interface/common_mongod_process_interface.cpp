@@ -42,32 +42,15 @@
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/exec/matcher/matcher.h"
 #include "mongo/db/flow_control_ticketholder.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_catalog.h"
-#include "mongo/db/local_catalog/collection_catalog_helper.h"
-#include "mongo/db/local_catalog/collection_options.h"
-#include "mongo/db/local_catalog/collection_uuid_mismatch.h"
-#include "mongo/db/local_catalog/database_holder.h"
-#include "mongo/db/local_catalog/db_raii.h"
-#include "mongo/db/local_catalog/index_catalog.h"
-#include "mongo/db/local_catalog/index_catalog_entry.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
-#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
-#include "mongo/db/local_catalog/lock_manager/exception_util.h"
-#include "mongo/db/local_catalog/lock_manager/fill_locker_info.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
-#include "mongo/db/local_catalog/shard_role_catalog/operation_sharding_state.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
+#include "mongo/db/pipeline/catalog_resource_handle.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_cursor.h"
 #include "mongo/db/pipeline/expression_context_builder.h"
-#include "mongo/db/pipeline/initialize_auto_get_helper.h"
 #include "mongo/db/pipeline/lite_parsed_pipeline.h"
 #include "mongo/db/pipeline/pipeline_d.h"
 #include "mongo/db/pipeline/search/search_helper.h"
+#include "mongo/db/pipeline/shard_role_transaction_resources_stasher_for_pipeline.h"
 #include "mongo/db/pipeline/stage_constraints.h"
 #include "mongo/db/pipeline/variables.h"
 #include "mongo/db/profile_settings.h"
@@ -86,6 +69,25 @@
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/kill_sessions.h"
 #include "mongo/db/session/session_catalog.h"
+#include "mongo/db/shard_role/initialize_auto_get_helper.h"
+#include "mongo/db/shard_role/lock_manager/d_concurrency.h"
+#include "mongo/db/shard_role/lock_manager/exception_util.h"
+#include "mongo/db/shard_role/lock_manager/fill_locker_info.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/collection_catalog_helper.h"
+#include "mongo/db/shard_role/shard_catalog/collection_options.h"
+#include "mongo/db/shard_role/shard_catalog/collection_uuid_mismatch.h"
+#include "mongo/db/shard_role/shard_catalog/database_holder.h"
+#include "mongo/db/shard_role/shard_catalog/db_raii.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog_entry.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
+#include "mongo/db/shard_role/shard_catalog/operation_sharding_state.h"
+#include "mongo/db/shard_role/shard_role.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/db/stats/storage_stats.h"
 #include "mongo/db/stats/top.h"
@@ -109,6 +111,7 @@
 #include "mongo/s/analyze_shard_key_role.h"
 #include "mongo/s/query_analysis_sample_tracker.h"
 #include "mongo/s/query_analysis_sampler_util.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/database_name_util.h"
 #include "mongo/util/future.h"
 #include "mongo/util/namespace_string_util.h"
@@ -129,40 +132,6 @@
 
 namespace mongo {
 namespace {
-
-// Returns true if the field names of 'keyPattern' are exactly those in 'uniqueKeyPaths', and each
-// of the elements of 'keyPattern' is numeric, i.e. not "text", "$**", or any other special type of
-// index.
-bool keyPatternNamesExactPaths(const BSONObj& keyPattern,
-                               const std::set<FieldPath>& uniqueKeyPaths) {
-    size_t nFieldsMatched = 0;
-    for (auto&& elem : keyPattern) {
-        if (!elem.isNumber()) {
-            return false;
-        }
-        if (uniqueKeyPaths.find(elem.fieldNameStringData()) == uniqueKeyPaths.end()) {
-            return false;
-        }
-        ++nFieldsMatched;
-    }
-    return nFieldsMatched == uniqueKeyPaths.size();
-}
-
-MongoProcessInterface::SupportingUniqueIndex supportsUniqueKey(
-    const boost::intrusive_ptr<ExpressionContext>& expCtx,
-    const IndexCatalogEntry* index,
-    const std::set<FieldPath>& uniqueKeyPaths) {
-    bool supports =
-        (index->descriptor()->unique() && !index->descriptor()->isPartial() &&
-         keyPatternNamesExactPaths(index->descriptor()->keyPattern(), uniqueKeyPaths) &&
-         CollatorInterface::collatorsMatch(index->getCollator(), expCtx->getCollator()));
-    if (!supports) {
-        return MongoProcessInterface::SupportingUniqueIndex::None;
-    }
-    return index->descriptor()->isSparse()
-        ? MongoProcessInterface::SupportingUniqueIndex::NotNullish
-        : MongoProcessInterface::SupportingUniqueIndex::Full;
-}
 
 // Proactively assert that this operation can safely write before hitting an assertion in the
 // storage engine. We can safely write if we are enforcing prepare conflicts by blocking or if we
@@ -330,7 +299,8 @@ bool requiresCollectionAcquisition(const Pipeline& pipeline) {
         // There's no need to attach a cursor or perform collection acquisition here (for stages
         // like $documents or $collStats that will not read from a user collection). Mongot
         // pipelines will not need a cursor but _do_ need to acquire the collection to check for a
-        // stale shard version.
+        // stale shard version and we may need the collection acquisition for
+        // $_internalSearchIdLookup.
         return false;
     }
 
@@ -342,8 +312,7 @@ std::unique_ptr<Pipeline> attachCursorSourceToPipelineForLocalReadImpl(
     CollectionOrViewAcquisitionMap& allAcquisitions,
     bool isAnySecondaryCollectionNotLocal,
     boost::optional<const AggregateCommandRequest&> aggRequest,
-    bool shouldUseCollectionDefaultCollator,
-    ExecShardFilterPolicy shardFilterPolicy) {
+    bool shouldUseCollectionDefaultCollator) {
     const boost::intrusive_ptr<ExpressionContext>& expCtx = pipeline->getContext();
 
     if (expCtx->eligibleForSampling()) {
@@ -405,21 +374,25 @@ std::unique_ptr<Pipeline> attachCursorSourceToPipelineForLocalReadImpl(
                                                           expCtx->getNamespaceString(),
                                                           resolvedAggRequest,
                                                           pipeline.get(),
-                                                          catalogResourceHandle,
-                                                          shardFilterPolicy);
+                                                          catalogResourceHandle);
 
     const bool isMongotPipeline = search_helpers::isMongotPipeline(pipeline.get());
+    // We split up mongot special logic as bindCatalogInfo() should be called on a desugared search
+    // pipeline and requires catalog locks.
     if (isMongotPipeline) {
-        // For mongot pipelines, we will not have a cursor attached and now must perform
-        // $search-specific stage preparation. It's important that we release locks early, before
-        // preparing the pipeline, so that we don't hold them during network calls to mongot. This
-        // is fine for search pipelines since they are not reading any local (lock-protected) data
-        // in the main pipeline. It was important that we still acquired the collection in order to
-        // check for a stale shard version.
+        search_helpers::desugarSearchPipeline(pipeline.get());
+    }
+
+    pipeline->bindCatalogInfo(holder, sharedStasher);
+
+    // Mongot pipelines may not use the MultipleCollectionAccessor and related acquisitions. Clear
+    // them to prevent dangling references to CollectionAcquistions.
+    if (isMongotPipeline) {
         holder.clear();
         primaryAcquisition.reset();
         secondaryAcquisitions.clear();
-        search_helpers::prepareSearchForNestedPipelineLegacyExecutor(pipeline.get());
+        // TODO SERVER-94874 Establish mongot cursor here for nested pipelines, similarly to
+        // prepareSearchForTopLevelPipelineLegacyExecutor().
     }
 
     // Stash resources to free locks.
@@ -482,10 +455,9 @@ std::vector<Document> CommonMongodProcessInterface::getIndexStats(OperationConte
         uassert(ErrorCodes::IndexNotFound,
                 "Could not find entry in IndexCatalog for index " + indexName,
                 idx);
-        auto entry = idxCatalog->getEntry(idx);
-        doc["spec"] = Value(idx->infoObj());
+        doc["spec"] = Value(idx->descriptor()->infoObj());
 
-        if (!entry->isReady()) {
+        if (!idx->isReady()) {
             doc["building"] = Value(true);
         }
 
@@ -532,7 +504,7 @@ std::deque<BSONObj> CommonMongodProcessInterface::listCatalog(OperationContext* 
                        [opCtx](const NamespaceStringOrUUID& nsOrUuid) {
                            return CollectionAcquisitionRequest(
                                nsOrUuid,
-                               PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                               PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
                                repl::ReadConcernArgs::get(opCtx),
                                AcquisitionPrerequisites::kRead);
                        });
@@ -758,19 +730,9 @@ CommonMongodProcessInterface::finalizeAndAttachCursorToPipelineForLocalRead(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     std::unique_ptr<Pipeline> pipeline,
     bool attachCursorAfterOptimizing,
-    std::function<void(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                       Pipeline* pipeline,
-                       CollectionMetadata collData)> finalizePipeline,
+    std::function<void(Pipeline* pipeline)> optimizePipeline,
     bool shouldUseCollectionDefaultCollator,
-    boost::optional<const AggregateCommandRequest&> aggRequest,
-    ExecShardFilterPolicy shardFilterPolicy) {
-
-    // TODO: SPM-4050 Remove this.
-    boost::optional<BypassCheckAllShardRoleAcquisitionsVersioned>
-        bypassCheckAllShardRoleAcquisitionsAreVersioned(
-            boost::in_place_init_if,
-            std::holds_alternative<ProofOfUpstreamFiltering>(shardFilterPolicy),
-            expCtx->getOperationContext());
+    boost::optional<const AggregateCommandRequest&> aggRequest) {
 
     // If the pipeline doesn't require any collection acquisition, since it produces it's own data,
     // or attachCursorAfterOptimizing is false we do not need to attach a cursor or perform viewless
@@ -779,8 +741,8 @@ CommonMongodProcessInterface::finalizeAndAttachCursorToPipelineForLocalRead(
     // Viewless timeseries translations should have already occurred so we can get stable results
     // reading from the cache.
     if (!requiresCollectionAcquisition(*pipeline) || !attachCursorAfterOptimizing) {
-        if (finalizePipeline) {
-            finalizePipeline(expCtx, pipeline.get(), std::monostate{});
+        if (optimizePipeline) {
+            optimizePipeline(pipeline.get());
         }
         return pipeline;
     }
@@ -789,36 +751,47 @@ CommonMongodProcessInterface::finalizeAndAttachCursorToPipelineForLocalRead(
     bool isAnySecondaryCollectionNotLocal =
         acquireCollectionsForPipeline(expCtx, pipeline->serializeToBson(), allAcquisitions);
 
-    // Find the primary acquisition, so we can use it in makePipeline.
+    // Find the primary acquisition, so we can use it in 'performPreOptimizationRewrites'.
     const auto& itr = allAcquisitions.find(expCtx->getNamespaceString());
     tassert(10313201, "Must acquire the primary namespace", itr != allAcquisitions.end());
     const CollectionOrViewAcquisition& primaryAcquisition = itr->second;
+    pipeline->validateWithCollectionMetadata(primaryAcquisition);
+    pipeline->performPreOptimizationRewrites(expCtx, primaryAcquisition);
 
-    // After acquiring all of the collections, we can make and optimize the pipeline.
-    if (finalizePipeline) {
-        finalizePipeline(expCtx, pipeline.get(), primaryAcquisition);
+    if (optimizePipeline) {
+        optimizePipeline(pipeline.get());
     }
     return attachCursorSourceToPipelineForLocalReadImpl(std::move(pipeline),
                                                         allAcquisitions,
                                                         isAnySecondaryCollectionNotLocal,
                                                         aggRequest,
-                                                        shouldUseCollectionDefaultCollator,
-                                                        shardFilterPolicy);
+                                                        shouldUseCollectionDefaultCollator);
+}
+
+std::unique_ptr<Pipeline>
+CommonMongodProcessInterface::attachCursorSourceToPipelineForLocalReadWithCatalog(
+    std::unique_ptr<Pipeline> pipeline,
+    const MultipleCollectionAccessor& collections,
+    const boost::intrusive_ptr<CatalogResourceHandle>& catalogResourceHandle) {
+    const boost::intrusive_ptr<ExpressionContext>& expCtx = pipeline->getContext();
+
+    auto stasher = catalogResourceHandle->getStasher();
+    PipelineD::buildAndAttachInnerQueryExecutorToPipeline(
+        collections,
+        expCtx->getNamespaceString(),
+        nullptr /*resolvedAggRequest*/,
+        pipeline.get(),
+        make_intrusive<DSCursorCatalogResourceHandle>(stasher));
+    pipeline->bindCatalogInfo(collections, stasher);
+
+    return pipeline;
 }
 
 std::unique_ptr<Pipeline> CommonMongodProcessInterface::attachCursorSourceToPipelineForLocalRead(
     std::unique_ptr<Pipeline> pipeline,
     boost::optional<const AggregateCommandRequest&> aggRequest,
-    bool shouldUseCollectionDefaultCollator,
-    ExecShardFilterPolicy shardFilterPolicy) {
+    bool shouldUseCollectionDefaultCollator) {
     const boost::intrusive_ptr<ExpressionContext>& expCtx = pipeline->getContext();
-
-    // TODO: SPM-4050 Remove this.
-    boost::optional<BypassCheckAllShardRoleAcquisitionsVersioned>
-        bypassCheckAllShardRoleAcquisitionsAreVersioned(
-            boost::in_place_init_if,
-            std::holds_alternative<ProofOfUpstreamFiltering>(shardFilterPolicy),
-            expCtx->getOperationContext());
 
     if (!requiresCollectionAcquisition(*pipeline)) {
         // There's no need to attach a cursor here so we can just return the pipeline.
@@ -833,8 +806,7 @@ std::unique_ptr<Pipeline> CommonMongodProcessInterface::attachCursorSourceToPipe
                                                         allAcquisitions,
                                                         isAnySecondaryCollectionNotLocal,
                                                         aggRequest,
-                                                        shouldUseCollectionDefaultCollator,
-                                                        shardFilterPolicy);
+                                                        shouldUseCollectionDefaultCollator);
 }
 
 std::string CommonMongodProcessInterface::getShardName(OperationContext* opCtx) const {
@@ -875,6 +847,9 @@ boost::optional<Document> CommonMongodProcessInterface::doLookupSingleDocument(
         // different from the collator of the corresponding collection.
         auto foreignExpCtx = makeCopyFromExpressionContext(
             expCtx, nss, collectionUUID, std::unique_ptr<CollatorInterface>());
+
+        // Clearing the change stream spec as the aggregate request is not a change stream.
+        foreignExpCtx->setChangeStreamSpec(boost::none);
 
         // If we are here, we are either executing the pipeline normally or running in one of the
         // execution stat explain verbosities. In either case, we disable explain on the foreign
@@ -1025,7 +1000,15 @@ CommonMongodProcessInterface::fieldsHaveSupportingUniqueIndex(
     auto result = SupportingUniqueIndex::None;
     while (indexIterator->more()) {
         const IndexCatalogEntry* entry = indexIterator->next();
-        result = std::max(result, supportsUniqueKey(expCtx, entry, fieldPaths));
+        result = std::max(
+            result,
+            supportsUniqueKey(entry->descriptor(),
+                              entry->getCollator(),
+                              expCtx->getCollator(),
+                              collection.getShardingDescription().isSharded()
+                                  ? &collection.getShardingDescription().getShardKeyPattern()
+                                  : nullptr,
+                              fieldPaths));
         if (result == SupportingUniqueIndex::Full) {
             break;
         }

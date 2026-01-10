@@ -30,13 +30,14 @@
 #pragma once
 
 #include "mongo/db/storage/storage_engine.h"
+#include "mongo/util/modules.h"
 
 namespace mongo {
 
 /**
  * Mock storage engine.
  */
-class StorageEngineMock : public StorageEngine {
+class MONGO_MOD_OPEN StorageEngineMock : public StorageEngine {
 public:
     std::unique_ptr<RecoveryUnit> newRecoveryUnit() final {
         return nullptr;
@@ -52,6 +53,9 @@ public:
     }
     void loadMDBCatalog(OperationContext* opCtx, LastShutdownState lastShutdownState) final {}
     void closeMDBCatalog(OperationContext* opCtx) final {}
+    bool isMDBCatalogOpen() const final {
+        return true;
+    }
     void flushAllFiles(OperationContext* opCtx, bool callerHoldsReadLock) final {}
     Status beginBackup() final {
         return Status(ErrorCodes::CommandNotSupported,
@@ -64,6 +68,9 @@ public:
     }
     Timestamp getBackupCheckpointTimestamp() override {
         return Timestamp(0, 0);
+    }
+    BSONObj getStatus(OperationContext* opCtx) const override {
+        return {};
     }
     StatusWith<std::unique_ptr<StorageEngine::StreamingCursor>> beginNonBlockingBackup(
         const StorageEngine::BackupOptions& options) final {
@@ -143,7 +150,6 @@ public:
     Timestamp getInitialDataTimestamp() const override {
         return Timestamp();
     }
-    void setOldestTimestampFromStable() final {}
     void setOldestTimestamp(Timestamp timestamp, bool force) final {}
     Timestamp getOldestTimestamp() const final {
         return {};
@@ -174,6 +180,9 @@ public:
                           const Timestamp& stableTimestamp,
                           StringData ident) final {}
     std::shared_ptr<Ident> markIdentInUse(StringData ident) final {
+        return nullptr;
+    }
+    TimestampMonitor* getTimestampMonitor() const final {
         return nullptr;
     }
     void startTimestampMonitor(

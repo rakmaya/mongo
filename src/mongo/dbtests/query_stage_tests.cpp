@@ -27,16 +27,8 @@
  *    it in the license file.
  */
 
-#include <memory>
-#include <string>
-#include <utility>
-#include <vector>
-
-#include <boost/container/small_vector.hpp>
-// IWYU pragma: no_include "boost/intrusive/detail/iterator.hpp"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/client.h"
@@ -44,14 +36,12 @@
 #include "mongo/db/exec/classic/index_scan.h"
 #include "mongo/db/exec/classic/plan_stage.h"
 #include "mongo/db/exec/classic/working_set.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
-#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
+#include "mongo/db/index_builds/index_build_test_helpers.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/expression_context_builder.h"
-#include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/compiler/parsers/matcher/expression_parser.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/plan_executor_factory.h"
@@ -59,12 +49,17 @@
 #include "mongo/db/query/query_planner_params.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
+#include "mongo/db/shard_role/shard_role.h"
 #include "mongo/dbtests/dbtests.h"  // IWYU pragma: keep
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/intrusive_counter.h"
 
-#include <boost/move/utility_core.hpp>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 /**
@@ -97,14 +92,14 @@ public:
     }
 
     void addIndex(const BSONObj& obj) {
-        ASSERT_OK(dbtests::createIndex(&_opCtx, ns(), obj));
+        ASSERT_OK(createIndex(&_opCtx, ns(), obj));
     }
 
     int countResults(const IndexScanParams& params, BSONObj filterObj = BSONObj()) {
         const auto collection = acquireCollection(
             &_opCtx,
             CollectionAcquisitionRequest(NamespaceString::createNamespaceString_forTest(ns()),
-                                         PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                         PlacementConcern(boost::none, ShardVersion::UNTRACKED()),
                                          repl::ReadConcernArgs::get(&_opCtx),
                                          AcquisitionPrerequisites::kRead),
             MODE_IS);
@@ -139,30 +134,29 @@ public:
         return count;
     }
 
-    const IndexDescriptor* getIndex(const BSONObj& obj) {
+    const IndexCatalogEntry* getIndex(const BSONObj& obj) {
         const auto collection = acquireCollection(
             &_opCtx,
             CollectionAcquisitionRequest(NamespaceString::createNamespaceString_forTest(ns()),
-                                         PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                         PlacementConcern(boost::none, ShardVersion::UNTRACKED()),
                                          repl::ReadConcernArgs::get(&_opCtx),
                                          AcquisitionPrerequisites::kRead),
             MODE_IS);
-        std::vector<const IndexDescriptor*> indexes;
+        std::vector<const IndexCatalogEntry*> indexes;
         collection.getCollectionPtr()->getIndexCatalog()->findIndexesByKeyPattern(
             &_opCtx, obj, IndexCatalog::InclusionPolicy::kReady, &indexes);
         return indexes.empty() ? nullptr : indexes[0];
     }
 
-    IndexScanParams makeIndexScanParams(OperationContext* opCtx,
-                                        const IndexDescriptor* descriptor) {
+    IndexScanParams makeIndexScanParams(OperationContext* opCtx, const IndexCatalogEntry* entry) {
         const auto collection = acquireCollection(
             &_opCtx,
             CollectionAcquisitionRequest(NamespaceString::createNamespaceString_forTest(ns()),
-                                         PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                         PlacementConcern(boost::none, ShardVersion::UNTRACKED()),
                                          repl::ReadConcernArgs::get(&_opCtx),
                                          AcquisitionPrerequisites::kRead),
             MODE_IS);
-        IndexScanParams params(opCtx, collection.getCollectionPtr(), descriptor);
+        IndexScanParams params(opCtx, collection.getCollectionPtr(), entry);
         params.bounds.isSimpleRange = true;
         params.bounds.endKey = BSONObj();
         params.bounds.boundInclusion = BoundInclusion::kIncludeBothStartAndEndKeys;

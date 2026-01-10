@@ -33,6 +33,7 @@
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/query_planner_params.h"
+#include "mongo/util/modules.h"
 
 namespace mongo {
 
@@ -44,7 +45,7 @@ struct PlannerData {
                 CanonicalQuery* cq,
                 std::unique_ptr<WorkingSet> workingSet,
                 const MultipleCollectionAccessor& collections,
-                std::unique_ptr<QueryPlannerParams> plannerParams,
+                std::shared_ptr<const QueryPlannerParams> plannerParams,
                 PlanYieldPolicy::YieldPolicy yieldPolicy,
                 boost::optional<size_t> cachedPlanHash)
         : opCtx(opCtx),
@@ -66,7 +67,9 @@ struct PlannerData {
     CanonicalQuery* cq;
     std::unique_ptr<WorkingSet> workingSet;
     const MultipleCollectionAccessor& collections;
-    std::unique_ptr<QueryPlannerParams> plannerParams;
+    // Shared pointer since this is shared across all instances of this type and also
+    // prepare helper functions that indeed create this objects.
+    std::shared_ptr<const QueryPlannerParams> plannerParams;
     PlanYieldPolicy::YieldPolicy yieldPolicy;
     boost::optional<size_t> cachedPlanHash;
 };

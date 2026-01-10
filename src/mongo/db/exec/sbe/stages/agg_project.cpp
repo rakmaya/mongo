@@ -90,8 +90,7 @@ void AggProjectStage::open(bool reOpen) {
 
     for (size_t idx = 0; idx < _slots.size(); ++idx) {
         if (_initCodes[idx]) {
-            auto [owned, tag, val] = _bytecode.run(_initCodes[idx].get());
-            _outAccessors[idx]->reset(owned, tag, val);
+            _outAccessors[idx]->reset(_bytecode.run(_initCodes[idx].get()));
         } else {
             _outAccessors[idx]->reset();
         }
@@ -109,8 +108,7 @@ PlanState AggProjectStage::getNext() {
     if (state == PlanState::ADVANCED) {
         // Run the agg project expressions here.
         for (size_t idx = 0; idx < _slots.size(); ++idx) {
-            auto [owned, tag, val] = _bytecode.run(_aggCodes[idx].get());
-            _outAccessors[idx]->reset(owned, tag, val);
+            _outAccessors[idx]->reset(_bytecode.run(_aggCodes[idx].get()));
         }
     }
 
@@ -150,8 +148,8 @@ const SpecificStats* AggProjectStage::getSpecificStats() const {
     return nullptr;
 }
 
-std::vector<DebugPrinter::Block> AggProjectStage::debugPrint() const {
-    auto ret = PlanStage::debugPrint();
+void AggProjectStage::doDebugPrint(std::vector<DebugPrinter::Block>& ret,
+                                   DebugPrintInfo& debugPrintInfo) const {
 
     ret.emplace_back("[`");
     bool first = true;
@@ -173,8 +171,25 @@ std::vector<DebugPrinter::Block> AggProjectStage::debugPrint() const {
     ret.emplace_back("`]");
 
     DebugPrinter::addNewLine(ret);
-    DebugPrinter::addBlocks(ret, _children[0]->debugPrint());
-    return ret;
+
+    if (debugPrintInfo.printBytecode) {
+        int i = 0;
+        for (const std::unique_ptr<vm::CodeFragment>& code : _initCodes) {
+            std::stringstream title;
+            title << "INIT_" << i;
+            PlanStage::debugPrintBytecode(ret, code, title.str().c_str());
+            i++;
+        }
+        i = 0;
+        for (const std::unique_ptr<vm::CodeFragment>& code : _aggCodes) {
+            std::stringstream title;
+            title << "AGG_" << i;
+            PlanStage::debugPrintBytecode(ret, code, title.str().c_str());
+            i++;
+        }
+    }
+
+    DebugPrinter::addBlocks(ret, _children[0]->debugPrint(debugPrintInfo));
 }
 
 size_t AggProjectStage::estimateCompileTimeSize() const {

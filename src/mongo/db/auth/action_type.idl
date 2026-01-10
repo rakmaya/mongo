@@ -34,6 +34,7 @@
 # Actions marked "ID only" are not used for permission checks, but to identify events in logs.
 global:
     cpp_namespace: "mongo"
+    mod_visibility: public
 
 imports:
     - "mongo/db/basic_types.idl"
@@ -101,6 +102,7 @@ enums:
             emptycapped: "emptycapped" # Deprecated (backwards compatibility)
             enableProfiler: "enableProfiler"
             enableSharding: "enableSharding"
+            eseRotateActiveKEK: "eseRotateActiveKEK"
             exportCollection: "exportCollection"
             find: "find"
             flushRouterConfig: "flushRouterConfig"
@@ -108,9 +110,10 @@ enums:
             fsync: "fsync"
             fsyncUnlock: "fsyncUnlock" # Deprecated in favor of unlock (refer to:SERVER-89642)
             getClusterParameter: "getClusterParameter"
+            getCmdLineOpts: "getCmdLineOpts"
             getDatabaseVersion: "getDatabaseVersion"
             getDefaultRWConcern: "getDefaultRWConcern"
-            getCmdLineOpts: "getCmdLineOpts"
+            getESERotateActiveKEKStatus: "getESERotateActiveKEKStatus"
             getLog: "getLog"
             getParameter: "getParameter"
             getShardMap: "getShardMap"
@@ -179,6 +182,7 @@ enums:
             revokePrivilegesFromRole: "revokePrivilegesFromRole" # ID only
             revokeRolesFromRole: "revokeRolesFromRole" # ID only
             revokeRolesFromUser: "revokeRolesFromUser" # ID only
+            rewriteCollection: "rewriteCollection"
             rotateCertificates: "rotateCertificates"
             runAsLessPrivilegedUser: "runAsLessPrivilegedUser"
             serverStatus: "serverStatus"

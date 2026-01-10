@@ -32,10 +32,10 @@
 #include "mongo/db/field_ref.h"
 #include "mongo/util/str.h"
 
-#include <boost/container/flat_set.hpp>
 #include <boost/container/small_vector.hpp>
 
 namespace mongo::multikey_paths {
+
 namespace {
 
 // An index will fail to get created if the size in bytes of its key pattern is greater than 2048.
@@ -45,7 +45,7 @@ const size_t kMaxKeyPatternPathLength = 2048;
 
 }  // namespace
 
-std::string toString(MultikeyPaths paths) {
+std::string toString(const MultikeyPaths& paths) {
     str::stream builder;
     builder << "[";
     auto pathIt = paths.begin();
@@ -53,26 +53,7 @@ std::string toString(MultikeyPaths paths) {
         if (pathIt == paths.end()) {
             break;
         }
-
-        builder << "{";
-
-        auto pathSet = *pathIt;
-        auto setIt = pathSet.begin();
-        while (true) {
-            if (setIt == pathSet.end()) {
-                break;
-            }
-
-            builder << *setIt;
-            if (++setIt == pathSet.end()) {
-                break;
-            } else {
-                builder << ",";
-            }
-        }
-
-        builder << "}";
-
+        builder << multikeyComponentsToString(*pathIt);
         if (++pathIt == paths.end()) {
             break;
         } else {
@@ -80,6 +61,26 @@ std::string toString(MultikeyPaths paths) {
         }
     }
     builder << "]";
+    return builder;
+}
+
+std::string multikeyComponentsToString(const MultikeyComponents& paths) {
+    str::stream builder;
+    builder << "{";
+    auto pathIt = paths.begin();
+    while (true) {
+        if (pathIt == paths.end()) {
+            break;
+        }
+
+        builder << *pathIt;
+        if (++pathIt == paths.end()) {
+            break;
+        } else {
+            builder << ",";
+        }
+    }
+    builder << "}";
     return builder;
 }
 

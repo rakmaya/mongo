@@ -49,13 +49,9 @@
 #include "mongo/util/time_support.h"
 
 #include <memory>
-#include <tuple>
 #include <type_traits>
 
-#include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/smart_ptr.hpp>
-#include <fmt/format.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
@@ -80,15 +76,13 @@ AsyncRequestsSender::AsyncRequestsSender(OperationContext* opCtx,
     : _opCtx(opCtx),
       _db(dbName),
       _readPreference(readPreference),
+      // Initialize command metadata to handle the read preference.
+      _metadataObj(_readPreference.toContainingBSON()),
       _retryPolicy(retryPolicy),
+      _remotesLeft(requests.size()),
       _subExecutor(std::move(executor)),
       _subBaton(opCtx->getBaton()->makeSubBaton()),
       _resourceYielder(std::move(resourceYielder)) {
-
-    _remotesLeft = requests.size();
-
-    // Initialize command metadata to handle the read preference.
-    _metadataObj = readPreference.toContainingBSON();
 
     _remotes.reserve(requests.size());
     for (const auto& request : requests) {
@@ -104,6 +98,18 @@ AsyncRequestsSender::AsyncRequestsSender(OperationContext* opCtx,
     }
 
     CurOp::get(_opCtx)->ensureRecordRemoteOpWait();
+}
+
+AsyncRequestsSender::~AsyncRequestsSender() {
+    // It is necessary to cancel all outstanding retries here. This is required because the
+    // callbacks for retry requests need access to the AsyncRequestsSender's internals, and we
+    // cannot destroy the AsyncRequestsSender when there are still outstanding retry requests on the
+    // baton.
+    _cancellationSource.cancel();
+
+    // Any scheduled callbacks from this AsyncResultsMerger instance cannot be serviced anymore when
+    // the instance goes out of scope.
+    _subBaton.shutdown();
 }
 
 AsyncRequestsSender::Response AsyncRequestsSender::next() {
@@ -130,7 +136,7 @@ AsyncRequestsSender::Response AsyncRequestsSender::next() {
         if (_failedUnyield && response.swResponse != _interruptStatus) {
             // If the interrupt was caused by an unyield error, every subsequent response must
             // also have that unyield error.
-            auto failedResponse = response;
+            auto failedResponse = std::move(response);
 
             // TODO (SERVER-97256): Remove this workaround once a proper solution is implemented.
             //
@@ -141,8 +147,8 @@ AsyncRequestsSender::Response AsyncRequestsSender::next() {
             // exception, preventing the router from invalidating the stale routing entry and
             // causing it to not converge.
             if (auto si = _interruptStatus.extraInfo<TransactionParticipantFailedUnyieldInfo>();
-                si && response.swResponse.isOK()) {
-                auto status = getStatusFromCommandResult(response.swResponse.getValue().data);
+                si && failedResponse.swResponse.isOK()) {
+                auto status = getStatusFromCommandResult(failedResponse.swResponse.getValue().data);
                 failedResponse.swResponse =
                     Status{TransactionParticipantFailedUnyieldInfo(si->getOriginalError(), status),
                            _interruptStatus.reason()};
@@ -203,6 +209,9 @@ AsyncRequestsSender::Response AsyncRequestsSender::next() {
         _interruptStatus = ex.toStatus();
     }
 
+    // abort any ongoing backoff.
+    _cancellationSource.cancel();
+
     // Make failed responses for all outstanding remotes with the interruption status and push them
     // onto the response queue
     for (auto& remote : _remotes) {
@@ -210,9 +219,6 @@ AsyncRequestsSender::Response AsyncRequestsSender::next() {
             _responseQueue.push(std::move(remote).makeFailedResponse(_interruptStatus));
         }
     }
-
-    // abort any ongoing backoff.
-    _cancellationSource.cancel();
 
     // Stop servicing callbacks
     _subBaton.shutdown();
@@ -225,6 +231,9 @@ AsyncRequestsSender::Response AsyncRequestsSender::next() {
 
 void AsyncRequestsSender::stopRetrying() noexcept {
     _stopRetrying = true;
+
+    // Cancel all pending retry operations, as they are not needed anymore.
+    _cancellationSource.cancel();
 }
 
 bool AsyncRequestsSender::done() const noexcept {
@@ -232,7 +241,7 @@ bool AsyncRequestsSender::done() const noexcept {
 }
 
 AsyncRequestsSender::Request::Request(ShardId shardId, BSONObj cmdObj, std::shared_ptr<Shard> shard)
-    : shardId(shardId), cmdObj(cmdObj), shard(std::move(shard)) {}
+    : shardId(std::move(shardId)), cmdObj(std::move(cmdObj)), shard(std::move(shard)) {}
 
 Status AsyncRequestsSender::Response::getEffectiveStatus(
     const AsyncRequestsSender::Response& response) {
@@ -381,10 +390,11 @@ auto AsyncRequestsSender::RemoteData::handleResponse(RemoteCommandCallbackArgs r
                 shard->updateReplSetMonitor(rcr.response.target, status);
             }
 
-            bool isStartingTransaction = _cmdObj.getField("startTransaction").booleanSafe();
-            if (!_ars->_stopRetrying && !isStartingTransaction &&
-                _retryStrategy->recordFailureAndEvaluateShouldRetry(
-                    status, rcr.response.target, rcr.response.getErrorLabels())) {
+            if (_retryStrategy->recordFailureAndEvaluateShouldRetry(
+                    status, rcr.response.target, rcr.response.getErrorLabels()) &&
+                !_ars->_stopRetrying) {
+                const auto delay = _retryStrategy->getNextRetryDelay();
+
                 LOGV2_DEBUG(
                     4615637,
                     1,
@@ -392,9 +402,9 @@ auto AsyncRequestsSender::RemoteData::handleResponse(RemoteCommandCallbackArgs r
                     "shardId"_attr = _shardId,
                     "attemptedHosts"_attr = rcr.request.target,
                     "failedHost"_attr = rcr.response.target,
-                    "error"_attr = redact(status));
+                    "error"_attr = redact(status),
+                    "delay"_attr = delay);
                 _shardHostAndPort.reset();
-                const auto delay = _retryStrategy->getNextRetryDelay();
 
                 if (delay > Milliseconds{0}) {
                     return _ars->_subBaton

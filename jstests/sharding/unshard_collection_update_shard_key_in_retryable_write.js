@@ -50,6 +50,7 @@ function runTest(reshardInPlace) {
         txnNumber: NumberLong(1),
     };
 
+    // TODO SERVER-114994 findAndModify support in UWE.
     const findAndModifyUpdateCmdObj = {
         findAndModify: collName,
         query: {oldShardKey: -2},

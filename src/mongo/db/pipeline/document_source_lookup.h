@@ -48,6 +48,7 @@
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/field_path.h"
 #include "mongo/db/pipeline/lite_parsed_document_source.h"
+#include "mongo/db/pipeline/lite_parsed_document_source_nested_pipelines.h"
 #include "mongo/db/pipeline/lite_parsed_pipeline.h"
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/stage_constraints.h"
@@ -57,6 +58,7 @@
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
 
 #include <cstddef>
 #include <memory>
@@ -92,11 +94,13 @@ struct LookUpSharedState {
 
 void lookupPipeValidator(const Pipeline& pipeline);
 
+DECLARE_STAGE_PARAMS_DERIVED_DEFAULT(LookUp);
+
 /**
  * Queries separate collection for equality matches with documents in the pipeline collection.
  * Adds matching documents to a new array field in the input document.
  */
-class DocumentSourceLookUp final : public DocumentSource {
+class MONGO_MOD_NEEDS_REPLACEMENT DocumentSourceLookUp final : public DocumentSource {
 public:
     static constexpr StringData kStageName = "$lookup"_sd;
     static constexpr StringData kFromField = "from"_sd;
@@ -105,17 +109,17 @@ public:
     static constexpr StringData kPipelineField = "pipeline"_sd;
     static constexpr StringData kAsField = "as"_sd;
 
-    class LiteParsed final : public LiteParsedDocumentSourceNestedPipelines {
+    class LiteParsed final : public LiteParsedDocumentSourceNestedPipelines<LiteParsed> {
     public:
         static std::unique_ptr<LiteParsed> parse(const NamespaceString& nss,
                                                  const BSONElement& spec,
                                                  const LiteParserOptions& options);
 
-        LiteParsed(std::string parseTimeName,
+        LiteParsed(const BSONElement& spec,
                    NamespaceString foreignNss,
                    boost::optional<LiteParsedPipeline> pipeline)
             : LiteParsedDocumentSourceNestedPipelines(
-                  std::move(parseTimeName), std::move(foreignNss), std::move(pipeline)) {}
+                  spec, std::move(foreignNss), std::move(pipeline)) {}
 
         /**
          * Lookup from a sharded collection may not be allowed.
@@ -138,12 +142,8 @@ public:
 
         void getForeignExecutionNamespaces(
             stdx::unordered_set<NamespaceString>& nssSet) const final {
-            // We do not recurse on, nor insert '_foreignNss' in the event that this $lookup has
-            // a subpipeline as such $lookup stages are not eligible for pushdown.
-            if (getSubPipelines().empty()) {
-                tassert(6235100, "Expected foreignNss to be initialized for $lookup", _foreignNss);
-                nssSet.emplace(*_foreignNss);
-            }
+            tassert(6235100, "Expected foreignNss to be initialized for $lookup", _foreignNss);
+            nssSet.emplace(*_foreignNss);
         }
 
         PrivilegeVector requiredPrivileges(bool isMongos,
@@ -151,6 +151,10 @@ public:
 
         bool requiresAuthzChecks() const override {
             return false;
+        }
+
+        std::unique_ptr<StageParams> getStageParams() const override {
+            return std::make_unique<LookUpStageParams>(_originalBson);
         }
     };
 
@@ -216,7 +220,8 @@ public:
     /**
      * Helper to absorb an $unwind stage. Only used for testing this special behavior.
      */
-    void setUnwindStage_forTest(const boost::intrusive_ptr<DocumentSourceUnwind>& unwind) {
+    MONGO_MOD_NEEDS_REPLACEMENT void setUnwindStage_forTest(
+        const boost::intrusive_ptr<DocumentSourceUnwind>& unwind) {
         invariant(!_unwindSrc);
         _unwindSrc = unwind;
     }
@@ -324,8 +329,9 @@ public:
         return hasPipeline() ? BSONObj() : _additionalFilter.value_or(BSONObj());
     }
 
-protected:
-    boost::optional<ShardId> computeMergeShardId() const final;
+    bool hasAdditionalFilter() const {
+        return _additionalFilter.has_value();
+    }
 
     /**
      * Attempts to combine with an immediately following $unwind stage that unwinds the $lookup's
@@ -333,8 +339,11 @@ protected:
      * this is done it may also absorb one or more $match stages that immediately followed the
      * $unwind, setting the resulting combined $match in the '_matchSrc' member.
      */
-    DocumentSourceContainer::iterator doOptimizeAt(DocumentSourceContainer::iterator itr,
-                                                   DocumentSourceContainer* container) final;
+    DocumentSourceContainer::iterator optimizeAt(DocumentSourceContainer::iterator itr,
+                                                 DocumentSourceContainer* container);
+
+protected:
+    boost::optional<ShardId> computeMergeShardId() const final;
 
 private:
     friend boost::intrusive_ptr<exec::agg::Stage> documentSourceLookUpToStageFn(

@@ -41,13 +41,6 @@
 #include "mongo/db/index/multikey_paths.h"
 #include "mongo/db/index_builds/index_builds_common.h"
 #include "mongo/db/index_builds/multi_index_block_gen.h"
-#include "mongo/db/local_catalog/collection_catalog.h"
-#include "mongo/db/local_catalog/collection_yield_restore.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
-#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
-#include "mongo/db/local_catalog/lock_manager/exception_util.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/multi_key_path_tracker.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer.h"
@@ -61,6 +54,13 @@
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/lock_manager/d_concurrency.h"
+#include "mongo/db/shard_role/lock_manager/exception_util.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/collection_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/collection_yield_restore.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/ident.h"
 #include "mongo/db/storage/key_format.h"
 #include "mongo/db/storage/key_string/key_string.h"
@@ -143,8 +143,7 @@ auto makeOnSuppressedErrorFn(const CollectionPtr& coll,
 
         // If a key generation error was suppressed, record the document as "skipped" so the
         // index builder can retry at a point when data is consistent.
-        auto interceptor = entry->indexBuildInterceptor();
-        if (interceptor && interceptor->getSkippedRecordTracker()) {
+        if (auto interceptor = entry->indexBuildInterceptor()) {
             LOGV2_DEBUG(20684,
                         1,
                         "Recording suppressed key generation error to retry later"
@@ -157,7 +156,7 @@ auto makeOnSuppressedErrorFn(const CollectionPtr& coll,
             // internally and causes the cursor to be unpositioned.
 
             saveCursorBeforeWrite();
-            interceptor->getSkippedRecordTracker()->record(opCtx, coll, loc.value());
+            interceptor->getSkippedRecordTracker().record(opCtx, coll, loc.value());
             restoreCursorAfterWrite();
         }
     };
@@ -515,8 +514,9 @@ Status MultiIndexBlock::insertAllDocumentsInCollection(
     const boost::optional<RecordId>& resumeAfterRecordId) {
     invariant(!shard_role_details::getLocker(opCtx)->inAWriteUnitOfWork());
     // TODO SERVER-109542: Use regular ShardRole acquisitions for read.
-    boost::optional<CollectionAcquisition> collection = acquireLocalCollectionNoConsistentCatalog(
-        opCtx, nssOrUUID, AcquisitionPrerequisites::kUnreplicatedWrite, MODE_IX);
+    boost::optional<CollectionAcquisition> collection =
+        shard_role_nocheck::acquireLocalCollectionNoConsistentCatalog(
+            opCtx, nssOrUUID, AcquisitionPrerequisites::kUnreplicatedWrite, MODE_IX);
     tassert(7683100, "Expected collection to exist", collection->exists());
 
     // This is stable under the collection lock. If the index build had been aborted, this opCtx
@@ -623,7 +623,7 @@ Status MultiIndexBlock::insertAllDocumentsInCollection(
                           shard_role_details::getRecoveryUnit(opCtx)->getTimestampReadSource()),
                       "error"_attr = ex);
 
-        collection = acquireLocalCollectionNoConsistentCatalog(
+        collection = shard_role_nocheck::acquireLocalCollectionNoConsistentCatalog(
             opCtx, nssOrUUID, AcquisitionPrerequisites::kUnreplicatedWrite, MODE_IX);
         tassert(7683101, "Expected collection to exist", collection->exists());
 
@@ -1006,11 +1006,8 @@ Status MultiIndexBlock::dumpInsertsFromBulk(
                 }
 
                 return {&collection.getCollectionPtr(),
-                        collection.getCollectionPtr()
-                            ->getIndexCatalog()
-                            ->findIndexByIdent(
-                                opCtx, indexIdent, IndexCatalog::InclusionPolicy::kUnfinished)
-                            ->getEntry()};
+                        collection.getCollectionPtr()->getIndexCatalog()->findIndexByIdent(
+                            opCtx, indexIdent, IndexCatalog::InclusionPolicy::kUnfinished)};
             };
 
             Status status = _indexes[i].bulk->commit(
@@ -1200,23 +1197,13 @@ Status MultiIndexBlock::commit(OperationContext* opCtx,
         if (auto interceptor = indexCatalogEntry->indexBuildInterceptor()) {
             auto multikeyPaths = interceptor->getMultikeyPaths();
             if (multikeyPaths) {
-                // TODO(SERVER-103400): Investigate usage validity of
-                // CollectionPtr::CollectionPtr_UNSAFE
-                indexCatalogEntry->setMultikey(opCtx,
-                                               CollectionPtr::CollectionPtr_UNSAFE(collection),
-                                               {},
-                                               multikeyPaths.value());
+                indexCatalogEntry->setMultikey(opCtx, collection, {}, multikeyPaths.value());
                 paths = std::move(multikeyPaths);
             }
 
-            multikeyPaths = interceptor->getSkippedRecordTracker()->getMultikeyPaths();
+            multikeyPaths = interceptor->getSkippedRecordTracker().getMultikeyPaths();
             if (multikeyPaths) {
-                // TODO(SERVER-103400): Investigate usage validity of
-                // CollectionPtr::CollectionPtr_UNSAFE
-                indexCatalogEntry->setMultikey(opCtx,
-                                               CollectionPtr::CollectionPtr_UNSAFE(collection),
-                                               {},
-                                               multikeyPaths.value());
+                indexCatalogEntry->setMultikey(opCtx, collection, {}, multikeyPaths.value());
                 if (!paths) {
                     paths = std::move(multikeyPaths);
                 } else {
@@ -1232,12 +1219,7 @@ Status MultiIndexBlock::commit(OperationContext* opCtx,
         // MultikeyPaths into IndexCatalogEntry::setMultikey here.
         const auto& bulkBuilder = index.bulk;
         if (bulkBuilder && bulkBuilder->isMultikey()) {
-            // TODO(SERVER-103400): Investigate usage validity of
-            // CollectionPtr::CollectionPtr_UNSAFE
-            indexCatalogEntry->setMultikey(opCtx,
-                                           CollectionPtr::CollectionPtr_UNSAFE(collection),
-                                           {},
-                                           bulkBuilder->getMultikeyPaths());
+            indexCatalogEntry->setMultikey(opCtx, collection, {}, bulkBuilder->getMultikeyPaths());
             if (!paths) {
                 paths = bulkBuilder->getMultikeyPaths();
             } else {
@@ -1267,9 +1249,11 @@ Status MultiIndexBlock::commit(OperationContext* opCtx,
         }
     }
 
-    // TODO(SERVER-103400): Investigate usage validity of CollectionPtr::CollectionPtr_UNSAFE
-    CollectionQueryInfo::get(collection)
-        .clearQueryCache(opCtx, CollectionPtr::CollectionPtr_UNSAFE(collection));
+    auto& collectionQueryInfo = CollectionQueryInfo::get(collection);
+    collectionQueryInfo.clearQueryCache(opCtx, collection);
+    if (feature_flags::gFeatureFlagPathArrayness.isEnabled()) {
+        collectionQueryInfo.rebuildPathArrayness(opCtx, collection);
+    }
     shard_role_details::getRecoveryUnit(opCtx)->onCommit(
         [this](OperationContext*, boost::optional<Timestamp>) { _buildIsCleanedUp = true; });
 
@@ -1291,6 +1275,26 @@ void MultiIndexBlock::appendBuildInfo(BSONObjBuilder* builder) const {
     builder->append("phaseStr", IndexBuildPhase_serializer(_phase));
 }
 
+void MultiIndexBlock::persistResumeState(OperationContext* opCtx,
+                                         const CollectionPtr& collection,
+                                         bool isResumable) {
+    if (!isResumable || _method != IndexBuildMethodEnum::kHybrid) {
+        return;
+    }
+
+    invariant(!_buildIsCleanedUp);
+    invariant(_buildUUID);
+
+    if (!_resumeStateTempRecordStore) {
+        _resumeStateTempRecordStore =
+            opCtx->getServiceContext()
+                ->getStorageEngine()
+                ->makeTemporaryRecordStoreForResumableIndexBuild(opCtx, KeyFormat::Long);
+    }
+
+    _writeStateToDisk(opCtx, collection, _resumeStateTempRecordStore.get());
+}
+
 void MultiIndexBlock::abortWithoutCleanup(OperationContext* opCtx,
                                           const CollectionPtr& collection,
                                           bool isResumable) {
@@ -1310,8 +1314,18 @@ void MultiIndexBlock::abortWithoutCleanup(OperationContext* opCtx,
 
     if (isResumable && _method == IndexBuildMethodEnum::kHybrid) {
         invariant(_buildUUID);
-        _writeStateToDisk(opCtx, collection);
 
+        if (!_resumeStateTempRecordStore) {
+            _resumeStateTempRecordStore =
+                opCtx->getServiceContext()
+                    ->getStorageEngine()
+                    ->makeTemporaryRecordStoreForResumableIndexBuild(opCtx, KeyFormat::Long);
+        }
+
+        _writeStateToDisk(opCtx, collection, _resumeStateTempRecordStore.get());
+
+        // Ensure all temporary tables are kept around after destruction.
+        _resumeStateTempRecordStore->keep();
         for (auto& index : _indexes) {
             index.block->keepTemporaryTables();
         }
@@ -1321,28 +1335,42 @@ void MultiIndexBlock::abortWithoutCleanup(OperationContext* opCtx,
 }
 
 void MultiIndexBlock::_writeStateToDisk(OperationContext* opCtx,
-                                        const CollectionPtr& collection) const {
+                                        const CollectionPtr& collection,
+                                        TemporaryRecordStore* tempRS) const {
     auto obj = _constructStateObject(opCtx, collection);
-    auto rs = opCtx->getServiceContext()
-                  ->getStorageEngine()
-                  ->makeTemporaryRecordStoreForResumableIndexBuild(opCtx, KeyFormat::Long);
 
     WriteUnitOfWork wuow(opCtx);
 
-    auto status = rs->rs()->insertRecord(opCtx,
-                                         *shard_role_details::getRecoveryUnit(opCtx),
-                                         obj.objdata(),
-                                         obj.objsize(),
-                                         Timestamp());
-    if (!status.isOK()) {
+    auto truncateStatus =
+        tempRS->rs()->truncate(opCtx, *shard_role_details::getRecoveryUnit(opCtx));
+    if (!truncateStatus.isOK()) {
+        LOGV2_ERROR(11231501,
+                    "Index build: failed to truncate temporary record store for resumable state",
+                    "buildUUID"_attr = _buildUUID,
+                    "collectionUUID"_attr = _collectionUUID,
+                    logAttrs(collection->ns()),
+                    "details"_attr = obj,
+                    "error"_attr = truncateStatus);
+        dassert(truncateStatus,
+                str::stream() << "Failed to write resumable index build state to disk. UUID: "
+                              << _buildUUID);
+        return;
+    }
+
+    auto insertStatus = tempRS->rs()->insertRecord(opCtx,
+                                                   *shard_role_details::getRecoveryUnit(opCtx),
+                                                   obj.objdata(),
+                                                   obj.objsize(),
+                                                   Timestamp());
+    if (!insertStatus.isOK()) {
         LOGV2_ERROR(4841501,
                     "Index build: failed to write resumable state to disk",
                     "buildUUID"_attr = _buildUUID,
                     "collectionUUID"_attr = _collectionUUID,
                     logAttrs(collection->ns()),
                     "details"_attr = obj,
-                    "error"_attr = status.getStatus());
-        dassert(status,
+                    "error"_attr = insertStatus.getStatus());
+        dassert(insertStatus,
                 str::stream() << "Failed to write resumable index build state to disk. UUID: "
                               << _buildUUID);
         return;
@@ -1356,8 +1384,6 @@ void MultiIndexBlock::_writeStateToDisk(OperationContext* opCtx,
           "collectionUUID"_attr = _collectionUUID,
           logAttrs(collection->ns()),
           "details"_attr = obj);
-
-    rs->keep();
 }
 
 BSONObj MultiIndexBlock::_constructStateObject(OperationContext* opCtx,
@@ -1396,7 +1422,7 @@ BSONObj MultiIndexBlock::_constructStateObject(OperationContext* opCtx,
             indexStateInfo.setDuplicateKeyTrackerTable(ident);
         }
 
-        if (!indexBuildInterceptor->getSkippedRecordTracker()->getTableIdent()) {
+        if (!indexBuildInterceptor->getSkippedRecordTracker().getTableIdent()) {
             // IndexBuildInterceptor requires the the skipped records tracker table ident to
             // be present in the resume case, so create the table if it hasn't been created yet.
             // TODO(SERVER-111080): Remove the code to create the skipped records tracker table

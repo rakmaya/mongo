@@ -6,12 +6,13 @@
  * query_intensive_pbt,
  * # This test runs commands that are not allowed with security token: setParameter.
  * not_allowed_with_signed_security_token,
- * requires_timeseries,
  * assumes_no_implicit_collection_creation_on_get_collection,
  * # Incompatible with setParameter
  * does_not_support_stepdowns,
  * # Runs queries that may return many results, requiring getmores
  * requires_getmore,
+ * # Time series collections do not support indexing array values in measurement fields.
+ * exclude_from_timeseries_crud_passthrough,
  * ]
  */
 import {createCorrectnessProperty} from "jstests/libs/property_test_helpers/common_properties.js";
@@ -22,17 +23,24 @@ import {testProperty} from "jstests/libs/property_test_helpers/property_testing_
 import {isSlowBuild} from "jstests/libs/query/aggregation_pipeline_utils.js";
 
 if (isSlowBuild(db)) {
-    jsTestLog("Returning early because debug is on, opt is off, or a sanitizer is enabled.");
+    jsTest.log.info("Returning early because debug is on, opt is off, or a sanitizer is enabled.");
     quit();
 }
 
+const is83orAbove = (() => {
+    const {version} = db.adminCommand({getParameter: 1, featureCompatibilityVersion: 1}).featureCompatibilityVersion;
+    return MongoRunner.compareBinVersions(version, "8.3") >= 0;
+})();
 const numRuns = 50;
 const numQueriesPerRun = 20;
 
 const controlColl = db.index_correctness_pbt_control;
 const experimentColl = db.index_correctness_pbt_experiment;
 const correctnessProperty = createCorrectnessProperty(controlColl, experimentColl);
-const aggModel = getQueryAndOptionsModel();
+const aggModel = getQueryAndOptionsModel().filter(
+    // Older versions suffer from SERVER-101007
+    ({pipeline}) => is83orAbove || !JSON.stringify(pipeline).includes('"$elemMatch"'),
+);
 
 // Test with a regular collection.
 testProperty(
@@ -41,21 +49,3 @@ testProperty(
     makeWorkloadModel({collModel: getCollectionModel(), aggModel, numQueriesPerRun}),
     numRuns,
 );
-
-// TODO SERVER-103381 re-enable timeseries PBT testing.
-// Test with a TS collection.
-// TODO SERVER-83072 re-enable $group in this test, by removing the filter below.
-// const tsAggModel = aggModel.filter(query => {
-//     for (const stage of query) {
-//         if (Object.keys(stage).includes('$group')) {
-//             return false;
-//         }
-//     }
-//     return true;
-// });
-// testProperty(
-//     correctnessProperty,
-//     {controlColl, experimentColl},
-//     makeWorkloadModel(
-//         {collModel: getCollectionModel({isTS: true}), aggModel: tsAggModel, numQueriesPerRun}),
-//     numRuns);

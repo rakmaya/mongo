@@ -317,6 +317,8 @@ public:
 
     HostAndPort getMyHostAndPort() const override;
 
+    boost::optional<int> getMyMaintenancePort() const override;
+
     Status setFollowerMode(const MemberState& newState) override;
 
     Status setFollowerModeRollback(OperationContext* opCtx) override;
@@ -339,6 +341,8 @@ public:
                                    ReplSetGetStatusResponseStyle responseStyle) override;
 
     void appendSecondaryInfoData(BSONObjBuilder* result) override;
+
+    ThreadPool* getDbWorkThreadPool() const noexcept override;
 
     ReplSetConfig getConfig() const override;
 
@@ -431,6 +435,7 @@ public:
                              BSONObjBuilder* builder) const override;
 
 
+    void setOldestTimestampMetric(const Timestamp& timestamp);
     void setOldestTimestamp(const Timestamp& timestamp) override;
 
     Status processHeartbeatV1(const ReplSetHeartbeatArgsV1& args,
@@ -1727,8 +1732,34 @@ private:
     ReadPreference _getSyncSourceReadPreference(WithLock lk) const;
 
     /*
-     * Performs the replica set reconfig procedure. Certain consensus safety checks are omitted when
-     * either 'force' or 'skipSafetyChecks' are true.
+     * Performs the replica set reconfig procedure.
+     *
+     * An "X" in the "f" column or "s" column indicates that when `force` or
+     * `skipSafetyChecks`, respectively, is `true`, we will NOT check the condition
+     * or perform the action in that row.
+     *
+     * ----------------------------------------------------------------------------
+     * |f |s | Condition/Action                                                   |
+     * |--|--|--------------------------------------------------------------------|
+     * |X |X | Node is writable primary                                           |
+     * |X |X | No pending shutdown detected                                       |
+     * |X |X | Config is not from a different term                                |
+     * |X |X | Config is majority committed                                       |
+     * |X |X | Latest committed optime from previous config is in current config  |
+     * |       (except for initial configs)                                       |
+     * |  |X | Config will not change implicit default write concern              |
+     * |       (if part of sharded cluster)                                       |
+     * |X |  | Node only adds or removes at most one node                         |
+     * |     | (see `validateConfigForReconfig`)                                  |
+     * |X |  | Node is electable in new config                                    |
+     * |  |X | Node is able to find self in new config                            |
+     * |X |X | Quorum check: majority of members have installed new config        |
+     * |X |X | Use implicit intent instead of LocalWrite intent when              |
+     * |  |  | persisting new config to disk                                      |
+     * |X |X | Node did not step down before persisting new config                |
+     * |X |  | Write a no-op to the oplog at the end of reconfig, if possible     |
+     * ----------------------------------------------------------------------------
+     *
      */
     Status _doReplSetReconfig(OperationContext* opCtx,
                               GetNewConfigFn getNewConfig,

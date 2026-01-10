@@ -53,21 +53,21 @@
 #include "mongo/db/generic_argument_util.h"
 #include "mongo/db/global_catalog/chunk_manager.h"
 #include "mongo/db/global_catalog/ddl/shard_key_index_util.h"
-#include "mongo/db/global_catalog/router_role_api/cluster_commands_helpers.h"
 #include "mongo/db/hasher.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_options.h"
-#include "mongo/db/local_catalog/ddl/create_indexes_gen.h"
-#include "mongo/db/local_catalog/ddl/list_indexes_gen.h"
-#include "mongo/db/local_catalog/index_catalog.h"
-#include "mongo/db/local_catalog/index_catalog_entry.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
-#include "mongo/db/local_catalog/list_indexes.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
 #include "mongo/db/query/collation/collation_spec.h"
+#include "mongo/db/router_role/cluster_commands_helpers.h"
 #include "mongo/db/s/migration_destination_manager.h"
 #include "mongo/db/server_feature_flags_gen.h"
+#include "mongo/db/shard_role/ddl/create_indexes_gen.h"
+#include "mongo/db/shard_role/ddl/list_indexes_gen.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_options.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog_entry.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
+#include "mongo/db/shard_role/shard_catalog/list_indexes.h"
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/timeseries/timeseries_constants.h"
 #include "mongo/db/timeseries/timeseries_index_schema_conversion_functions.h"
@@ -364,6 +364,15 @@ void validateTimeseriesShardKey(StringData timeFieldName,
                          elem.fieldNameStringData().starts_with(*metaFieldName + ".")));
         }
     }
+}
+
+BSONObj validateAndTranslateTimeseriesShardKey(const TimeseriesOptions& tsOptions,
+                                               const BSONObj& tsShardKey) {
+    shardkeyutil::validateTimeseriesShardKey(
+        tsOptions.getTimeField(), tsOptions.getMetaField(), tsShardKey);
+
+    return uassertStatusOK(
+        timeseries::createBucketsShardKeySpecFromTimeseriesShardKeySpec(tsOptions, tsShardKey));
 }
 
 // TODO: SERVER-64187 move calls to validateShardKeyIsNotEncrypted into

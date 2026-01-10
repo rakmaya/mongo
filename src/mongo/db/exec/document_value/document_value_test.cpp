@@ -31,7 +31,6 @@
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bson_depth.h"
 #include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
@@ -60,10 +59,8 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
-#include <memory>
 #include <sstream>
 #include <string>
-#include <variant>
 #include <vector>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
@@ -1215,6 +1212,101 @@ TEST(MetaFields, CopyMetadataFromCopiesAllMetadata) {
     ASSERT_FALSE(result.metadata().isChangeStreamControlEvent());
 }
 
+TEST(DocumentTest, ValidateToBsonWithMetadataOnlyAllFields) {
+    MutableDocument mutableDocument;
+    mutableDocument.addField("field1", Value("value1"_sd));
+    mutableDocument.metadata().setTextScore(5.0);
+    mutableDocument.metadata().setSearchScore(3.5);
+    mutableDocument.metadata().setRandVal(0.42);
+    mutableDocument.metadata().setSearchHighlights(Value(BSON_ARRAY("highlight1" << "highlight2")));
+
+    Document document = mutableDocument.freeze();
+    BSONObj metadataOnly = document.toBsonWithMetaDataOnly();
+
+    ASSERT_EQ(metadataOnly["$textScore"].Double(), 5.0);
+    ASSERT_EQ(metadataOnly["$searchScore"].Double(), 3.5);
+    ASSERT_EQ(metadataOnly["$randVal"].Double(), 0.42);
+    ASSERT_TRUE(metadataOnly.hasField("$searchHighlights"));
+    ASSERT_FALSE(metadataOnly.hasField("field1"));
+}
+
+TEST(DocumentTest, ValidateToBsonWithEmptyMetadataOnly) {
+    MutableDocument mutableDocument;
+    mutableDocument.addField("field1", Value("value1"_sd));
+
+    Document document = mutableDocument.freeze();
+    BSONObj metadataOnly = document.toBsonWithMetaDataOnly();
+
+    ASSERT_TRUE(metadataOnly.isEmpty());
+}
+
+TEST(DocumentTest, ValidateToBsonWithMetadataOnlySerializationSucceeds) {
+    MutableDocument mutableDocument;
+    mutableDocument.addField("name", Value("test"_sd));
+    mutableDocument.addField("count", Value(42));
+    mutableDocument.metadata().setTextScore(2.5);
+    mutableDocument.metadata().setSearchScore(1.8);
+
+    Document document = mutableDocument.freeze();
+
+    BSONObj documentOnly = document.toBson();
+    BSONObj metadataOnly = document.toBsonWithMetaDataOnly();
+
+    ASSERT_TRUE(documentOnly.hasField("name"));
+    ASSERT_TRUE(documentOnly.hasField("count"));
+    ASSERT_FALSE(documentOnly.hasField("$textScore"));
+    ASSERT_FALSE(documentOnly.hasField("$searchScore"));
+
+    ASSERT_FALSE(metadataOnly.hasField("name"));
+    ASSERT_FALSE(metadataOnly.hasField("count"));
+    ASSERT_TRUE(metadataOnly.hasField("$textScore"));
+    ASSERT_TRUE(metadataOnly.hasField("$searchScore"));
+
+    // Verify combined equals toBsonWithMetaData()
+    BSONObjBuilder combined;
+    combined.appendElements(documentOnly);
+    combined.appendElements(metadataOnly);
+    BSONObj combinedObj = combined.obj();
+
+    ASSERT_BSONOBJ_EQ(combinedObj, document.toBsonWithMetaData());
+}
+
+TEST(DocumentTest, CreateDocumentWithMetadata) {
+    BSONObj docBson = BSON("_id" << 1 << "name" << "test");
+    BSONObj metaBson = BSON("$textScore" << 5.0 << "$searchScore" << 3.5);
+
+    Document doc = Document::createDocumentWithMetadata(docBson, metaBson);
+
+    // Verify document content preserved.
+    ASSERT_EQ(doc["_id"].getInt(), 1);
+    ASSERT_EQ(doc["name"].getString(), "test");
+
+    // Verify metadata attached.
+    ASSERT_TRUE(doc.metadata().hasTextScore());
+    ASSERT_EQ(doc.metadata().getTextScore(), 5.0);
+    ASSERT_TRUE(doc.metadata().hasSearchScore());
+    ASSERT_EQ(doc.metadata().getSearchScore(), 3.5);
+}
+
+TEST(DocumentTest, CreateEmptyDocumentAndMetadata) {
+    BSONObj docBson = BSONObj();
+    BSONObj metaBson = BSONObj();
+
+    Document doc = Document::createDocumentWithMetadata(docBson, metaBson);
+
+    ASSERT_TRUE(doc.empty());
+    ASSERT_FALSE(doc.metadata());
+}
+
+TEST(DocumentTest, CreateEmptyDocumentAndMetadata1) {
+    BSONObj docBson = BSONObj();
+    BSONObj metaBson = BSONObj();
+
+    Document doc = Document::createDocumentWithMetadata(docBson, metaBson);
+
+    ASSERT_TRUE(doc.empty());
+}
+
 class SerializationTest : public unittest::Test {
 protected:
     Document roundTrip(const Document& input) {
@@ -1465,8 +1557,9 @@ TEST(MetaFields, MetaFieldsIncludedInDocumentApproximateSize) {
 
     // Do a sanity check on the amount of space taken by metadata in document 2. Note that the size
     // of certain data types may vary on different build variants, so we cannot assert on the exact
-    // size.
-    ASSERT_LT(doc2.getMetadataApproximateSize(), 400U);
+    // size. Also note that if this assertion fails, it may be because more document metadata fields
+    // were added. If this is the case, then the limit should be relaxed again.
+    ASSERT_LT(doc2.getMetadataApproximateSize(), 500U);
 
     Document emptyDoc;
     ASSERT_LT(emptyDoc.getMetadataApproximateSize(), 100U);
@@ -1599,7 +1692,7 @@ public:
                 Value{obj["str"]};
             }(),
             DBException,
-            16493);
+            ErrorCodes::BSONObjectTooLarge);
     }
 };
 
@@ -1752,6 +1845,30 @@ public:
         Value value(BSONSymbol("FOOBAR"));
         ASSERT_EQUALS("FOOBAR", value.getSymbol());
         ASSERT_EQUALS(BSONType::symbol, value.getType());
+        assertRoundTrips(value);
+    }
+};
+
+/** CodeWScope type. */
+class CodeWScope {
+public:
+    void run() {
+        Value value(BSONCodeWScope("FOO", BSON("BAR" << 1)));
+        ASSERT_EQUALS("FOO", value.getCodeWScope().code);
+        ASSERT_BSONOBJ_EQ(BSON("BAR" << 1), value.getCodeWScope().scope);
+        ASSERT_EQUALS(BSONType::codeWScope, value.getType());
+        assertRoundTrips(value);
+    }
+};
+
+/** DBRef type. */
+class DBRef {
+public:
+    void run() {
+        Value value(BSONDBRef("FOO"_sd, OID("abcdefabcdefabcdefabcdef")));
+        ASSERT_EQUALS("FOO", value.getDBRef().ns);
+        ASSERT_EQUALS(OID("abcdefabcdefabcdefabcdef"), value.getDBRef().oid);
+        ASSERT_EQUALS(BSONType::dbRef, value.getType());
         assertRoundTrips(value);
     }
 };
@@ -2833,6 +2950,8 @@ public:
         add<Value::Bool>();
         add<Value::Regex>();
         add<Value::Symbol>();
+        add<Value::CodeWScope>();
+        add<Value::DBRef>();
         add<Value::Undefined>();
         add<Value::Null>();
         add<Value::True>();

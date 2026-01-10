@@ -30,7 +30,6 @@
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/oid.h"
 #include "mongo/bson/timestamp.h"
@@ -41,19 +40,16 @@
 #include "mongo/db/global_catalog/chunk_manager.h"
 #include "mongo/db/global_catalog/shard_key_pattern.h"
 #include "mongo/db/global_catalog/type_chunk.h"
-#include "mongo/db/global_catalog/type_collection_common_types_gen.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_catalog.h"
-#include "mongo/db/local_catalog/create_collection.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_catalog/collection_metadata.h"
-#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_runtime.h"
-#include "mongo/db/local_catalog/shard_role_catalog/database_sharding_state_mock.h"
-#include "mongo/db/local_catalog/shard_role_catalog/operation_sharding_state.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/query/collation/collator_interface.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/collection_metadata.h"
+#include "mongo/db/shard_role/shard_catalog/collection_sharding_runtime.h"
+#include "mongo/db/shard_role/shard_catalog/database_sharding_state_mock.h"
+#include "mongo/db/shard_role/shard_catalog/operation_sharding_state.h"
 #include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/db/sharding_environment/shard_server_test_fixture.h"
 #include "mongo/db/tenant_id.h"
@@ -61,19 +57,14 @@
 #include "mongo/db/versioning_protocol/database_version.h"
 #include "mongo/db/versioning_protocol/shard_version.h"
 #include "mongo/db/versioning_protocol/shard_version_factory.h"
-#include "mongo/s/resharding/type_collection_fields_gen.h"
 #include "mongo/unittest/unittest.h"
-#include "mongo/util/assert_util.h"
 #include "mongo/util/uuid.h"
 
 #include <memory>
 #include <string>
-#include <type_traits>
 #include <utility>
-#include <variant>
 #include <vector>
 
-#include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
 
@@ -96,7 +87,7 @@ namespace {
 // +---------+-------------------------+-------------+---------------+---------------+
 // | Db Name |          Coll Name      |   Sharded?  |   Db Version  | Shard Version |
 // +---------+-------------------------+-------------+---------------+---------------+
-// | testDB1 |   unsharded.radiohead   |     NO      |      dbV1     |   UNSHARDED() |
+// | testDB1 |   unsharded.radiohead   |     NO      |      dbV1     |   UNTRACKED() |
 // | testDB1 | sharded.porcupine.tree  |     YES     |      dbV1     |       sV1     |
 // | testDB2 |       sharded.oasis     |     YES     |      dbV2     |       sV2     |
 // +---------+-------------------------+-------------+---------------+---------------+
@@ -135,11 +126,11 @@ protected:
         CollectionGeneration{OID::gen(), Timestamp(12, 0)}, CollectionPlacement(10, 1)));
 };
 
-void installUnshardedCollectionMetadata(OperationContext* opCtx, const NamespaceString& nss) {
-    const auto unshardedCollectionMetadata = CollectionMetadata::UNTRACKED();
+void installUntrackedCollectionMetadata(OperationContext* opCtx, const NamespaceString& nss) {
+    const auto untrackedCollectionMetadata = CollectionMetadata::UNTRACKED();
     AutoGetCollection coll(opCtx, nss, MODE_IX);
     CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(opCtx, nss)
-        ->setFilteringMetadata(opCtx, unshardedCollectionMetadata);
+        ->setFilteringMetadata(opCtx, untrackedCollectionMetadata);
 }
 
 void installShardedCollectionMetadata(OperationContext* opCtx,
@@ -176,8 +167,7 @@ void installShardedCollectionMetadata(OperationContext* opCtx,
         RoutingTableHistoryValueHandle(std::make_shared<RoutingTableHistory>(std::move(rt)),
                                        ComparableChunkVersion::makeComparableChunkVersion(version));
 
-    const auto collectionMetadata =
-        CollectionMetadata(ChunkManager(rtHandle, boost::none), thisShardId);
+    const auto collectionMetadata = CollectionMetadata(CurrentChunkManager(rtHandle), thisShardId);
 
     AutoGetCollection coll(opCtx, nss, MODE_IX);
     CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(opCtx, nss)
@@ -196,7 +186,7 @@ void BulkWriteShardTest::setUp() {
 
     // Create nssUnshardedCollection1
     createTestCollection(opCtx(), nssUnshardedCollection1);
-    installUnshardedCollectionMetadata(opCtx(), nssUnshardedCollection1);
+    installUntrackedCollectionMetadata(opCtx(), nssUnshardedCollection1);
 
     // Create nssShardedCollection1
     createTestCollection(opCtx(), nssShardedCollection1);
@@ -240,7 +230,7 @@ TEST_F(BulkWriteShardTest, ThreeSuccessfulInsertsOrdered) {
          BulkWriteInsertOp(2, BSON("x" << -1))},
         {
             nsInfoWithShardDatabaseVersions(
-                nssUnshardedCollection1, dbVersionTestDb1, ShardVersion::UNSHARDED()),
+                nssUnshardedCollection1, dbVersionTestDb1, ShardVersion::UNTRACKED()),
             nsInfoWithShardDatabaseVersions(
                 nssShardedCollection1, dbVersionTestDb1, shardVersionShardedCollection1),
             nsInfoWithShardDatabaseVersions(
@@ -267,7 +257,7 @@ TEST_F(BulkWriteShardTest, OneFailingShardedOneSkippedUnshardedSuccessInsertOrde
         {nsInfoWithShardDatabaseVersions(
              nssShardedCollection1, dbVersionTestDb1, incorrectShardVersion),
          nsInfoWithShardDatabaseVersions(
-             nssUnshardedCollection1, dbVersionTestDb1, ShardVersion::UNSHARDED())});
+             nssUnshardedCollection1, dbVersionTestDb1, ShardVersion::UNTRACKED())});
 
     const auto& [replyItems, retriedStmtIds, summaryFields] =
         bulk_write::performWrites(opCtx(), request);
@@ -372,7 +362,7 @@ TEST_F(BulkWriteShardTest, InsertsAndUpdatesSuccessOrdered) {
          nsInfoWithShardDatabaseVersions(
              nssShardedCollection2, dbVersionTestDb2, shardVersionShardedCollection2),
          nsInfoWithShardDatabaseVersions(
-             nssUnshardedCollection1, dbVersionTestDb1, ShardVersion::UNSHARDED())});
+             nssUnshardedCollection1, dbVersionTestDb1, ShardVersion::UNTRACKED())});
 
     const auto& [replyItems, retriedStmtIds, summaryFields] =
         bulk_write::performWrites(opCtx(), request);
@@ -398,7 +388,7 @@ TEST_F(BulkWriteShardTest, InsertsAndUpdatesSuccessUnordered) {
          nsInfoWithShardDatabaseVersions(
              nssShardedCollection2, dbVersionTestDb2, shardVersionShardedCollection2),
          nsInfoWithShardDatabaseVersions(
-             nssUnshardedCollection1, dbVersionTestDb1, ShardVersion::UNSHARDED())});
+             nssUnshardedCollection1, dbVersionTestDb1, ShardVersion::UNTRACKED())});
 
     request.setOrdered(false);
 
@@ -426,7 +416,7 @@ TEST_F(BulkWriteShardTest, InsertsAndUpdatesFailUnordered) {
          nsInfoWithShardDatabaseVersions(
              nssShardedCollection2, dbVersionTestDb2, shardVersionShardedCollection2),
          nsInfoWithShardDatabaseVersions(
-             nssUnshardedCollection1, dbVersionTestDb1, ShardVersion::UNSHARDED())});
+             nssUnshardedCollection1, dbVersionTestDb1, ShardVersion::UNTRACKED())});
 
     request.setOrdered(false);
 
@@ -534,7 +524,7 @@ TEST_F(BulkWriteShardTest, FirstFailsRestSkippedStaleDbVersionUnordered) {
          BulkWriteInsertOp(0, BSON("x" << -1)),
          BulkWriteInsertOp(1, BSON("x" << -2))},
         {nsInfoWithShardDatabaseVersions(
-             nssUnshardedCollection1, incorrectDatabaseVersion, ShardVersion::UNSHARDED()),
+             nssUnshardedCollection1, incorrectDatabaseVersion, ShardVersion::UNTRACKED()),
          nsInfoWithShardDatabaseVersions(
              nssShardedCollection2, dbVersionTestDb2, shardVersionShardedCollection2)});
 

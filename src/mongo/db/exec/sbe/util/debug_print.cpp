@@ -32,7 +32,6 @@
 #include "mongo/db/exec/sbe/stages/stages.h"
 
 #include <cstddef>
-#include <memory>
 
 namespace mongo {
 namespace sbe {
@@ -124,8 +123,8 @@ std::string DebugPrinter::print(const std::vector<Block>& blocks) {
     return ret;
 }
 
-std::string DebugPrinter::print(const PlanStage& s) {
-    return print(s.debugPrint());
+std::string DebugPrinter::print(const PlanStage& s, DebugPrintInfo& debugPrintInfo) {
+    return print(s.debugPrint(debugPrintInfo));
 }
 }  // namespace sbe
 }  // namespace mongo

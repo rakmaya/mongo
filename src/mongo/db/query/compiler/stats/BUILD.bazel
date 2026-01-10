@@ -25,11 +25,6 @@ mongo_cc_library(
         "value_utils.cpp",
         ":stats_for_histograms_gen",
     ],
-    hdrs = [
-        "ce_histogram.h",
-        "scalar_histogram.h",
-        "value_utils.h",
-    ],
     deps = [
         "//src/mongo/db:sbe_values",
         "//src/mongo/db/exec:docval_to_sbeval",
@@ -41,9 +36,6 @@ mongo_cc_library(
     srcs = [
         "max_diff.cpp",
     ],
-    hdrs = [
-        "max_diff.h",
-    ],
     deps = [
         ":stats_histograms",
     ],
@@ -51,9 +43,6 @@ mongo_cc_library(
 
 mongo_cc_library(
     name = "collection_statistics_interface",
-    hdrs = [
-        "collection_statistics.h",
-    ],
     deps = [
         ":stats_histograms",
     ],
@@ -67,19 +56,12 @@ mongo_cc_library(
         "stats_cache_loader_impl.cpp",
         "stats_catalog.cpp",
     ],
-    hdrs = [
-        "collection_statistics_impl.h",
-        "stats_cache.h",
-        "stats_cache_loader.h",
-        "stats_cache_loader_impl.h",
-        "stats_catalog.h",
-    ],
     deps = [
         ":collection_statistics_interface",
         ":stats_histograms",
         "//src/mongo/db:dbdirectclient",
-        "//src/mongo/util:caching",  # TODO(SERVER-93876): Remove.
-        "//src/mongo/util/concurrency:thread_pool",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/util:caching",
+        "//src/mongo/util/concurrency:thread_pool",
     ],
 )
 
@@ -87,9 +69,6 @@ mongo_cc_library(
     name = "test_utils",
     srcs = [
         "test_utils.cpp",
-    ],
-    hdrs = [
-        "test_utils.h",
     ],
     deps = [
         "//src/mongo/db:sbe_values",
@@ -101,9 +80,6 @@ mongo_cc_library(
     srcs = [
         "collection_statistics_mock.cpp",
     ],
-    hdrs = [
-        "collection_statistics_mock.h",
-    ],
     deps = [
         ":collection_statistics_interface",
     ],
@@ -113,9 +89,6 @@ mongo_cc_library(
     name = "maxdiff_test_utils",
     srcs = [
         "maxdiff_test_utils.cpp",
-    ],
-    hdrs = [
-        "maxdiff_test_utils.h",
     ],
     deps = [
         ":stats_histograms",
@@ -135,14 +108,12 @@ mongo_cc_library(
     srcs = [
         "rand_utils.cpp",
     ],
-    hdrs = [
-        "rand_utils.h",
-    ],
     deps = [
         ":stats_histograms",
         "//src/mongo:base",
         "//src/mongo/db:sbe_values",
         "//src/mongo/stdx",
+        "@com_google_absl//absl/random:distributions",
     ],
 )
 
@@ -152,7 +123,6 @@ mongo_cc_unit_test(
         "stats_cache_loader_mock.cpp",
         "stats_cache_test.cpp",
     ],
-    private_hdrs = [":stats_cache_loader_mock.h"],
     tags = ["mongo_unittest_eighth_group"],
     deps = [
         ":stats",
@@ -231,7 +201,6 @@ mongo_cc_unit_test(
         "stats_cache_loader_test.cpp",
         "stats_cache_loader_test_fixture.cpp",
     ],
-    private_hdrs = [":stats_cache_loader_test_fixture.h"],
     tags = ["mongo_unittest_eighth_group"],
     deps = [
         "//src/mongo/db:multitenancy",
@@ -240,7 +209,6 @@ mongo_cc_unit_test(
         "//src/mongo/db:service_context",
         "//src/mongo/db:service_context_d_test_fixture",
         "//src/mongo/db:service_context_test_fixture",
-        "//src/mongo/db:shard_role",
         "//src/mongo/db/auth:authmocks",
         "//src/mongo/db/collection_crud",
         "//src/mongo/db/commands:test_commands_enabled",
@@ -254,6 +222,7 @@ mongo_cc_unit_test(
         "//src/mongo/db/repl:repl_coordinator_interface",
         "//src/mongo/db/repl:replmocks",
         "//src/mongo/db/repl:storage_interface_impl",
+        "//src/mongo/db/shard_role",
         "//src/mongo/db/storage/wiredtiger:storage_wiredtiger",
         "//src/mongo/db/timeseries:timeseries_options",
         "//src/mongo/unittest",

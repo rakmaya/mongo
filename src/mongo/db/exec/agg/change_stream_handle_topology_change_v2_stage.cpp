@@ -32,10 +32,10 @@
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/db/exec/agg/document_source_to_stage_registry.h"
-#include "mongo/db/global_catalog/router_role_api/cluster_commands_helpers.h"
 #include "mongo/db/global_catalog/type_shard.h"
 #include "mongo/db/pipeline/change_stream_helpers.h"
 #include "mongo/db/pipeline/change_stream_pipeline_helpers.h"
+#include "mongo/db/pipeline/change_stream_read_mode.h"
 #include "mongo/db/pipeline/change_stream_reader_builder.h"
 #include "mongo/db/pipeline/change_stream_reader_context.h"
 #include "mongo/db/pipeline/change_stream_shard_targeter.h"
@@ -46,6 +46,7 @@
 #include "mongo/db/pipeline/resume_token.h"
 #include "mongo/db/query/compiler/parsers/matcher/expression_parser.h"
 #include "mongo/db/query/query_knobs_gen.h"
+#include "mongo/db/router_role/cluster_commands_helpers.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/sharding_environment/client/shard.h"
 #include "mongo/db/sharding_environment/grid.h"
@@ -98,7 +99,9 @@ public:
         _mergeCursors = stage->getSourceStage();
 
         _mergeCursors->recognizeControlEvents();
-        _mergeCursors->setInitialHighWaterMark(ResumeToken(resumeTokenData).toBSON());
+
+        _initializationResumeToken = ResumeToken(resumeTokenData);
+        _mergeCursors->setInitialHighWaterMark(_initializationResumeToken.toBSON());
 
         _originalAggregateCommand = expCtx->getOriginalAggregateCommand().getOwned();
     }
@@ -112,11 +115,26 @@ public:
                 // Build the change stream pipeline command to be run on the data shards.
                 // '_originalAggregateCommand' already contains the relevant match expressions
                 // for the oplog.
-                auto cmdObj = change_stream::topology_helpers::createUpdatedCommandForNewShard(
-                    expCtx,
-                    atClusterTime,
-                    _originalAggregateCommand,
-                    ChangeStreamReaderVersionEnum::kV2);
+                auto cmdObj = [&]() {
+                    // If the 'atClusterTime' matches the clusterTime of
+                    // '_initializationResumeToken', we should open the $changeStream cursors by
+                    // passing the original resume token.
+                    const bool isInitialRequest =
+                        atClusterTime == _initializationResumeToken.getClusterTime();
+                    if (isInitialRequest) {
+                        return change_stream::topology_helpers::createUpdatedCommandForNewShard(
+                            expCtx,
+                            _initializationResumeToken,
+                            _originalAggregateCommand,
+                            ChangeStreamReaderVersionEnum::kV2);
+                    }
+
+                    return change_stream::topology_helpers::createUpdatedCommandForNewShard(
+                        expCtx,
+                        atClusterTime,
+                        _originalAggregateCommand,
+                        ChangeStreamReaderVersionEnum::kV2);
+                }();
 
                 LOGV2_DEBUG(10657554,
                             3,
@@ -383,6 +401,9 @@ private:
     // The original aggregate pipeline command used when opening the change stream. Used when
     // opening change streams on data shards.
     BSONObj _originalAggregateCommand;
+
+    // ResumeToken used for initializing the CursorManager.
+    ResumeToken _initializationResumeToken;
 
     // Pointer to the preceding 'MergeCursors' stage. Will be set in 'initialize()'.
     exec::agg::MergeCursorsStage* _mergeCursors = nullptr;

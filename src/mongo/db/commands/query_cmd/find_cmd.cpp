@@ -36,7 +36,7 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/client/read_preference.h"
 #include "mongo/crypto/fle_field_schema_gen.h"
-#include "mongo/db/admission/execution_admission_context.h"
+#include "mongo/db/admission/execution_control/execution_admission_context.h"
 #include "mongo/db/api_parameters.h"
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_checks.h"
@@ -55,12 +55,6 @@
 #include "mongo/db/exec/disk_use_options_gen.h"
 #include "mongo/db/exec/shard_filterer_impl.h"
 #include "mongo/db/fle_crud.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_options.h"
-#include "mongo/db/local_catalog/collection_type.h"
-#include "mongo/db/local_catalog/db_raii.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/logical_time.h"
 #include "mongo/db/matcher/extensions_callback_real.h"
 #include "mongo/db/namespace_string.h"
@@ -79,6 +73,7 @@
 #include "mongo/db/query/client_cursor/cursor_response.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/db/query/collation/collator_interface.h"
+#include "mongo/db/query/collection_query_info.h"
 #include "mongo/db/query/compiler/parsers/matcher/expression_parser.h"
 #include "mongo/db/query/explain.h"
 #include "mongo/db/query/explain_diagnostic_printer.h"
@@ -100,7 +95,6 @@
 #include "mongo/db/query/query_utils.h"
 #include "mongo/db/query/shard_key_diagnostic_printer.h"
 #include "mongo/db/query/timeseries/timeseries_translation.h"
-#include "mongo/db/raw_data_operation.h"
 #include "mongo/db/read_concern_support_result.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/repl/read_concern_level.h"
@@ -108,6 +102,14 @@
 #include "mongo/db/s/query_analysis_writer.h"
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/lock_manager/exception_util.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_options.h"
+#include "mongo/db/shard_role/shard_catalog/collection_type.h"
+#include "mongo/db/shard_role/shard_catalog/db_raii.h"
+#include "mongo/db/shard_role/shard_catalog/raw_data_operation.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/storage_options.h"
@@ -190,6 +192,10 @@ std::unique_ptr<CanonicalQuery> parseQueryAndBeginOperation(
     auto expCtx = ExpressionContextBuilder{}
                       .fromRequest(opCtx, *findCommand, collator, allowDiskUseByDefault.load())
                       .tmpDir(boost::filesystem::path(storageGlobalParams.dbpath) / "_tmp")
+                      .mainCollPathArrayness(
+                          collection && feature_flags::gFeatureFlagPathArrayness.isEnabled()
+                              ? CollectionQueryInfo::get(collection).getPathArrayness()
+                              : nullptr)
                       .build();
     expCtx->startExpressionCounters();
     auto parsedRequest = uassertStatusOK(parsed_find_command::parse(
@@ -231,7 +237,7 @@ std::unique_ptr<CanonicalQuery> parseQueryAndBeginOperation(
         });
 
         if (parsedRequest->findCommandRequest->getIncludeQueryStatsMetrics()) {
-            CurOp::get(opCtx)->debug().queryStatsInfo.metricsRequested = true;
+            CurOp::get(opCtx)->debug().getQueryStatsInfo().metricsRequested = true;
         }
     }
 
@@ -428,6 +434,9 @@ public:
             }
         }
 
+        /**
+         * Entry point for execution of find explain command.
+         */
         void explain(OperationContext* opCtx,
                      ExplainOptions::Verbosity verbosity,
                      rpc::ReplyBuilderInterface* replyBuilder) override {
@@ -503,6 +512,10 @@ public:
                     .fromRequest(opCtx, *_cmdRequest, collator, allowDiskUseByDefault.load())
                     .explain(verbosity)
                     .tmpDir(boost::filesystem::path(storageGlobalParams.dbpath) / "_tmp")
+                    .mainCollPathArrayness(
+                        collectionPtr && feature_flags::gFeatureFlagPathArrayness.isEnabled()
+                            ? CollectionQueryInfo::get(collectionPtr).getPathArrayness()
+                            : nullptr)
                     .build();
             expCtx->startExpressionCounters();
 
@@ -546,7 +559,7 @@ public:
                 timeseries::requiresViewlessTimeseriesTranslation(opCtx, *collectionOrView)) {
                 // Relinquish locks. The aggregation command will re-acquire them.
                 collectionOrView.reset();
-                CurOp::get(opCtx)->debug().queryStatsInfo.disableForSubqueryExecution = true;
+                CurOp::get(opCtx)->debug().getQueryStatsInfo().disableForSubqueryExecution = true;
                 return runFindAsAgg(opCtx, *cq, verbosity, replyBuilder);
             }
 
@@ -871,6 +884,7 @@ public:
             {
                 stdx::lock_guard<Client> lk(*opCtx->getClient());
                 CurOp::get(opCtx)->setPlanSummary(lk, exec->getPlanExplainer().getPlanSummary());
+                CurOp::get(opCtx)->debug().queryFramework = exec->getQueryFramework();
             }
 
             if (!collection.exists()) {
@@ -1017,6 +1031,7 @@ public:
             // checked on getMore and explain will not open a cursor.
             const auto privileges = verbosity ? PrivilegeVector{}
                                               : uassertStatusOK(auth::getPrivilegesForAggregate(
+                                                    opCtx,
                                                     AuthorizationSession::get(opCtx->getClient()),
                                                     aggRequest.getNamespace(),
                                                     aggRequest,
@@ -1109,11 +1124,7 @@ private:
             CommandHelpers::ensureValidCollectionName(nss.nss());
         }
 
-        // Forbid users from passing 'querySettings' explicitly.
-        uassert(7746901,
-                "BSON field 'querySettings' is an unknown field",
-                query_settings::allowQuerySettingsFromClient(opCtx->getClient()) ||
-                    !findCommand->getQuerySettings().has_value());
+        assertInternalParamsAreSetByInternalClients(opCtx->getClient(), *findCommand);
 
         uassert(ErrorCodes::FailedToParse,
                 "Use of forcedPlanSolutionHash not permitted.",

@@ -35,15 +35,14 @@
 
 #include <fmt/format.h>
 
-namespace mongo::optimizer {
+namespace mongo::join_ordering {
 
-optimizer::SamplingEstimatorMap makeSamplingEstimators(
-    const MultipleCollectionAccessor& collections,
-    const mongo::join_ordering::JoinGraph& graph,
-    PlanYieldPolicy::YieldPolicy yieldPolicy) {
+SamplingEstimatorMap makeSamplingEstimators(const MultipleCollectionAccessor& collections,
+                                            const JoinGraph& graph,
+                                            PlanYieldPolicy::YieldPolicy yieldPolicy) {
     const auto numNodes = graph.numNodes();
 
-    optimizer::SamplingEstimatorMap samplingEstimators;
+    SamplingEstimatorMap samplingEstimators;
     samplingEstimators.reserve(numNodes);
 
     for (size_t i = 0; i < numNodes; i++) {
@@ -73,9 +72,9 @@ optimizer::SamplingEstimatorMap makeSamplingEstimators(
 StatusWith<SingleTableAccessPlansResult> singleTableAccessPlans(
     OperationContext* opCtx,
     const MultipleCollectionAccessor& collections,
-    const mongo::join_ordering::JoinGraph& graph,
+    const JoinGraph& graph,
     const SamplingEstimatorMap& samplingEstimators) {
-    join_ordering::QuerySolutionMap solns;
+    QuerySolutionMap solns;
     cost_based_ranker::EstimateMap estimates;
 
     const auto numNodes = graph.numNodes();
@@ -83,10 +82,24 @@ StatusWith<SingleTableAccessPlansResult> singleTableAccessPlans(
         const auto& node = graph.getNode(i);
         auto& nss = node.accessPath->nss();
 
+        // Re-construct MultipleCollectionAccessor so that this collection is treated as the "main"
+        // collection during query planning (and CE).
+        auto singleAcq = [&nss, &collections]() -> CollectionOrViewAcquisition {
+            if (nss == collections.getMainCollectionPtrOrAcquisition().nss()) {
+                return collections.getMainCollectionPtrOrAcquisition();
+            }
+
+            const auto& secondaries = collections.getSecondaryCollectionAcquisitions();
+            auto it = secondaries.find(nss);
+            tassert(11434000, "Namespace not found in collections", it != secondaries.end());
+            return it->second;
+        }();
+        MultipleCollectionAccessor singleMca{singleAcq};
+
         QueryPlannerParams params(QueryPlannerParams::ArgsForSingleCollectionQuery{
             .opCtx = opCtx,
             .canonicalQuery = *node.accessPath,
-            .collections = collections,
+            .collections = singleMca,
             .planRankerMode = QueryPlanRankerModeEnum::kSamplingCE,
         });
 
@@ -120,4 +133,4 @@ StatusWith<SingleTableAccessPlansResult> singleTableAccessPlans(
     };
 }
 
-}  // namespace mongo::optimizer
+}  // namespace mongo::join_ordering

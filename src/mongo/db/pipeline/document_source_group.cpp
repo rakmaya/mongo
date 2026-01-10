@@ -57,10 +57,10 @@ namespace mongo {
 
 constexpr StringData DocumentSourceGroup::kStageName;
 
-REGISTER_DOCUMENT_SOURCE(group,
-                         LiteParsedDocumentSourceDefault::parse,
-                         DocumentSourceGroup::createFromBson,
-                         AllowedWithApiStrict::kAlways);
+REGISTER_LITE_PARSED_DOCUMENT_SOURCE(group, GroupLiteParsed::parse, AllowedWithApiStrict::kAlways);
+
+REGISTER_DOCUMENT_SOURCE_WITH_STAGE_PARAMS_DEFAULT(group, DocumentSourceGroup, GroupStageParams);
+
 ALLOCATE_DOCUMENT_SOURCE_ID(group, DocumentSourceGroup::id)
 
 const char* DocumentSourceGroup::getSourceName() const {
@@ -93,9 +93,9 @@ boost::intrusive_ptr<DocumentSource> DocumentSourceGroup::createFromBson(
     return createFromBsonWithMaxMemoryUsage(std::move(elem), expCtx, boost::none);
 }
 
-DocumentSourceContainer::iterator DocumentSourceGroup::doOptimizeAt(
+DocumentSourceContainer::iterator DocumentSourceGroup::optimizeAt(
     DocumentSourceContainer::iterator itr, DocumentSourceContainer* container) {
-    invariant(*itr == this);
+    tassert(11294800, "Expecting DocumentSource iterator pointing to this stage", *itr == this);
 
     if (pushDotRenamedMatch(itr, container)) {
         return itr;
@@ -220,7 +220,7 @@ AccumulationStatement makeAccStmtForTopBottom(boost::intrusive_ptr<ExpressionCon
 bool DocumentSourceGroup::tryToAbsorbTopKSort(DocumentSourceSort* prospectiveSort,
                                               DocumentSourceContainer::iterator prospectiveSortItr,
                                               DocumentSourceContainer* container) {
-    invariant(prospectiveSort);
+    tassert(11282999, "Missing $sort stage pointer", prospectiveSort);
 
     // If the $sort has a limit, we cannot absorb it into the $group since we know the selected
     // documents for $limit for sure after all the input are processed.

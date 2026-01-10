@@ -39,11 +39,13 @@
 #include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/expression_context_builder.h"
+#include "mongo/db/pipeline/pipeline_factory.h"
 #include "mongo/db/pipeline/process_interface/mongo_process_interface.h"
 #include "mongo/db/pipeline/sort_reorder_helpers.h"
 #include "mongo/db/query/allowed_contexts.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/stage_memory_limit_knobs/knobs.h"
+#include "mongo/db/shard_role/shard_catalog/raw_data_operation.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/topology/sharding_state.h"
 #include "mongo/util/namespace_string_util.h"
@@ -95,13 +97,18 @@ std::unique_ptr<DocumentSourceGraphLookUp::LiteParsed> DocumentSourceGraphLookUp
             fromElement);
 
     return std::make_unique<LiteParsed>(
-        spec.fieldName(), parseGraphLookupFromAndResolveNamespace(fromElement, nss.dbName()));
+        spec, parseGraphLookupFromAndResolveNamespace(fromElement, nss.dbName()));
 }
 
-REGISTER_DOCUMENT_SOURCE(graphLookup,
-                         DocumentSourceGraphLookUp::LiteParsed::parse,
-                         DocumentSourceGraphLookUp::createFromBson,
-                         AllowedWithApiStrict::kAlways);
+
+REGISTER_LITE_PARSED_DOCUMENT_SOURCE(graphLookup,
+                                     DocumentSourceGraphLookUp::LiteParsed::parse,
+                                     AllowedWithApiStrict::kAlways);
+
+REGISTER_DOCUMENT_SOURCE_WITH_STAGE_PARAMS_DEFAULT(graphLookup,
+                                                   DocumentSourceGraphLookUp,
+                                                   GraphLookUpStageParams);
+
 ALLOCATE_DOCUMENT_SOURCE_ID(graphLookup, DocumentSourceGraphLookUp::id)
 
 const char* DocumentSourceGraphLookUp::getSourceName() const {
@@ -158,7 +165,9 @@ DocumentSource::GetModPathsReturn DocumentSourceGraphLookUp::getModifiedPaths() 
     OrderedPathSet modifiedPaths{getAsField().fullPath()};
     if (_unwind) {
         auto pathsModifiedByUnwind = _unwind.value()->getModifiedPaths();
-        invariant(pathsModifiedByUnwind.type == GetModPathsReturn::Type::kFiniteSet);
+        tassert(11294802,
+                "Expecting only finite set of paths modified by $unwind",
+                pathsModifiedByUnwind.type == GetModPathsReturn::Type::kFiniteSet);
         modifiedPaths.insert(pathsModifiedByUnwind.paths.begin(),
                              pathsModifiedByUnwind.paths.end());
     }
@@ -191,9 +200,9 @@ StageConstraints DocumentSourceGraphLookUp::constraints(PipelineSplitState pipeS
     return constraints;
 }
 
-DocumentSourceContainer::iterator DocumentSourceGraphLookUp::doOptimizeAt(
+DocumentSourceContainer::iterator DocumentSourceGraphLookUp::optimizeAt(
     DocumentSourceContainer::iterator itr, DocumentSourceContainer* container) {
-    invariant(*itr == this);
+    tassert(11294801, "Expecting DocumentSource iterator pointing to this stage", *itr == this);
 
     if (std::next(itr) == container->end()) {
         return container->end();
@@ -313,8 +322,13 @@ DocumentSourceGraphLookUp::DocumentSourceGraphLookUp(
 
     // We append an additional BSONObj to '_fromPipeline' as a placeholder for the $match
     // stage we'll eventually construct from the input document.
-    _fromPipeline.reserve(resolvedNamespace.pipeline.size() + 1);
-    _fromPipeline = resolvedNamespace.pipeline;
+    if (!isRawDataOperation(expCtx->getOperationContext()) ||
+        !resolvedNamespace.ns.isTimeseriesBucketsCollection()) {
+        _fromPipeline.reserve(resolvedNamespace.pipeline.size() + 1);
+        _fromPipeline = resolvedNamespace.pipeline;
+    } else {
+        _fromPipeline.reserve(1);
+    }
     _fromPipeline.push_back(BSON("$match" << BSONObj()));
 }
 
@@ -470,7 +484,8 @@ boost::intrusive_ptr<DocumentSource> DocumentSourceGraphLookUp::clone(
 void DocumentSourceGraphLookUp::addInvolvedCollections(
     stdx::unordered_set<NamespaceString>* collectionNames) const {
     collectionNames->insert(_fromExpCtx->getNamespaceString());
-    auto introspectionPipeline = Pipeline::parse(_fromPipeline, _fromExpCtx);
+    auto introspectionPipeline = pipeline_factory::makePipeline(
+        _fromPipeline, _fromExpCtx, pipeline_factory::kOptionsMinimal);
     for (auto&& stage : introspectionPipeline->getSources()) {
         stage->addInvolvedCollections(collectionNames);
     }

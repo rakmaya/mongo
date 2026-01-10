@@ -30,6 +30,7 @@
 #pragma once
 
 #include "mongo/platform/atomic_word.h"
+#include "mongo/util/modules.h"
 
 namespace mongo {
 
@@ -40,7 +41,7 @@ class ServiceContext;
 /**
  * Encapsulates per-process statistics for the sharding subsystem.
  */
-struct ShardingStatistics {
+struct MONGO_MOD_NEEDS_REPLACEMENT ShardingStatistics {
     // Counts how many times threads hit stale config exception (which is what triggers metadata
     // refreshes).
     AtomicWord<long long> countStaleConfigErrors{0};
@@ -151,6 +152,13 @@ struct ShardingStatistics {
     // that have been kicked off by the _flushReshardingStateChange command.
     AtomicWord<long long> countFlushReshardingStateChangeSuccessfulShardingMetadataRefreshes{0};
     AtomicWord<long long> countFlushReshardingStateChangeFailedShardingMetadataRefreshes{0};
+
+    // Total number of times a compound wildcard index prefixed by shard key has been detected
+    // during a moveChunk, range deleter or any other operation which needs to fetch a valid shard
+    // key index. This will help estimate the impact of SERVER-103774.
+    //
+    // TODO (SERVER-112793) Remove once v9.0 branches out.
+    AtomicWord<long long> countHitsOfCompoundWildcardIndexesWithShardKeyPrefix{0};
 
     /**
      * Obtains the per-process instance of the sharding statistics object.

@@ -32,17 +32,17 @@
 #include "mongo/bson/oid.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/client/connection_string.h"
-#include "mongo/db/global_catalog/router_role_api/ns_targeter.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/optime.h"
+#include "mongo/db/router_role/ns_targeter.h"
 #include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/s/write_ops/batched_command_request.h"
 #include "mongo/s/write_ops/batched_command_response.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/net/hostandport.h"
 
 #include <map>
 #include <set>
-#include <string>
 
 #include <boost/optional/optional.hpp>
 
@@ -90,7 +90,8 @@ struct HostOpTime {
 
 typedef std::map<ConnectionString, HostOpTime> HostOpTimeMap;
 
-class BatchWriteExecStats {
+// TODO SERVER-109104 This macro will be resolved once we delete the BatchWriteExec.
+class MONGO_MOD_NEEDS_REPLACEMENT BatchWriteExecStats {
 public:
     BatchWriteExecStats() : numRounds(0), numStaleShardBatches(0), numStaleDbBatches(0) {}
 

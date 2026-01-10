@@ -30,10 +30,11 @@
 
 #include "mongo/db/exec/agg/pipeline_builder.h"
 #include "mongo/db/exec/document_value/document.h"
-#include "mongo/db/pipeline/document_source_internal_shard_filter.h"
 #include "mongo/db/pipeline/document_source_limit.h"
+#include "mongo/db/pipeline/pipeline_factory.h"
 #include "mongo/db/pipeline/search/document_source_internal_search_id_lookup_gen.h"
 #include "mongo/db/pipeline/search/document_source_search.h"
+#include "mongo/db/pipeline/skip_and_limit.h"
 
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
@@ -41,23 +42,26 @@ namespace mongo {
 
 using boost::intrusive_ptr;
 
-REGISTER_DOCUMENT_SOURCE(_internalSearchIdLookup,
-                         DocumentSourceInternalSearchIdLookUp::LiteParsed::parse,
-                         DocumentSourceInternalSearchIdLookUp::createFromBson,
-                         AllowedWithApiStrict::kInternal);
-ALLOCATE_DOCUMENT_SOURCE_ID(_internalSearchIdLookup, DocumentSourceInternalSearchIdLookUp::id)
+REGISTER_LITE_PARSED_DOCUMENT_SOURCE(_internalSearchIdLookup,
+                                     DocumentSourceInternalSearchIdLookUp::LiteParsed::parse,
+                                     AllowedWithApiStrict::kInternal);
+
+REGISTER_DOCUMENT_SOURCE_WITH_STAGE_PARAMS_DEFAULT(_internalSearchIdLookup,
+                                                   DocumentSourceInternalSearchIdLookUp,
+                                                   InternalSearchIdLookupStageParams);
+
+ALLOCATE_DOCUMENT_SOURCE_ID(_internalSearchIdLookup, DocumentSourceInternalSearchIdLookUp::id);
 
 DocumentSourceInternalSearchIdLookUp::DocumentSourceInternalSearchIdLookUp(
     const intrusive_ptr<ExpressionContext>& expCtx,
     long long limit,
-    const boost::intrusive_ptr<CatalogResourceHandle>& catalogResourceHandle,
-    ExecShardFilterPolicy shardFilterPolicy,
     boost::optional<SearchQueryViewSpec> view)
     : DocumentSource(kStageName, expCtx),
       _limit(limit),
-      _catalogResourceHandle(catalogResourceHandle),
-      _shardFilterPolicy(shardFilterPolicy),
-      _viewPipeline(view ? Pipeline::parse(view->getEffectivePipeline(), getExpCtx()) : nullptr) {
+      _viewPipeline(view ? pipeline_factory::makePipeline(view->getEffectivePipeline(),
+                                                          getExpCtx(),
+                                                          pipeline_factory::kOptionsMinimal)
+                         : nullptr) {
     // We need to reset the docsSeenByIdLookup/docsReturnedByIdLookup in the state sharedby the
     // DocumentSourceInternalSearchMongotRemote and DocumentSourceInternalSearchIdLookup stages when
     // we create a new DocumentSourceInternalSearchIdLookup stage. This is because if $search is
@@ -118,8 +122,9 @@ Value DocumentSourceInternalSearchIdLookUp::serialize(const SerializationOptions
             pipeline.insert(pipeline.end(), bsonViewPipeline.begin(), bsonViewPipeline.end());
         }
 
-        outputSpec["subPipeline"] =
-            Value(Pipeline::parse(pipeline, getExpCtx())->serializeToBson(opts));
+        outputSpec["subPipeline"] = Value(
+            pipeline_factory::makePipeline(pipeline, getExpCtx(), pipeline_factory::kOptionsMinimal)
+                ->serializeToBson(opts));
     }
 
     return Value(DOC(getSourceName() << outputSpec.freezeToValue()));
@@ -129,19 +134,22 @@ const char* DocumentSourceInternalSearchIdLookUp::getSourceName() const {
     return kStageName.data();
 }
 
-DocumentSourceContainer::iterator DocumentSourceInternalSearchIdLookUp::doOptimizeAt(
+void DocumentSourceInternalSearchIdLookUp::bindCatalogInfo(
+    const MultipleCollectionAccessor& collections,
+    boost::intrusive_ptr<ShardRoleTransactionResourcesStasherForPipeline> sharedStasher) {
+    // We should not error on non-existent collections as they should return EOF.
+    uassert(11140100,
+            "$_internalSearchIdLookup must be run on a collection.",
+            collections.hasMainCollection() || collections.hasNonExistentMainCollection());
+    _catalogResourceHandle = make_intrusive<DSInternalSearchIdLookUpCatalogResourceHandle>(
+        sharedStasher, collections.getMainCollectionAcquisition());
+}
+
+DocumentSourceContainer::iterator DocumentSourceInternalSearchIdLookUp::optimizeAt(
     DocumentSourceContainer::iterator itr, DocumentSourceContainer* container) {
-    for (auto optItr = std::next(itr); optItr != container->end(); ++optItr) {
-        auto limitStage = dynamic_cast<DocumentSourceLimit*>(optItr->get());
-        if (limitStage) {
-            _limit = limitStage->getLimit();
-            break;
-        }
-        if (!optItr->get()->constraints().canSwapWithSkippingOrLimitingStage) {
-            break;
-        }
-    }
-    return std::next(itr);
+    auto stageItr = std::next(itr);
+    _limit = getUserLimit(stageItr, container).value_or(_limit);
+    return stageItr;
 }
 
 }  // namespace mongo

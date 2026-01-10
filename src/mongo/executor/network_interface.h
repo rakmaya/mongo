@@ -45,6 +45,7 @@
 #include "mongo/util/functional.h"
 #include "mongo/util/future.h"
 #include "mongo/util/future_impl.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/time_support.h"
 
@@ -68,21 +69,11 @@ extern FailPoint networkInterfaceShouldNotKillPendingRequests;
 /**
  * Interface to networking for use by TaskExecutor implementations.
  */
-class NetworkInterface {
+class MONGO_MOD_PUBLIC NetworkInterface {
     NetworkInterface(const NetworkInterface&) = delete;
     NetworkInterface& operator=(const NetworkInterface&) = delete;
 
 public:
-    using Response = RemoteCommandResponse;
-    /**
-     * This must not throw exceptions.
-     */
-    using RemoteCommandCompletionFn = unique_function<void(const TaskExecutor::ResponseStatus&)>;
-    /**
-     * This must not throw exceptions.
-     */
-    using RemoteCommandOnReplyFn = unique_function<void(const TaskExecutor::ResponseStatus&)>;
-
     // Indicates that there is no expiration time by when a request needs to complete
     static constexpr Date_t kNoExpirationDate{Date_t::max()};
 

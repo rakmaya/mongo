@@ -40,6 +40,7 @@
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/lite_parsed_document_source.h"
+#include "mongo/db/pipeline/lite_parsed_document_source_nested_pipelines.h"
 #include "mongo/db/pipeline/lite_parsed_pipeline.h"
 #include "mongo/db/pipeline/optimization/optimize.h"
 #include "mongo/db/pipeline/pipeline.h"
@@ -49,6 +50,7 @@
 #include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
 
 #include <list>
 #include <memory>
@@ -65,7 +67,7 @@
 namespace mongo {
 
 struct UnionWithSharedState {
-    enum ExecutionProgress {
+    enum class ExecutionProgress {
         // We haven't yet iterated 'pSource' to completion.
         kIteratingSource,
 
@@ -80,6 +82,14 @@ struct UnionWithSharedState {
         // There are no more results.
         kFinished
     };
+
+    UnionWithSharedState(std::unique_ptr<Pipeline> pipeline,
+                         std::unique_ptr<exec::agg::Pipeline> execPipeline,
+                         ExecutionProgress executionState = ExecutionProgress::kIteratingSource);
+
+    // This pipeline will not be translated nor optimized, but the view will be resolved.
+    // Pre-optimization rewrites and optimizations will happen right before the subpipeline is
+    // executed in 'UnionWithStage::doGetNext'.
     std::unique_ptr<Pipeline> _pipeline;
     std::unique_ptr<exec::agg::Pipeline> _execPipeline;
     // The aggregation pipeline defined with the user request, prior to optimization and view
@@ -95,30 +105,36 @@ struct UnionWithSharedState {
     VariablesParseState _variablesParseState;
 };
 
-class DocumentSourceUnionWith final : public DocumentSource {
+DECLARE_STAGE_PARAMS_DERIVED_DEFAULT(UnionWith);
+
+class MONGO_MOD_NEEDS_REPLACEMENT DocumentSourceUnionWith final : public DocumentSource {
 public:
     static constexpr StringData kStageName = "$unionWith"_sd;
 
     static boost::intrusive_ptr<DocumentSource> createFromBson(
         BSONElement elem, const boost::intrusive_ptr<ExpressionContext>& expCtx);
 
-    class LiteParsed final : public LiteParsedDocumentSourceNestedPipelines {
+    class LiteParsed final : public LiteParsedDocumentSourceNestedPipelines<LiteParsed> {
     public:
         static std::unique_ptr<LiteParsed> parse(const NamespaceString& nss,
                                                  const BSONElement& spec,
                                                  const LiteParserOptions& options);
 
-        LiteParsed(std::string parseTimeName,
+        LiteParsed(const BSONElement& spec,
                    NamespaceString foreignNss,
                    boost::optional<LiteParsedPipeline> pipeline)
             : LiteParsedDocumentSourceNestedPipelines(
-                  std::move(parseTimeName), std::move(foreignNss), std::move(pipeline)) {}
+                  spec, std::move(foreignNss), std::move(pipeline)) {}
 
         PrivilegeVector requiredPrivileges(bool isMongos,
                                            bool bypassDocumentValidation) const final;
 
         bool requiresAuthzChecks() const override {
             return false;
+        }
+
+        std::unique_ptr<StageParams> getStageParams() const override {
+            return std::make_unique<UnionWithStageParams>(_originalBson);
         }
     };
 
@@ -131,6 +147,7 @@ public:
     DocumentSourceUnionWith(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                             std::unique_ptr<Pipeline> pipeline);
 
+    // Copy constructor used for clone().
     DocumentSourceUnionWith(const DocumentSourceUnionWith& original,
                             const boost::intrusive_ptr<ExpressionContext>& newExpCtx);
 
@@ -174,7 +191,7 @@ public:
                 _sharedState->_pipeline->getSources(), unionConstraints);
         }
         // DocumentSourceUnionWith cannot directly swap with match but it contains custom logic in
-        // the doOptimizeAt() member function to allow itself to duplicate any match ahead in the
+        // the optimizeAt() member function to allow itself to duplicate any match ahead in the
         // current pipeline and place one copy inside its sub-pipeline and one copy behind in the
         // current pipeline.
         unionConstraints.canSwapWithMatch = false;
@@ -226,17 +243,16 @@ public:
         return _sharedState;
     }
 
-    static std::unique_ptr<Pipeline> buildPipelineFromViewDefinition(
+    static std::unique_ptr<Pipeline> parsePipelineWithMaybeViewDefinition(
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
         const ResolvedNamespace& resolvedNs,
         std::vector<BSONObj> currentPipeline,
         const NamespaceString& userNss);
 
-protected:
-    DocumentSourceContainer::iterator doOptimizeAt(DocumentSourceContainer::iterator itr,
-                                                   DocumentSourceContainer* container) final;
+    DocumentSourceContainer::iterator optimizeAt(DocumentSourceContainer::iterator itr,
+                                                 DocumentSourceContainer* container);
 
-    boost::intrusive_ptr<DocumentSource> optimize() final {
+    boost::intrusive_ptr<DocumentSource> optimize() {
         pipeline_optimization::optimizePipeline(*_sharedState->_pipeline);
         return this;
     }
@@ -246,8 +262,6 @@ private:
         const boost::intrusive_ptr<const DocumentSource>& documentSource);
 
     Value serialize(const SerializationOptions& opts = SerializationOptions{}) const final;
-
-    void addViewDefinition(NamespaceString nss, std::vector<BSONObj> viewPipeline);
 
     std::shared_ptr<UnionWithSharedState> _sharedState;
 

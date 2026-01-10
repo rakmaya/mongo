@@ -165,8 +165,8 @@ void validate(const AggregateCommandRequest& aggregate,
     }
 }
 
-void validateRequestForAPIVersion(const OperationContext* opCtx,
-                                  const AggregateCommandRequest& request) {
+void validateRequestWithClient(const OperationContext* opCtx,
+                               const AggregateCommandRequest& request) {
     invariant(opCtx);
 
     auto apiParameters = APIParameters::get(opCtx);
@@ -186,6 +186,20 @@ void validateRequestForAPIVersion(const OperationContext* opCtx,
                                  "'apiStrict: true' in API Version "
                               << apiVersion,
                 isInternalThreadOrClient);
+    }
+
+    // Forbid users from passing 'originalQueryShapeHash' explicitly.
+    if (request.getOriginalQueryShapeHash()) {
+        uassert(10742706,
+                "BSON field 'originalQueryShapeHash' is an unknown field",
+                isInternalThreadOrClient || client->isInDirectClient());
+    }
+
+    // Forbid users from passing 'ifrFlags' explicitly.
+    if (request.getIfrFlags()) {
+        uassert(11516201,
+                "BSON field 'ifrFlags' is an unknown field",
+                isInternalThreadOrClient || client->isInDirectClient());
     }
 }
 

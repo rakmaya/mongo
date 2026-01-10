@@ -29,7 +29,6 @@
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
@@ -304,10 +303,10 @@ TEST(SBEVM, Add) {
         code.appendAdd({}, {});
 
         vm::ByteCode interpreter;
-        auto [owned, tag, val] = interpreter.run(&code);
+        auto res = interpreter.run(&code);
 
-        ASSERT_EQUALS(tag, value::TypeTags::NumberInt64);
-        ASSERT_EQUALS(value::bitcastTo<int64_t>(val), -12);
+        ASSERT_EQUALS(res.tag(), value::TypeTags::NumberInt64);
+        ASSERT_EQUALS(value::bitcastTo<int64_t>(res.value()), -12);
     }
     {
         auto tagInt32 = value::TypeTags::NumberInt32;
@@ -322,10 +321,10 @@ TEST(SBEVM, Add) {
         code.appendAdd({}, {});
 
         vm::ByteCode interpreter;
-        auto [owned, tag, val] = interpreter.run(&code);
+        auto res = interpreter.run(&code);
 
-        ASSERT_EQUALS(tag, value::TypeTags::NumberDouble);
-        ASSERT_EQUALS(value::bitcastTo<double>(val), -12.0);
+        ASSERT_EQUALS(res.tag(), value::TypeTags::NumberDouble);
+        ASSERT_EQUALS(value::bitcastTo<double>(res.value()), -12.0);
     }
     {
         auto [tagDecimal, valDecimal] = value::makeCopyDecimal(mongo::Decimal128(-7.25));
@@ -339,13 +338,12 @@ TEST(SBEVM, Add) {
         code.appendAdd({}, {});
 
         vm::ByteCode interpreter;
-        auto [owned, tag, val] = interpreter.run(&code);
+        auto res = interpreter.run(&code);
 
-        ASSERT_EQUALS(tag, value::TypeTags::NumberDecimal);
-        ASSERT_EQUALS(value::bitcastTo<mongo::Decimal128>(val).toDouble(), -12.5);
-        ASSERT_TRUE(owned);
+        ASSERT_EQUALS(res.tag(), value::TypeTags::NumberDecimal);
+        ASSERT_EQUALS(value::bitcastTo<mongo::Decimal128>(res.value()).toDouble(), -12.5);
+        ASSERT_TRUE(res.owned());
 
-        value::releaseValue(tag, val);
         value::releaseValue(tagDecimal, valDecimal);
     }
 }
@@ -365,11 +363,11 @@ TEST(SBEVM, CompareBinData) {
         code.appendCmp3w({}, {});
 
         vm::ByteCode interpreter;
-        auto [owned, tag, val] = interpreter.run(&code);
+        auto res = interpreter.run(&code);
 
-        ASSERT_EQ(tag, value::TypeTags::NumberInt32);
-        ASSERT_LT(value::bitcastTo<int32_t>(val), 0);
-        ASSERT_FALSE(owned);
+        ASSERT_EQ(res.tag(), value::TypeTags::NumberInt32);
+        ASSERT_LT(value::bitcastTo<int32_t>(res.value()), 0);
+        ASSERT_FALSE(res.owned());
     }
     {
         uint8_t byteArray1[] = {1, 2, 3, 4};
@@ -385,11 +383,11 @@ TEST(SBEVM, CompareBinData) {
         code.appendCmp3w({}, {});
 
         vm::ByteCode interpreter;
-        auto [owned, tag, val] = interpreter.run(&code);
+        auto res = interpreter.run(&code);
 
-        ASSERT_EQ(tag, value::TypeTags::NumberInt32);
-        ASSERT_EQ(value::bitcastTo<int32_t>(val), 0);
-        ASSERT_FALSE(owned);
+        ASSERT_EQ(res.tag(), value::TypeTags::NumberInt32);
+        ASSERT_EQ(value::bitcastTo<int32_t>(res.value()), 0);
+        ASSERT_FALSE(res.owned());
     }
     {
         uint8_t byteArray1[] = {1, 2, 10, 4};
@@ -405,11 +403,11 @@ TEST(SBEVM, CompareBinData) {
         code.appendCmp3w({}, {});
 
         vm::ByteCode interpreter;
-        auto [owned, tag, val] = interpreter.run(&code);
+        auto res = interpreter.run(&code);
 
-        ASSERT_EQ(tag, value::TypeTags::NumberInt32);
-        ASSERT_GT(value::bitcastTo<int32_t>(val), 0);
-        ASSERT_FALSE(owned);
+        ASSERT_EQ(res.tag(), value::TypeTags::NumberInt32);
+        ASSERT_GT(value::bitcastTo<int32_t>(res.value()), 0);
+        ASSERT_FALSE(res.owned());
     }
 
     // BinData values are ordered by subtype. Values with different subtypes should compare as not
@@ -429,11 +427,11 @@ TEST(SBEVM, CompareBinData) {
         code.appendCmp3w({}, {});
 
         vm::ByteCode interpreter;
-        auto [owned, tag, val] = interpreter.run(&code);
+        auto res = interpreter.run(&code);
 
-        ASSERT_EQ(tag, value::TypeTags::NumberInt32);
-        ASSERT_LT(value::bitcastTo<int32_t>(val), 0);
-        ASSERT_FALSE(owned);
+        ASSERT_EQ(res.tag(), value::TypeTags::NumberInt32);
+        ASSERT_LT(value::bitcastTo<int32_t>(res.value()), 0);
+        ASSERT_FALSE(res.owned());
     }
 
     // Comparison of 'ByteArrayDeprecated' BinData values should consider the leading four bytes,
@@ -453,11 +451,11 @@ TEST(SBEVM, CompareBinData) {
         code.appendCmp3w({}, {});
 
         vm::ByteCode interpreter;
-        auto [owned, tag, val] = interpreter.run(&code);
+        auto res = interpreter.run(&code);
 
-        ASSERT_EQ(tag, value::TypeTags::NumberInt32);
-        ASSERT_LT(value::bitcastTo<int32_t>(val), 0);
-        ASSERT_FALSE(owned);
+        ASSERT_EQ(res.tag(), value::TypeTags::NumberInt32);
+        ASSERT_LT(value::bitcastTo<int32_t>(res.value()), 0);
+        ASSERT_FALSE(res.owned());
     }
 }
 
@@ -493,8 +491,8 @@ TEST(SBEVM, CodeFragmentToStringSanity) {
 }
 
 TEST(SBEVM, CodeFragmentPrintStable) {
-    GoldenTestContext ctx(&goldenTestConfigSbe);
-    ctx.printTestHeader(GoldenTestContext::HeaderFormat::Text);
+    unittest::GoldenTestContext ctx(&goldenTestConfigSbe);
+    ctx.printTestHeader(unittest::GoldenTestContext::HeaderFormat::Text);
 
     auto& os = ctx.outStream();
 
@@ -512,7 +510,7 @@ TEST(SBEVM, CodeFragmentPrintStable) {
     code.appendDateTrunc(
         TimeUnit::day, 1, timezoneDB.getTimeZone("America/New_York"_sd), DayOfWeek::monday);
 
-    vm::CodeFragmentPrinter printer(vm::CodeFragmentPrinter::PrintFormat::Stable);
+    vm::CodeFragmentPrinter printer(vm::CodeFragment::PrintFormat::Stable);
     printer.print(os, code);
     os << std::endl;
 }

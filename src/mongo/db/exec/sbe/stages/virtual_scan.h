@@ -39,7 +39,6 @@
 #include "mongo/util/modules.h"
 
 #include <cstddef>
-#include <cstdint>
 #include <memory>
 #include <vector>
 
@@ -58,7 +57,8 @@ public:
                               value::TypeTags arrTag,
                               value::Value arrVal,
                               PlanYieldPolicy* yieldPolicy = nullptr,
-                              bool participateInTrialRunTracking = true);
+                              bool participateInTrialRunTracking = true,
+                              bool owned = true);
 
     ~VirtualScanStage() final;
 
@@ -76,7 +76,8 @@ public:
 
     std::unique_ptr<PlanStageStats> getStats(bool includeDebugInfo) const final;
     const SpecificStats* getSpecificStats() const final;
-    std::vector<DebugPrinter::Block> debugPrint() const final;
+    void doDebugPrint(std::vector<DebugPrinter::Block>& ret,
+                      DebugPrintInfo& debugPrintInfo) const final;
     size_t estimateCompileTimeSize() const final;
 
 protected:
@@ -91,6 +92,7 @@ private:
 
     value::TypeTags _arrTag;
     value::Value _arrVal;
+    bool _owned;
 
     std::unique_ptr<value::ViewOfValueAccessor> _outFieldOutputAccessor;
 

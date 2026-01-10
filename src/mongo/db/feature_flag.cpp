@@ -33,6 +33,7 @@
 #include "mongo/db/feature_compatibility_version_parser.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/version_context.h"
+#include "mongo/db/version_context_feature_flags_gen.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/debug_util.h"
 #include "mongo/util/static_immortal.h"
@@ -55,9 +56,9 @@ void BinaryCompatibleFeatureFlag::appendFlagValueAndMetadata(BSONObjBuilder& fla
 }
 
 // (Generic FCV reference): Feature flag support.
-FCVGatedFeatureFlag::FCVGatedFeatureFlag(bool enabled,
-                                         StringData versionString,
-                                         bool enableOnTransitionalFCV)
+FCVGatedFeatureFlagBase::FCVGatedFeatureFlagBase(bool enabled,
+                                                 StringData versionString,
+                                                 bool enableOnTransitionalFCV)
     : _enabled(enabled),
       _enableOnTransitionalFCV(enableOnTransitionalFCV),
       _version(multiversion::GenericFCV::kLatest) {
@@ -82,14 +83,14 @@ FCVGatedFeatureFlag::FCVGatedFeatureFlag(bool enabled,
 
 // If the functionality of this function changes, make sure that the isEnabled/isPresentAndEnabled
 // functions in feature_flag_util.js also incorporate the change.
-bool FCVGatedFeatureFlag::isEnabled(const VersionContext& vCtx,
-                                    const ServerGlobalParams::FCVSnapshot fcv) const {
+bool FCVGatedFeatureFlagBase::isEnabled(const VersionContext& vCtx,
+                                        const ServerGlobalParams::FCVSnapshot fcv) const {
     const auto currentFcv = vCtx.getOperationFCV(VersionContext::Passkey()).value_or(fcv);
 
     return isEnabledOnVersion(currentFcv.getVersion());
 }
 
-bool FCVGatedFeatureFlag::isEnabledUseLastLTSFCVWhenUninitialized(
+bool FCVGatedFeatureFlagBase::isEnabledUseLastLTSFCVWhenUninitialized(
     const VersionContext& vCtx, const ServerGlobalParams::FCVSnapshot fcv) const {
     const auto currentFcv = vCtx.getOperationFCV(VersionContext::Passkey()).value_or(fcv);
     // (Generic FCV reference): This reference is needed for the feature flag check API.
@@ -100,7 +101,7 @@ bool FCVGatedFeatureFlag::isEnabledUseLastLTSFCVWhenUninitialized(
     return isEnabledOnVersion(applicableFcv.getVersion());
 }
 
-bool FCVGatedFeatureFlag::isEnabledUseLatestFCVWhenUninitialized(
+bool FCVGatedFeatureFlagBase::isEnabledUseLatestFCVWhenUninitialized(
     const VersionContext& vCtx, const ServerGlobalParams::FCVSnapshot fcv) const {
     const auto currentFcv = vCtx.getOperationFCV(VersionContext::Passkey()).value_or(fcv);
     // (Generic FCV reference): This reference is needed for the feature flag check API.
@@ -122,11 +123,11 @@ bool FCVGatedFeatureFlag::isEnabledUseLatestFCVWhenUninitialized(
 // is uninitialized during initial sync.
 // Note that if the feature flag does not have any upgrade/downgrade concerns, then fcv_gated
 // should be set to false and BinaryCompatibleFeatureFlag should be used instead of this function.
-bool FCVGatedFeatureFlag::isEnabledAndIgnoreFCVUnsafe() const {
+bool FCVGatedFeatureFlagBase::isEnabledAndIgnoreFCVUnsafe() const {
     return _enabled;
 }
 
-bool FCVGatedFeatureFlag::isEnabledOnVersion(
+bool FCVGatedFeatureFlagBase::isEnabledOnVersion(
     multiversion::FeatureCompatibilityVersion targetFCV) const {
     if (!_enabled) {
         return false;
@@ -149,7 +150,7 @@ bool FCVGatedFeatureFlag::isEnabledOnVersion(
     return false;
 }
 
-bool FCVGatedFeatureFlag::isDisabledOnTargetFCVButEnabledOnOriginalFCV(
+bool FCVGatedFeatureFlagBase::isDisabledOnTargetFCVButEnabledOnOriginalFCV(
     multiversion::FeatureCompatibilityVersion targetFCV,
     multiversion::FeatureCompatibilityVersion originalFCV) const {
     if (!_enabled) {
@@ -159,7 +160,7 @@ bool FCVGatedFeatureFlag::isDisabledOnTargetFCVButEnabledOnOriginalFCV(
     return originalFCV >= _version && targetFCV < _version;
 }
 
-bool FCVGatedFeatureFlag::isEnabledOnTargetFCVButDisabledOnOriginalFCV(
+bool FCVGatedFeatureFlagBase::isEnabledOnTargetFCVButDisabledOnOriginalFCV(
     multiversion::FeatureCompatibilityVersion targetFCV,
     multiversion::FeatureCompatibilityVersion originalFCV) const {
     if (!_enabled) {
@@ -169,7 +170,7 @@ bool FCVGatedFeatureFlag::isEnabledOnTargetFCVButDisabledOnOriginalFCV(
     return targetFCV >= _version && originalFCV < _version;
 }
 
-void FCVGatedFeatureFlag::appendFlagValueAndMetadata(BSONObjBuilder& flagBuilder) const {
+void FCVGatedFeatureFlagBase::appendFlagValueAndMetadata(BSONObjBuilder& flagBuilder) const {
     flagBuilder.append("value", _enabled);
     if (_enabled) {
         flagBuilder.append(
@@ -180,40 +181,86 @@ void FCVGatedFeatureFlag::appendFlagValueAndMetadata(BSONObjBuilder& flagBuilder
 
     auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
     if (fcvSnapshot.isVersionInitialized()) {
-        // TODO (SERVER-102076): Use VersionContext from opCtx instead of
+        // TODO (SERVER-114119): Use VersionContext from opCtx instead of
         // kVersionContextIgnored_UNSAFE.
         flagBuilder.append("currentlyEnabled",
                            isEnabled(kVersionContextIgnored_UNSAFE, fcvSnapshot));
     }
 }
 
-void FCVGatedFeatureFlag::setForServerParameter(bool enabled) {
+void FCVGatedFeatureFlagBase::setForServerParameter(bool enabled) {
     _enabled = enabled;
 }
 
-bool LegacyContextUnawareFCVGatedFeatureFlag::isEnabled(ServerGlobalParams::FCVSnapshot fcv) const {
+bool OperationFCVOnlyFCVGatedFeatureFlag::isEnabled(const VersionContext& vCtx) const {
+    auto globalFcv = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
+    assertCheckingAgainstOFCV(vCtx, globalFcv);
+    return FCVGatedFeatureFlagBase::isEnabled(vCtx, globalFcv);
+}
+
+bool OperationFCVOnlyFCVGatedFeatureFlag::isEnabledUseLastLTSFCVWhenUninitialized(
+    const VersionContext& vCtx) const {
+    auto globalFcv = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
+    assertCheckingAgainstOFCV(vCtx, globalFcv);
+    return FCVGatedFeatureFlagBase::isEnabledUseLastLTSFCVWhenUninitialized(vCtx, globalFcv);
+}
+
+bool OperationFCVOnlyFCVGatedFeatureFlag::isEnabledUseLatestFCVWhenUninitialized(
+    const VersionContext& vCtx) const {
+    auto globalFcv = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
+    assertCheckingAgainstOFCV(vCtx, globalFcv);
+    return FCVGatedFeatureFlagBase::isEnabledUseLatestFCVWhenUninitialized(vCtx, globalFcv);
+}
+
+void OperationFCVOnlyFCVGatedFeatureFlag::assertCheckingAgainstOFCV(
+    const VersionContext& vCtx, ServerGlobalParams::FCVSnapshot globalFcv) const {
+    if (vCtx.hasOperationFCV()) {
+        return;
+    }
+
+    // This operation could be part of a ShardingDDLCoordinator started on FCV 8.0, which do not
+    // have an OFCV. In this case, tolerate checking it against the global server FCV.
+    if (!feature_flags::gStrictlyEnforceOperationFCVOnlyFCVGatedFeatureFlags
+             .isEnabledUseLatestFCVWhenUninitialized(vCtx, globalFcv)) {
+        // Ensure that this only happens in a sharded cluster, as we expect.
+        tassert(11144901,
+                "Expected relaxed OFCV-only feature flag checks to only happen on sharded clusters",
+                !serverGlobalParams.clusterRole.has(ClusterRole::None));
+        return;
+    }
+
+    tasserted(11144900, "Expected the feature flag to have been checked with an OFCV");
+}
+
+bool LegacyFCVSnapshotOnlyFCVGatedFeatureFlag::isEnabled(
+    ServerGlobalParams::FCVSnapshot fcv) const {
     return isEnabled(kVersionContextIgnored_UNSAFE, fcv);
 }
 
-bool LegacyContextUnawareFCVGatedFeatureFlag::isEnabledUseLastLTSFCVWhenUninitialized(
+bool LegacyFCVSnapshotOnlyFCVGatedFeatureFlag::isEnabledUseLastLTSFCVWhenUninitialized(
     ServerGlobalParams::FCVSnapshot fcv) const {
     return isEnabledUseLastLTSFCVWhenUninitialized(kVersionContextIgnored_UNSAFE, fcv);
 }
 
-bool LegacyContextUnawareFCVGatedFeatureFlag::isEnabledUseLatestFCVWhenUninitialized(
+bool LegacyFCVSnapshotOnlyFCVGatedFeatureFlag::isEnabledUseLatestFCVWhenUninitialized(
     ServerGlobalParams::FCVSnapshot fcv) const {
     return isEnabledUseLatestFCVWhenUninitialized(kVersionContextIgnored_UNSAFE, fcv);
 }
 
 namespace {
-std::vector<const IncrementalRolloutFeatureFlag*>& getMutableAllIncrementalRolloutFeatureFlags() {
-    static StaticImmortal<std::vector<const IncrementalRolloutFeatureFlag*>> flags;
+std::vector<IncrementalRolloutFeatureFlag*>& getMutableAllIncrementalRolloutFeatureFlags() {
+    static StaticImmortal<std::vector<IncrementalRolloutFeatureFlag*>> flags;
     return *flags;
 }
 }  // namespace
 
-const std::vector<const IncrementalRolloutFeatureFlag*>& IncrementalRolloutFeatureFlag::getAll() {
-    return getMutableAllIncrementalRolloutFeatureFlags();
+IncrementalRolloutFeatureFlag* IncrementalRolloutFeatureFlag::findByName(StringData flagName) {
+    for (auto* flag : getMutableAllIncrementalRolloutFeatureFlags()) {
+        if (flag->getName() == flagName) {
+            return flag;
+        }
+    }
+    return nullptr;
 }
 
 bool IncrementalRolloutFeatureFlag::checkEnabled() {
@@ -229,6 +276,12 @@ void IncrementalRolloutFeatureFlag::appendFlagStats(BSONArrayBuilder& flagStats)
         .append("falseChecks", static_cast<long long>(_numFalseChecks.loadRelaxed()))
         .append("trueChecks", static_cast<long long>(_numTrueChecks.loadRelaxed()))
         .append("numToggles", static_cast<long long>(_numToggles.loadRelaxed()));
+}
+
+void IncrementalRolloutFeatureFlag::appendFlagsStats(BSONArrayBuilder& flagStats) {
+    for (auto* flag : getMutableAllIncrementalRolloutFeatureFlags()) {
+        flag->appendFlagStats(flagStats);
+    }
 }
 
 void IncrementalRolloutFeatureFlag::appendFlagValueAndMetadata(BSONObjBuilder& flagBuilder) const {
@@ -280,6 +333,29 @@ void IncrementalRolloutFeatureFlag::registerFlag(IncrementalRolloutFeatureFlag* 
     getMutableAllIncrementalRolloutFeatureFlags().push_back(flag);
 }
 
+IncrementalFeatureRolloutContext::IncrementalFeatureRolloutContext(std::span<const BSONObj> flags) {
+    for (const auto& flagObj : flags) {
+        const auto& name = flagObj["name"];
+        uassert(11565102, "Expected 'name' field to be a string", name.type() == BSONType::string);
+
+        const auto& value = flagObj["value"];
+        uassert(
+            11565103, "Expected 'value' field to be a boolean", value.type() == BSONType::boolean);
+
+        const auto flagName = name.valueStringData();
+        auto* flag = IncrementalRolloutFeatureFlag::findByName(flagName);
+
+        // Reaching this error should be impossible if the proper upgrade/downgrade procedure is
+        // followed. If triggered, it implies something went wrong with the IFR flag rollout (e.g.
+        // the flag was enabled before all binaries were upgraded).
+        tassert(ErrorCodes::UnrecognizedIFRFlag,
+                str::stream() << "Unrecognized IFR flag: " << flagName,
+                flag != nullptr);
+
+        _savedFlagValues[flag] = value.boolean();
+    }
+}
+
 bool IncrementalFeatureRolloutContext::getSavedFlagValue(IncrementalRolloutFeatureFlag& flag) {
     if (auto flagIt = _savedFlagValues.find(&flag); flagIt != _savedFlagValues.end()) {
         return flagIt->second;
@@ -297,4 +373,22 @@ void IncrementalFeatureRolloutContext::appendSavedFlagValues(BSONArrayBuilder& b
         flagBuilder.appendBool("value", savedValue);
     }
 }
+
+void IncrementalFeatureRolloutContext::disableFlag(IncrementalRolloutFeatureFlag& flag) {
+    _savedFlagValues.insert_or_assign(&flag, false);
+}
+
+std::vector<BSONObj> IncrementalFeatureRolloutContext::serializeFlagValues(
+    const std::vector<IncrementalRolloutFeatureFlag*>& flags) {
+    std::vector<BSONObj> result;
+    result.reserve(flags.size());
+    for (auto* flag : flags) {
+        result.push_back(BSONObjBuilder{}
+                             .append("name", flag->getName())
+                             .append("value", getSavedFlagValue(*flag))
+                             .obj());
+    }
+    return result;
+}
+
 }  // namespace mongo

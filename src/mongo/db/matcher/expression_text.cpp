@@ -37,17 +37,17 @@
 #include "mongo/db/fts/fts_util.h"
 #include "mongo/db/index/fts_access_method.h"
 #include "mongo/db/index_names.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_catalog.h"
-#include "mongo/db/local_catalog/database.h"
-#include "mongo/db/local_catalog/index_catalog.h"
-#include "mongo/db/local_catalog/index_catalog_entry.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
-#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
+#include "mongo/db/shard_role/lock_manager/d_concurrency.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/database.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog_entry.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
+#include "mongo/db/shard_role/shard_role.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
 
@@ -85,7 +85,7 @@ const FTSAccessMethod* validateFTSIndex(OperationContext* opCtx, const Namespace
                           << nss.toStringForErrorMsg() << "')",
             collectionPtr);
 
-    std::vector<const IndexDescriptor*> idxMatches;
+    std::vector<const IndexCatalogEntry*> idxMatches;
     collectionPtr->getIndexCatalog()->findIndexByType(opCtx, IndexNames::TEXT, idxMatches);
 
     uassert(ErrorCodes::IndexNotFound, "text index required for $text query", !idxMatches.empty());
@@ -93,9 +93,8 @@ const FTSAccessMethod* validateFTSIndex(OperationContext* opCtx, const Namespace
             "more than one text index found for $text query",
             idxMatches.size() < 2);
 
-    const IndexDescriptor* index = idxMatches[0];
-    const FTSAccessMethod* fam = static_cast<const FTSAccessMethod*>(
-        collectionPtr->getIndexCatalog()->getEntry(index)->accessMethod());
+    const auto* index = idxMatches[0];
+    const FTSAccessMethod* fam = static_cast<const FTSAccessMethod*>(index->accessMethod());
     invariant(fam);
     return fam;
 }

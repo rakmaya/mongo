@@ -34,36 +34,30 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/database_name.h"
-#include "mongo/db/index_builds/commit_quorum_options.h"
 #include "mongo/db/index_builds/index_builds_common.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
-#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/operation_id.h"
 #include "mongo/db/repl/optime.h"
+#include "mongo/db/shard_role/lock_manager/d_concurrency.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
 #include "mongo/executor/task_executor.h"
-#include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/concurrency/with_lock.h"
 #include "mongo/util/future.h"
 #include "mongo/util/future_impl.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/uuid.h"
 
-#include <algorithm>
-#include <list>
 #include <memory>
 #include <string>
-#include <utility>
 #include <vector>
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
 
-namespace mongo {
+namespace MONGO_MOD_PUBLIC mongo {
 
 // Indicates which protocol an index build is using.
 enum class IndexBuildProtocol {
@@ -120,6 +114,7 @@ enum class IndexBuildAction {
  */
 std::string indexBuildActionToString(IndexBuildAction action);
 
+namespace index_build_internal {
 /**
  * Represents the index build state. See _checkIfValidTransition() for valid state transitions.
  */
@@ -311,6 +306,19 @@ private:
     // TODO (SERVER-111304): Remove multikey information from IndexBuildState.
     std::vector<boost::optional<MultikeyPaths>> _multikey;
 };
+}  // namespace index_build_internal
+
+/**
+ * Tracks metrics for an index build of one or more indexes.
+ */
+struct IndexBuildMetrics {
+    // The time at which the index build begins.
+    Date_t startTime;
+    // The time at which we voted to commit the index build.
+    Date_t voteCommitTime = Date_t::min();
+    // The time at which we received a 'commitIndexBuild' oplog entry.
+    Date_t commitIndexOplogEntryTime = Date_t::min();
+};
 
 /**
  * Tracks the cross replica set progress of a particular index build identified by a build UUID.
@@ -328,7 +336,8 @@ public:
                         const UUID& collUUID,
                         const DatabaseName& dbName,
                         std::vector<IndexBuildInfo> indexes,
-                        IndexBuildProtocol protocol);
+                        IndexBuildProtocol protocol,
+                        Date_t startTime);
 
     const std::vector<IndexBuildInfo>& getIndexes() const {
         return _indexes;
@@ -558,6 +567,11 @@ public:
     void appendBuildInfo(BSONObjBuilder* builder) const;
 
     /**
+     * Returns the metrics for this index build.
+     */
+    IndexBuildMetrics getIndexBuildMetrics() const;
+
+    /**
      * Sets the multikey information for this index build.
      *
      * TODO (SERVER-111304): Remove this function.
@@ -570,6 +584,16 @@ public:
      * TODO (SERVER-111304): Remove this function.
      */
     const std::vector<boost::optional<MultikeyPaths>>& getMultikey() const;
+
+    /**
+     * Stores the time at which which we voted to commit an index build.
+     */
+    void setVotedToCommitTime(const Date_t& time);
+
+    /**
+     * Stores the time at which we received the `commitIndexBuild` oplog entry.
+     */
+    void setReceivedCommitIndexBuildEntryTime(const Date_t& time);
 
     // Uniquely identifies this index build across replica set members.
     const UUID buildUUID;
@@ -598,7 +622,7 @@ public:
      * stdx::mutex lock order:
      * commitQuorumLock -> mutex.
      */
-    boost::optional<Lock::ResourceMutex> commitQuorumLock;
+    boost::optional<ResourceMutex> commitQuorumLock;
 
     struct IndexCatalogStats {
         int numIndexesBefore = 0;
@@ -650,7 +674,7 @@ private:
     std::unique_ptr<SharedPromise<IndexBuildAction>> _waitForNextAction;
 
     // Maintains the state of the index build.
-    IndexBuildState _indexBuildState;
+    index_build_internal::IndexBuildState _indexBuildState;
 
     // Indicates whether this node should produce any table writes during the index build. When
     // this is false, it means that this node is a secondary and is only applying writes received
@@ -675,6 +699,9 @@ private:
 
     // Set once before attempting to vote for commit readiness.
     bool _votedForCommitReadiness = false;
+
+    // Metrics for this index build. Used for server status reporting.
+    IndexBuildMetrics _metrics;
 };
 
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUBLIC mongo

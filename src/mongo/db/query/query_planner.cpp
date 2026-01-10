@@ -44,8 +44,8 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
+#include "mongo/db/index/index_constants.h"
 #include "mongo/db/index_names.h"
-#include "mongo/db/local_catalog/clustered_collection_options_gen.h"
 #include "mongo/db/matcher/expression_algo.h"
 #include "mongo/db/matcher/expression_hasher.h"
 #include "mongo/db/matcher/expression_text.h"
@@ -88,6 +88,7 @@
 #include "mongo/db/query/query_planner_common.h"
 #include "mongo/db/query/query_request_helper.h"
 #include "mongo/db/query/search/mongot_cursor.h"
+#include "mongo/db/shard_role/shard_catalog/clustered_collection_options_gen.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
@@ -245,7 +246,8 @@ StatusWith<std::unique_ptr<QuerySolution>> tryToBuildSearchQuerySolution(
                 feature_flags::gFeatureFlagSearchInSbe.isEnabled());
 
         // Build a SearchNode in order to retrieve the search info.
-        auto searchNode = search_helpers::getSearchNode(query.cqPipeline().front().get());
+        auto searchNode =
+            search_helpers::getSearchNode(query.nss(), query.cqPipeline().front().get());
 
         if (searchNode->searchQuery.getBoolField(mongot_cursor::kReturnStoredSourceArg) ||
             searchNode->isSearchMeta) {
@@ -558,7 +560,7 @@ StatusWith<std::unique_ptr<PlanCacheIndexTree>> QueryPlanner::cacheDataFromTagge
 
     if (taggedTree->getTag() &&
         taggedTree->getTag()->getType() == MatchExpression::TagData::Type::IndexTag) {
-        IndexTag* itag = static_cast<IndexTag*>(taggedTree->getTag());
+        IndexTag* itag = indexTagCast<IndexTag>(taggedTree->getTag());
         if (itag->index >= relevantIndices.size()) {
             str::stream ss;
             ss << "Index number is " << itag->index << " but there are only "
@@ -582,10 +584,10 @@ StatusWith<std::unique_ptr<PlanCacheIndexTree>> QueryPlanner::cacheDataFromTagge
         indexTree->canCombineBounds = itag->canCombineBounds;
     } else if (taggedTree->getTag() &&
                taggedTree->getTag()->getType() == MatchExpression::TagData::Type::OrPushdownTag) {
-        OrPushdownTag* orPushdownTag = static_cast<OrPushdownTag*>(taggedTree->getTag());
+        OrPushdownTag* orPushdownTag = indexTagCast<OrPushdownTag>(taggedTree->getTag());
 
         if (orPushdownTag->getIndexTag()) {
-            const IndexTag* itag = static_cast<const IndexTag*>(orPushdownTag->getIndexTag());
+            const IndexTag* itag = indexTagCast<const IndexTag>(orPushdownTag->getIndexTag());
 
             if (is2DIndex(relevantIndices[itag->index].keyPattern)) {
                 return Status(ErrorCodes::BadValue, "can't cache '2d' index");
@@ -653,7 +655,7 @@ Status QueryPlanner::tagAccordingToCache(MatchExpression* filter,
 
     if (!indexTree->orPushdowns.empty()) {
         filter->setTag(new OrPushdownTag());
-        OrPushdownTag* orPushdownTag = static_cast<OrPushdownTag*>(filter->getTag());
+        OrPushdownTag* orPushdownTag = indexTagCast<OrPushdownTag>(filter->getTag());
         for (const auto& orPushdown : indexTree->orPushdowns) {
             auto index = indexMap.find(orPushdown.indexEntryId);
             if (index == indexMap.end()) {
@@ -676,7 +678,7 @@ Status QueryPlanner::tagAccordingToCache(MatchExpression* filter,
             return Status(ErrorCodes::NoQueryExecutionPlans, ss);
         }
         if (filter->getTag()) {
-            OrPushdownTag* orPushdownTag = static_cast<OrPushdownTag*>(filter->getTag());
+            OrPushdownTag* orPushdownTag = indexTagCast<OrPushdownTag>(filter->getTag());
             orPushdownTag->setIndexTag(
                 new IndexTag(got->second, indexTree->index_pos, indexTree->canCombineBounds));
         } else {
@@ -701,9 +703,10 @@ StatusWith<std::unique_ptr<QuerySolution>> QueryPlanner::planFromCache(
     }
 
     // A query not suitable for caching should not have made its way into the cache. The exception
-    // is if `internalQueryDisablePlanCache` was enabled after a cache entry was made. This knob
-    // marks all entries as "should not cache", meaning we would end up in a state where a query
-    // should not be cached, but is in the cached. This is why we check the knob.
+    // is if `internalQueryDisablePlanCache` was enabled after a cache entry was made. Enabling this
+    // knob blocks new cache entries from being inserted and blocks existing entries from
+    // being retrieved, meaning that in the exception case we would end up in a state where a query
+    // should not be cached, but is in the cache. This is why we check the knob.
     dassert(internalQueryDisablePlanCache.load() || shouldCacheQuery(query));
 
     if (SolutionCacheData::WHOLE_IXSCAN_SOLN == solnCacheData.solnType) {
@@ -763,9 +766,15 @@ StatusWith<std::unique_ptr<QuerySolution>> QueryPlanner::planFromCache(
     std::map<IndexEntry::Identifier, size_t> indexMap;
     for (size_t i = 0; i < expandedIndexes.size(); ++i) {
         const IndexEntry& ie = expandedIndexes[i];
-        const auto insertionRes = indexMap.insert(std::make_pair(ie.identifier, i));
+        const auto [it, success] = indexMap.insert(std::make_pair(ie.identifier, i));
         // Be sure the key was not already in the map.
-        invariant(insertionRes.second);
+        tassert(11321035,
+                fmt::format("Failed to map index identifier {} to indexNumber {} because a mapping "
+                            "to {} already existed",
+                            ie.identifier.toString(),
+                            i,
+                            it->second),
+                success);
         LOGV2_DEBUG(20964,
                     5,
                     "Index mapping: number and identifier",
@@ -978,7 +987,16 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
     boost::optional<BSONObj> hintedIndexBson = boost::none;
     if (!params.indexFiltersApplied && !params.querySettingsApplied) {
         if (auto hintObj = query.getFindCommandRequest().getHint(); !hintObj.isEmpty()) {
-            hintedIndexBson = hintObj;
+            if (params.mainCollectionInfo.stats.isTimeseries &&
+                hintObj.firstElement().valueStringDataSafe() == IndexConstants::kIdIndexName) {
+                // The index name '_id_' is reserved for the _id index on the underlying buckets
+                // collection of a timeseries collection. The user will never be able to specify the
+                // _id index name '_id_' in the hint.
+                return Status(ErrorCodes::BadValue,
+                              "cannot hint on '_id_' for timeseries collections");
+            } else {
+                hintedIndexBson = hintObj;
+            }
         }
     }
 
@@ -1048,7 +1066,11 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
         // $** index.
         if (relevantIndices.size() > 1) {
             for (auto&& entry : relevantIndices) {
-                invariant(entry.type == IndexType::INDEX_WILDCARD);
+                tassert(11321036,
+                        fmt::format("Expected all 'relevantIndices' to be of type INDEX_WILDCARD, "
+                                    "but found type {}",
+                                    toString(entry.type)),
+                        entry.type == IndexType::INDEX_WILDCARD);
             }
         }
     }
@@ -1075,8 +1097,15 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
         }
         // Be sure that index expansion didn't do anything. As wildcard indexes are banned for
         // min/max, we expect to find a single hinted index entry.
-        invariant(fullIndexList.size() == 1);
-        invariant(*hintedIndexEntry == fullIndexList.front());
+        tassert(11321037,
+                fmt::format("Expected a single element in fullIndexList, but found size={}",
+                            fullIndexList.size()),
+                fullIndexList.size() == 1);
+        tassert(11321038,
+                fmt::format("Expected 'fullIndexList' to be equal to [{}], but found [{}]",
+                            hintedIndexEntry->toString(),
+                            fullIndexList.front().toString()),
+                *hintedIndexEntry == fullIndexList.front());
 
         // In order to be fully compatible, the min has to be less than the max according to the
         // index key pattern ordering. The first step in verifying this is "finish" the min and
@@ -1094,7 +1123,7 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
 
         std::unique_ptr<QuerySolutionNode> solnRoot(QueryPlannerAccess::makeIndexScan(
             *hintedIndexEntry, query, params, finishedMinObj, finishedMaxObj));
-        invariant(solnRoot);
+        tassert(11321039, "solnRoot must not be null", solnRoot);
 
         auto soln = QueryPlannerAnalysis::analyzeDataAccess(query, params, std::move(solnRoot));
         if (!soln) {
@@ -1156,7 +1185,7 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
     if (QueryPlannerCommon::hasNode(
             query.getPrimaryMatchExpression(), MatchExpression::GEO_NEAR, &gnNode)) {
         // No index for GEO_NEAR?  No query.
-        RelevantTag* tag = static_cast<RelevantTag*>(gnNode->getTag());
+        RelevantTag* tag = indexTagCast<RelevantTag>(gnNode->getTag());
         if (!tag || (0 == tag->first.size() && 0 == tag->notFirst.size())) {
             LOGV2_DEBUG(20973, 5, "Unable to find index for $geoNear query");
             // Don't leave tags on query tree.
@@ -1175,7 +1204,7 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
     const MatchExpression* textNode = nullptr;
     if (QueryPlannerCommon::hasNode(
             query.getPrimaryMatchExpression(), MatchExpression::TEXT, &textNode)) {
-        RelevantTag* tag = static_cast<RelevantTag*>(textNode->getTag());
+        RelevantTag* tag = indexTagCast<RelevantTag>(textNode->getTag());
 
         // Exactly one text index required for TEXT.  We need to check this explicitly because
         // the text stage can't be built if no text index exists or there is an ambiguity as to
@@ -1204,7 +1233,9 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
 
         // At this point, we know that there is only one text index and that the TEXT node is
         // assigned to it.
-        invariant(1 == tag->first.size() + tag->notFirst.size());
+        tassert(11321040,
+                "Expected only one text index with TEXT node assigned to it",
+                1 == tag->first.size() + tag->notFirst.size());
 
         LOGV2_DEBUG(20975,
                     5,
@@ -1352,6 +1383,15 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
             return Status(
                 ErrorCodes::NoQueryExecutionPlans,
                 "$hint: refusing to build whole-index solution, because it's a wildcard index");
+        }
+        if (QueryPlannerCommon::hasNode(query.getPrimaryMatchExpression(),
+                                        MatchExpression::GEO_NEAR)) {
+            tassert(11306900,
+                    "invalid non-compound index should be prohibited before planning for $geoNear",
+                    relevantIndices.front().keyPattern.nFields() > 1);
+            return Status(
+                ErrorCodes::NoQueryExecutionPlans,
+                "$hint: refusing to build whole-index solution, because it's a $geoNear query");
         }
 
         LOGV2_WARNING(
@@ -1639,7 +1679,7 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
     return {std::move(out)};
 }  // QueryPlanner::plan
 
-StatusWith<QueryPlanner::CostBasedRankerResult> QueryPlanner::planWithCostBasedRanking(
+StatusWith<QueryPlanner::PlanRankingResult> QueryPlanner::planWithCostBasedRanking(
     const CanonicalQuery& query,
     const QueryPlannerParams& params,
     ce::SamplingEstimator* samplingEstimator,
@@ -1710,9 +1750,9 @@ StatusWith<QueryPlanner::CostBasedRankerResult> QueryPlanner::planWithCostBasedR
             "Some plan has fallen into the gray zone between accepted and rejected QSNs.",
             acceptedSoln.size() + rejectedSoln.size() == allSoln.size());
 
-    return QueryPlanner::CostBasedRankerResult{.solutions = std::move(acceptedSoln),
-                                               .rejectedPlans = std::move(rejectedSoln),
-                                               .estimates = std::move(estimates)};
+    return QueryPlanner::PlanRankingResult{.solutions = std::move(acceptedSoln),
+                                           .rejectedPlans = std::move(rejectedSoln),
+                                           .estimates = std::move(estimates)};
 }
 
 /**
@@ -1944,8 +1984,9 @@ StatusWith<std::unique_ptr<QuerySolution>> QueryPlanner::choosePlanForSubqueries
             }
         } else {
             // N solutions, rank them.
-
-            invariant(!branchResult->solutions.empty());
+            tassert(11321041,
+                    "branchResult->solutions must not be empty",
+                    !branchResult->solutions.empty());
 
             auto multiPlanStatus = multiplanCallback(branchResult->canonicalQuery.get(),
                                                      std::move(branchResult->solutions));
@@ -2043,16 +2084,26 @@ StatusWith<QueryPlanner::SubqueriesPlanningResult> QueryPlanner::planSubqueries(
     ce::SamplingEstimator* samplingEstimator,
     const ce::ExactCardinalityEstimator* exactCardinality,
     boost::optional<StringSet&> topLevelSampleFieldNames) {
-    invariant(query.getPrimaryMatchExpression()->matchType() == MatchExpression::OR);
-    invariant(query.getPrimaryMatchExpression()->numChildren(),
-              "Cannot plan subqueries for an $or with no children");
+    tassert(11321042,
+            fmt::format("Expected the primary match expression to be an OR, but found type {}",
+                        static_cast<int>(query.getPrimaryMatchExpression()->matchType())),
+            query.getPrimaryMatchExpression()->matchType() == MatchExpression::OR);
+    tassert(11321043,
+            "Cannot plan subqueries for an $or with no children",
+            query.getPrimaryMatchExpression()->numChildren() > 0);
 
     SubqueriesPlanningResult planningResult{query.getPrimaryMatchExpression()->clone()};
     for (size_t i = 0; i < params.mainCollectionInfo.indexes.size(); ++i) {
         const IndexEntry& ie = params.mainCollectionInfo.indexes[i];
-        const auto insertionRes = planningResult.indexMap.insert(std::make_pair(ie.identifier, i));
+        const auto [it, success] = planningResult.indexMap.insert(std::make_pair(ie.identifier, i));
         // Be sure the key was not already in the map.
-        invariant(insertionRes.second);
+        tassert(11321044,
+                fmt::format(
+                    "Failed mapping index identifier {} to {} because a {} mapping already existed",
+                    ie.identifier.toString(),
+                    i,
+                    it->second),
+                success);
         LOGV2_DEBUG(20598,
                     5,
                     "Subplanner: index number and entry",
@@ -2104,7 +2155,8 @@ StatusWith<QueryPlanner::SubqueriesPlanningResult> QueryPlanner::planSubqueries(
 
             // We don't set NO_TABLE_SCAN because peeking at the cache data will keep us from
             // considering any plan that's a collscan.
-            invariant(branchResult->solutions.empty());
+            tassert(
+                11321045, "branchResult->solutions must be empty", branchResult->solutions.empty());
 
             auto statusWithMultiPlanSolns = samplingEstimator
                 ? QueryPlanner::plan(

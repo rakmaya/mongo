@@ -10,12 +10,15 @@
  *  does_not_support_stepdowns,
  *  # Explain for the aggregate command cannot run within a multi-document transaction
  *  does_not_support_transactions,
- *  requires_fcv_82]
+ *  requires_fcv_82,
+ *  # This test sets a server parameter via setParameterOnAllNonConfigNodes. To keep the host list
+ *  # consistent, no add/remove shard operations should occur during the test.
+ *  assumes_stable_shard_list,
+ * ]
  */
-import {DiscoverTopology} from "jstests/libs/discover_topology.js";
 import {getEngine, getQueryPlanner, getSingleNodeExplain, getWarnings} from "jstests/libs/query/analyze_plan.js";
 import {checkSbeRestrictedOrFullyEnabled} from "jstests/libs/query/sbe_util.js";
-import {setParameterOnAllHosts} from "jstests/noPassthrough/libs/server_parameter_helpers.js";
+import {setParameterOnAllNonConfigNodes} from "jstests/noPassthrough/libs/server_parameter_helpers.js";
 
 const leeway = 32;
 const statsTreeWarning = "stats tree exceeded BSON size limit for explain";
@@ -52,16 +55,12 @@ const original = assert.commandWorked(db.adminCommand({getParameter: 1, "interna
 
 try {
     // Increase explain threshold step-by-step.
-    for (let size = 350; ; size++) {
+    for (let size = 410; ; size++) {
         if (!checkSbeRestrictedOrFullyEnabled(db)) {
             // Test is SBE-only.
             break;
         }
-        setParameterOnAllHosts(
-            DiscoverTopology.findNonConfigNodes(db.getMongo()),
-            "internalQueryExplainSizeThresholdBytes",
-            size,
-        );
+        setParameterOnAllNonConfigNodes(db.getMongo(), "internalQueryExplainSizeThresholdBytes", size);
         const coll = db.internal_query_explain_size_threshold_bytes;
         coll.drop();
         assert.commandWorked(coll.insert({_id: 1, a: 1}));
@@ -74,11 +73,11 @@ try {
             .aggregate([{$match: {"$or": orClauses}}, {$group: {_id: "$_id"}}, {$project: {_id: 1, a: 0}}]);
         // Test is SBE-only. Assert the query used SBE as expected.
         assert(getWarnings(explain).length > 0 || getEngine(explain) === "sbe");
-        jsTestLog("Checking explain");
+        jsTest.log.info("Checking explain");
         let winningPlan = getQueryPlanner(explain).winningPlan;
         let queryPlan = winningPlan.queryPlan;
         let slotBasedPlan = winningPlan.slotBasedPlan;
-        jsTestLog({
+        jsTest.log.info({
             "size": size,
             "Object.bsonsize(winningPlan)": Object.bsonsize(winningPlan),
             "winningPlan": winningPlan,
@@ -96,8 +95,8 @@ try {
     }
 } finally {
     // Reset parameter for other tests.
-    setParameterOnAllHosts(
-        DiscoverTopology.findNonConfigNodes(db.getMongo()),
+    setParameterOnAllNonConfigNodes(
+        db.getMongo(),
         "internalQueryExplainSizeThresholdBytes",
         original.internalQueryExplainSizeThresholdBytes,
     );

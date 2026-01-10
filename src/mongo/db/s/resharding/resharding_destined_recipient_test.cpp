@@ -39,27 +39,15 @@
 #include "mongo/client/connection_string.h"
 #include "mongo/client/remote_command_targeter_factory_mock.h"
 #include "mongo/client/remote_command_targeter_mock.h"
-#include "mongo/db/collection_crud/collection_write_path.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/dbhelpers.h"
-#include "mongo/db/global_catalog/catalog_cache/catalog_cache.h"
-#include "mongo/db/global_catalog/catalog_cache/catalog_cache_loader.h"
-#include "mongo/db/global_catalog/catalog_cache/catalog_cache_loader_mock.h"
-#include "mongo/db/global_catalog/catalog_cache/shard_cannot_refresh_due_to_locks_held_exception.h"
-#include "mongo/db/global_catalog/router_role_api/sharding_write_router.h"
 #include "mongo/db/global_catalog/sharding_catalog_client.h"
 #include "mongo/db/global_catalog/sharding_catalog_client_mock.h"
 #include "mongo/db/global_catalog/type_chunk.h"
 #include "mongo/db/global_catalog/type_collection.h"
 #include "mongo/db/global_catalog/type_database_gen.h"
 #include "mongo/db/global_catalog/type_shard.h"
-#include "mongo/db/local_catalog/create_collection.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
-#include "mongo/db/local_catalog/shard_role_catalog/operation_sharding_state.h"
-#include "mongo/db/local_catalog/shard_role_catalog/shard_filtering_metadata_refresh.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/record_id.h"
@@ -73,9 +61,20 @@
 #include "mongo/db/repl/read_concern_level.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
 #include "mongo/db/repl/wait_for_majority_service.h"
+#include "mongo/db/router_role/routing_cache/catalog_cache.h"
+#include "mongo/db/router_role/routing_cache/catalog_cache_loader.h"
+#include "mongo/db/router_role/routing_cache/catalog_cache_loader_mock.h"
+#include "mongo/db/router_role/routing_cache/shard_cannot_refresh_due_to_locks_held_exception.h"
+#include "mongo/db/router_role/sharding_write_router.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/session_catalog_mongod.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/create_collection.h"
+#include "mongo/db/shard_role/shard_catalog/operation_sharding_state.h"
+#include "mongo/db/shard_role/shard_catalog/shard_filtering_metadata_refresh.h"
+#include "mongo/db/shard_role/shard_role.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/db/sharding_environment/shard_server_test_fixture.h"
 #include "mongo/db/sharding_environment/sharding_mongod_test_fixture.h"
@@ -89,6 +88,7 @@
 #include "mongo/idl/idl_parser.h"
 #include "mongo/s/resharding/common_types_gen.h"
 #include "mongo/s/resharding/type_collection_fields_gen.h"
+#include "mongo/s/would_change_owning_shard_exception.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/fail_point.h"
@@ -123,18 +123,24 @@ void runInTransaction(OperationContext* opCtx, Callable&& func) {
     auto mongoDSessionCatalog = MongoDSessionCatalog::get(opCtx);
     auto ocs = mongoDSessionCatalog->checkOutSession(opCtx);
 
+    TransactionRuntimeContext transactionRuntimeContext;
+    transactionRuntimeContext.setPlacementConflictTime(LogicalTime(Timestamp::max()));
+
     auto txnParticipant = TransactionParticipant::get(opCtx);
     ASSERT(txnParticipant);
     txnParticipant.beginOrContinue(opCtx,
                                    {txnNum},
                                    false /* autocommit */,
-                                   TransactionParticipant::TransactionActions::kStart);
+                                   TransactionParticipant::TransactionActions::kStart,
+                                   transactionRuntimeContext);
     txnParticipant.unstashTransactionResources(opCtx, "SetDestinedRecipient");
 
     func();
 
     txnParticipant.commitUnpreparedTransaction(opCtx);
     txnParticipant.stashTransactionResources(opCtx);
+
+    opCtx->resetMultiDocumentTransactionState();
 }
 
 class DestinedRecipientTest : public ShardServerTestFixtureWithCatalogCacheLoaderMock {
@@ -268,9 +274,6 @@ protected:
         coll.setAllowMigrations(false);
 
         // When running in transaction, the db version must carry a PlacementConflictTime.
-        if (runInTransaction) {
-            env.dbVersion.setPlacementConflictTime(LogicalTime(Timestamp{0, 0}));
-        }
         getConfigServerCatalogCacheLoaderMock()->setDatabaseRefreshReturnValue(
             DatabaseType(kNss.dbName(), kShardList[0].getName(), env.dbVersion));
 
@@ -321,8 +324,7 @@ protected:
             CollectionAcquisitionRequest::fromOpCtx(opCtx, nss, AcquisitionPrerequisites::kWrite),
             MODE_IX);
         WriteUnitOfWork wuow(opCtx);
-        ASSERT_OK(collection_internal::insertDocument(
-            opCtx, coll.getCollectionPtr(), InsertStatement(doc), nullptr));
+        ASSERT_OK(Helpers::insert(opCtx, coll.getCollectionPtr(), doc));
         wuow.commit();
     }
 
@@ -350,9 +352,7 @@ protected:
         ASSERT(!rid.isNull());
 
         WriteUnitOfWork wuow(opCtx);
-        OpDebug opDebug;
-        collection_internal::deleteDocument(
-            opCtx, coll.getCollectionPtr(), kUninitializedStmtId, rid, &opDebug);
+        Helpers::deleteByRid(opCtx, coll, rid);
         wuow.commit();
     }
 
@@ -588,6 +588,30 @@ TEST_F(DestinedRecipientTest, TestUpdateChangesOwningShardThrows) {
                                                  env);
                                    }),
                   ExceptionFor<ErrorCodes::WouldChangeOwningShard>);
+}
+
+TEST_F(DestinedRecipientTest, TestUpdateChangesOwningShardReturnsCorrectDestinedShard) {
+    auto opCtx = operationContext();
+
+    DBDirectClient client(opCtx);
+    client.insert(kNss, BSON("_id" << 0 << "x" << 2 << "y" << 2 << "z" << 4));
+
+    auto env = setupReshardingEnv(opCtx, true, true);
+
+    OperationShardingState::setShardRole(opCtx, kNss, env.version, env.dbVersion);
+    try {
+        runInTransaction(opCtx, [&]() {
+            updateDoc(
+                opCtx, kNss, BSON("_id" << 0 << "x" << 2), BSON("$set" << BSON("y" << 50)), env);
+        });
+        ASSERT_TRUE(false);
+    } catch (const ExceptionFor<ErrorCodes::WouldChangeOwningShard>& ex) {
+        auto wouldChangeOwningShardInfo = ex.extraInfo<WouldChangeOwningShardInfo>();
+        ASSERT_TRUE(wouldChangeOwningShardInfo);
+        ASSERT_TRUE(wouldChangeOwningShardInfo->getPreImageReshardingDestinedShard());
+        ASSERT_EQ(*wouldChangeOwningShardInfo->getPreImageReshardingDestinedShard(),
+                  kShardList[0].getName());
+    }
 }
 
 TEST_F(DestinedRecipientTest, TestUpdateSameOwningShard) {

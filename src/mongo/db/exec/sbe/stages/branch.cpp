@@ -132,12 +132,9 @@ void BranchStage::open(bool reOpen) {
     _specificStats.numTested++;
 
     // run the filter expressions here
-    auto [owned, tag, val] = _bytecode.run(_filterCode.get());
-    if (owned) {
-        value::releaseValue(tag, val);
-    }
-    if (tag == value::TypeTags::Boolean) {
-        if (value::bitcastTo<bool>(val)) {
+    value::TagValueMaybeOwned filterResult = _bytecode.run(_filterCode.get());
+    if (filterResult.tag() == value::TypeTags::Boolean) {
+        if (value::bitcastTo<bool>(filterResult.value())) {
             _activeBranch = 0;
             _children[0]->open(reOpen && _thenOpened);
             _thenOpened = true;
@@ -213,8 +210,8 @@ const SpecificStats* BranchStage::getSpecificStats() const {
     return &_specificStats;
 }
 
-std::vector<DebugPrinter::Block> BranchStage::debugPrint() const {
-    auto ret = PlanStage::debugPrint();
+void BranchStage::doDebugPrint(std::vector<DebugPrinter::Block>& ret,
+                               DebugPrintInfo& debugPrintInfo) const {
     ret.emplace_back("{`");
     DebugPrinter::addBlocks(ret, _filter->debugPrint());
     ret.emplace_back("`}");
@@ -239,7 +236,7 @@ std::vector<DebugPrinter::Block> BranchStage::debugPrint() const {
     }
     ret.emplace_back(DebugPrinter::Block("`]"));
 
-    DebugPrinter::addBlocks(ret, _children[0]->debugPrint());
+    DebugPrinter::addBlocks(ret, _children[0]->debugPrint(debugPrintInfo));
 
     DebugPrinter::addNewLine(ret);
 
@@ -252,8 +249,11 @@ std::vector<DebugPrinter::Block> BranchStage::debugPrint() const {
     }
     ret.emplace_back(DebugPrinter::Block("`]"));
 
-    DebugPrinter::addBlocks(ret, _children[1]->debugPrint());
-    return ret;
+    if (debugPrintInfo.printBytecode) {
+        PlanStage::debugPrintBytecode(ret, _filterCode, "FILTER" /*title*/);
+    }
+
+    DebugPrinter::addBlocks(ret, _children[1]->debugPrint(debugPrintInfo));
 }
 
 size_t BranchStage::estimateCompileTimeSize() const {

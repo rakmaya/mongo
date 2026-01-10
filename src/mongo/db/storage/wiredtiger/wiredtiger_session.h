@@ -31,6 +31,7 @@
 
 #include "mongo/db/storage/wiredtiger/wiredtiger_compiled_configuration.h"
 #include "mongo/stdx/unordered_set.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/system_tick_source.h"
 #include "mongo/util/tick_source.h"
@@ -152,8 +153,10 @@ public:
     WRAPPED_WT_SESSION_METHOD(timestamp_transaction_uint)
     WRAPPED_WT_SESSION_METHOD(transaction_pinned_range)
     WRAPPED_WT_SESSION_METHOD(truncate)
-    WRAPPED_WT_SESSION_METHOD(verify)
 #undef WRAPPED_WT_SESSION_METHOD
+
+    // TODO SERVER-113061: remove this workaround.
+    int verify(const char* name, const char* config);
 
     /**
      * Gets a cursor on the table id 'id' with optional configuration, 'config'.
@@ -273,7 +276,7 @@ public:
     /**
      * Setter used for testing to allow tick source to be mocked.
      */
-    void setTickSource_forTest(TickSource* tickSource) {
+    MONGO_MOD_PRIVATE void setTickSource_forTest(TickSource* tickSource) {
         _tickSource = tickSource;
     }
 

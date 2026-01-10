@@ -30,43 +30,27 @@
 #include "mongo/db/query/write_ops/write_ops_exec.h"
 
 #include "mongo/base/string_data.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/json.h"
 #include "mongo/bson/oid.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/bson/unordered_fields_bsonobj_comparator.h"
-#include "mongo/crypto/sha256_block.h"
 #include "mongo/db/basic_types.h"
-#include "mongo/db/collection_crud/collection_write_path.h"
-#include "mongo/db/dbhelpers.h"
-#include "mongo/db/generic_argument_util.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/catalog_test_fixture.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/create_collection.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
 #include "mongo/db/op_observer/op_observer_noop.h"
 #include "mongo/db/op_observer/op_observer_registry.h"
 #include "mongo/db/pipeline/legacy_runtime_constants_gen.h"
 #include "mongo/db/query/write_ops/write_ops.h"
-#include "mongo/db/record_id_helpers.h"
-#include "mongo/db/repl/read_concern_args.h"
-#include "mongo/db/session/logical_session_id_gen.h"
-#include "mongo/db/storage/snapshot.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_test_fixture.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/create_collection.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/db/timeseries/timeseries_request_util.h"
-#include "mongo/db/write_concern_idl.h"
-#include "mongo/db/write_concern_options.h"
-#include "mongo/idl/idl_parser.h"
 #include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/time_support.h"
 
 #include <cstdint>
 #include <string>
-#include <type_traits>
 #include <utility>
 
 #include <boost/cstdint.hpp>
@@ -388,6 +372,57 @@ TEST_F(WriteOpsExecTest, InsertFailsIfTimeseriesCollectionCreatedDuringInsert) {
                                                   &out),
                        DBException,
                        10685100);
+}
+
+TEST_F(WriteOpsExecTest, UpdateAppendsMetricsWhenRequested) {
+    NamespaceString ns =
+        NamespaceString::createNamespaceString_forTest("db_write_ops_exec_test", "updateColl");
+    auto opCtx = operationContext();
+
+    // Create the collection and insert 5 documents.
+    ASSERT_OK(createCollection(opCtx, ns.dbName(), BSON("create" << ns.coll())));
+    write_ops::InsertCommandRequest insertCmdReq(ns);
+    std::vector<BSONObj> docsToInsert{fromjson("{_id: 0, x: 0}"),
+                                      fromjson("{_id: 1, x: 1}"),
+                                      fromjson("{_id: 2, x: 2}"),
+                                      fromjson("{_id: 3, x: 3}"),
+                                      fromjson("{_id: 4, x: 4}")};
+    insertCmdReq.setDocuments(docsToInsert);
+    auto insertResult = write_ops_exec::performInserts(
+        opCtx, insertCmdReq, /*preConditions=*/boost::none, OperationSource::kStandard);
+    ASSERT_EQ(5, insertResult.results.size());
+
+    // Build 5 UpdateOpEntry instances. Request metrics for indices 1 and 3.
+    std::vector<write_ops::UpdateOpEntry> updateOps;
+    for (int i = 0; i < 5; ++i) {
+        auto mod = write_ops::UpdateModification::parseFromClassicUpdate(BSON("x" << (i * 10)));
+        write_ops::UpdateOpEntry entry(BSON("x" << i), std::move(mod));
+        if (i == 1 || i == 3) {
+            // Here we are saying that the i-th entry sent to a shard coorespondes to the
+            // (200 + i)th entry in the original batch that arrived at the router. The router sets
+            // this field when requesting metrics from update statements sent to shards.
+            entry.setIncludeQueryStatsMetricsForOpIndex(200 + i);
+        }
+        updateOps.push_back(std::move(entry));
+    }
+
+    write_ops::UpdateCommandRequest updateCmdReq{ns, std::move(updateOps)};
+    auto updateResult = write_ops_exec::performUpdates(
+        opCtx, updateCmdReq, /*preConditions=*/boost::none, OperationSource::kStandard);
+
+    // Verify all 5 updates succeeded.
+    ASSERT_EQ(5, updateResult.results.size());
+    for (size_t i = 0; i < 5; ++i) {
+        ASSERT_OK(updateResult.results[i].getStatus());
+        ASSERT_EQ(1, updateResult.results[i].getValue().getN());
+    }
+
+    // Verify that metrics are present only for indices 1 and 3.
+    ASSERT_FALSE(updateResult.results[0].getValue().getQueryStatsMetrics().has_value());
+    ASSERT_EQ(updateResult.results[1].getValue().getQueryStatsMetrics()->getOriginalOpIndex(), 201);
+    ASSERT_FALSE(updateResult.results[2].getValue().getQueryStatsMetrics().has_value());
+    ASSERT_EQ(updateResult.results[3].getValue().getQueryStatsMetrics()->getOriginalOpIndex(), 203);
+    ASSERT_FALSE(updateResult.results[4].getValue().getQueryStatsMetrics().has_value());
 }
 
 class OpObserverMock : public OpObserverNoop {

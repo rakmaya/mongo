@@ -30,11 +30,13 @@
 #pragma once
 
 #include "mongo/base/string_data.h"
-#include "mongo/db/local_catalog/ddl/create_gen.h"
+#include "mongo/db/shard_role/ddl/create_gen.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/string_map.h"
 
-namespace mongo {
-namespace timeseries {
+MONGO_MOD_PUBLIC;
+
+namespace mongo::timeseries {
 
 // These are hard-coded constants in the bucket schema.
 static constexpr StringData kBucketIdFieldName = "_id"_sd;
@@ -86,7 +88,7 @@ static constexpr StringData kControlFieldNameDocDiff = "scontrol"_sd;
 static constexpr StringData kMinFieldNameDocDiff = "smin"_sd;
 static constexpr StringData kMaxFieldNameDocDiff = "smax"_sd;
 
-static const StringDataSet kAllowedCollectionCreationOptions{
+inline const StringDataSet kAllowedCollectionCreationOptions{
     CreateCommand::kStorageEngineFieldName,
     CreateCommand::kIndexOptionDefaultsFieldName,
     CreateCommand::kCollationFieldName,
@@ -94,5 +96,4 @@ static const StringDataSet kAllowedCollectionCreationOptions{
     CreateCommand::kExpireAfterSecondsFieldName,
     CreateCommand::kTempFieldName};
 
-}  // namespace timeseries
-}  // namespace mongo
+}  // namespace mongo::timeseries

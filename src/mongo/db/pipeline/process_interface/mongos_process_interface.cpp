@@ -36,12 +36,8 @@
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/curop.h"
-#include "mongo/db/global_catalog/catalog_cache/catalog_cache.h"
 #include "mongo/db/global_catalog/chunk_manager.h"
-#include "mongo/db/global_catalog/router_role_api/cluster_commands_helpers.h"
-#include "mongo/db/global_catalog/router_role_api/router_role.h"
 #include "mongo/db/index/index_constants.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/pipeline/document_source_merge.h"
 #include "mongo/db/pipeline/expression_context_builder.h"
@@ -53,9 +49,13 @@
 #include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/repl/read_concern_args.h"
+#include "mongo/db/router_role/cluster_commands_helpers.h"
+#include "mongo/db/router_role/router_role.h"
+#include "mongo/db/router_role/routing_cache/catalog_cache.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/kill_sessions.h"
 #include "mongo/db/session/session_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
 #include "mongo/db/sharding_environment/client/shard.h"
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/versioning_protocol/shard_version.h"
@@ -74,7 +74,6 @@
 
 #include <algorithm>
 #include <iterator>
-#include <type_traits>
 #include <typeinfo>
 
 #include <boost/none.hpp>
@@ -106,34 +105,6 @@ StatusWith<std::unique_ptr<RoutingContext>> getAndValidateRoutingCtx(
     return swRoutingCtx;
 }
 
-MongoProcessInterface::SupportingUniqueIndex supportsUniqueKey(
-    const boost::intrusive_ptr<ExpressionContext>& expCtx,
-    const BSONObj& index,
-    const std::set<FieldPath>& uniqueKeyPaths) {
-    // Retrieve the collation from the index, or default to the simple collation.
-    const auto collation = uassertStatusOK(
-        CollatorFactoryInterface::get(expCtx->getOperationContext()->getServiceContext())
-            ->makeFromBSON(index.hasField(IndexDescriptor::kCollationFieldName)
-                               ? index.getObjectField(IndexDescriptor::kCollationFieldName)
-                               : CollationSpec::kSimpleSpec));
-
-    // SERVER-5335: The _id index does not report to be unique, but in fact is unique.
-    auto isIdIndex =
-        index[IndexDescriptor::kIndexNameFieldName].String() == IndexConstants::kIdIndexName;
-    bool supports =
-        (isIdIndex || index.getBoolField(IndexDescriptor::kUniqueFieldName)) &&
-        !index.hasField(IndexDescriptor::kPartialFilterExprFieldName) &&
-        CommonProcessInterface::keyPatternNamesExactPaths(
-            index.getObjectField(IndexDescriptor::kKeyPatternFieldName), uniqueKeyPaths) &&
-        CollatorInterface::collatorsMatch(collation.get(), expCtx->getCollator());
-    if (!supports) {
-        return MongoProcessInterface::SupportingUniqueIndex::None;
-    }
-    return index.getBoolField(IndexDescriptor::kSparseFieldName)
-        ? MongoProcessInterface::SupportingUniqueIndex::NotNullish
-        : MongoProcessInterface::SupportingUniqueIndex::Full;
-}
-
 }  // namespace
 
 std::unique_ptr<MongoProcessInterface::WriteSizeEstimator>
@@ -146,9 +117,7 @@ std::unique_ptr<Pipeline> MongosProcessInterface::finalizeAndMaybePreparePipelin
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     std::unique_ptr<Pipeline> pipeline,
     bool attachCursorAfterOptimizing,
-    std::function<void(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                       Pipeline* pipeline,
-                       CollectionMetadata collData)> finalizePipeline,
+    std::function<void(Pipeline* pipeline)> optimizePipeline,
     ShardTargetingPolicy shardTargetingPolicy,
     boost::optional<BSONObj> readConcern,
     bool shouldUseCollectionDefaultCollator) {
@@ -160,7 +129,7 @@ std::unique_ptr<Pipeline> MongosProcessInterface::finalizeAndMaybePreparePipelin
         expCtx,
         std::move(pipeline),
         attachCursorAfterOptimizing,
-        finalizePipeline,
+        optimizePipeline,
         shardTargetingPolicy,
         readConcern,
         shouldUseCollectionDefaultCollator);
@@ -199,8 +168,10 @@ std::unique_ptr<Pipeline> MongosProcessInterface::preparePipelineForExecution(
         std::move(readConcern));
 }
 
-BSONObj MongosProcessInterface::preparePipelineAndExplain(std::unique_ptr<Pipeline> pipeline,
-                                                          ExplainOptions::Verbosity verbosity) {
+BSONObj MongosProcessInterface::finalizePipelineAndExplain(
+    std::unique_ptr<Pipeline> pipeline,
+    ExplainOptions::Verbosity verbosity,
+    std::function<void(Pipeline* pipeline)> optimizePipeline) {
     auto firstStage = pipeline->peekFront();
 
     // We don't want to serialize and send a MergeCursors stage to the shards.
@@ -209,7 +180,8 @@ BSONObj MongosProcessInterface::preparePipelineAndExplain(std::unique_ptr<Pipeli
          typeid(*firstStage) == typeid(DocumentSourceMergeCursors))) {
         pipeline->popFront();
     }
-    return sharded_agg_helpers::targetShardsForExplain(std::move(pipeline));
+    return sharded_agg_helpers::finalizePipelineAndTargetShardsForExplain(std::move(pipeline),
+                                                                          optimizePipeline);
 }
 
 boost::optional<Document> MongosProcessInterface::lookupSingleDocument(
@@ -237,10 +209,8 @@ boost::optional<Document> MongosProcessInterface::lookupSingleDocument(
     try {
         auto findCmd = cmdBuilder.obj();
         const auto& foreignNss = foreignExpCtx->getNamespaceString();
-        sharding::router::CollectionRouter router(
-            expCtx->getOperationContext()->getServiceContext(), foreignNss);
+        sharding::router::CollectionRouter router(expCtx->getOperationContext(), foreignNss);
         auto shardResults = router.route(
-            foreignExpCtx->getOperationContext(),
             str::stream() << "Looking up document matching " << redact(filter.toBson()),
             [&](OperationContext* opCtx, const CollectionRoutingInfo& cri) {
                 auto routingCtxPtr = uassertStatusOK(getAndValidateRoutingCtx(foreignExpCtx, cri));
@@ -436,10 +406,8 @@ MongosProcessInterface::fieldsHaveSupportingUniqueIndex(
     // this is any shard that currently owns at least one chunk. This helper sends database and/or
     // shard versions to ensure this router is not stale, but will not automatically retry if either
     // version is stale.
-    sharding::router::CollectionRouter router{expCtx->getOperationContext()->getServiceContext(),
-                                              nss};
+    sharding::router::CollectionRouter router(expCtx->getOperationContext(), nss);
     return router.routeWithRoutingContext(
-        expCtx->getOperationContext(),
         "MongosProcessInterface::fieldsHaveSupportingUniqueIndex"_sd,
         [&](OperationContext* opCtx, RoutingContext& routingCtx) {
             auto response =
@@ -453,13 +421,29 @@ MongosProcessInterface::fieldsHaveSupportingUniqueIndex(
             uassertStatusOK(response);
 
             const auto& indexes = response.getValue().docs;
-            return std::accumulate(indexes.begin(),
-                                   indexes.end(),
-                                   SupportingUniqueIndex::None,
-                                   [&expCtx, &fieldPaths](auto result, const auto& index) {
-                                       return std::max(
-                                           result, supportsUniqueKey(expCtx, index, fieldPaths));
-                                   });
+            const auto& cri = routingCtx.getCollectionRoutingInfo(nss);
+
+            return std::accumulate(
+                indexes.begin(),
+                indexes.end(),
+                SupportingUniqueIndex::None,
+                [&](auto result, const auto& index) {
+                    IndexDescriptor descriptor(IndexNames::findPluginName(index.getObjectField(
+                                                   IndexDescriptor::kKeyPatternFieldName)),
+                                               index);
+                    std::unique_ptr<CollatorInterface> collator = descriptor.collation().isEmpty()
+                        ? nullptr
+                        : uassertStatusOK(CollatorFactoryInterface::get(opCtx->getServiceContext())
+                                              ->makeFromBSON(descriptor.collation()));
+                    return std::max(
+                        result,
+                        supportsUniqueKey(
+                            &descriptor,
+                            collator.get(),
+                            expCtx->getCollator(),
+                            cri.isSharded() ? &cri.getChunkManager().getShardKeyPattern() : nullptr,
+                            fieldPaths));
+                });
         });
 }
 

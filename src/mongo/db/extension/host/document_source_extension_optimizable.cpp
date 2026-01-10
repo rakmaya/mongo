@@ -29,21 +29,183 @@
 
 #include "mongo/db/extension/host/document_source_extension_optimizable.h"
 
-#include "mongo/db/extension/host_connector/query_shape_opts_adapter.h"
+#include "mongo/db/extension/host/document_source_extension_expandable.h"
 
 namespace mongo::extension::host {
 
+ALLOCATE_DOCUMENT_SOURCE_ID(extensionOptimizable, DocumentSourceExtensionOptimizable::id);
+
 Value DocumentSourceExtensionOptimizable::serialize(const SerializationOptions& opts) const {
-    if (!opts.isKeepingLiteralsUnchanged()) {
-        host_connector::QueryShapeOptsAdapter adapter{&opts};
-        return Value(_parseNode.getQueryShape(adapter));
-    } else if (opts.isSerializingForExplain()) {
-        return Value(_logicalStage.explain(*opts.verbosity));
-    } else {
-        // Serialize the stage for query execution.
-        return Value(_logicalStage.serialize());
+    tassert(11217800,
+            "SerializationOptions should keep literals unchanged while represented as a "
+            "DocumentSourceExtensionOptimizable",
+            opts.isKeepingLiteralsUnchanged());
+
+    if (opts.isSerializingForExplain()) {
+        return Value(_logicalStage->explain(*opts.verbosity));
     }
-    return Value(BSONObj());
+
+    // Serialize the stage for query execution.
+    return Value(_logicalStage->serialize());
+}
+
+StageConstraints DocumentSourceExtensionOptimizable::constraints(
+    PipelineSplitState pipeState) const {
+    // Default properties if unset.
+    auto constraints = DocumentSourceExtension::constraints(pipeState);
+
+    // Apply potential overrides from static properties.
+    if (!_properties.getRequiresInputDocSource()) {
+        constraints.setConstraintsForNoInputSources();
+    }
+    if (auto pos = static_properties_util::toPositionRequirement(_properties.getPosition())) {
+        constraints.requiredPosition = *pos;
+    }
+    if (auto host = static_properties_util::toHostTypeRequirement(_properties.getHostType())) {
+        constraints.hostRequirement = *host;
+    }
+    if (!_properties.getUnionWithIsAllowed()) {
+        constraints.unionRequirement = StageConstraints::UnionRequirement::kNotAllowed;
+    }
+    if (!_properties.getLookupIsAllowed()) {
+        constraints.lookupRequirement = StageConstraints::LookupRequirement::kNotAllowed;
+    }
+    if (!_properties.getFacetIsAllowed()) {
+        constraints.facetRequirement = StageConstraints::FacetRequirement::kNotAllowed;
+    }
+
+    return constraints;
+}
+
+DocumentSource::Id DocumentSourceExtensionOptimizable::getId() const {
+    return id;
+}
+
+DepsTracker::State DocumentSourceExtensionOptimizable::getDependencies(DepsTracker* deps) const {
+    auto processFields = [](const auto& fields, auto&& apply) {
+        if (fields.has_value()) {
+            for (const auto& fieldName : *fields) {
+                auto metaType = DocumentMetadataFields::parseMetaType(fieldName);
+                apply(metaType);
+            }
+        }
+    };
+
+    // Report required metadata fields for this stage.
+    processFields(_properties.getRequiredMetadataFields(),
+                  [&](auto metaType) { deps->setNeedsMetadata(metaType); });
+
+    // Drop upstream metadata fields if this stage does not preserve them.
+    if (!_properties.getPreservesUpstreamMetadata()) {
+        // TODO: SERVER-100443
+        deps->clearMetadataAvailable();
+    }
+
+    // Report provided metadata fields for this stage.
+    processFields(_properties.getProvidedMetadataFields(),
+                  [&](auto metaType) { deps->setMetadataAvailable(metaType); });
+
+    // Retain entire metadata and do not optimize, as it may be needed by the extension.
+    return DepsTracker::State::NOT_SUPPORTED;
+}
+
+boost::optional<DocumentSource::DistributedPlanLogic>
+DocumentSourceExtensionOptimizable::distributedPlanLogic() {
+    auto dplHandle = _logicalStage->getDistributedPlanLogic();
+
+    if (!dplHandle.isValid()) {
+        return boost::none;
+    }
+
+    // Convert the returned VariantDPLHandle to a list of DocumentSources.
+    const auto convertDPLHandleToDocumentSources = [&](VariantDPLHandle& handle) {
+        return std::visit(
+            OverloadedVisitor{
+                [&](AggStageParseNodeHandle& dplElement) {
+                    if (HostAggStageParseNode::isHostAllocated(*dplElement.get())) {
+                        // Host-allocated: parse the host-allocated parse node.
+                        const auto& hostParse =
+                            *static_cast<const HostAggStageParseNode*>(dplElement.get());
+                        return DocumentSource::parse(getExpCtx(), hostParse.getBsonSpec());
+                    } else {
+                        // Extension-allocated: expand the parse node.
+                        return DocumentSourceExtensionExpandable::expandParseNode(getExpCtx(),
+                                                                                  dplElement);
+                    }
+                },
+                [&](LogicalAggStageHandle& dplLogicalStage) {
+                    // Create a DocumentSource directly from the logical stage handle. We only allow
+                    // logical stages to be created here if they are the same type as the
+                    // originating stage. Because of this assumption, we can pass in the static
+                    // properties from the originating stage. Otherwise we would not have access to
+                    // the new stage's properties here, since they live on the ASTNode.
+                    uassert(11513800,
+                            "an extension logical stage in a distributed plan pipeline must be the "
+                            "same type as its originating stage",
+                            dplLogicalStage->getName() == _logicalStage->getName());
+                    return std::list<boost::intrusive_ptr<DocumentSource>>{
+                        DocumentSourceExtensionOptimizable::create(
+                            getExpCtx(), std::move(dplLogicalStage), _properties)};
+                }},
+            handle);
+    };
+
+    DistributedPlanLogic logic;
+
+    // Convert shardsPipeline.
+    auto shardsPipeline = dplHandle->extractShardsPipeline();
+    if (!shardsPipeline.empty()) {
+        tassert(11420601,
+                "Shards pipeline must have exactly one element per API specification",
+                shardsPipeline.size() == 1);
+        auto shardsStages = convertDPLHandleToDocumentSources(shardsPipeline[0]);
+        tassert(11420602,
+                "Single shardsStage must expand to exactly one DocumentSource",
+                shardsStages.size() == 1);
+        logic.shardsStage = shardsStages.front();
+    }
+
+    // Convert mergingPipeline.
+    auto mergingPipeline = dplHandle->extractMergingPipeline();
+    for (auto& handle : mergingPipeline) {
+        auto stages = convertDPLHandleToDocumentSources(handle);
+        logic.mergingStages.splice(logic.mergingStages.end(), stages);
+    }
+
+    // Convert sortPattern.
+    const auto sortPattern = dplHandle->getSortPattern();
+    if (!sortPattern.isEmpty()) {
+        logic.mergeSortPattern = sortPattern.getOwned();
+    }
+
+    return logic;
+}
+
+boost::intrusive_ptr<DocumentSourceExtensionOptimizable> DocumentSourceExtensionOptimizable::create(
+    const boost::intrusive_ptr<ExpressionContext>& expCtx,
+    const AggStageParseNodeHandle& parseNodeHandle) {
+    auto expanded = parseNodeHandle->expand();
+
+    tassert(
+        11623000, "Expected parseNode to only expand into a single node.", expanded.size() == 1);
+
+    boost::intrusive_ptr<DocumentSourceExtensionOptimizable> optimizable = nullptr;
+    helper::visitExpandedNodes(
+        expanded,
+        [&](const HostAggStageParseNode& host) {
+            tasserted(11623001, "Expected extension AST node, got host parse node.");
+        },
+        [&](const AggStageParseNodeHandle& handle) {
+            tasserted(11623002, "Expected extension AST node, got extension parse node.");
+        },
+        [&](const HostAggStageAstNode& hostAst) {
+            tasserted(11623003, "Expected extension AST node, got host AST node.");
+        },
+        [&](AggStageAstNodeHandle handle) {
+            optimizable = DocumentSourceExtensionOptimizable::create(expCtx, std::move(handle));
+        });
+
+    return optimizable;
 }
 
 }  // namespace mongo::extension::host

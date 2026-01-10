@@ -29,8 +29,8 @@
 
 #include "mongo/db/query/search/search_index_process_shard.h"
 
-#include "mongo/db/local_catalog/collection_catalog.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/shard_catalog/collection_catalog.h"
 #include "mongo/db/views/view_catalog_helpers.h"
 
 #include <boost/optional/optional.hpp>
@@ -52,7 +52,7 @@ std::pair<boost::optional<UUID>, boost::optional<ResolvedView>>
 SearchIndexProcessShard::fetchCollectionUUIDAndResolveView(OperationContext* opCtx,
                                                            const NamespaceString& nss,
                                                            bool failOnTsColl) {
-    auto catalog = CollectionCatalog::get(opCtx);
+    auto catalog = CollectionCatalog::get(opCtx);  // NOLINT TODO: SERVER-104335 Remove this.
     auto coll = catalog->lookupCollectionByNamespace(opCtx, nss);
     auto view = catalog->lookupView(opCtx, nss);
 

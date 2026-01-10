@@ -38,10 +38,13 @@
 
 namespace mongo {
 
-REGISTER_INTERNAL_DOCUMENT_SOURCE(_internalChangeStreamHandleTopologyChange,
-                                  LiteParsedDocumentSourceChangeStreamInternal::parse,
-                                  DocumentSourceChangeStreamHandleTopologyChange::createFromBson,
-                                  true);
+REGISTER_INTERNAL_LITE_PARSED_DOCUMENT_SOURCE(_internalChangeStreamHandleTopologyChange,
+                                              ChangeStreamHandleTopologyChangeLiteParsed::parse);
+
+REGISTER_DOCUMENT_SOURCE_WITH_STAGE_PARAMS_DEFAULT(_internalChangeStreamHandleTopologyChange,
+                                                   DocumentSourceChangeStreamHandleTopologyChange,
+                                                   ChangeStreamHandleTopologyChangeStageParams);
+
 ALLOCATE_DOCUMENT_SOURCE_ID(_internalChangeStreamHandleTopologyChange,
                             DocumentSourceChangeStreamHandleTopologyChange::id)
 

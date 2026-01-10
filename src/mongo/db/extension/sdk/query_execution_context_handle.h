@@ -31,33 +31,45 @@
 #include "mongo/db/extension/sdk/assert_util.h"
 #include "mongo/db/extension/shared/extension_status.h"
 #include "mongo/db/extension/shared/handle/handle.h"
+#include "mongo/db/extension/shared/handle/operation_metrics_handle.h"
 #include "mongo/util/modules.h"
 
-namespace mongo::extension::sdk {
+namespace mongo::extension {
+namespace sdk {
+class QueryExecutionContextAPI;
+}
+template <>
+struct c_api_to_cpp_api<::MongoExtensionQueryExecutionContext> {
+    using CppApi_t = sdk::QueryExecutionContextAPI;
+};
 
+namespace sdk {
 /**
  * Wrapper for ::MongoExtensionQueryExecutionContext, providing safe access to its public API
  * through the underlying vtable.
  *
- * This is an unowned handle, meaning the object is fully owned by the host, and
- * ownership is never transferred to the extension.
+ * Typically ownership of MongoExtensionQueryExecutionContext pointer is never transferred to the
+ * extension, so this API is expected to only be used with an UnownedHandle.
  */
-class QueryExecutionContextHandle
-    : public UnownedHandle<const ::MongoExtensionQueryExecutionContext> {
+class QueryExecutionContextAPI : public VTableAPI<::MongoExtensionQueryExecutionContext> {
 public:
-    QueryExecutionContextHandle(const ::MongoExtensionQueryExecutionContext* ctx)
-        : UnownedHandle<const ::MongoExtensionQueryExecutionContext>(ctx) {
-        _assertValidVTable();
-    }
+    QueryExecutionContextAPI(::MongoExtensionQueryExecutionContext* ctx)
+        : VTableAPI<::MongoExtensionQueryExecutionContext>(ctx) {}
 
     ExtensionGenericStatus checkForInterrupt() const;
 
-private:
-    void _assertVTableConstraints(const VTable_t& vtable) const override {
-        tripwireAssert(11098300,
-                       "QueryExecutionContext' 'check_for_interrupt' is null",
-                       vtable.check_for_interrupt != nullptr);
+    UnownedOperationMetricsHandle getMetrics(MongoExtensionExecAggStage* execStage) const;
+
+    static void assertVTableConstraints(const VTable_t& vtable) {
+        sdk_tassert(11098300,
+                    "QueryExecutionContext' 'check_for_interrupt' is null",
+                    vtable.check_for_interrupt != nullptr);
+        sdk_tassert(11213507,
+                    "QueryExecutionContext' 'get_metrics' is null",
+                    vtable.get_metrics != nullptr);
     };
 };
 
-}  // namespace mongo::extension::sdk
+using QueryExecutionContextHandle = UnownedHandle<::MongoExtensionQueryExecutionContext>;
+}  // namespace sdk
+}  // namespace mongo::extension

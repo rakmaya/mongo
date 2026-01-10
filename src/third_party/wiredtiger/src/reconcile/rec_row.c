@@ -84,9 +84,7 @@ __rec_cell_build_leaf_key(WT_SESSION_IMPL *session, WTI_RECONCILE *r, const void
 {
     WT_BTREE *btree;
     WTI_REC_KV *key;
-    size_t pfx_max;
     uint8_t pfx;
-    const uint8_t *a, *b;
 
     *is_ovflp = false;
 
@@ -111,34 +109,11 @@ __rec_cell_build_leaf_key(WT_SESSION_IMPL *session, WTI_RECONCILE *r, const void
         /*
          * Do prefix compression on the key. We know by definition the previous key sorts before the
          * current key, which means the keys must differ and we just need to compare up to the
-         * shorter of the two keys.
+         * shorter one of the two keys.
          */
         if (r->key_pfx_compress) {
-            /*
-             * We can't compress out more than 256 bytes, limit the comparison to that.
-             */
-            pfx_max = UINT8_MAX;
-            if (size < pfx_max)
-                pfx_max = size;
-            if (r->last->size < pfx_max)
-                pfx_max = r->last->size;
-            for (a = data, b = r->last->data; pfx < pfx_max; ++pfx)
-                if (*a++ != *b++)
-                    break;
-
-            /*
-             * Prefix compression costs CPU and memory when the page is re-loaded, skip unless
-             * there's a reasonable gain. Also, if the previous key was prefix compressed, don't
-             * increase the prefix compression if we aren't getting a reasonable gain. (Groups of
-             * keys with the same prefix can be quickly built without needing to roll forward
-             * through intermediate keys or allocating memory so they can be built faster in the
-             * future, for that reason try and create big groups of keys with the same prefix.)
-             */
-            if (pfx < btree->prefix_compression_min)
-                pfx = 0;
-            else if (r->key_pfx_last != 0 && pfx > r->key_pfx_last &&
-              pfx < r->key_pfx_last + WTI_KEY_PREFIX_PREVIOUS_MINIMUM)
-                pfx = r->key_pfx_last;
+            __wt_cell_compress_prefix_key(
+              r->last, data, size, r->key_pfx_last, btree->prefix_compression_min, &pfx);
 
             if (pfx != 0) {
                 if (is_delta)
@@ -186,22 +161,24 @@ __wt_bulk_insert_row(WT_SESSION_IMPL *session, WT_CURSOR_BULK *cbulk)
     WTI_RECONCILE *r;
     WTI_REC_KV *key, *val;
     WT_TIME_WINDOW tw;
-    bool ovfl_key;
+    WT_DECL_RET;
+    bool ovfl_key, ovfl_val;
 
     r = cbulk->reconcile;
     btree = S2BT(session);
     cursor = &cbulk->cbt.iface;
+    ovfl_key = ovfl_val = false;
     WT_TIME_WINDOW_INIT(&tw);
 
     key = &r->k;
     val = &r->v;
-    WT_RET(__rec_cell_build_leaf_key(session, r, /* Build key cell */
+    WT_ERR(__rec_cell_build_leaf_key(session, r, /* Build key cell */
       cursor->key.data, cursor->key.size, false, &ovfl_key));
     if (cursor->value.size == 0)
         val->len = 0;
     else
-        WT_RET(__wti_rec_cell_build_val(session, r, cursor->value.data, /* Build value cell */
-          cursor->value.size, &tw, 0));
+        WT_ERR(__wti_rec_cell_build_val(session, r, cursor->value.data, /* Build value cell */
+          cursor->value.size, &tw, 0, &ovfl_val));
 
     /* Boundary: split or write the page. */
     if (WTI_CROSSING_SPLIT_BND(r, key->len + val->len)) {
@@ -213,9 +190,15 @@ __wt_bulk_insert_row(WT_SESSION_IMPL *session, WT_CURSOR_BULK *cbulk)
             r->key_pfx_compress = false;
             r->key_pfx_last = 0;
             if (!ovfl_key)
-                WT_RET(__rec_cell_build_leaf_key(session, r, NULL, 0, false, &ovfl_key));
+                WT_ERR(__rec_cell_build_leaf_key(session, r, NULL, 0, false, &ovfl_key));
         }
-        WT_RET(__wti_rec_split_crossing_bnd(session, r, key->len + val->len));
+
+        ret = __wti_rec_split_crossing_bnd(session, r, key->len + val->len);
+        if (ret != 0)
+            __wt_verbose_warning(
+              session, WT_VERB_SPLIT, "%s", "bulk insert failed during page split");
+
+        WT_ERR(ret);
     }
 
     /* Copy the key/value pair onto the page. */
@@ -225,7 +208,7 @@ __wt_bulk_insert_row(WT_SESSION_IMPL *session, WT_CURSOR_BULK *cbulk)
     else {
         r->all_empty_value = false;
         if (btree->dictionary)
-            WT_RET(__wti_rec_dict_replace(session, r, &tw, 0, val));
+            WT_ERR(__wti_rec_dict_replace(session, r, &tw, 0, val));
         __wti_rec_image_copy(session, r, val);
     }
     WTI_REC_CHUNK_TA_UPDATE(session, r->cur_ptr, &tw);
@@ -234,6 +217,20 @@ __wt_bulk_insert_row(WT_SESSION_IMPL *session, WT_CURSOR_BULK *cbulk)
     __rec_key_state_update(r, ovfl_key);
 
     return (0);
+
+err:
+    /*
+     * If we built an overflow key we need to clean it up now as the parent leaf page failed to
+     * split. We should directly free the block here as the key/value pair have not yet been copied
+     * to the parent leaf page.
+     */
+    if (ovfl_key)
+        WT_TRET(__wt_btree_block_free(session, key->buf.data, key->buf.size));
+
+    if (ovfl_val)
+        WT_TRET(__wt_btree_block_free(session, val->buf.data, val->buf.size));
+
+    return (ret);
 }
 
 /*
@@ -323,6 +320,7 @@ __wti_rec_pack_delta_row_leaf(WT_SESSION_IMPL *session, WTI_RECONCILE *r, WT_SAV
     WT_DECL_ITEM(custom_value);
     WT_DECL_RET;
     WT_ITEM *key, value;
+    WT_TIME_WINDOW *twp, tw;
     size_t custom_value_size, new_size;
     uint8_t flags, *p;
     bool ovfl_key;
@@ -357,6 +355,8 @@ __wti_rec_pack_delta_row_leaf(WT_SESSION_IMPL *session, WTI_RECONCILE *r, WT_SAV
             value.data = supd->onpage_upd->data;
             value.size = supd->onpage_upd->size;
         }
+
+        twp = &supd->tw;
     } else {
         WT_ASSERT(session,
           supd->onpage_tombstone != NULL &&
@@ -365,6 +365,9 @@ __wti_rec_pack_delta_row_leaf(WT_SESSION_IMPL *session, WTI_RECONCILE *r, WT_SAV
         LF_SET(WT_DELTA_LEAF_IS_DELETE);
         value.data = NULL;
         value.size = 0;
+
+        WT_TIME_WINDOW_INIT(&tw);
+        twp = &tw;
     }
 
     /* Pack the flags and delta value into a custom value. */
@@ -377,7 +380,7 @@ __wti_rec_pack_delta_row_leaf(WT_SESSION_IMPL *session, WTI_RECONCILE *r, WT_SAV
 
     /* Pack the custom value into a standard cell structure. */
     WT_ERR(
-      __wti_rec_cell_build_val(session, r, custom_value->data, custom_value_size, &supd->tw, 0));
+      __wti_rec_cell_build_val(session, r, custom_value->data, custom_value_size, twp, 0, NULL));
 
     new_size = r->delta.size + r->k.len + r->v.len;
     if (new_size > r->delta.memsize)
@@ -415,7 +418,7 @@ __rec_stop_build_delta_int(WTI_RECONCILE *r, bool *build_deltap)
  */
 static int
 __rec_row_merge(
-  WT_SESSION_IMPL *session, WTI_RECONCILE *r, WT_REF *ref, uint8_t ref_changes, bool *build_deltap)
+  WT_SESSION_IMPL *session, WTI_RECONCILE *r, WT_REF *ref, bool prev_dirty, bool *build_deltap)
 {
     WT_ADDR *addr;
     WT_MULTI *multi;
@@ -440,7 +443,7 @@ __rec_row_merge(
          * remember it on the ref otherwise the information is lost if the child page is evicted.
          */
         F_SET(ref, WT_REF_FLAG_REC_MULTIPLE);
-        if (*build_deltap && ref_changes > 0)
+        if (*build_deltap && prev_dirty)
             __rec_stop_build_delta_int(r, build_deltap);
     } else
         F_CLR(ref, WT_REF_FLAG_REC_MULTIPLE);
@@ -480,7 +483,7 @@ __rec_row_merge(
         /* Update compression state. */
         __rec_key_state_update(r, false);
 
-        if (*build_deltap && ref_changes > 0) {
+        if (*build_deltap && prev_dirty) {
             WT_ASSERT(session, mod->mod_multi_entries == 1);
             WT_RET(__rec_pack_delta_row_int(session, r, key, val));
         }
@@ -528,8 +531,7 @@ __wti_rec_row_int(WT_SESSION_IMPL *session, WTI_RECONCILE *r, WT_PAGE *page)
     WT_REF *ref;
     WT_TIME_AGGREGATE ft_ta, *source_ta, ta;
     size_t size;
-    uint8_t prev_ref_changes;
-    bool build_delta, cell_zero_tmp, retain_onpage;
+    bool build_delta, cell_zero_tmp, prev_dirty, retain_onpage;
     const void *p;
 
     btree = S2BT(session);
@@ -548,7 +550,7 @@ __wti_rec_row_int(WT_SESSION_IMPL *session, WTI_RECONCILE *r, WT_PAGE *page)
     cell = NULL;
     build_delta = WT_BUILD_DELTA_INT(session, r);
 
-    WT_RET(__wti_rec_split_init(session, r, page, 0, btree->maxintlpage_precomp, 0));
+    WT_RET(__wti_rec_split_init(session, r, 0, btree->maxintlpage_precomp));
     WT_RET(__rec_build_delta_int(session, r, build_delta));
 
     /*
@@ -567,7 +569,7 @@ __wti_rec_row_int(WT_SESSION_IMPL *session, WTI_RECONCILE *r, WT_PAGE *page)
 
     /* For each entry in the in-memory page... */
     WT_INTL_FOREACH_BEGIN (session, page, ref) {
-        WT_ACQUIRE_READ(prev_ref_changes, ref->ref_changes);
+        prev_dirty = __wt_atomic_cas_uint8_v(&ref->rec_state, WT_REF_REC_DIRTY, WT_REF_REC_CLEAN);
 
         /*
          * FIXME-WT-15709: build delta for split pages.
@@ -583,7 +585,7 @@ __wti_rec_row_int(WT_SESSION_IMPL *session, WTI_RECONCILE *r, WT_PAGE *page)
          */
         if (build_delta &&
           (r->multi_next > 0 || F_ISSET(ref, WT_REF_FLAG_REC_MULTIPLE) ||
-            (r->cell_zero && prev_ref_changes > 0)))
+            (r->cell_zero && prev_dirty)))
             __rec_stop_build_delta_int(r, &build_delta);
 
         retain_onpage = false;
@@ -617,7 +619,7 @@ __wti_rec_row_int(WT_SESSION_IMPL *session, WTI_RECONCILE *r, WT_PAGE *page)
 
         switch (cms.state) {
         case WTI_CHILD_IGNORE:
-            if (build_delta && prev_ref_changes > 0) {
+            if (build_delta && prev_dirty) {
                 __wt_ref_key(page, ref, &p, &size);
                 WT_ERR(__rec_cell_build_int_key(session, r, p, size));
                 WT_ERR(__rec_pack_delta_row_int(session, r, key, NULL));
@@ -629,8 +631,8 @@ __wti_rec_row_int(WT_SESSION_IMPL *session, WTI_RECONCILE *r, WT_PAGE *page)
              */
             if (WT_DELTA_INT_ENABLED(btree, S2C(session))) {
                 /* If there are concurrent changes to the first child, abort delta creation. */
-                if (!__wt_atomic_casv8(&ref->ref_changes, prev_ref_changes, 0) && build_delta &&
-                  r->cell_zero)
+                if (__wt_atomic_load_uint8_v_acquire(&ref->rec_state) == WT_REF_REC_DIRTY &&
+                  build_delta && r->cell_zero)
                     __rec_stop_build_delta_int(r, &build_delta);
             }
 
@@ -643,7 +645,7 @@ __wti_rec_row_int(WT_SESSION_IMPL *session, WTI_RECONCILE *r, WT_PAGE *page)
             /* Modified child. Empty pages are merged into the parent and discarded. */
             switch (child->modify->rec_result) {
             case WT_PM_REC_EMPTY:
-                if (build_delta && prev_ref_changes > 0) {
+                if (build_delta && prev_dirty) {
                     __wt_ref_key(page, ref, &p, &size);
                     WT_ERR(__rec_cell_build_int_key(session, r, p, size));
                     WT_ERR(__rec_pack_delta_row_int(session, r, key, NULL));
@@ -655,8 +657,8 @@ __wti_rec_row_int(WT_SESSION_IMPL *session, WTI_RECONCILE *r, WT_PAGE *page)
                  */
                 if (WT_DELTA_INT_ENABLED(btree, S2C(session))) {
                     /* If there are concurrent changes to the first child, abort delta creation. */
-                    if (!__wt_atomic_casv8(&ref->ref_changes, prev_ref_changes, 0) && build_delta &&
-                      r->cell_zero)
+                    if (__wt_atomic_load_uint8_v_acquire(&ref->rec_state) == WT_REF_REC_DIRTY &&
+                      build_delta && r->cell_zero)
                         __rec_stop_build_delta_int(r, &build_delta);
                 }
 
@@ -665,7 +667,7 @@ __wti_rec_row_int(WT_SESSION_IMPL *session, WTI_RECONCILE *r, WT_PAGE *page)
                 continue;
             case WT_PM_REC_MULTIBLOCK:
                 cell_zero_tmp = r->cell_zero;
-                WT_ERR(__rec_row_merge(session, r, ref, prev_ref_changes, &build_delta));
+                WT_ERR(__rec_row_merge(session, r, ref, prev_dirty, &build_delta));
 
                 /*
                  * Set the ref_changes state to zero if there were no concurrent changes while
@@ -673,8 +675,8 @@ __wti_rec_row_int(WT_SESSION_IMPL *session, WTI_RECONCILE *r, WT_PAGE *page)
                  */
                 if (WT_DELTA_INT_ENABLED(btree, S2C(session))) {
                     /* If there are concurrent changes to the first child, abort delta creation. */
-                    if (!__wt_atomic_casv8(&ref->ref_changes, prev_ref_changes, 0) && build_delta &&
-                      cell_zero_tmp)
+                    if (__wt_atomic_load_uint8_v_acquire(&ref->rec_state) == WT_REF_REC_DIRTY &&
+                      build_delta && cell_zero_tmp)
                         __rec_stop_build_delta_int(r, &build_delta);
                 }
 
@@ -683,7 +685,7 @@ __wti_rec_row_int(WT_SESSION_IMPL *session, WTI_RECONCILE *r, WT_PAGE *page)
             case WT_PM_REC_REPLACE:
                 /*
                  * If the page is replaced, the page's modify structure has the page's address. If
-                 * we skipped writing an empty delta, we write the current address.
+                 * we skipped writing the page, we write the current address.
                  */
                 if (child->modify->mod_replace.block_cookie != NULL)
                     addr = &child->modify->mod_replace;
@@ -719,11 +721,11 @@ __wti_rec_row_int(WT_SESSION_IMPL *session, WTI_RECONCILE *r, WT_PAGE *page)
             retain_onpage = true;
 
             /*
-             * We may see a changed state here if the child reconciliation skipped writing an empty
-             * delta.
+             * We may see a changed state here if the child reconciliation skipped writing a child
+             * page.
              */
             WT_ASSERT_ALWAYS(session,
-              cms.state == WTI_CHILD_ORIGINAL || WT_DELTA_ENABLED_FOR_PAGE(session, child->type),
+              cms.state == WTI_CHILD_ORIGINAL || F_ISSET(btree, WT_BTREE_DISAGGREGATED),
               "Not propagating the original fast-truncate information");
             /*
              * The transaction ids are cleared after restart. Repack the cell with new validity
@@ -732,8 +734,23 @@ __wti_rec_row_int(WT_SESSION_IMPL *session, WTI_RECONCILE *r, WT_PAGE *page)
             __wt_cell_unpack_addr(session, page->dsk, ref->addr, vpack);
 
             /* The proxy cells of fast truncate pages must be handled in the above flows. */
-            WT_ASSERT_ALWAYS(session, vpack->type != WT_CELL_ADDR_DEL,
-              "Proxy cell is selected with original child image");
+            if (ref->page_del == NULL)
+                WT_ASSERT_ALWAYS(session, vpack->type != WT_CELL_ADDR_DEL,
+                  "Proxy cell is selected with original child image, vpack->type=%u, "
+                  "ref->page_del=NULL",
+                  vpack->type);
+            else {
+                char ts_string[2][WT_TS_INT_STRING_SIZE];
+                WT_ASSERT_ALWAYS(session, vpack->type != WT_CELL_ADDR_DEL,
+                  "Proxy cell is selected with original child image, vpack->type=%u, "
+                  "ref->page_del->txnid=%" PRIu64
+                  ", pg_del_durable_ts=%s, pg_del_start_ts=%s, committed=%s, selected_for_write=%s",
+                  vpack->type, ref->page_del->txnid,
+                  __wt_timestamp_to_string(ref->page_del->pg_del_durable_ts, ts_string[0]),
+                  __wt_timestamp_to_string(ref->page_del->pg_del_start_ts, ts_string[1]),
+                  ref->page_del->committed ? "true" : "false",
+                  ref->page_del->selected_for_write ? "true" : "false");
+            }
 
             if (F_ISSET(vpack, WT_CELL_UNPACK_TIME_WINDOW_CLEARED)) {
                 __wti_rec_cell_build_addr(session, r, NULL, vpack, WT_RECNO_OOB, page_del);
@@ -777,7 +794,7 @@ __wti_rec_row_int(WT_SESSION_IMPL *session, WTI_RECONCILE *r, WT_PAGE *page)
         /* Update compression state. */
         __rec_key_state_update(r, false);
 
-        if (build_delta && prev_ref_changes > 0 && !retain_onpage)
+        if (build_delta && prev_dirty && !retain_onpage)
             WT_ERR(__rec_pack_delta_row_int(session, r, key, val));
 
         /*
@@ -786,8 +803,8 @@ __wti_rec_row_int(WT_SESSION_IMPL *session, WTI_RECONCILE *r, WT_PAGE *page)
          */
         if (WT_DELTA_INT_ENABLED(btree, S2C(session))) {
             /* If there are concurrent changes to the first child, abort delta creation. */
-            if (!__wt_atomic_casv8(&ref->ref_changes, prev_ref_changes, 0) && build_delta &&
-              r->cell_zero)
+            if (__wt_atomic_load_uint8_v_acquire(&ref->rec_state) == WT_REF_REC_DIRTY &&
+              build_delta && r->cell_zero)
                 __rec_stop_build_delta_int(r, &build_delta);
         }
 
@@ -824,93 +841,19 @@ __rec_row_zero_len(WT_SESSION_IMPL *session, WT_TIME_WINDOW *tw)
 }
 
 /*
- * __rec_row_garbage_collect_fixup_update_list --
- *     Insert a tombstone at the start of an update list if all entries are eligible for garbage
- *     collection. There is duplication between the update list and insert list versions of these
- *     functions but my head explodes trying to keep the data structures involved mapped in my head,
- *     so the duplication feels warranted. Don't bother tracking the additional memory associated
- *     with these tombstones - it is about to be freed anyway.
+ * __rec_row_garbage_collect_tw_eligible --
+ *     Check if the time window is eligible for garbage collection.
  */
-static int
-__rec_row_garbage_collect_fixup_update_list(WT_SESSION_IMPL *session, WTI_RECONCILE *r, WT_ROW *rip)
+static WT_INLINE bool
+__rec_row_garbage_collect_tw_eligible(WTI_RECONCILE *r, WT_TIME_WINDOW *twp)
 {
-    WT_BTREE *btree;
-    WT_PAGE *page;
-    WT_PAGE_MODIFY *mod;
-    WT_UPDATE *first_upd, *tombstone, *upd, **upd_entry;
+    if (WT_TIME_WINDOW_HAS_STOP(twp)) {
+        if (WT_REC_CAN_PRUNE_UPD(twp->stop_txn, twp->durable_stop_ts, r))
+            return (true);
+    } else if (WT_REC_CAN_PRUNE_UPD(twp->start_txn, twp->durable_start_ts, r))
+        return (true);
 
-    btree = S2BT(session);
-    page = r->page;
-    mod = page->modify;
-
-    if (!F_ISSET(btree, WT_BTREE_GARBAGE_COLLECT) || !F_ISSET(r, WT_REC_EVICT))
-        return (0);
-
-    if ((first_upd = WT_ROW_UPDATE(page, rip)) == NULL)
-        return (0);
-
-    for (upd = first_upd; upd != NULL && upd->txnid == WT_TXN_ABORTED; upd = upd->next)
-        ;
-
-    if (upd == NULL)
-        return (0);
-
-    if (upd->type == WT_UPDATE_TOMBSTONE)
-        return (0);
-
-    if (upd->txnid < r->rec_start_oldest_id && r->rec_prune_timestamp != WT_TS_NONE &&
-      upd->upd_durable_ts <= r->rec_prune_timestamp) {
-        WT_RET(__wt_upd_alloc_tombstone(session, &tombstone, NULL));
-        tombstone->next = first_upd;
-        upd_entry = &mod->mod_row_update[WT_ROW_SLOT(page, rip)];
-        *upd_entry = tombstone;
-
-        WT_STAT_CONN_DSRC_INCR(session, rec_ingest_garbage_collection_keys);
-    }
-
-    return (0);
-}
-
-/*
- * __rec_row_garbage_collect_fixup_insert_list --
- *     Insert a tombstone at the start of an insert list if all entries are eligible for garbage
- *     collection.
- */
-static int
-__rec_row_garbage_collect_fixup_insert_list(
-  WT_SESSION_IMPL *session, WTI_RECONCILE *r, WT_INSERT *ins)
-{
-    WT_BTREE *btree;
-    WT_UPDATE *first_upd, *tombstone, *upd;
-
-    btree = S2BT(session);
-
-    if (!F_ISSET(btree, WT_BTREE_GARBAGE_COLLECT) || !F_ISSET(r, WT_REC_EVICT))
-        return (0);
-
-    /* The insert list should have an update, but be paranoid */
-    if ((first_upd = ins->upd) == NULL)
-        return (0);
-
-    for (upd = first_upd; upd != NULL && upd->txnid == WT_TXN_ABORTED; upd = upd->next)
-        ;
-
-    if (upd == NULL)
-        return (0);
-
-    if (upd->type == WT_UPDATE_TOMBSTONE)
-        return (0);
-
-    if (upd->txnid < r->rec_start_oldest_id && r->rec_prune_timestamp != WT_TS_NONE &&
-      upd->upd_durable_ts <= r->rec_prune_timestamp) {
-        WT_RET(__wt_upd_alloc_tombstone(session, &tombstone, NULL));
-        tombstone->next = first_upd;
-        ins->upd = tombstone;
-
-        WT_STAT_CONN_DSRC_INCR(session, rec_ingest_garbage_collection_keys);
-    }
-
-    return (0);
+    return (false);
 }
 
 /*
@@ -944,7 +887,6 @@ __rec_row_leaf_insert(WT_SESSION_IMPL *session, WTI_RECONCILE *r, WT_INSERT *ins
     WT_RET(__wt_scr_alloc(session, 0, &tmpkey));
 
     for (; ins != NULL; ins = WT_SKIP_NEXT(ins)) {
-        WT_ERR(__rec_row_garbage_collect_fixup_insert_list(session, r, ins));
         WT_ERR(__wti_rec_upd_select(session, r, ins, NULL, NULL, &upd_select));
         if ((upd = upd_select.upd) == NULL) {
             /*
@@ -992,14 +934,14 @@ __rec_row_leaf_insert(WT_SESSION_IMPL *session, WTI_RECONCILE *r, WT_INSERT *ins
               session, cbt, upd, cbt->upd_value, WT_OPCTX_RECONCILATION));
             __wt_value_return(cbt, cbt->upd_value);
             WT_ERR(__wti_rec_cell_build_val(
-              session, r, cbt->iface.value.data, cbt->iface.value.size, &tw, 0));
+              session, r, cbt->iface.value.data, cbt->iface.value.size, &tw, 0, NULL));
             break;
         case WT_UPDATE_STANDARD:
             if (upd->size == 0 && WT_TIME_WINDOW_IS_EMPTY(&tw))
                 val->len = 0;
             else
                 /* Take the value from the update. */
-                WT_ERR(__wti_rec_cell_build_val(session, r, upd->data, upd->size, &tw, 0));
+                WT_ERR(__wti_rec_cell_build_val(session, r, upd->data, upd->size, &tw, 0, NULL));
             break;
         case WT_UPDATE_TOMBSTONE:
             break;
@@ -1079,7 +1021,7 @@ __rec_cell_repack(
 
     p = vpack->data;
     size = vpack->size;
-    WT_ERR(__wti_rec_cell_build_val(session, r, p, size, tw, 0));
+    WT_ERR(__wti_rec_cell_build_val(session, r, p, size, tw, 0, NULL));
 
 err:
     __wt_scr_free(session, &tmpval);
@@ -1133,7 +1075,7 @@ __wti_rec_row_leaf(
     cbt = &r->update_modify_cbt;
     cbt->iface.session = (WT_SESSION *)session;
 
-    WT_RET(__wti_rec_split_init(session, r, page, 0, btree->maxleafpage_precomp, 0));
+    WT_RET(__wti_rec_split_init(session, r, 0, btree->maxleafpage_precomp));
 
     /*
      * Write any K/V pairs inserted into the page before the first from-disk key on the page.
@@ -1185,9 +1127,6 @@ __wti_rec_row_leaf(
         /* Unpack the on-page value cell. */
         __wt_row_leaf_value_cell(session, page, rip, vpack);
 
-        /* Give garbage collected tables a change to mark obsolete content for cleanup */
-        WT_ERR(__rec_row_garbage_collect_fixup_update_list(session, r, rip));
-
         /* Look for an update. */
         WT_ERR(__wti_rec_upd_select(session, r, NULL, rip, vpack, &upd_select));
         upd = upd_select.upd;
@@ -1200,7 +1139,8 @@ __wti_rec_row_leaf(
              * onpage prepared update. Otherwise, we leak the prepared update.
              */
             WT_ASSERT_ALWAYS(session,
-              !F_ISSET(conn, WT_CONN_PRESERVE_PREPARED) || !WT_TIME_WINDOW_HAS_PREPARE(twp),
+              !F_ISSET(conn, WT_CONN_PRESERVE_PREPARED) || F_ISSET(conn, WT_CONN_IN_MEMORY) ||
+                F_ISSET(btree, WT_BTREE_IN_MEMORY) || !WT_TIME_WINDOW_HAS_PREPARE(twp),
               "leaked prepared update.");
         } else
             twp = &upd_select.tw;
@@ -1211,24 +1151,14 @@ __wti_rec_row_leaf(
          * the table, and the value has become obsolete.
          */
         if (upd == NULL) {
-            if (__wt_txn_tw_stop_visible_all(session, twp))
+            if (__wt_txn_tw_stop_visible_all(session, twp)) {
                 upd = &upd_tombstone;
-            else if (F_ISSET(btree, WT_BTREE_GARBAGE_COLLECT)) {
-                if (WT_TIME_WINDOW_HAS_STOP(twp)) {
-                    if (twp->stop_txn < r->rec_start_oldest_id &&
-                      r->rec_prune_timestamp != WT_TS_NONE &&
-                      twp->durable_stop_ts <= r->rec_prune_timestamp) {
-                        upd = &upd_tombstone;
-                        WT_STAT_CONN_DSRC_INCR(session, rec_ingest_garbage_collection_keys);
-                    }
-                } else {
-                    if (twp->start_txn < r->rec_start_oldest_id &&
-                      r->rec_prune_timestamp != WT_TS_NONE &&
-                      twp->durable_start_ts <= r->rec_prune_timestamp) {
-                        upd = &upd_tombstone;
-                        WT_STAT_CONN_DSRC_INCR(session, rec_ingest_garbage_collection_keys);
-                    }
-                }
+                r->key_removed_from_disk_image = true;
+            } else if (F_ISSET(btree, WT_BTREE_GARBAGE_COLLECT) &&
+              __rec_row_garbage_collect_tw_eligible(r, twp)) {
+                upd = &upd_tombstone;
+                r->key_removed_from_disk_image = true;
+                WT_STAT_CONN_DSRC_INCR(session, rec_ingest_garbage_collection_keys_disk_image);
             }
         }
 
@@ -1291,9 +1221,7 @@ __wti_rec_row_leaf(
             WT_ASSERT(session,
               F_ISSET(upd, WT_UPDATE_DS) || !F_ISSET(r, WT_REC_HS) ||
                 __wt_txn_tw_start_visible_all(session, twp) ||
-                (F_ISSET(btree, WT_BTREE_GARBAGE_COLLECT) &&
-                  twp->start_txn < r->rec_start_oldest_id && r->rec_prune_timestamp != WT_TS_NONE &&
-                  twp->durable_start_ts <= r->rec_prune_timestamp));
+                WT_REC_CAN_PRUNE_UPD(twp->start_txn, twp->durable_start_ts, r));
 
             /* The first time we find an overflow record, discard the underlying blocks. */
             if (F_ISSET(vpack, WT_CELL_UNPACK_OVERFLOW) && vpack->raw != WT_CELL_VALUE_OVFL_RM)
@@ -1306,12 +1234,12 @@ __wti_rec_row_leaf(
                   session, cbt, upd, cbt->upd_value, WT_OPCTX_RECONCILATION));
                 __wt_value_return(cbt, cbt->upd_value);
                 WT_ERR(__wti_rec_cell_build_val(
-                  session, r, cbt->iface.value.data, cbt->iface.value.size, twp, 0));
+                  session, r, cbt->iface.value.data, cbt->iface.value.size, twp, 0, NULL));
                 dictionary = true;
                 break;
             case WT_UPDATE_STANDARD:
                 /* Take the value from the update. */
-                WT_ERR(__wti_rec_cell_build_val(session, r, upd->data, upd->size, twp, 0));
+                WT_ERR(__wti_rec_cell_build_val(session, r, upd->data, upd->size, twp, 0, NULL));
                 dictionary = true;
                 break;
             case WT_UPDATE_TOMBSTONE:
@@ -1337,6 +1265,7 @@ __wti_rec_row_leaf(
 
                 /* Not creating a key so we can't use last-key as a prefix for a subsequent key. */
                 lastkey->size = 0;
+                r->key_removed_from_disk_image = true;
                 break;
             default:
                 WT_ERR(__wt_illegal_value(session, upd->type));

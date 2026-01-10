@@ -34,10 +34,10 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/json.h"
 #include "mongo/db/client.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/create_collection.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/create_collection.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/db/timeseries/bucket_catalog/bucket_catalog_internal.h"
 #include "mongo/db/timeseries/bucket_catalog/bucket_metadata.h"
@@ -2375,7 +2375,8 @@ TEST_F(BucketCatalogTest, ReopeningFailedDueToMinMaxCalculation) {
     ASSERT_EQ(1, stats->numBucketReopeningsFailedDueToMinMaxCalculation.load());
 }
 
-DEATH_TEST_F(BucketCatalogTest, ReopeningFailedDueToCompression, "invariant") {
+using BucketCatalogTestDeathTest = BucketCatalogTest;
+DEATH_TEST_F(BucketCatalogTestDeathTest, ReopeningFailedDueToCompression, "invariant") {
     BSONObj bucketDoc = ::mongo::fromjson(
         R"({"_id":{"$oid":"629e1e680958e279dc29a517"},
             "control":{"version":2,"min":{"time":{"$date":"2022-06-06T15:34:00.000Z"},"a":1,"b":1},

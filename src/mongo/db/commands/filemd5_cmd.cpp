@@ -39,9 +39,6 @@
 #include "mongo/db/curop_failpoint_helpers.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/dbdirectclient.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/db_raii.h"
-#include "mongo/db/local_catalog/lock_manager/exception_util.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/expression_context_builder.h"
@@ -54,6 +51,8 @@
 #include "mongo/db/query/plan_yield_policy.h"
 #include "mongo/db/query/query_planner_params.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/lock_manager/exception_util.h"
+#include "mongo/db/shard_role/shard_catalog/db_raii.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/fail_point.h"
@@ -130,7 +129,7 @@ public:
 
         md5digest d;
         md5_state_t st;
-        md5_init_state(&st);
+        md5_init_state_deprecated(&st);
 
         int n = 0;
 
@@ -230,7 +229,7 @@ public:
                     int len;
                     const char* data = owned["data"].binDataClean(len);
                     // This is potentially an expensive operation, so do it out of the lock
-                    md5_append(&st, (const md5_byte_t*)(data), len);
+                    md5_append_deprecated(&st, (const md5_byte_t*)(data), len);
                     n++;
 
                     CurOpFailpointHelpers::waitWhileFailPointEnabled(
@@ -260,7 +259,7 @@ public:
                 result.appendBinData("md5state", sizeof(st), BinDataGeneral, &st);
 
             // This must be *after* the capture of md5state since it mutates st
-            md5_finish(&st, d);
+            md5_finish_deprecated(&st, d);
 
             result.append("numChunks", n);
             result.append("md5", digestToString(d));

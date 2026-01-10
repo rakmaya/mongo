@@ -33,6 +33,7 @@
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
+#include "mongo/db/baton.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/client_cursor/cursor_id.h"
@@ -133,8 +134,9 @@ public:
      * docBuffer. If a sort is specified in the ClusterClientCursorParams, places the remotes with
      * buffered results onto _mergeQueue.
      *
-     * The TaskExecutor* must remain valid for the lifetime of the ARM.
+     * The TaskExecutor* must remain valid for the lifetime of the AsyncResultsMerger.
      *
+     * Must only be called with a valid, non-nullptr 'opCtx'.
      * If 'opCtx' may be deleted before this AsyncResultsMerger finishes, the caller must call
      * detachFromOperationContext() before deleting 'opCtx', and call reattachToOperationContext()
      * with a new, valid OperationContext before the next use.
@@ -301,6 +303,11 @@ public:
     std::size_t getNumRemotes() const;
 
     /**
+     * Returns the number of buffered response documents.
+     */
+    std::size_t getNumBufferedResponses_forTest() const;
+
+    /**
      * Returns true if we have a cursor established for the specified shard and shard tag, false
      * otherwise.
      */
@@ -308,7 +315,7 @@ public:
                                    const ShardTag& tag = ShardTag::kDefault) const;
 
     /**
-     * Returns the number of buffered remote responses.
+     * Returns the total number of buffered remote responses.
      */
     std::size_t numberOfBufferedRemoteResponses_forTest() const;
 
@@ -699,7 +706,7 @@ private:
     /**
      * Cleans up after remote query failure.
      */
-    void _cleanUpFailedBatch(WithLock, Status status, RemoteCursorData& remote);
+    void _cleanUpFailedBatch(WithLock lk, Status status, RemoteCursorData& remote);
 
     /**
      * Processes results from a remote query.
@@ -811,6 +818,11 @@ private:
      */
     void _cancelCallbackForRemote(WithLock lk, const RemoteCursorPtr& remote);
 
+    /**
+     * Clear internal document buffers in order to release memory as early as possible.
+     */
+    void _clearBuffers(WithLock);
+
     OperationContext* _opCtx;
     std::shared_ptr<executor::TaskExecutor> _executor;
 
@@ -850,7 +862,9 @@ private:
 
     /**
      * List of pending responses to be processed for additional participants. Remote responses are
-     * buffered here until they are processed in 'nextReady()' or 'detachedFromOperationContext()'.
+     * buffered here until they are processed in 'nextReady()' or 'detachFromOperationContext()'.
+     * Only the parsed parts of the response pertaining to additional transaction participants are
+     * included here and not the full remote responses.
      */
     std::queue<RemoteResponse> _remoteResponses;
 
@@ -944,6 +958,8 @@ private:
     };
 
     boost::optional<CompletePromiseFuture> _killCompleteInfo;
+
+    Baton::SubBatonHolder _subBaton;
 
     CancellationSource _cancellationSource;
 };

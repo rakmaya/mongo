@@ -27,7 +27,7 @@
  *    it in the license file.
  */
 
-#include "mongo/db/admission/execution_admission_context.h"
+#include "mongo/db/admission/execution_control/execution_admission_context.h"
 #include "mongo/db/admission/ingress_admission_context.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/operation_context_options_gen.h"
@@ -77,7 +77,7 @@ int64_t addWaitForLock(OperationContext* opCtx,
     const ResourceId resId(
         RESOURCE_COLLECTION,
         NamespaceString::createNamespaceString_forTest(boost::none, "CurOpStatsTest.WaitForLock"));
-    resetGlobalLockStats();
+    resetGlobalLockStats_forTest();
 
     Locker lockerConflict(svcCtx);
     lockerConflict.lockGlobal(opCtx, MODE_IX);

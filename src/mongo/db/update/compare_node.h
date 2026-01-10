@@ -42,6 +42,7 @@
 #include "mongo/db/update/update_node.h"
 #include "mongo/db/update/update_node_visitor.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
 
 #include <memory>
 
@@ -95,8 +96,8 @@ private:
         }
     }
 
-    BSONObj operatorValue() const final {
-        return BSON("" << _val);
+    BSONObj operatorValue(const SerializationOptions& opts) const final {
+        return BSON("" << opts.serializeLiteral(_val));
     }
 
     CompareMode _mode;

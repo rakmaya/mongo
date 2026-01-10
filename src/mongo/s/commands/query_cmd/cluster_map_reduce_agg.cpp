@@ -43,10 +43,7 @@
 #include "mongo/db/commands/query_cmd/mr_common.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/value.h"
-#include "mongo/db/global_catalog/catalog_cache/catalog_cache.h"
 #include "mongo/db/global_catalog/chunk_manager.h"
-#include "mongo/db/global_catalog/router_role_api/router_role.h"
-#include "mongo/db/local_catalog/document_validation.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/pipeline/expression_context.h"
@@ -62,6 +59,9 @@
 #include "mongo/db/query/explain_common.h"
 #include "mongo/db/query/map_reduce_output_format.h"
 #include "mongo/db/query/shard_key_diagnostic_printer.h"
+#include "mongo/db/router_role/router_role.h"
+#include "mongo/db/router_role/routing_cache/catalog_cache.h"
+#include "mongo/db/shard_role/shard_catalog/document_validation.h"
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/version_context.h"
 #include "mongo/executor/task_executor_pool.h"
@@ -332,9 +332,9 @@ bool runAggregationMapReduce(OperationContext* opCtx,
                       "https://docs.mongodb.com/manual/core/map-reduce/");
     }
 
-    sharding::router::CollectionRouter router{opCtx->getServiceContext(), nss};
+    sharding::router::CollectionRouter router(opCtx, nss);
     return router.routeWithRoutingContext(
-        opCtx, "mapReduce"_sd, [&](OperationContext* opCtx, RoutingContext& routingCtx) {
+        "mapReduce"_sd, [&](OperationContext* opCtx, RoutingContext& routingCtx) {
             // Clear the `result` BSONObjBuilder since this lambda function may be retried if the
             // router cache is stale.
             result.resetToEmpty();

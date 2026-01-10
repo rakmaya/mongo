@@ -62,21 +62,23 @@ namespace mongo {
 
 using namespace query_stats;
 
+DECLARE_STAGE_PARAMS_DERIVED_DEFAULT(QueryStats);
+
 class DocumentSourceQueryStats final : public DocumentSource {
 public:
     static constexpr StringData kStageName = "$queryStats"_sd;
 
-    class LiteParsed final : public LiteParsedDocumentSource {
+    class LiteParsed final : public LiteParsedDocumentSourceDefault<LiteParsed> {
     public:
         static std::unique_ptr<LiteParsed> parse(const NamespaceString& nss,
                                                  const BSONElement& spec,
                                                  const LiteParserOptions& options);
 
-        LiteParsed(std::string parseTimeName,
+        LiteParsed(const BSONElement& spec,
                    const boost::optional<TenantId>& tenantId,
                    TransformAlgorithmEnum algorithm,
                    std::string hmacKey)
-            : LiteParsedDocumentSource(std::move(parseTimeName)),
+            : LiteParsedDocumentSourceDefault(spec),
               _algorithm(algorithm),
               _hmacKey(hmacKey),
               _privileges(
@@ -103,6 +105,10 @@ public:
 
         void assertSupportsMultiDocumentTransaction() const override {
             transactionNotSupported(kStageName);
+        }
+
+        std::unique_ptr<StageParams> getStageParams() const final {
+            return std::make_unique<QueryStatsStageParams>(_originalBson);
         }
 
         const TransformAlgorithmEnum _algorithm;

@@ -8,30 +8,20 @@
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 . "$DIR/prelude.sh"
-
-cd src
+. "$DIR/bazel_evergreen_shutils.sh"
 
 set -o errexit
 set -o verbose
 
-activate_venv
-
-source ./evergreen/bazel_evergreen_shutils.sh
+bazel_evergreen_shutils::activate_and_cd_src
 
 BAZEL_BINARY=$(bazel_evergreen_shutils::bazel_get_binary_path)
 
-# Timeout is set here to avoid the build hanging indefinitely, still allowing
-# for retries.
-TIMEOUT_CMD=""
-if [ -n "${build_timeout_seconds}" ]; then
-    TIMEOUT_CMD="timeout ${build_timeout_seconds}"
-fi
+ci_flags="--//bazel/resmoke:in_evergreen"
 
-ci_flags="\
---//bazel/resmoke:in_evergreen \
---test_output=all \
---noincompatible_enable_cc_toolchain_resolution \
---repo_env=no_c++_toolchain=1"
+# For simple build ID generation:
+export compile_variant="${compile_variant}"
+export version_id="${version_id}"
 
 if [[ "${evergreen_remote_exec}" == "on" ]]; then
     ci_flags="--config=remote_test ${ci_flags}"
@@ -62,74 +52,60 @@ for strategy in "${strategies[@]}"; do
     ci_flags+=" --test_arg=--evergreenTestSelectionStrategy=${strategy}"
 done
 
-# If not explicitly specified on the target, pick a shard count that will fully utilize the current machine.
-BUILD_INFO=$(bazel query ${targets} --output build)
-if [[ "$BUILD_INFO" != *"shard_count ="* ]] && [[ "${bazel_args} ${bazel_compile_flags} ${task_compile_flags} ${patch_compile_flags}" != *"test_sharding_strategy"* ]]; then
-    CPUS=$(nproc)
-    SIZE=$(echo $BUILD_INFO | grep "size =" | cut -d '"' -f2)
-    TEST_RESOURCES_CPU=$(echo ${bazel_args} ${bazel_compile_flags} ${task_compile_flags} ${patch_compile_flags} | awk -F'--default_test_resources=cpu=' '{print $2}')
-    TEST_RESOURCES_CPU=(${TEST_RESOURCES_CPU//,/ })
-    declare -A SIZES
-    SIZES=(["small"]=0 ["medium"]=1 ["large"]=2 ["enormous"]=3)
-    CPUS_PER_SHARD=${TEST_RESOURCES_CPU[${SIZES[$SIZE]}]}
-    SHARD_COUNT=$((CPUS / $CPUS_PER_SHARD))
-    ci_flags+=" --test_sharding_strategy=forced=$SHARD_COUNT"
-fi
+ALL_FLAGS="${ci_flags} ${LOCAL_ARG} ${bazel_args:-} ${bazel_compile_flags:-} ${task_compile_flags:-} ${patch_compile_flags:-}"
+echo "${ALL_FLAGS}" >.bazel_build_flags
+
+# Save the invocation, intentionally excluding CI specific flags.
+echo "python buildscripts/install_bazel.py" >bazel-invocation.txt
+echo "bazel test ${bazel_args} ${targets}" >>bazel-invocation.txt
 
 set +o errexit
 
-for i in {1..3}; do
-    eval ${TIMEOUT_CMD} ${BAZEL_BINARY} fetch ${ci_flags} ${bazel_args} ${bazel_compile_flags} ${task_compile_flags} ${patch_compile_flags} ${targets} && RET=0 && break || RET=$? && sleep 60
-    if [ $RET -eq 124 ]; then
-        echo "Bazel fetch timed out after ${build_timeout_seconds} seconds, retrying..."
-    else
-        echo "Bazel fetch failed, retrying..."
-    fi
-    $BAZEL_BINARY shutdown
-done
-
-# Save the invocation, intentionally excluding ci_flags.
-echo "python buildscripts/install_bazel.py" >bazel-invocation.txt
-echo "bazel test ${bazel_args} ${bazel_compile_flags} ${task_compile_flags} ${patch_compile_flags} ${targets}" >>bazel-invocation.txt
-
-eval ${BAZEL_BINARY} test ${ci_flags} ${bazel_args} ${bazel_compile_flags} ${task_compile_flags} ${patch_compile_flags} ${targets}
+# Fetch then test with retries.
+export RETRY_ON_FAIL=1
+bazel_evergreen_shutils::retry_bazel_cmd 3 "$BAZEL_BINARY" \
+    fetch ${ci_flags} ${bazel_args} ${bazel_compile_flags} ${task_compile_flags} ${patch_compile_flags} ${targets}
 RET=$?
+
+if [[ "$RET" == "0" ]]; then
+    export RETRY_ON_FAIL=0
+    bazel_evergreen_shutils::retry_bazel_cmd 3 "$BAZEL_BINARY" \
+        test ${ci_flags} ${bazel_args} ${bazel_compile_flags} ${task_compile_flags} ${patch_compile_flags} --build_event_json_file=build_events.json ${targets}
+    RET=$?
+
+    if [[ "$RET" -eq 124 ]]; then
+        echo "Bazel timed out after ${build_timeout_seconds:-<unspecified>} seconds."
+    elif [[ "$RET" != "0" ]]; then
+        echo "Errors were found during bazel test, failing the execution"
+    fi
+fi
+
+bazel_evergreen_shutils::write_last_engflow_link
 
 set -o errexit
 
-# Symlink data directories to where Resmoke normally puts them for compatability with post tasks
-# that run for all Resmoke tasks.
-find bazel-testlogs/ -path '*data/job*' -name 'job*' -print0 |
-    while IFS= read -r -d '' test_outputs; do
-        source=${workdir}/src/$test_outputs
-        target=${workdir}/$(sed 's/.*\.outputs\///' <<<$test_outputs)
-        mkdir -p $(dirname $target)
-        ln -sf $source $target
-    done
+if [[ "$RET" != "0" ]]; then
+    # This is a hacky way to save build time for the initial build during the `bazel test` above. They
+    # are stripped binaries there. We should rebuild them with debug symbols and separate debug.
+    # The relinked binaries should still be hash identical when stripped with strip.
+    sed -i -e 's/--config=remote_test//g' -e 's/--separate_debug=False/--separate_debug=True/g' -e 's/--features=strip_debug//g' .bazel_build_flags
 
-# Symlink test logs to where Evergreen expects them. Evergreen won't read into a symlinked directory,
-# so symlink each log file individually.
-find bazel-testlogs/ -type f -path "*TestLogs/*" -print0 |
-    while IFS= read -r -d '' test_outputs; do
-        source=${workdir}/src/$test_outputs
-        target=${workdir}/$(sed 's/.*\.outputs\///' <<<$test_outputs)
-        mkdir -p $(dirname $target)
-        ln -sf $source $target
-    done
+    # The --config flag needs to stay consistent for the `bazel run` to avoid evicting the previous results.
+    # Strip out anything that isn't a --config flag that could interfere with the run command.
+    CONFIG_FLAGS="$(bazel_evergreen_shutils::extract_config_flags "${ALL_FLAGS}")"
+    eval ${BAZEL_BINARY} run ${CONFIG_FLAGS} //buildscripts:gather_failed_tests || true
+fi
 
-# Symlinks archived data directories from multiple tests/shards to a single folder. Evergreen needs a
-# single folder it can glob for s3.put. See the Evergreen function "upload mongodatafiles".
-find bazel-testlogs/ -path '*data_archives/*.tgz' -print0 |
-    while IFS= read -r -d '' archive; do
-        source=${workdir}/src/$archive
-        target=${workdir}/$(sed 's/.*\.outputs\///' <<<$archive)
-        echo $source
-        echo $target
-        mkdir -p $(dirname $target)
-        ln -sf $source $target
-    done
+eval ${BAZEL_BINARY} run ${CONFIG_FLAGS} //buildscripts:append_result_tasks -- --outfile=generated_tasks.json
 
-# Combine reports from potentially multiple tests/shards.
-find bazel-testlogs/ -name report*.json | xargs $python buildscripts/combine_reports.py --no-report-exit -o report.json
-
-exit $RET
+# Return code 3 from `bazel test` indicates that the build was OK, but some tests failed or timed out.
+# The test failures are reported in individual results tasks, so don't fail the task here.
+if [[ "$RET" -eq 3 ]]; then
+    echo 'Some tests failed. See the generated task(s) for the failed targets for more details on the failure(s).'
+    exit 0
+elif [[ "$RET" -eq 0 ]]; then
+    exit 0
+else
+    echo 'Some tests failed to build. Look for "FAILED TO BUILD" or other build errors above. Tests with regular test failures will have their results in separate generated tasks.'
+    exit $RET
+fi

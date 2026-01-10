@@ -42,19 +42,19 @@ namespace mongo::plan_explainer_factory {
 std::unique_ptr<PlanExplainer> make(PlanStage* root, boost::optional<size_t> cachedPlanHash) {
     return make(root,
                 cachedPlanHash,
-                QueryPlanner::CostBasedRankerResult{},
+                QueryPlanner::PlanRankingResult{},
                 stage_builder::PlanStageToQsnMap{},
                 {} /* cbrRejectedPlanStages */);
 }
 
 std::unique_ptr<PlanExplainer> make(PlanStage* root,
                                     boost::optional<size_t> cachedPlanHash,
-                                    QueryPlanner::CostBasedRankerResult cbrResult,
+                                    QueryPlanner::PlanRankingResult planRankingResult,
                                     stage_builder::PlanStageToQsnMap planStageQsnMap,
                                     std::vector<std::unique_ptr<PlanStage>> cbrRejectedPlanStages) {
     return std::make_unique<PlanExplainerImpl>(root,
                                                cachedPlanHash,
-                                               std::move(cbrResult),
+                                               std::move(planRankingResult),
                                                std::move(planStageQsnMap),
                                                std::move(cbrRejectedPlanStages));
 }
@@ -65,6 +65,7 @@ std::unique_ptr<PlanExplainer> make(PlanStage* root, const PlanEnumeratorExplain
 
 std::unique_ptr<PlanExplainer> make(
     sbe::PlanStage* root,
+    const NamespaceString& nss,
     const stage_builder::PlanStageData* data,
     const QuerySolution* solution,
     bool isMultiPlan,
@@ -72,10 +73,11 @@ std::unique_ptr<PlanExplainer> make(
     boost::optional<size_t> cachedPlanHash,
     std::shared_ptr<const plan_cache_debug_info::DebugInfoSBE> debugInfoSBE,
     std::unique_ptr<PlanStage> classicRuntimePlannerStage,
-    RemoteExplainVector* remoteExplains) {
+    RemoteExplainVector* remoteExplains,
+    bool usedJoinOpt) {
     if (!debugInfoSBE) {
         debugInfoSBE = std::make_shared<const plan_cache_debug_info::DebugInfoSBE>(
-            plan_cache_util::buildDebugInfo(solution));
+            plan_cache_util::buildDebugInfo(nss, solution));
     }
     return std::make_unique<PlanExplainerClassicRuntimePlannerForSBE>(
         root,
@@ -86,6 +88,7 @@ std::unique_ptr<PlanExplainer> make(
         cachedPlanHash,
         debugInfoSBE,
         std::move(classicRuntimePlannerStage),
-        remoteExplains);
+        remoteExplains,
+        usedJoinOpt);
 }
 }  // namespace mongo::plan_explainer_factory

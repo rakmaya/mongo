@@ -30,10 +30,11 @@
 #pragma once
 
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/lock_manager/d_concurrency.h"
 #include "mongo/util/background.h"
+#include "mongo/util/modules.h"
 
-namespace mongo {
-
+namespace MONGO_MOD_PUBLIC mongo {
 void startOplogCapMaintainerThread(ServiceContext* serviceContext,
                                    bool isReplSet,
                                    bool shouldSkipOplogSampling);
@@ -43,7 +44,7 @@ void stopOplogCapMaintainerThread(ServiceContext* serviceContext, const Status& 
 /**
  * Responsible for deleting oplog truncate markers once their max capacity has been reached.
  */
-class OplogCapMaintainerThread : public BackgroundJob {
+class MONGO_MOD_OPEN OplogCapMaintainerThread : public BackgroundJob {
 public:
     OplogCapMaintainerThread() : BackgroundJob(false /* deleteSelf */) {}
 
@@ -65,9 +66,19 @@ public:
 
 private:
     /**
+     * Options for lock acquisition with an intent appropriate to the oplog being truncated.
+     */
+    virtual Lock::GlobalLockOptions _getOplogTruncationLockOptions();
+
+    /**
      * Returns true iff there was an oplog to delete from.
      */
     bool _deleteExcessDocuments(OperationContext* opCtx);
+
+    /**
+     * Pass-through method for reclaiming oplog appropriately to the oplog being truncated.
+     */
+    virtual void _reclaimOplog(OperationContext* opCtx, RecordStore& rs, RecordId mayTruncateUpTo);
 
     // Serializes setting/resetting _uniqueCtx and marking _uniqueCtx killed.
     mutable stdx::mutex _opCtxMutex;
@@ -83,4 +94,4 @@ private:
         toStringForLogging(NamespaceString::kRsOplogNamespace);
 };
 
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUBLIC mongo

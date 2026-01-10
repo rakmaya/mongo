@@ -36,8 +36,10 @@
 #include "mongo/db/memory_tracking/operation_memory_usage_tracker.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_mock.h"
+#include "mongo/db/pipeline/optimization/rule_based_rewriter.h"
 #include "mongo/db/query/client_cursor/cursor_manager.h"
 #include "mongo/executor/network_interface_factory.h"
+#include "mongo/executor/thread_pool_task_executor.h"
 #include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/logv2/log.h"
 #include "mongo/unittest/assert.h"
@@ -68,6 +70,16 @@ protected:
         _executor->shutdown();
         _executor.reset();
         DBCommandTestFixture::tearDown();
+    }
+
+    AggregateCommandRequest makeRequestWithIfrFlag() {
+        NamespaceString nss = NamespaceString::createNamespaceString_forTest("test", "coll");
+        AggregateCommandRequest request(std::move(nss));
+        request.setPipeline({});
+        auto& flag = feature_flags::gFeatureFlagVectorSearchExtension;
+        request.setIfrFlags(
+            std::vector<BSONObj>{BSON("name" << flag.getName() << "value" << true)});
+        return request;
     }
 
     static OperationContext* getTrackerOpCtx(OperationMemoryUsageTracker* tracker) {
@@ -375,11 +387,19 @@ private:
     SimpleMemoryUsageTracker _tracker;
 };
 
-REGISTER_DOCUMENT_SOURCE(trackingMock,
-                         LiteParsedDocumentSourceDefault::parse,
-                         DocumentSourceTrackingMock::createFromBson,
-                         AllowedWithApiStrict::kAlways);
-ALLOCATE_DOCUMENT_SOURCE_ID(trackingMock, DocumentSourceTrackingMock::id)
+DEFINE_LITE_PARSED_STAGE_DEFAULT_DERIVED(TrackingMock);
+
+REGISTER_LITE_PARSED_DOCUMENT_SOURCE(trackingMock,
+                                     TrackingMockLiteParsed::parse,
+                                     AllowedWithApiStrict::kAlways);
+
+REGISTER_DOCUMENT_SOURCE_WITH_STAGE_PARAMS_DEFAULT(trackingMock,
+                                                   DocumentSourceTrackingMock,
+                                                   TrackingMockStageParams);
+
+ALLOCATE_DOCUMENT_SOURCE_ID(trackingMock, DocumentSourceTrackingMock::id);
+
+REGISTER_RULES(DocumentSourceTrackingMock, OPTIMIZE_IN_PLACE_RULE(DocumentSourceTrackingMock));
 
 class TrackingMockStage : public mongo::exec::agg::MockStage {
     using GetNextResult = exec::agg::GetNextResult;
@@ -589,5 +609,19 @@ TEST_F(RunAggregateTest, ExchangePipelineAndMemoryTrackingWorksNConsumersWithErr
     });
 }
 
+TEST_F(RunAggregateTest, RunAggregateReadsIFRFlagsFromRequest) {
+    AggregateCommandRequest request = makeRequestWithIfrFlag();
+    LiteParsedPipeline liteParsedPipeline(request, false);
+    BSONObj cmdObj = request.toBSON();
+    PrivilegeVector privileges;
+    boost::optional<ExplainOptions::Verbosity> verbosity = boost::none;
+    rpc::OpMsgReplyBuilder replyBuilder;
+
+    Status status = runAggregate(
+        opCtx, request, liteParsedPipeline, cmdObj, privileges, verbosity, &replyBuilder);
+
+    // Validate that runAggregate correctly reads and processes IFR flags.
+    ASSERT_TRUE(status.isOK());
+}
 }  // namespace
 }  // namespace mongo

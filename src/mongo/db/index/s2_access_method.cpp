@@ -38,8 +38,8 @@
 #include "mongo/db/index/expression_params.h"
 #include "mongo/db/index/s2_key_generator.h"
 #include "mongo/db/index_names.h"
-#include "mongo/db/local_catalog/index_catalog_entry.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog_entry.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
@@ -90,7 +90,7 @@ S2AccessMethod::S2AccessMethod(IndexCatalogEntry* btreeState,
             "Expect at least one geo field, spec=" + descriptor->keyPattern().toString(),
             geoFields >= 1);
 
-    if (descriptor->isSparse()) {
+    if (descriptor->isSetSparseByUser()) {
         LOGV2_WARNING(23742,
                       "Sparse option ignored for index spec",
                       "indexSpec"_attr = descriptor->keyPattern());

@@ -27,20 +27,20 @@
  *    it in the license file.
  */
 
-#include "oplog_cap_maintainer_thread.h"
+#include "mongo/db/storage/oplog_cap_maintainer_thread.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
-#include "mongo/db/admission/execution_admission_context.h"
+#include "mongo/db/admission/execution_control/execution_admission_context.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands/server_status/server_status.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/local_oplog_info.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/intent_registry.h"
+#include "mongo/db/repl/local_oplog_info.h"
 #include "mongo/db/rss/replicated_storage_service.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
 #include "mongo/db/storage/collection_truncate_markers.h"
 #include "mongo/db/storage/oplog_truncate_marker_parameters_gen.h"
 #include "mongo/db/storage/oplog_truncation.h"
@@ -49,9 +49,9 @@
 #include "mongo/logv2/log.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/background.h"
 #include "mongo/util/concurrency/admission_context.h"
 #include "mongo/util/concurrency/idle_thread_block.h"
-#include "mongo/util/decorable.h"
 #include "mongo/util/fail_point.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
@@ -205,6 +205,13 @@ void OplogCapMaintainerThread::set(
     maintainerThread = std::move(oplogCapMaintainerThread);
 }
 
+Lock::GlobalLockOptions OplogCapMaintainerThread::_getOplogTruncationLockOptions() {
+    return {.skipFlowControlTicket = true,
+            .skipRSTLLock = true,
+            .skipDirectConnectionChecks = false,
+            .explicitIntent = rss::consensus::IntentRegistry::Intent::LocalWrite};
+}
+
 bool OplogCapMaintainerThread::_deleteExcessDocuments(OperationContext* opCtx) {
     // A Global IX lock should be good enough to protect the oplog truncation from
     // interruptions such as replication rollback. Database lock or collection lock is not
@@ -240,10 +247,7 @@ bool OplogCapMaintainerThread::_deleteExcessDocuments(OperationContext* opCtx) {
                                   MODE_IX,
                                   Date_t::max(),
                                   Lock::InterruptBehavior::kThrow,
-                                  {false,
-                                   true /* skipRstl */,
-                                   false,
-                                   rss::consensus::IntentRegistry::Intent::LocalWrite});
+                                  _getOplogTruncationLockOptions());
         auto rs = LocalOplogInfo::get(opCtx)->getRecordStore();
         if (!rs) {
             LOGV2_DEBUG(9064300, 2, "oplog collection does not exist");
@@ -253,7 +257,7 @@ bool OplogCapMaintainerThread::_deleteExcessDocuments(OperationContext* opCtx) {
         auto mayTruncateUpTo = opCtx->getServiceContext()->getStorageEngine()->getPinnedOplog();
 
         Timer timer;
-        oplog_truncation::reclaimOplog(opCtx, *rs, RecordId(mayTruncateUpTo.asULL()));
+        _reclaimOplog(opCtx, *rs, RecordId(mayTruncateUpTo.asULL()));
 
         auto elapsedMicros = timer.micros();
         totalTimeTruncating.fetchAndAdd(elapsedMicros);
@@ -271,9 +275,15 @@ bool OplogCapMaintainerThread::_deleteExcessDocuments(OperationContext* opCtx) {
     return true;
 }
 
+void OplogCapMaintainerThread::_reclaimOplog(OperationContext* opCtx,
+                                             RecordStore& rs,
+                                             RecordId mayTruncateUpTo) {
+    oplog_truncation::reclaimOplog(opCtx, rs, mayTruncateUpTo);
+}
+
 void OplogCapMaintainerThread::run() {
-    LOGV2(5295000, "Oplog cap maintainer thread started", "threadName"_attr = _name);
-    ThreadClient tc(_name,
+    LOGV2(5295000, "Oplog cap maintainer thread started", "threadName"_attr = name());
+    ThreadClient tc(name(),
                     getGlobalServiceContext()->getService(ClusterRole::ShardServer),
                     Client::noSession(),
                     ClientOperationKillableByStepdown{false});
@@ -311,7 +321,9 @@ void OplogCapMaintainerThread::run() {
         }
     });
 
-    if (gOplogSamplingAsyncEnabled) {
+    // asynchronously regenerate truncation markers, if they are still needed when we get here.
+    auto& provider = rss::ReplicatedStorageService::get(_uniqueCtx->get()).getPersistenceProvider();
+    if (gOplogSamplingAsyncEnabled && provider.supportsOplogSampling()) {
         try {
             {
                 stdx::unique_lock<stdx::mutex> lk(_stateMutex);

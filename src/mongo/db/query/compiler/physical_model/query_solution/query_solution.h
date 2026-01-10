@@ -43,7 +43,6 @@
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/exec/collection_scan_common.h"
 #include "mongo/db/fts/fts_query.h"
-#include "mongo/db/local_catalog/clustered_collection_options_gen.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/accumulation_statement.h"
@@ -66,9 +65,8 @@
 #include "mongo/db/query/plan_enumerator/plan_enumerator_explain_info.h"
 #include "mongo/db/query/record_id_bound.h"
 #include "mongo/db/query/timeseries/bucket_spec.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/db/shard_role/shard_catalog/clustered_collection_options_gen.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/id_generator.h"
 #include "mongo/util/modules.h"
 #include "mongo/util/str.h"
 
@@ -525,12 +523,10 @@ public:
     size_t taggedMatchExpressionHash{0};
 
 private:
-    using QsnIdGenerator = IdGenerator<PlanNodeId>;
-
     QuerySolution(const QuerySolution&) = delete;
     QuerySolution& operator=(const QuerySolution&) = delete;
 
-    void assignNodeIds(QsnIdGenerator& idGenerator, QuerySolutionNode& node);
+    void assignNodeIds(PlanNodeId& lastNodeId, QuerySolutionNode& node);
 
     std::unique_ptr<QuerySolutionNode> _root;
     PlanNodeId _unextendedRootId{kEmptyPlanNodeId};
@@ -575,8 +571,6 @@ struct CollectionScanNode : public QuerySolutionNodeWithSortSet {
     void markNotEligibleForPlanCache() {
         eligibleForPlanCache = false;
     }
-
-    IndexBounds getIndexBounds() const;
 
     std::unique_ptr<QuerySolutionNode> clone() const final;
 
@@ -796,8 +790,9 @@ struct MergeSortNode : public QuerySolutionNodeWithSortSet {
 };
 
 struct FetchNode : public QuerySolutionNode {
-    FetchNode() {}
-    FetchNode(std::unique_ptr<QuerySolutionNode> child) : QuerySolutionNode(std::move(child)) {}
+    explicit FetchNode(NamespaceString nss) : nss(std::move(nss)) {}
+    FetchNode(std::unique_ptr<QuerySolutionNode> child, NamespaceString nss)
+        : QuerySolutionNode(std::move(child)), nss(std::move(nss)) {}
     ~FetchNode() override {}
 
     StageType getType() const override {
@@ -820,10 +815,12 @@ struct FetchNode : public QuerySolutionNode {
     }
 
     std::unique_ptr<QuerySolutionNode> clone() const final;
+
+    NamespaceString nss;
 };
 
 struct MONGO_MOD_NEEDS_REPLACEMENT IndexScanNode : public QuerySolutionNodeWithSortSet {
-    IndexScanNode(IndexEntry index);
+    IndexScanNode(NamespaceString nss, IndexEntry index);
     ~IndexScanNode() override {}
 
     void computeProperties() override;
@@ -860,6 +857,8 @@ struct MONGO_MOD_NEEDS_REPLACEMENT IndexScanNode : public QuerySolutionNodeWithS
         // that share the same plan cache key.
         QuerySolutionNode::hash(std::move(h));
     }
+
+    NamespaceString nss;
 
     IndexEntry index;
 
@@ -1364,8 +1363,8 @@ struct SkipNode : public QuerySolutionNode {
 };
 
 struct GeoNear2DNode : public QuerySolutionNodeWithSortSet {
-    GeoNear2DNode(IndexEntry index)
-        : index(std::move(index)), addPointMeta(false), addDistMeta(false) {}
+    GeoNear2DNode(NamespaceString nss, IndexEntry index)
+        : nss(std::move(nss)), index(std::move(index)), addPointMeta(false), addDistMeta(false) {}
 
     ~GeoNear2DNode() override {}
 
@@ -1386,6 +1385,8 @@ struct GeoNear2DNode : public QuerySolutionNodeWithSortSet {
 
     std::unique_ptr<QuerySolutionNode> clone() const final;
 
+    NamespaceString nss;
+
     // Not owned here
     const GeoNearExpression* nq;
     IndexBounds baseBounds;
@@ -1396,8 +1397,8 @@ struct GeoNear2DNode : public QuerySolutionNodeWithSortSet {
 };
 
 struct GeoNear2DSphereNode : public QuerySolutionNodeWithSortSet {
-    GeoNear2DSphereNode(IndexEntry index)
-        : index(std::move(index)), addPointMeta(false), addDistMeta(false) {}
+    GeoNear2DSphereNode(NamespaceString nss, IndexEntry index)
+        : nss(std::move(nss)), index(std::move(index)), addPointMeta(false), addDistMeta(false) {}
 
     ~GeoNear2DSphereNode() override {}
 
@@ -1417,6 +1418,8 @@ struct GeoNear2DSphereNode : public QuerySolutionNodeWithSortSet {
     }
 
     std::unique_ptr<QuerySolutionNode> clone() const final;
+
+    NamespaceString nss;
 
     // Not owned here
     const GeoNearExpression* nq;
@@ -1467,7 +1470,8 @@ struct ShardingFilterNode : public QuerySolutionNode {
  * *always* skip over the current key to the next key.
  */
 struct DistinctNode : public QuerySolutionNodeWithSortSet {
-    DistinctNode(IndexEntry index) : index(std::move(index)) {}
+    DistinctNode(NamespaceString nss, IndexEntry index)
+        : nss(std::move(nss)), index(std::move(index)) {}
 
     ~DistinctNode() override {}
 
@@ -1526,6 +1530,8 @@ struct DistinctNode : public QuerySolutionNodeWithSortSet {
         QuerySolutionNode::hash(std::move(h));
     }
 
+    NamespaceString nss;
+
     IndexEntry index;
     IndexBounds bounds;
 
@@ -1543,7 +1549,8 @@ struct DistinctNode : public QuerySolutionNodeWithSortSet {
  * Some count queries reduce to counting how many keys are between two entries in a Btree.
  */
 struct CountScanNode : public QuerySolutionNodeWithSortSet {
-    CountScanNode(IndexEntry index) : index(std::move(index)) {}
+    CountScanNode(NamespaceString nss, IndexEntry index)
+        : nss(std::move(nss)), index(std::move(index)) {}
 
     ~CountScanNode() override {}
 
@@ -1564,13 +1571,15 @@ struct CountScanNode : public QuerySolutionNodeWithSortSet {
 
     std::unique_ptr<QuerySolutionNode> clone() const final;
 
+    NamespaceString nss;
+
     IndexEntry index;
 
     BSONObj startKey;
-    bool startKeyInclusive;
+    bool startKeyInclusive = false;
 
     BSONObj endKey;
-    bool endKeyInclusive;
+    bool endKeyInclusive = false;
 
     /**
      * A vector of Interval Evaluation Trees (IETs) with the same ordering as the index key pattern.
@@ -1616,8 +1625,14 @@ struct TextOrNode : public OrNode {
 };
 
 struct TextMatchNode : public QuerySolutionNodeWithSortSet {
-    TextMatchNode(IndexEntry index, std::unique_ptr<fts::FTSQuery> ftsQuery, bool wantTextScore)
-        : index(std::move(index)), ftsQuery(std::move(ftsQuery)), wantTextScore(wantTextScore) {}
+    TextMatchNode(NamespaceString nss,
+                  IndexEntry index,
+                  std::unique_ptr<fts::FTSQuery> ftsQuery,
+                  bool wantTextScore)
+        : nss(std::move(nss)),
+          index(std::move(index)),
+          ftsQuery(std::move(ftsQuery)),
+          wantTextScore(wantTextScore) {}
 
     StageType getType() const override {
         return STAGE_TEXT_MATCH;
@@ -1637,6 +1652,8 @@ struct TextMatchNode : public QuerySolutionNodeWithSortSet {
     }
 
     std::unique_ptr<QuerySolutionNode> clone() const final;
+
+    NamespaceString nss;
 
     IndexEntry index;
     std::unique_ptr<fts::FTSQuery> ftsQuery;
@@ -2020,13 +2037,15 @@ struct SentinelNode : public QuerySolutionNode {
 struct SearchNode : public QuerySolutionNode {
     SearchNode() = default;
 
-    SearchNode(bool isSearchMeta,
+    SearchNode(NamespaceString nss,
+               bool isSearchMeta,
                BSONObj searchQuery,
                boost::optional<long long> limit,
                boost::optional<BSONObj> sortSpec,
                size_t remoteCursorId,
                boost::optional<BSONObj> remoteCursorVars)
-        : isSearchMeta(isSearchMeta),
+        : nss(std::move(nss)),
+          isSearchMeta(isSearchMeta),
           searchQuery(searchQuery),
           limit(limit),
           sortSpec(sortSpec),
@@ -2056,6 +2075,8 @@ struct SearchNode : public QuerySolutionNode {
     }
 
     std::unique_ptr<QuerySolutionNode> clone() const final;
+
+    NamespaceString nss;
 
     /**
      * True for $searchMeta, False for $search query.
@@ -2236,6 +2257,11 @@ struct WindowNode : public QuerySolutionNode {
  *   - leftEmbeddingField = "b", rightEmbeddingField = boost::none
  *   - Left child: Scan(B)
  *   - Right child: Scan(A)
+ *
+ * A plan may also have no embeddings! This can happen when, for example, the base collection is on
+ * the RHS and a subtree of foreign collections being joined is on the LHS. In this case, neither
+ * side of the joins is embedded; instead, this implies that we want to merge the resulting objects
+ * on either side.
  */
 struct BinaryJoinEmbeddingNode : public QuerySolutionNode {
     BinaryJoinEmbeddingNode(std::unique_ptr<QuerySolutionNode> leftChildArg,
@@ -2248,11 +2274,6 @@ struct BinaryJoinEmbeddingNode : public QuerySolutionNode {
           rightEmbeddingField(std::move(rightEmbeddingFieldArg)) {
         children.push_back(std::move(leftChildArg));
         children.push_back(std::move(rightChildArg));
-        // Prevent accidental creation of a plan which doesn't have an embedding field for either
-        // side of the join.
-        tassert(10976201,
-                "BinaryJoinEmbeddingNode must have at least one child with an embedding field",
-                leftEmbeddingField.has_value() || rightEmbeddingField.has_value());
     }
 
     bool fetched() const override {

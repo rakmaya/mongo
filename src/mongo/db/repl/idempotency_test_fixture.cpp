@@ -35,16 +35,16 @@
 #include "mongo/bson/util/builder.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/index_builds/index_builds_coordinator.h"
-#include "mongo/db/local_catalog/index_catalog.h"
-#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
 #include "mongo/db/query/internal_plans.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/plan_yield_policy.h"
 #include "mongo/db/repl/oplog_entry_test_helpers.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/logical_session_id.h"
+#include "mongo/db/shard_role/lock_manager/d_concurrency.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog.h"
+#include "mongo/db/shard_role/shard_role.h"
 #include "mongo/db/validate/collection_validation.h"
 #include "mongo/db/validate/validate_results.h"
 #include "mongo/unittest/unittest.h"
@@ -324,17 +324,17 @@ std::string IdempotencyTest::computeDataHash(const CollectionAcquisition& collec
                                            InternalPlanner::IXSCAN_FETCH);
     ASSERT(nullptr != exec.get());
     md5_state_t st;
-    md5_init_state(&st);
+    md5_init_state_deprecated(&st);
 
     PlanExecutor::ExecState state;
     BSONObj obj;
     while (PlanExecutor::ADVANCED == (state = exec->getNext(&obj, nullptr))) {
         obj = this->canonicalizeDocumentForDataHash(obj);
-        md5_append(&st, (const md5_byte_t*)obj.objdata(), obj.objsize());
+        md5_append_deprecated(&st, (const md5_byte_t*)obj.objdata(), obj.objsize());
     }
     ASSERT_EQUALS(PlanExecutor::IS_EOF, state);
     md5digest d;
-    md5_finish(&st, d);
+    md5_finish_deprecated(&st, d);
     return digestToString(d);
 }
 
@@ -362,7 +362,7 @@ CollectionAcquisition getCollectionForRead(OperationContext* opCtx, const Namesp
     return acquireCollection(
         opCtx,
         CollectionAcquisitionRequest(nss,
-                                     PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                     PlacementConcern(boost::none, ShardVersion::UNTRACKED()),
                                      repl::ReadConcernArgs::get(opCtx),
                                      mongo::AcquisitionPrerequisites::kRead),
         MODE_IS);

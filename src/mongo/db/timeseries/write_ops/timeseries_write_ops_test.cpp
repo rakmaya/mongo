@@ -29,12 +29,13 @@
 
 #include "mongo/db/timeseries/write_ops/timeseries_write_ops.h"
 
+#include "mongo/base/string_data.h"
 #include "mongo/bson/json.h"
 #include "mongo/bson/unordered_fields_bsonobj_comparator.h"
-#include "mongo/db/collection_crud/collection_write_path.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/create_collection.h"
+#include "mongo/db/dbhelpers.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/create_collection.h"
 #include "mongo/db/timeseries/bucket_compression.h"
 #include "mongo/db/timeseries/collection_pre_conditions_util.h"
 #include "mongo/db/timeseries/timeseries_test_fixture.h"
@@ -68,8 +69,7 @@ TEST_F(TimeseriesWriteOpsTest, PerformAtomicTimeseriesWritesWithTransform) {
         _opCtx, _nsNoMeta.makeTimeseriesBucketsNamespace(), LockMode::MODE_IX);
     {
         WriteUnitOfWork wunit{_opCtx};
-        ASSERT_OK(collection_internal::insertDocument(
-            _opCtx, *bucketsColl, InsertStatement{compressedBucket}, nullptr));
+        ASSERT_OK(Helpers::insert(_opCtx, *bucketsColl, compressedBucket));
         wunit.commit();
     }
 
@@ -91,7 +91,10 @@ TEST_F(TimeseriesWriteOpsTest, PerformAtomicTimeseriesWritesWithTransform) {
         op.setWriteCommandRequestBase(std::move(base));
         op.setCollectionUUID(bucketsColl->uuid());
 
-        ASSERT_OK(timeseries::write_ops::internal::performAtomicTimeseriesWrites(_opCtx, {}, {op}));
+        auto preConditions = timeseries::CollectionPreConditions::getCollectionPreConditions(
+            _opCtx, _nsNoMeta, /*expectedUUID=*/boost::none);
+        ASSERT_OK(timeseries::write_ops::internal::performAtomicTimeseriesWrites(
+            _opCtx, preConditions, {}, {op}));
     }
 
     // Check the document is actually decompressed on disk.
@@ -104,34 +107,53 @@ TEST_F(TimeseriesWriteOpsTest, PerformAtomicTimeseriesWritesWithTransform) {
     }
 }
 
-TEST_F(TimeseriesWriteOpsTest, TimeseriesWritesMismatchedUUID) {
-    // Ordered
+TEST_F(TimeseriesWriteOpsTest, OrderedTimeseriesWritesMismatchedUUID) {
     auto insertCommandReq =
         write_ops::InsertCommandRequest(_nsNoMeta.makeTimeseriesBucketsNamespace());
     insertCommandReq.setCollectionUUID(UUID::gen());
+    auto preConditions =
+        timeseries::CollectionPreConditions(UUID::gen(),
+                                            true,  // isTimeseries
+                                            true,  // isViewlessTimeseries
+                                            _nsNoMeta.makeTimeseriesBucketsNamespace(),
+                                            boost::none);  // expectedUUID
     ASSERT_THROWS_CODE(
-        timeseries::write_ops::internal::performAtomicTimeseriesWrites(
-            _opCtx, std::vector<write_ops::InsertCommandRequest>{insertCommandReq}, {}),
+        uassertStatusOK(timeseries::write_ops::internal::performAtomicTimeseriesWrites(
+            _opCtx,
+            preConditions,
+            std::vector<write_ops::InsertCommandRequest>{insertCommandReq},
+            {})),
         DBException,
-        9748800);
+        10685101);
+}
 
-    // Unordered
+TEST_F(TimeseriesWriteOpsTest, UnorderedTimeseriesWritesMismatchedUUID) {
     auto insertStatements = std::vector<InsertStatement>{InsertStatement{fromjson("{_id: 0}")}};
     auto fixer = write_ops_exec::LastOpFixer(_opCtx);
     write_ops_exec::WriteResult result;
-    auto preConditions = timeseries::CollectionPreConditions::getCollectionPreConditions(
-        _opCtx, _nsNoMeta.makeTimeseriesBucketsNamespace(), UUID::gen());
+    auto preConditions =
+        timeseries::CollectionPreConditions(UUID::gen(),
+                                            true,  // isTimeseries
+                                            true,  // isViewlessTimeseries
+                                            _nsNoMeta.makeTimeseriesBucketsNamespace(),
+                                            boost::none);  // expectedUUID
+
     ASSERT_THROWS_CODE(
-        write_ops_exec::insertBatchAndHandleErrors(_opCtx,
-                                                   _nsNoMeta,
-                                                   preConditions,
-                                                   false,
-                                                   insertStatements,
-                                                   OperationSource::kTimeseriesInsert,
-                                                   &fixer,
-                                                   &result),
+        [&] {
+            write_ops_exec::insertBatchAndHandleErrors(_opCtx,
+                                                       _nsNoMeta,
+                                                       preConditions,
+                                                       false,
+                                                       insertStatements,
+                                                       OperationSource::kTimeseriesInsert,
+                                                       &fixer,
+                                                       &result);
+            for (const auto& statusWithWriteRes : result.results) {
+                uassertStatusOK(statusWithWriteRes);
+            }
+        }(),
         DBException,
-        9748801);
+        10685101);
 }
 
 // It is possible that a collection is dropped after an insert starts but before it finishes. In

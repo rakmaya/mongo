@@ -35,8 +35,6 @@
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_options.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/op_observer/op_observer_noop.h"
@@ -48,6 +46,7 @@
 #include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/repl/oplog_entry_gen.h"
 #include "mongo/db/repl/oplog_entry_or_grouped_inserts.h"
+#include "mongo/db/repl/oplog_writer.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/replication_consistency_markers.h"
 #include "mongo/db/repl/replication_coordinator.h"
@@ -58,6 +57,8 @@
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/logical_session_id_gen.h"
 #include "mongo/db/session/session_txn_record_gen.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_options.h"
 #include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/util/duration.h"
@@ -290,6 +291,11 @@ protected:
     Status runOpsSteadyState(std::vector<OplogEntry> ops);
     Status runOpInitialSync(const OplogEntry& entry);
     Status runOpsInitialSync(std::vector<OplogEntry> ops);
+
+
+    long getOplogSize();
+    BSONObj getFirstOplogDoc();
+    BSONObj getLastOplogDoc();
 
     UUID kUuid{UUID::gen()};
 

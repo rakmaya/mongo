@@ -42,9 +42,6 @@
 #include "mongo/db/database_name.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/value.h"
-#include "mongo/db/exec/exec_shard_filter_policy.h"
-#include "mongo/db/local_catalog/collection_type.h"
-#include "mongo/db/local_catalog/shard_role_api/resource_yielder.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
@@ -62,6 +59,8 @@
 #include "mongo/db/record_id.h"
 #include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/repl/optime.h"
+#include "mongo/db/shard_role/resource_yielder.h"
+#include "mongo/db/shard_role/shard_catalog/collection_type.h"
 #include "mongo/db/storage/backup_cursor_hooks.h"
 #include "mongo/db/storage/backup_cursor_state.h"
 #include "mongo/db/storage/key_format.h"
@@ -74,6 +73,7 @@
 #include "mongo/db/versioning_protocol/shard_version.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/executor/task_executor.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/uuid.h"
 
 #include <cstdint>
@@ -98,10 +98,8 @@ class JsExecution;
 
 class Pipeline;
 class RoutingContext;
-// TODO SERVER-110774 investigate removing 'CollectionRoutingInfo' and
-// 'CollectionOrViewAcquisition' forward declarations.
-class CollectionRoutingInfo;
-class CollectionOrViewAcquisition;
+class CatalogResourceHandle;
+class MultipleCollectionAccessor;
 class TransactionHistoryIteratorBase;
 
 /**
@@ -110,7 +108,7 @@ class TransactionHistoryIteratorBase;
  * interface. This allows all DocumentSources to be parsed on either mongos or mongod, but only
  * executable where it makes sense.
  */
-class MongoProcessInterface {
+class MONGO_MOD_OPEN MongoProcessInterface {
 public:
     /**
      * Storage for a batch of BSON Objects to be updated in the write namespace. For each element
@@ -126,11 +124,6 @@ public:
     using BatchObject =
         std::tuple<BSONObj, write_ops::UpdateModification, boost::optional<BSONObj>>;
     using BatchedObjects = std::vector<BatchObject>;
-    using CollectionMetadata =
-        std::variant<std::monostate,
-                     std::reference_wrapper<const CollectionOrViewAcquisition>,
-                     std::reference_wrapper<const CollectionRoutingInfo>>;
-
 
     enum class UpsertType {
         kNone,              // This operation is not an upsert.
@@ -148,7 +141,7 @@ public:
     /**
      * Interface which estimates the size of a given write operation.
      */
-    class WriteSizeEstimator {
+    class MONGO_MOD_OPEN WriteSizeEstimator {
     public:
         virtual ~WriteSizeEstimator() = default;
 
@@ -244,21 +237,26 @@ public:
     virtual void updateClientOperationTime(OperationContext* opCtx) const = 0;
 
     /**
-     * Executes 'insertCommand' against 'ns' and returns an error Status if the insert fails. If
-     * 'targetEpoch' is set, throws ErrorCodes::StaleEpoch if the targeted collection does not have
-     * the same epoch or the epoch changes during the course of the insert.
+     * Executes 'insertCommand' against 'ns'. Returns an empty vector on success and a vector of
+     * write erros on failure. If 'targetEpoch' is set, throws ErrorCodes::StaleEpoch if the
+     * targeted collection does not have the same epoch or the epoch changes during the course of
+     * the insert.
      */
-    virtual Status insert(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                          const NamespaceString& ns,
-                          std::unique_ptr<write_ops::InsertCommandRequest> insertCommand,
-                          const WriteConcernOptions& wc,
-                          boost::optional<OID> targetEpoch) = 0;
+    using InsertResult = std::vector<write_ops::WriteError>;
 
-    virtual Status insertTimeseries(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                                    const NamespaceString& ns,
-                                    std::unique_ptr<write_ops::InsertCommandRequest> insertCommand,
-                                    const WriteConcernOptions& wc,
-                                    boost::optional<OID> targetEpoch) = 0;
+    virtual InsertResult insert(const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                                const NamespaceString& ns,
+                                std::unique_ptr<write_ops::InsertCommandRequest> insertCommand,
+                                const WriteConcernOptions& wc,
+                                boost::optional<OID> targetEpoch) = 0;
+
+    virtual InsertResult insertTimeseries(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx,
+        const NamespaceString& ns,
+        std::unique_ptr<write_ops::InsertCommandRequest> insertCommand,
+        const WriteConcernOptions& wc,
+        boost::optional<OID> targetEpoch) = 0;
+
     /**
      * Executes the updates described by 'updateCommand'. Returns an error Status if any of the
      * updates fail, otherwise returns an 'UpdateResult' objects with the details of the update
@@ -427,9 +425,9 @@ public:
 
     /**
      * Accepts a pipeline and returns a new one which will draw input from the underlying
-     * collection. Behavior for how to finalize the pipeline, such as optimizations and
-     * translations, before a cursor is attached must be defined inside 'finalizePipeline'. To
-     * attach a cursor this function calls 'preparePipelineForExecution' (see below).
+     * collection. The function will perform pre-optimization rewrites, but behavior for how to
+     * optimize the pipeline before a cursor is attached must be defined inside 'optimizePipeline'.
+     * To attach a cursor this function calls 'preparePipelineForExecution' (see below).
      *
      * This function guarantees that optimizing, translating and preparing the pipeline for
      * execution will use a single snapshot of collection metadata ('CollectionOrViewAcquisition' or
@@ -439,9 +437,7 @@ public:
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
         std::unique_ptr<Pipeline> pipeline,
         bool attachCursorAfterOptimizing,
-        std::function<void(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                           Pipeline* pipeline,
-                           CollectionMetadata collData)> finalizePipeline = nullptr,
+        std::function<void(Pipeline* pipeline)> optimizePipeline = nullptr,
         ShardTargetingPolicy shardTargetingPolicy = ShardTargetingPolicy::kAllowed,
         boost::optional<BSONObj> readConcern = boost::none,
         bool shouldUseCollectionDefaultCollator = false) = 0;
@@ -490,8 +486,27 @@ public:
      * {"pipeline": <explainOutput>}. Note that <explainOutput> can be an object (shardsvr) or an
      * array (non_shardsvr).
      */
-    virtual BSONObj preparePipelineAndExplain(std::unique_ptr<Pipeline> pipeline,
-                                              ExplainOptions::Verbosity verbosity) = 0;
+    virtual BSONObj finalizePipelineAndExplain(
+        std::unique_ptr<Pipeline> pipeline,
+        ExplainOptions::Verbosity verbosity,
+        std::function<void(Pipeline* pipeline)> optimizePipeline = nullptr) = 0;
+
+    /**
+     * Accepts a pipeline and returns a new one which will draw input from the underlying
+     * collection _locally_. Trying to run this method on mongos is a programming error. Running
+     * this method on a shard server will only return results which match the pipeline on that
+     * shard.
+     *
+     * Accepts catalog information that will be used for the new returned pipeline. Collections
+     * should be locked. The caller should handle acquiring and releasing catalog resources.
+     *
+     * Unlike attachCursorSourceToPipelineForLocalRead(), this method does not accept additional
+     * configuration through 'aggRequest' or 'shouldUseCollectionDefaultCollator' parameters.
+     */
+    virtual std::unique_ptr<Pipeline> attachCursorSourceToPipelineForLocalReadWithCatalog(
+        std::unique_ptr<Pipeline> pipeline,
+        const MultipleCollectionAccessor& collections,
+        const boost::intrusive_ptr<CatalogResourceHandle>& catalogResourceHandle) = 0;
 
     /**
      * Accepts a pipeline and returns a new one which will draw input from the underlying
@@ -509,14 +524,14 @@ public:
     virtual std::unique_ptr<Pipeline> attachCursorSourceToPipelineForLocalRead(
         std::unique_ptr<Pipeline> pipeline,
         boost::optional<const AggregateCommandRequest&> aggRequest = boost::none,
-        bool shouldUseCollectionDefaultCollator = false,
-        ExecShardFilterPolicy shardFilterPolicy = AutomaticShardFiltering{}) = 0;
+        bool shouldUseCollectionDefaultCollator = false) = 0;
 
     /**
      * Accepts a pipeline and returns a new one which will draw input from the underlying collection
-     * _locally_. Behavior for how to finalize the pipeline, such as optimizations and translations,
-     * before a cursor is attached must be defined inside 'finalizePipeline'. To attach a cursor
-     * this function calls 'attachCursorSourceToPipelineForLocalRead' (see below).
+     * _locally_. The function will perform pre-optimization rewrites, but behavior for how to
+     * optimize the pipeline before a cursor is attached must be defined inside 'optimizePipeline'.
+     * To attach a cursor this function calls 'attachCursorSourceToPipelineForLocalRead' (see
+     * below).
      *
      * This function guarantees that parsing and preparing the pipeline for execution will use a
      * single snapshot of collection metadata ('CollectionOrViewAcquisition').
@@ -525,12 +540,9 @@ public:
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
         std::unique_ptr<Pipeline> pipeline,
         bool attachCursorAfterOptimizing,
-        std::function<void(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                           Pipeline* pipeline,
-                           CollectionMetadata collData)> finalizePipeline = nullptr,
+        std::function<void(Pipeline* pipeline)> optimizePipeline = nullptr,
         bool shouldUseCollectionDefaultCollator = false,
-        boost::optional<const AggregateCommandRequest&> aggRequest = boost::none,
-        ExecShardFilterPolicy shardFilterPolicy = AutomaticShardFiltering{}) = 0;
+        boost::optional<const AggregateCommandRequest&> aggRequest = boost::none) = 0;
 
     /**
      * Returns a vector of owned BSONObjs, each of which contains details of an in-progress
@@ -685,13 +697,13 @@ public:
                                                     bool addPrimaryShard = false) = 0;
 
     /**
-     * Used to enforce the constraint that the foreign collection must be unsharded.
+     * Used to enforce the constraint that the foreign collection must be untracked.
      */
-    class ScopedExpectUnshardedCollection {
+    class MONGO_MOD_UNFORTUNATELY_OPEN ScopedExpectUntrackedCollection {
     public:
-        virtual ~ScopedExpectUnshardedCollection() = default;
+        virtual ~ScopedExpectUntrackedCollection() = default;
     };
-    virtual std::unique_ptr<ScopedExpectUnshardedCollection> expectUnshardedCollectionInScope(
+    virtual std::unique_ptr<ScopedExpectUntrackedCollection> expectUntrackedCollectionInScope(
         OperationContext* opCtx,
         const NamespaceString& nss,
         const boost::optional<DatabaseVersion>& dbVersion) = 0;

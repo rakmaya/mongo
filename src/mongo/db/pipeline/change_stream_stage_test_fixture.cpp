@@ -44,12 +44,12 @@
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_change_stream.h"
 #include "mongo/db/pipeline/document_source_change_stream_ensure_resume_token_present.h"
-#include "mongo/db/pipeline/document_source_change_stream_gen.h"
 #include "mongo/db/pipeline/document_source_change_stream_transform.h"
 #include "mongo/db/pipeline/document_source_match.h"
 #include "mongo/db/pipeline/document_source_mock.h"
 #include "mongo/db/pipeline/optimization/optimize.h"
 #include "mongo/db/pipeline/pipeline.h"
+#include "mongo/db/pipeline/pipeline_factory.h"
 #include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/replication_coordinator.h"
@@ -210,8 +210,8 @@ void ChangeStreamStageTest::checkTransformation(
 }
 
 /**
- * Returns a list of stages expanded from a $changStream specification, starting with a
- * DocumentSourceMock which contains a single document representing 'entry'.
+ * Returns a list of stages expanded from a $changeStream specification, starting with a
+ * DocumentSourceMock which contains a single document-representing 'entry'.
  *
  * Stages such as DSEnsureResumeTokenPresent which can swallow results are removed from the
  * returned list.
@@ -222,8 +222,8 @@ std::unique_ptr<exec::agg::Pipeline> ChangeStreamStageTest::makeExecPipeline(BSO
 }
 
 /**
- * Returns a list of the stages expanded from a $changStream specification, starting with a
- * DocumentSourceMock which contains a list of document representing 'entries'.
+ * Returns a list of the stages expanded from a $changeStream specification, starting with a
+ * DocumentSourceMock which contains a list of document-representing 'entries'.
  */
 std::unique_ptr<exec::agg::Pipeline> ChangeStreamStageTest::makeExecPipeline(
     std::vector<BSONObj> entries, const BSONObj& spec, bool removeEnsureResumeTokenStage) {
@@ -371,7 +371,8 @@ std::unique_ptr<Pipeline> ChangeStreamStageTest::buildTestPipeline(
     auto expCtx = getExpCtx();
     expCtx->setInRouter(true);
 
-    auto pipeline = Pipeline::parse(rawPipeline, expCtx);
+    auto pipeline =
+        pipeline_factory::makePipeline(rawPipeline, expCtx, pipeline_factory::kOptionsMinimal);
     pipeline_optimization::optimizePipeline(*pipeline);
 
     return pipeline;

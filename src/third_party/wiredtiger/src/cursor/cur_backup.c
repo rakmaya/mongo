@@ -280,7 +280,7 @@ err:
         const char *cfg[] = {WT_CONFIG_BASE(session, WT_SESSION_checkpoint), NULL};
 
         /* Mark the connection modified to make sure a checkpoint happens even on an idle system. */
-        conn->modified = true;
+        __wt_tsan_suppress_store_bool(&conn->modified, true);
         WT_TRET(__wt_checkpoint_db(session, cfg, true));
     }
     /* Clear the flag on force stop after the completion of the checkpoint. */
@@ -778,7 +778,7 @@ __backup_start(
      * Single thread hot backups: we're holding the schema lock, so we know we'll serialize with
      * other attempts to start a hot backup.
      */
-    if (__wt_atomic_load64(&conn->hot_backup_start) != 0 && !is_dup)
+    if (__wt_atomic_load_uint64_relaxed(&conn->hot_backup_start) != 0 && !is_dup)
         WT_RET_MSG(session, EINVAL, "there is already a backup cursor open");
 
     if (F_ISSET(session, WT_SESSION_BACKUP_DUP) && is_dup)
@@ -935,7 +935,8 @@ __backup_stop(WT_SESSION_IMPL *session, WT_CURSOR_BACKUP *cb)
     WT_TRET(__wt_remove_if_exists(session, WT_EXPORT_BACKUP, true));
 
     /* Checkpoint deletion and next hot backup can proceed. */
-    WT_WITH_HOTBACKUP_WRITE_LOCK(session, __wt_atomic_store64(&conn->hot_backup_start, 0));
+    WT_WITH_HOTBACKUP_WRITE_LOCK(
+      session, __wt_atomic_store_uint64_relaxed(&conn->hot_backup_start, 0));
     F_CLR(session, WT_SESSION_BACKUP_CURSOR);
 
     return (ret);

@@ -40,17 +40,10 @@
 #include "mongo/db/database_name.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/dbhelpers.h"
+#include "mongo/db/feature_flag.h"
 #include "mongo/db/global_catalog/type_shard_identity.h"
+#include "mongo/db/import_collection_oplog_entry_gen.h"
 #include "mongo/db/index_builds/index_builds_coordinator.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_catalog.h"
-#include "mongo/db/local_catalog/drop_collection.h"
-#include "mongo/db/local_catalog/import_collection_oplog_entry_gen.h"
-#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
-#include "mongo/db/local_catalog/lock_manager/exception_util.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/query/get_executor.h"
@@ -74,6 +67,7 @@
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/repl/transaction_oplog_application.h"
 #include "mongo/db/replication_state_transition_lock_guard.h"
+#include "mongo/db/rss/replicated_storage_service.h"
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/server_recovery.h"
@@ -82,6 +76,14 @@
 #include "mongo/db/session/logical_session_id_gen.h"
 #include "mongo/db/session/session_catalog_mongod.h"
 #include "mongo/db/session/session_txn_record_gen.h"
+#include "mongo/db/shard_role/lock_manager/d_concurrency.h"
+#include "mongo/db/shard_role/lock_manager/exception_util.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/drop_collection.h"
+#include "mongo/db/shard_role/shard_role.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/remove_saver.h"
@@ -508,7 +510,8 @@ RollbackImpl::_namespacesAndUUIDsForOp(const OplogEntry& oplogEntry) {
             case OplogEntry::CommandType::kAbortIndexBuild:
             case OplogEntry::CommandType::kCommitIndexBuild:
             case OplogEntry::CommandType::kCollMod:
-            case OplogEntry::CommandType::kTruncateRange: {
+            case OplogEntry::CommandType::kTruncateRange:
+            case OplogEntry::CommandType::kSetMultikeyMetadata: {
                 // For all other command types, we should be able to parse the collection name from
                 // the first command argument.
                 try {
@@ -606,7 +609,7 @@ void RollbackImpl::_restoreTxnsTableEntryFromRetryableWrites(OperationContext* o
                 acquireCollection(opCtx,
                                   CollectionAcquisitionRequest(
                                       nss,
-                                      PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                      PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
                                       repl::ReadConcernArgs::get(opCtx),
                                       AcquisitionPrerequisites::kUnreplicatedWrite),
                                   MODE_IX);
@@ -695,11 +698,18 @@ void RollbackImpl::_runPhaseFromAbortToReconstructPreparedTxns(
           "update"_attr = getCommandCount(kUpdateCmdName),
           "delete"_attr = getCommandCount(kDeleteCmdName));
 
-    // Retryable writes create derived updates to the transactions table which can be coalesced into
-    // one operation, so certain session operations history may be lost after restoring to the
-    // 'stableTimestamp'. We must scan the oplog and restore the transactions table entries to
-    // detail the last executed writes.
-    _restoreTxnsTableEntryFromRetryableWrites(opCtx, stableTimestamp);
+    // When we stop coalescing updates during oplog application so that no updates are lost on
+    // rollback. The table on secondaries will preserve the full update chain that existed on the
+    // primary.
+    if (!rss::ReplicatedStorageService::get(opCtx)
+             .getPersistenceProvider()
+             .shouldDisableTransactionUpdateCoalescing()) {
+        // Retryable writes create derived updates to the transactions table which can be coalesced
+        // into one operation, so certain session operations history may be lost after restoring to
+        // the 'stableTimestamp'. We must scan the oplog and restore the transactions table entries
+        // to detail the last executed writes.
+        _restoreTxnsTableEntryFromRetryableWrites(opCtx, stableTimestamp);
+    }
 
     // During replication recovery, we truncate all oplog entries with timestamps greater than the
     // oplog truncate after point. If we entered rollback, we are guaranteed to have at least one

@@ -37,9 +37,6 @@
 #include "mongo/db/api_parameters.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands/txn_cmds_gen.h"
-#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
-#include "mongo/db/local_catalog/lock_manager/lock_stats.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/write_ops/update_request.h"
@@ -53,12 +50,17 @@
 #include "mongo/db/session/session.h"
 #include "mongo/db/session/session_catalog.h"
 #include "mongo/db/session/session_txn_record_gen.h"
+#include "mongo/db/session/session_txn_record_helpers.h"
+#include "mongo/db/shard_role/lock_manager/d_concurrency.h"
+#include "mongo/db/shard_role/lock_manager/lock_stats.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/stats/single_transaction_stats.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/storage_engine.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/transaction/transaction_metrics_observer.h"
 #include "mongo/db/transaction/transaction_operations.h"
+#include "mongo/db/transaction/transaction_runtime_context_gen.h"
 #include "mongo/idl/mutable_observer_registry.h"
 #include "mongo/logv2/attribute_storage.h"
 #include "mongo/util/assert_util.h"
@@ -438,6 +440,22 @@ public:
         boost::optional<TxnNumber> getClientTxnNumber(
             const TxnNumberAndRetryCounter& txnNumberAndRetryCounter) const;
 
+        /**
+         * Returns the placementConflictTimeForNonSnapshotReadConcern of this transaction.
+         * This optional value represents a conservative upper bound for placement changes (i.e.,
+         * chunk migrations) for any collection which might be accessed for the lifetime of the
+         * transaction. The transactions will fail with a retryable MigrationConflict error
+         * if any placement changes have committed since this time."
+         */
+        boost::optional<LogicalTime> getPlacementConflictTimeForNonSnapshotReadConcern() const;
+
+        /**
+         * Returns the list of databases that were created by the transaction running on the top
+         * router (where the client is connected. This is used to ignore the placementConflictTime
+         * check on those databases.
+         */
+        std::span<const DatabaseName> getDatabasesCreatedAtTopRouter() const;
+
     protected:
         explicit Observer(TransactionParticipant* tp) : _tp(tp) {}
 
@@ -582,7 +600,9 @@ public:
         void beginOrContinue(OperationContext* opCtx,
                              TxnNumberAndRetryCounter txnNumberAndRetryCounter,
                              boost::optional<bool> autocommit,
-                             TransactionActions action);
+                             TransactionActions action,
+                             const boost::optional<TransactionRuntimeContext>&
+                                 transactionRuntimeContext = boost::none);
 
         /**
          * Used only by the secondary oplog application logic. Similar to 'beginOrContinue' without
@@ -590,7 +610,10 @@ public:
          * the past.
          */
         void beginOrContinueTransactionUnconditionally(
-            OperationContext* opCtx, TxnNumberAndRetryCounter txnNumberAndRetryCounter);
+            OperationContext* opCtx,
+            TxnNumberAndRetryCounter txnNumberAndRetryCounter,
+            const boost::optional<TransactionRuntimeContext>& transactionRuntimeContext =
+                boost::none);
 
         /**
          * If the participant is in prepare, returns a future whose promise is fulfilled when
@@ -656,6 +679,14 @@ public:
          */
         std::pair<Timestamp, absl::flat_hash_set<NamespaceString>> prepareTransaction(
             OperationContext* opCtx, boost::optional<repl::OpTime> prepareOptime);
+
+        /**
+         * Given a session transaction record, this updates in-memory state to match the state
+         * represented by that record. Must only be called as part of recovering a transaction from
+         * a precise checkpoint.
+         */
+        void restorePreparedTxnFromPreciseCheckpoint(OperationContext* opCtx,
+                                                     SessionTxnRecordForPrepareRecovery txnRecord);
 
         /**
          * Sets the prepare optime used for recovery.
@@ -908,6 +939,13 @@ public:
             OperationContext* opCtx,
             std::shared_ptr<const WouldChangeOwningShardInfo> wouldChangeOwningShardInfo);
 
+        /**
+         * Adds fields to the given session transaction record (i.e. config.transactions entry)
+         * necessary to recover from a precise checkpoint.
+         */
+        void addPreparedTransactionPreciseCheckpointRecoveryFields(
+            SessionTxnRecord& sessionTxnRecord) const;
+
     private:
         // Checks whether the given statementId for the specified transaction has already executed
         // in any external or internal sessions associated with this session (see the header comment
@@ -1060,14 +1098,19 @@ public:
         // Attempt to begin a new multi document transaction at the given transaction number and
         // transaction retry counter.
         void _beginMultiDocumentTransaction(
-            OperationContext* opCtx, const TxnNumberAndRetryCounter& txnNumberAndRetryCounter);
+            OperationContext* opCtx,
+            const TxnNumberAndRetryCounter& txnNumberAndRetryCounter,
+            const boost::optional<TransactionRuntimeContext>& transactionRuntimeContext =
+                boost::none);
 
         // Attempt to continue an in-progress multi document transaction at the given transaction
         // number and transaction retry counter.
         void _continueMultiDocumentTransaction(
             OperationContext* opCtx,
             const TxnNumberAndRetryCounter& txnNumberAndRetryCounter,
-            TransactionActions action);
+            TransactionActions action,
+            const boost::optional<TransactionRuntimeContext>& transactionRuntimeContext =
+                boost::none);
 
         // Implementation of public refreshFromStorageIfNeeded methods.
         void _refreshFromStorageIfNeeded(OperationContext* opCtx, bool fetchOplogEntries);
@@ -1268,6 +1311,8 @@ private:
         // Set to true if incomplete history is detected. For example, when the oplog to a write was
         // truncated because it was too old.
         bool hasIncompleteHistory{false};
+
+        boost::optional<TransactionRuntimeContext> transactionRuntimeContext;
     } _o;
 
     /**

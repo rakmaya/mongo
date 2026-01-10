@@ -41,6 +41,7 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source.h"
 #include "mongo/util/duration.h"
+#include "mongo/util/modules.h"
 
 #include <memory>
 #include <string>
@@ -361,10 +362,11 @@ public:
      * execution has started.
      */
     void markShouldCollectTimingInfo() {
-        invariant(durationCount<Microseconds>(_commonStats.executionTime.executionTimeEstimate) ==
-                  0);
+        tassert(11051636,
+                "Calling markShouldCollectTimingInfo after execution has started",
+                durationCount<Microseconds>(_commonStats.executionTime.executionTimeEstimate) == 0);
 
-        if (internalMeasureQueryExecutionTimeInNanoseconds.load()) {
+        if (_expCtx->getQueryKnobConfiguration().getMeasureQueryExecutionTimeInNanoseconds()) {
             _commonStats.executionTime.precision = QueryExecTimerPrecision::kNanos;
         } else {
             _commonStats.executionTime.precision = QueryExecTimerPrecision::kMillis;

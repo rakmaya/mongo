@@ -45,18 +45,7 @@
 #include "mongo/db/collection_crud/collection_write_path.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/dbhelpers.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/clustered_collection_util.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_options_gen.h"
-#include "mongo/db/local_catalog/create_collection.h"
-#include "mongo/db/local_catalog/database.h"
-#include "mongo/db/local_catalog/import_collection_oplog_entry_gen.h"
-#include "mongo/db/local_catalog/local_oplog_info.h"
-#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
-#include "mongo/db/local_catalog/lock_manager/exception_util.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
+#include "mongo/db/import_collection_oplog_entry_gen.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/batched_write_context.h"
 #include "mongo/db/op_observer/change_stream_pre_images_op_observer.h"
@@ -72,6 +61,7 @@
 #include "mongo/db/record_id.h"
 #include "mongo/db/repl/apply_ops_command_info.h"
 #include "mongo/db/repl/image_collection_entry_gen.h"
+#include "mongo/db/repl/local_oplog_info.h"
 #include "mongo/db/repl/member_state.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/oplog_entry.h"
@@ -93,6 +83,16 @@
 #include "mongo/db/session/session_catalog.h"
 #include "mongo/db/session/session_catalog_mongod.h"
 #include "mongo/db/session/session_txn_record_gen.h"
+#include "mongo/db/shard_role/lock_manager/d_concurrency.h"
+#include "mongo/db/shard_role/lock_manager/exception_util.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/clustered_collection_util.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_options_gen.h"
+#include "mongo/db/shard_role/shard_catalog/create_collection.h"
+#include "mongo/db/shard_role/shard_catalog/database.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/ident.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/storage_options.h"
@@ -366,7 +366,7 @@ protected:
         auto coll = acquireCollection(
             opCtx,
             CollectionAcquisitionRequest(NamespaceString::kConfigImagesNamespace,
-                                         PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                         PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
                                          repl::ReadConcernArgs::get(opCtx),
                                          AcquisitionPrerequisites::kRead),
             MODE_IS);
@@ -382,7 +382,7 @@ protected:
         auto sideCollection = acquireCollection(
             opCtx,
             CollectionAcquisitionRequest(NamespaceString::kConfigImagesNamespace,
-                                         PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                         PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
                                          repl::ReadConcernArgs::get(opCtx),
                                          AcquisitionPrerequisites::kRead),
             MODE_IS);
@@ -400,7 +400,7 @@ protected:
         auto configTransactions = acquireCollection(
             opCtx,
             CollectionAcquisitionRequest(NamespaceString::kSessionTransactionsTableNamespace,
-                                         PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                         PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
                                          repl::ReadConcernArgs::get(opCtx),
                                          AcquisitionPrerequisites::kRead),
             MODE_IS);
@@ -427,7 +427,7 @@ protected:
         auto preImagesCollection = acquireCollection(
             opCtx,
             CollectionAcquisitionRequest(NamespaceString::kChangeStreamPreImagesNamespace,
-                                         PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                         PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
                                          repl::ReadConcernArgs::get(opCtx),
                                          AcquisitionPrerequisites::kRead),
             MODE_IS);
@@ -558,6 +558,7 @@ protected:
         OpObserverImpl opObserver(std::make_unique<OperationLoggerImpl>());
         {
             // Generate the create oplog entry.
+            VersionContext::FixedOperationFCVRegion fixedOfcvRegion(opCtx);
             AutoGetCollection autoColl(opCtx, nss, MODE_X);
             WriteUnitOfWork wuow(opCtx);
             opObserver.onCreateCollection(opCtx,
@@ -600,6 +601,7 @@ protected:
         OpObserverImpl opObserver(std::make_unique<OperationLoggerImpl>());
         {
             // Generate the create oplog entry.
+            VersionContext::FixedOperationFCVRegion fixedOfcvRegion(opCtx);
             AutoGetCollection autoColl(opCtx, nss, MODE_X);
             WriteUnitOfWork wuow(opCtx);
             opObserver.onCreateCollection(opCtx,
@@ -649,6 +651,7 @@ protected:
         }
 
         {
+            VersionContext::FixedOperationFCVRegion fixedOfcvRegion(opCtx.get());
             AutoGetCollection autoColl(opCtx.get(), localNSS, MODE_X);
             WriteUnitOfWork wuow(opCtx.get());
             opObserver.onCreateCollection(opCtx.get(),
@@ -714,7 +717,10 @@ TEST_F(OpObserverOnCreateCollectionTest, UnreplicatedCollectionNotInLocalCatalog
                                        false /* isPersistedInLocalCatalog */);
 }
 
-DEATH_TEST_F(OpObserverOnCreateCollectionTest, CrashIfNoReplicatedCatalogIdentifier, "invariant") {
+using OpObserverOnCreateCollectionTestDeathTest = OpObserverOnCreateCollectionTest;
+DEATH_TEST_F(OpObserverOnCreateCollectionTestDeathTest,
+             CrashIfNoReplicatedCatalogIdentifier,
+             "Missing catalog identifier") {
     // Invariant only enforced when replicated local catalog identifiers are required for
     // replication correctness.
     RAIIServerParameterControllerForTest replicateLocalCatalogInfoController(
@@ -723,6 +729,7 @@ DEATH_TEST_F(OpObserverOnCreateCollectionTest, CrashIfNoReplicatedCatalogIdentif
     auto opCtx = cc().makeOperationContext();
 
     ASSERT_TRUE(nss.isReplicated());
+    VersionContext::FixedOperationFCVRegion fixedOfcvRegion(opCtx.get());
     AutoGetCollection autoColl(opCtx.get(), nss, MODE_X);
     WriteUnitOfWork wuow(opCtx.get());
     opObserver.onCreateCollection(opCtx.get(),
@@ -1563,7 +1570,7 @@ TEST_F(OpObserverTest, EntriesIncludeVersionContextDecoration) {
     OpObserverImpl opObserver(std::make_unique<OperationLoggerImpl>());
     auto opCtx = cc().makeOperationContext();
     // (Generic FCV reference): used for testing, should exist across LTS binary versions
-    auto expectedVCtx = VersionContext{multiversion::GenericFCV::kLastLTS};
+    auto expectedVCtx = VersionContext{multiversion::GenericFCV::kLastContinuous};
     auto dbName = DatabaseName::createDatabaseName_forTest(boost::none, "test");
 
     // Write to the oplog.
@@ -1644,8 +1651,8 @@ TEST_F(OpObserverTest, TruncateRangeIsReplicated) {
     ASSERT_EQ(oplogEntry.getUuid(), autoColl->uuid());
 
     const auto& o = oplogEntry.getObject();
-    TruncateRangeOplogEntry objectEntry(
-        std::string(autoColl->ns().coll()), RecordId("a"), RecordId("b"), 1, 1);
+    // truncate range oplog entries include the db name in the namespace string
+    TruncateRangeOplogEntry objectEntry(autoColl->ns(), RecordId("a"), RecordId("b"), 1, 1);
     ASSERT_BSONOBJ_EQ(o, objectEntry.toBSON());
 }
 
@@ -1746,7 +1753,8 @@ TEST_F(OpObserverTest, MultipleOnDelete) {
     opObserver.onDelete(opCtx.get(), *autoColl, kUninitializedStmtId, doc, documentKey, args);
 }
 
-DEATH_TEST_REGEX_F(OpObserverTest,
+using OpObserverTestDeathTest = OpObserverTest;
+DEATH_TEST_REGEX_F(OpObserverTestDeathTest,
                    NodeCrashesIfShardIdentityDocumentRolledBack,
                    "Fatal assertion.*50712") {
     OpObserverImpl opObserver(std::make_unique<OperationLoggerImpl>());
@@ -1887,7 +1895,9 @@ protected:
 
     void assertTxnRecord(TxnNumber txnNum,
                          repl::OpTime opTime,
-                         boost::optional<DurableTxnStateEnum> txnState) {
+                         boost::optional<DurableTxnStateEnum> txnState,
+                         boost::optional<Timestamp> prepareTs = boost::none,
+                         boost::optional<size_t> numAffectedNamespaces = boost::none) {
         DBDirectClient client(opCtx());
         FindCommandRequest findRequest{NamespaceString::kSessionTransactionsTableNamespace};
         findRequest.setFilter(BSON("_id" << session()->getSessionId().toBSON()));
@@ -1911,6 +1921,17 @@ protected:
             ASSERT_EQ(opTime, txnParticipant.getLastWriteOpTime());
         } else {
             ASSERT_EQ(txnRecord.getLastWriteOpTime(), txnParticipant.getLastWriteOpTime());
+        }
+
+        if (prepareTs) {
+            ASSERT_EQ(txnRecord.getLastWriteOpTime().getTimestamp(), *prepareTs);
+        }
+
+        if (numAffectedNamespaces) {
+            ASSERT(txnRecord.getAffectedNamespaces());
+            ASSERT_EQ(txnRecord.getAffectedNamespaces()->size(), *numAffectedNamespaces);
+        } else {
+            ASSERT(!txnRecord.getAffectedNamespaces());
         }
     }
 
@@ -1962,6 +1983,42 @@ TEST_F(OpObserverTransactionTest, checkIsTimeseriesOnMultiDocTransaction) {
                        AssertionException,
                        ErrorCodes::OperationNotSupportedInTransaction);
     wuow.commit();
+}
+
+TEST_F(OpObserverTransactionTest, TransactionOpsIncludeVersionContext) {
+    // (Generic FCV reference): used for testing, should exist across LTS binary versions
+    auto expectedVCtx = VersionContext{multiversion::GenericFCV::kLastContinuous};
+
+    auto txnParticipant = TransactionParticipant::get(opCtx());
+    txnParticipant.unstashTransactionResources(opCtx(), "insert");
+
+    {
+        VersionContext::ScopedSetDecoration scopedVersionContext(opCtx(), expectedVCtx);
+        AutoGetCollection autoColl1(opCtx(), nss1, MODE_IX);
+        WriteUnitOfWork wuow(opCtx());
+        std::vector<InsertStatement> inserts = {
+            InsertStatement(0, BSON("_id" << 0 << "data" << "x"))};
+        opObserver().onInserts(opCtx(),
+                               *autoColl1,
+                               inserts.begin(),
+                               inserts.end(),
+                               /*recordIds=*/{},
+                               /*fromMigrate=*/std::vector<bool>(inserts.size(), false),
+                               /*defaultFromMigrate=*/false);
+        commitUnpreparedTransaction<OpObserverImpl>(opCtx(), opObserver());
+        wuow.commit();
+    }
+
+    auto oplogEntryObj = getSingleOplogEntry(opCtx());
+    checkCommonFields(oplogEntryObj);
+    OplogEntry oplogEntry = assertGet(OplogEntry::parse(oplogEntryObj));
+
+    // The transaction (applyOps) entry itself should have no VersionContext
+    ASSERT_EQ(boost::none, oplogEntry.getVersionContext());
+
+    // Ops inside the transaction should have the VersionContext field set
+    auto innerOp = getInnerEntryFromApplyOpsOplogEntry(oplogEntry);
+    ASSERT_EQ(expectedVCtx, innerOp.getVersionContext());
 }
 
 TEST_F(OpObserverTransactionTest, TransactionalPrepareTest) {
@@ -2076,12 +2133,7 @@ TEST_F(OpObserverTransactionTest, TransactionalPreparedCommitTest) {
 
     {
         Lock::GlobalLock lk(opCtx(), MODE_IX);
-        opObserver().onPreparedTransactionCommit(
-            opCtx(),
-            commitSlot,
-            prepareTimestamp,
-            txnParticipant.retrieveCompletedTransactionOperations(opCtx())
-                ->getOperationsForOpObserver());
+        opObserver().onPreparedTransactionCommit(opCtx(), commitSlot, prepareTimestamp);
     }
     repl::OplogInterfaceLocal oplogInterface(opCtx());
     auto oplogIter = oplogInterface.makeIterator();
@@ -2256,6 +2308,30 @@ TEST_F(OpObserverTransactionTest, PreparingTransactionWritesToTransactionTable) 
     txnParticipant.unstashTransactionResources(opCtx(), "abortTransaction");
 }
 
+TEST_F(OpObserverTransactionTest,
+       PreparingTransactionWritesToTransactionTablePreciseCheckpointsFlagOn) {
+    RAIIServerParameterControllerForTest featureFlagController(
+        "featureFlagPreparedTransactionsPreciseCheckpoints", true);
+
+    auto txnParticipant = TransactionParticipant::get(opCtx());
+    txnParticipant.unstashTransactionResources(opCtx(), "prepareTransaction");
+
+    repl::OpTime prepareOpTime;
+    {
+        Lock::GlobalLock lk(opCtx(), MODE_IX);
+        WriteUnitOfWork wuow(opCtx());
+        auto reservedSlots = prepareTransaction();
+        prepareOpTime = reservedSlots.back();
+    }
+
+    ASSERT_EQ(prepareOpTime.getTimestamp(),
+              shard_role_details::getRecoveryUnit(opCtx())->getPrepareTimestamp());
+    txnParticipant.stashTransactionResources(opCtx());
+    assertTxnRecord(
+        txnNum(), prepareOpTime, DurableTxnStateEnum::kPrepared, prepareOpTime.getTimestamp(), 0);
+    txnParticipant.unstashTransactionResources(opCtx(), "abortTransaction");
+}
+
 TEST_F(OpObserverTransactionTest, AbortingUnpreparedTransactionDoesNotWriteToTransactionTable) {
     auto txnParticipant = TransactionParticipant::get(opCtx());
     txnParticipant.unstashTransactionResources(opCtx(), "prepareTransaction");
@@ -2365,12 +2441,7 @@ TEST_F(OpObserverTransactionTest, CommittingPreparedTransactionWritesToTransacti
 
     {
         Lock::GlobalLock lk(opCtx(), MODE_IX);
-        opObserver().onPreparedTransactionCommit(
-            opCtx(),
-            commitSlot,
-            prepareOpTime.getTimestamp(),
-            txnParticipant.retrieveCompletedTransactionOperations(opCtx())
-                ->getOperationsForOpObserver());
+        opObserver().onPreparedTransactionCommit(opCtx(), commitSlot, prepareOpTime.getTimestamp());
     }
     assertTxnRecord(txnNum(), commitOpTime, DurableTxnStateEnum::kCommitted);
 }
@@ -3392,10 +3463,14 @@ protected:
         NamespaceString::createNamespaceString_forTest(boost::none, "test", "coll");
     const NamespaceString _nssWithTid =
         NamespaceString::createNamespaceString_forTest(TenantId(OID::gen()), "test", "coll");
+
+    // Reusable test for asserting batched writes with a single operation are not wrapped in
+    // applyOps
+    void testBatchedWriteSingleOplogEntryIsNotWrappedInApplyOps(auto opLoggingFn);
 };
 
 // Verifies that a WriteUnitOfWork with groupOplogEntries=kGroupForTransaction replicates its writes
-// as a single applyOps. Tests WUOWs batching a range of 1 to 5 deletes (inclusive).
+// as a single applyOps. Tests WUOWs batching a range of 2 to 5 deletes (inclusive).
 TEST_F(BatchedWriteOutputsTest, TestApplyOpsGrouping) {
     const auto nDocsToDelete = 5;
     const BSONObj docsToDelete[nDocsToDelete] = {
@@ -3412,8 +3487,8 @@ TEST_F(BatchedWriteOutputsTest, TestApplyOpsGrouping) {
     reset(opCtx, _nss);
     reset(opCtx, NamespaceString::kRsOplogNamespace);
 
-    // Run the test with WUOW's grouping 1 to 5 deletions.
-    for (size_t docsToBeBatched = 1; docsToBeBatched <= nDocsToDelete; docsToBeBatched++) {
+    // Run the test with WUOW's grouping 2 to 5 deletions.
+    for (size_t docsToBeBatched = 2; docsToBeBatched <= nDocsToDelete; docsToBeBatched++) {
 
         // Start a WUOW with groupOplogEntries=kGroupForTransaction. Verify that initialises the
         // BatchedWriteContext.
@@ -3433,9 +3508,9 @@ TEST_F(BatchedWriteOutputsTest, TestApplyOpsGrouping) {
 
         wuow.commit();
 
-        // Retrieve the oplog entries. We expect 'docsToBeBatched' oplog entries because of
+        // Retrieve the oplog entries. We expect 'docsToBeBatched' - 1 oplog entries because of
         // previous iteration of this loop that exercised previous batch sizes.
-        std::vector<BSONObj> oplogs = getNOplogEntries(opCtx, docsToBeBatched);
+        std::vector<BSONObj> oplogs = getNOplogEntries(opCtx, docsToBeBatched - 1);
         // Entries in ascending timestamp order, so fetch the last one at the back of the
         // vector.
         auto lastOplogEntry = oplogs.back();
@@ -3459,7 +3534,7 @@ TEST_F(BatchedWriteOutputsTest, TestApplyOpsGrouping) {
     }
 }
 
-// Verifies that a WriteUnitOfWork with groupOplogEntries=kGroupForTransaction constisting of an
+// Verifies that a WriteUnitOfWork with groupOplogEntries=kGroupForTransaction consisting of an
 // insert, an update and a delete replicates as a single applyOps.
 TEST_F(BatchedWriteOutputsTest, TestApplyOpsInsertDeleteUpdate) {
     // Setup.
@@ -3823,8 +3898,8 @@ TEST_F(BatchedWriteOutputsTest, testWUOWTooLarge) {
     AutoGetCollection autoColl(opCtx, _nss, MODE_IX);
     WriteUnitOfWork wuow(opCtx, WriteUnitOfWork::kGroupForTransaction);
 
-    // Attempt to delete more documents than allowed in a single applyOps batch because it
-    // the generated entry exceeds the limit of 16MB for an applyOps entry.
+    // Attempt to delete more documents than allowed in a single applyOps batch because the
+    // generated entry exceeds the limit of 16MB for an applyOps entry.
     int approximateDifferenceBetweenBSONObjMaxUserAndInternalSize = 2000;
     for (int docId = 0; docId < BatchedWriteOutputsTest::maxDeleteOpsInBatch +
              approximateDifferenceBetweenBSONObjMaxUserAndInternalSize + 1;
@@ -3846,8 +3921,112 @@ TEST_F(BatchedWriteOutputsTest, testWUOWTooLarge) {
     getNOplogEntries(opCtx, 0);
 }
 
+// TODO SERVER-66577: Remove.
+TEST_F(BatchedWriteOutputsTest, RuntimeOpCountLimitThrowsWithFeatureFlagOff) {
+    RAIIServerParameterControllerForTest featureFlagScope("featureFlagLargeBatchedOperations",
+                                                          false);
+
+    constexpr int kDocsInBatch = 5;
+    constexpr int kOpLimitForTransactionTooLarge = 1;
+    ASSERT_LT(kOpLimitForTransactionTooLarge, kDocsInBatch);
+
+    auto opCtxRaii = cc().makeOperationContext();
+    OperationContext* opCtx = opCtxRaii.get();
+
+    // Batching is not restricted by default.
+    reset(opCtx, _nss);
+    reset(opCtx, NamespaceString::kRsOplogNamespace);
+    {
+        WriteUnitOfWork wuow(opCtx, WriteUnitOfWork::kGroupForTransaction);
+        AutoGetCollection autoColl(opCtx, _nss, MODE_IX);
+        for (int docId = 0; docId < kDocsInBatch; docId++) {
+            OplogDeleteEntryArgs args;
+            auto doc = BSON("_id" << docId);
+            const auto& documentKey = getDocumentKey(*autoColl, doc);
+            opCtx->getServiceContext()->getOpObserver()->onDelete(
+                opCtx, *autoColl, kUninitializedStmtId, doc, documentKey, args);
+        }
+        wuow.commit();
+    }
+    getNOplogEntries(opCtx, 1);
+
+    // With the feature flag off, exceeding maxNumberOfBatchedOperationsInSingleOplogEntry will
+    // throw.
+    reset(opCtx, _nss);
+    reset(opCtx, NamespaceString::kRsOplogNamespace);
+    RAIIServerParameterControllerForTest opCountLimit(
+        "maxNumberOfBatchedOperationsInSingleOplogEntry", kOpLimitForTransactionTooLarge);
+    WriteUnitOfWork wuow(opCtx, WriteUnitOfWork::kGroupForTransaction);
+    AutoGetCollection autoColl(opCtx, _nss, MODE_IX);
+    for (int docId = 0; docId < kDocsInBatch; docId++) {
+        OplogDeleteEntryArgs args;
+        auto doc = BSON("_id" << docId);
+        const auto& documentKey = getDocumentKey(*autoColl, doc);
+        opCtx->getServiceContext()->getOpObserver()->onDelete(
+            opCtx, *autoColl, kUninitializedStmtId, doc, documentKey, args);
+    }
+    ASSERT_THROWS_CODE(wuow.commit(), DBException, ErrorCodes::TransactionTooLarge);
+    getNOplogEntries(opCtx, 0);
+}
+
+TEST_F(BatchedWriteOutputsTest, RuntimeLimitsAffectApplyOpsBatchingWithFeatureFlagOn) {
+    auto opCtxRaii = cc().makeOperationContext();
+    OperationContext* opCtx = opCtxRaii.get();
+
+    constexpr int kDocsInBatch = 2;
+    constexpr int kSmallSizeLimitBytes = 200;
+    constexpr int kLargeSizeLimitBytes = 16 * 1024 * 1024;
+    constexpr int kSmallOpLimit = 1;
+    constexpr int kLargeOpLimit = 10;
+
+    const auto makeDoc = [](int id) {
+        return BSON("_id" << id << "padding" << std::string(170, 'x'));
+    };
+
+    auto verifyOplogEntryCount = [&](int maxOps, int maxBytes, size_t expectedEntries) {
+        reset(opCtx, _nss);
+        reset(opCtx, NamespaceString::kRsOplogNamespace);
+        RAIIServerParameterControllerForTest maxOpsController(
+            "maxNumberOfBatchedOperationsInSingleOplogEntry", maxOps);
+        RAIIServerParameterControllerForTest maxBytesController(
+            "maxSizeOfBatchedOperationsInSingleOplogEntryBytes", maxBytes);
+
+        WriteUnitOfWork wuow(opCtx, WriteUnitOfWork::kGroupForTransaction);
+        AutoGetCollection autoColl(opCtx, _nss, MODE_IX);
+        for (int docId = 0; docId < kDocsInBatch; ++docId) {
+            OplogDeleteEntryArgs args;
+            auto doc = makeDoc(docId);
+            const auto& documentKey = getDocumentKey(*autoColl, doc);
+            opCtx->getServiceContext()->getOpObserver()->onDelete(
+                opCtx, *autoColl, kUninitializedStmtId, doc, documentKey, args);
+        }
+        wuow.commit();
+
+        auto oplogs = getNOplogEntries(opCtx, expectedEntries);
+        for (const auto& oplog : oplogs) {
+            auto parsed = assertGet(repl::OplogEntry::parse(oplog));
+            ASSERT_EQ(repl::OpTypeEnum::kCommand, parsed.getOpType());
+            ASSERT_EQ(repl::OplogEntry::CommandType::kApplyOps, parsed.getCommandType());
+        }
+    };
+
+    // No splitting with large limits.
+    verifyOplogEntryCount(/*maxOps=*/kLargeOpLimit,
+                          /*maxBytes=*/kLargeSizeLimitBytes,
+                          /*expectedEntries=*/1);
+
+    // A small op count or oplog entry size limit will cause the operation to be split.
+    verifyOplogEntryCount(/*maxOps=*/kLargeOpLimit,
+                          /*maxBytes=*/kSmallSizeLimitBytes,
+                          /*expectedEntries=*/2);
+
+    verifyOplogEntryCount(/*maxOps=*/kSmallOpLimit,
+                          /*maxBytes=*/kLargeSizeLimitBytes,
+                          /*expectedEntries=*/2);
+}
+
 // Verifies that a WriteUnitOfWork with groupOplogEntries=kGroupForPossiblyRetryableOperations
-// replicates its writes as a single applyOps. Tests WUOWs batching a range of 1 to 5 inserts
+// replicates its writes as a single applyOps. Tests WUOWs batching a range of 2 to 5 inserts
 // (inclusive).
 TEST_F(BatchedWriteOutputsTest, TestVectoredInsertApplyOpsGrouping) {
     const BSONObj docsToInsert[] = {
@@ -3865,8 +4044,8 @@ TEST_F(BatchedWriteOutputsTest, TestVectoredInsertApplyOpsGrouping) {
     reset(opCtx, _nss);
     reset(opCtx, NamespaceString::kRsOplogNamespace);
 
-    // Run the test with WUOW's grouping 1 to 5 inserts.
-    for (size_t docsToBeBatched = 1; docsToBeBatched <= nDocsToInsert; docsToBeBatched++) {
+    // Run the test with WUOW's grouping 2 to 5 inserts.
+    for (size_t docsToBeBatched = 2; docsToBeBatched <= nDocsToInsert; docsToBeBatched++) {
         // Start a WUOW with groupOplogEntries=kGroupForPossiblyRetryableOperation.
         // Verify that initialises the BatchedWriteContext.
         auto& bwc = BatchedWriteContext::get(opCtx);
@@ -3891,9 +4070,9 @@ TEST_F(BatchedWriteOutputsTest, TestVectoredInsertApplyOpsGrouping) {
             /*defaultFromMigrate=*/false);
         wuow.commit();
 
-        // Retrieve the oplog entries. We expect 'docsToBeBatched' oplog entries because of
-        // previous iteration of this loop that exercised previous batch sizes.
-        std::vector<BSONObj> oplogs = getNOplogEntries(opCtx, docsToBeBatched);
+        // Retrieve the oplog entries. We expect 'docsToBeBatched' - 1 oplog entries because of
+        // previous iterations of this loop that exercised previous batch sizes.
+        std::vector<BSONObj> oplogs = getNOplogEntries(opCtx, docsToBeBatched - 1);
         // Entries in ascending timestamp order, so fetch the last one at the back of the
         // vector.
         auto lastOplogEntry = oplogs.back();
@@ -4323,6 +4502,109 @@ TEST_F(BatchedWriteOutputsTest, TestNonRetryableVectoredInsertMultiApplyOpsGroup
         ASSERT(innerEntry.getStatementIds().empty());
         ASSERT_BSONOBJ_EQ(innerEntry.getObject(), docsToInsert1[opIdx]);
     }
+}
+
+// Test that oplog entry is not wrapped in applyOps when grouping is enabled. Provide a function
+// which will create an oplog entry.
+void BatchedWriteOutputsTest::testBatchedWriteSingleOplogEntryIsNotWrappedInApplyOps(
+    auto opLoggingFn) {
+    auto opCtxRaii = cc().makeOperationContext();
+    OperationContext* opCtx = opCtxRaii.get();
+    reset(opCtx, _nss);
+    reset(opCtx, NamespaceString::kRsOplogNamespace);
+
+    // Execution operation without grouping to get the expected oplog entry.
+    AutoGetCollection autoColl(opCtx, _nss, MODE_IX);
+    WriteUnitOfWork wuow(opCtx);
+    opLoggingFn(autoColl, opCtx);
+    wuow.commit();
+
+    // Execute same operation but grouped.
+    WriteUnitOfWork wuowGrouped(opCtx, WriteUnitOfWork::kGroupForPossiblyRetryableOperations);
+    opLoggingFn(autoColl, opCtx);
+    wuowGrouped.commit();
+
+    // Retrieve the oplog entries. Implicitly asserts that there are two oplog entries: one
+    // for each call to "opLoggingFn".
+    std::vector<BSONObj> oplogs = getNOplogEntries(opCtx, 2);
+    auto oplogEntry = oplogs[0].removeFields({"ts", "wall"});
+    auto oplogEntry1 = oplogs[1].removeFields({"ts", "wall"});
+    // Check that both oplog entries other than the timestamp and wall clock time are identical.
+    ASSERT_BSONOBJ_EQ(oplogEntry, oplogEntry1);
+}
+
+TEST_F(BatchedWriteOutputsTest, TestSingleInsertIsNotInApplyOps) {
+    testBatchedWriteSingleOplogEntryIsNotWrappedInApplyOps(
+        [&](const AutoGetCollection& autoColl, OperationContext* opCtx) {
+            std::vector<InsertStatement> inserts;
+            inserts.emplace_back(kUninitializedStmtId, BSON("_id" << 0 << "a" << 10));
+            opCtx->getServiceContext()->getOpObserver()->onInserts(
+                opCtx,
+                *autoColl,
+                inserts.begin(),
+                inserts.end(),
+                /*recordIds=*/{},
+                /*fromMigrate=*/std::vector<bool>(inserts.size(), false),
+                /*defaultFromMigrate=*/false);
+        });
+
+    // TODO SERVER-114338: Update test to check single retryable insert oplog entries. We can do the
+    // same thing above using a statement id StmtId(0).
+}
+
+TEST_F(BatchedWriteOutputsTest, TestSingleDeleteIsNotInApplyOps) {
+    testBatchedWriteSingleOplogEntryIsNotWrappedInApplyOps(
+        [&](const AutoGetCollection& autoColl, OperationContext* opCtx) {
+            auto doc = BSON("_id" << 0 << "a" << 10);
+            opCtx->getServiceContext()->getOpObserver()->onDelete(
+                opCtx, *autoColl, kUninitializedStmtId, doc, getDocumentKey(*autoColl, doc), {});
+        });
+
+    // TODO SERVER-114338: Update test to check single retryable delete oplog entries. We can do the
+    // same thing above using a statement id StmtId(0).
+}
+
+TEST_F(BatchedWriteOutputsTest, TestSingleUpdateIsNotInApplyOps) {
+    testBatchedWriteSingleOplogEntryIsNotWrappedInApplyOps(
+        [&](const AutoGetCollection& autoColl, OperationContext* opCtx) {
+            const auto criteria = BSON("_id" << 0);
+            // Create a fake preImageDoc; the tested code path does not care about this value.
+            const auto preImageDoc = criteria;
+            CollectionUpdateArgs updateArgs{preImageDoc};
+            updateArgs.criteria = criteria;
+            updateArgs.updatedDoc = BSON("_id" << 0 << "data"
+                                               << "x");
+            updateArgs.update = BSON("$set" << BSON("data" << "x"));
+            updateArgs.mustCheckExistenceForInsertOperations = true;
+            OplogUpdateEntryArgs update(&updateArgs, *autoColl);
+
+            opCtx->getServiceContext()->getOpObserver()->onUpdate(opCtx, update);
+        });
+
+    // TODO SERVER-114338: Update test to check single retryable update oplog entries. We can do the
+    // same thing above but also setting updateArgs.stmtIds to StmtId(0).
+}
+
+TEST_F(BatchedWriteOutputsTest, TestSingleContainerInsertIsNotInApplyOps) {
+    testBatchedWriteSingleOplogEntryIsNotWrappedInApplyOps(
+        [&](const AutoGetCollection& autoColl, OperationContext* opCtx) {
+            auto ident = "ident";
+            int64_t key = 100;
+            std::string value = "things";
+            opCtx->getServiceContext()->getOpObserver()->onContainerInsert(
+                opCtx, _nss, uuid, ident, key, value);
+        });
+}
+
+TEST_F(BatchedWriteOutputsTest, TestSingleContainerDeleteIsNotInApplyOps) {
+    testBatchedWriteSingleOplogEntryIsNotWrappedInApplyOps(
+        [&](const AutoGetCollection& autoColl, OperationContext* opCtx) {
+            auto ident = "ident";
+            int64_t key = 100;
+
+            opCtx->getServiceContext()->getOpObserver()->onContainerDelete(
+                opCtx, _nss, uuid, ident, key);
+        });
 }
 
 class OnDeleteOutputsTest : public OpObserverTest {
@@ -5042,12 +5324,7 @@ TEST_F(OpObserverMultiEntryTransactionTest, CommitPreparedTest) {
 
     {
         Lock::GlobalLock lk(opCtx(), MODE_IX);
-        opObserver().onPreparedTransactionCommit(
-            opCtx(),
-            commitSlot,
-            commitTimestamp,
-            txnParticipant.retrieveCompletedTransactionOperations(opCtx())
-                ->getOperationsForOpObserver());
+        opObserver().onPreparedTransactionCommit(opCtx(), commitSlot, commitTimestamp);
     }
     oplogEntryObjs = getNOplogEntries(opCtx(), 3);
     const auto commitOplogObj = oplogEntryObjs.back();
@@ -5316,12 +5593,7 @@ TEST_F(OpObserverMultiEntryTransactionTest, CommitPreparedPackingTest) {
     // commitTimestamp must be greater than the prepareTimestamp.
     auto commitTimestamp = Timestamp(prepareTimestamp.getSecs(), prepareTimestamp.getInc() + 1);
 
-    opObserver().onPreparedTransactionCommit(
-        opCtx(),
-        commitSlot,
-        commitTimestamp,
-        txnParticipant.retrieveCompletedTransactionOperations(opCtx())
-            ->getOperationsForOpObserver());
+    opObserver().onPreparedTransactionCommit(opCtx(), commitSlot, commitTimestamp);
 
     oplogEntryObjs = getNOplogEntries(opCtx(), 2);
     const auto commitOplogObj = oplogEntryObjs.back();
@@ -5887,13 +6159,52 @@ TEST_F(OpObserverTransactionTest, OnContainerInsert) {
     std::string value1 = "things";
     std::string value2 = "other things";
 
-    OpObserverImpl opObserver{std::make_unique<OperationLoggerImpl>()};
-    ASSERT_THROWS_CODE(opObserver.onContainerInsert(opCtx(), nss, uuid, ident, key1, value1),
-                       DBException,
-                       10942700);
-    ASSERT_THROWS_CODE(opObserver.onContainerInsert(opCtx(), nss, uuid, ident, key2, value2),
-                       DBException,
-                       10942700);
+    opObserver().onContainerInsert(opCtx(), nss, uuid, ident, key1, value1);
+    opObserver().onContainerInsert(opCtx(), nss, uuid, ident, key2, value2);
+
+    commitUnpreparedTransaction<OpObserverImpl>(opCtx(), opObserver());
+
+    auto entryObj = getSingleOplogEntry(opCtx());
+    checkCommonFields(entryObj);
+
+    auto entry = assertGet(OplogEntry::parse(entryObj));
+    ASSERT_EQ(entry.getOpType(), repl::OpTypeEnum::kCommand);
+    ASSERT_EQ(entry.getCommandType(), OplogEntry::CommandType::kApplyOps);
+
+    std::vector<repl::OplogEntry> innerEntries;
+    repl::ApplyOps::extractOperationsTo(entry, entry.getEntry().toBSON(), &innerEntries);
+    ASSERT_EQ(innerEntries.size(), 2);
+
+    ASSERT_EQ(innerEntries[0].getOpType(), repl::OpTypeEnum::kContainerInsert);
+    ASSERT_EQ(innerEntries[1].getOpType(), repl::OpTypeEnum::kContainerInsert);
+    ASSERT_EQ(innerEntries[0].getEntry().getContainer(), StringData{ident});
+    ASSERT_EQ(innerEntries[1].getEntry().getContainer(), StringData{ident});
+
+    auto entry1Object = innerEntries[0].getObject();
+    ASSERT_EQ(entry1Object.nFields(), 2);
+    auto entry1Key = entry1Object["k"];
+    ASSERT_EQ(entry1Key.type(), BSONType::numberLong);
+    ASSERT_EQ(entry1Key.numberLong(), key1);
+    auto entry1Value = entry1Object["v"];
+    ASSERT_EQ(entry1Value.type(), BSONType::binData);
+    ASSERT_EQ(entry1Value.binDataType(), BinDataType::BinDataGeneral);
+    int entry1ValueBinDataLength;
+    auto entry1ValueBinData = entry1Value.binData(entry1ValueBinDataLength);
+    ASSERT_EQ(std::string(entry1ValueBinData, entry1ValueBinDataLength), value1);
+
+    auto entry2Object = innerEntries[1].getObject();
+    ASSERT_EQ(entry2Object.nFields(), 2);
+    auto entry2Key = entry2Object["k"];
+    ASSERT_EQ(entry2Key.type(), BSONType::binData);
+    int entry2KeyBinDataLength;
+    auto entry2KeyBinData = entry2Key.binData(entry2KeyBinDataLength);
+    ASSERT_EQ(std::string(entry2KeyBinData, entry2KeyBinDataLength), key2);
+    auto entry2Value = entry2Object["v"];
+    ASSERT_EQ(entry2Value.type(), BSONType::binData);
+    ASSERT_EQ(entry2Value.binDataType(), BinDataType::BinDataGeneral);
+    int entry2ValueBinDataLength;
+    auto entry2ValueBinData = entry2Value.binData(entry2ValueBinDataLength);
+    ASSERT_EQ(std::string(entry2ValueBinData, entry2ValueBinDataLength), value2);
 }
 
 TEST_F(OpObserverTransactionTest, OnContainerDelete) {
@@ -5903,11 +6214,126 @@ TEST_F(OpObserverTransactionTest, OnContainerDelete) {
     int64_t key1 = 100;
     std::string key2 = "stuff";
 
-    OpObserverImpl opObserver{std::make_unique<OperationLoggerImpl>()};
-    ASSERT_THROWS_CODE(
-        opObserver.onContainerDelete(opCtx(), nss, uuid, ident, key1), DBException, 10942702);
-    ASSERT_THROWS_CODE(
-        opObserver.onContainerDelete(opCtx(), nss, uuid, ident, key2), DBException, 10942702);
+    opObserver().onContainerDelete(opCtx(), nss, uuid, ident, key1);
+    opObserver().onContainerDelete(opCtx(), nss, uuid, ident, key2);
+
+    commitUnpreparedTransaction<OpObserverImpl>(opCtx(), opObserver());
+
+    auto entryObj = getSingleOplogEntry(opCtx());
+    checkCommonFields(entryObj);
+
+    auto entry = assertGet(OplogEntry::parse(entryObj));
+    ASSERT_EQ(entry.getOpType(), repl::OpTypeEnum::kCommand);
+    ASSERT_EQ(entry.getCommandType(), OplogEntry::CommandType::kApplyOps);
+
+    std::vector<repl::OplogEntry> innerEntries;
+    repl::ApplyOps::extractOperationsTo(entry, entry.getEntry().toBSON(), &innerEntries);
+    ASSERT_EQ(innerEntries.size(), 2);
+
+    ASSERT_EQ(innerEntries[0].getOpType(), repl::OpTypeEnum::kContainerDelete);
+    ASSERT_EQ(innerEntries[1].getOpType(), repl::OpTypeEnum::kContainerDelete);
+    ASSERT_EQ(innerEntries[0].getEntry().getContainer(), StringData{ident});
+    ASSERT_EQ(innerEntries[1].getEntry().getContainer(), StringData{ident});
+
+    auto entry1Object = innerEntries[0].getObject();
+    ASSERT_EQ(entry1Object.nFields(), 1);
+    auto entry1Key = entry1Object["k"];
+    ASSERT_EQ(entry1Key.type(), BSONType::numberLong);
+    ASSERT_EQ(entry1Key.numberLong(), key1);
+
+    auto entry2Object = innerEntries[1].getObject();
+    ASSERT_EQ(entry2Object.nFields(), 1);
+    auto entry2Key = entry2Object["k"];
+    ASSERT_EQ(entry2Key.type(), BSONType::binData);
+    int entry2KeyBinDataLength;
+    auto entry2KeyBinData = entry2Key.binData(entry2KeyBinDataLength);
+    ASSERT_EQ(std::string(entry2KeyBinData, entry2KeyBinDataLength), key2);
+}
+
+TEST_F(OpObserverTransactionTest, OnContainerInsertDeleteWithInsertDeleteUpdate) {
+    TransactionParticipant::get(opCtx()).unstashTransactionResources(opCtx(), "insert");
+    AutoGetCollection coll{opCtx(), nss, LockMode::MODE_IX};
+
+    auto ident = "ident";
+    int64_t key1 = 100;
+    std::string key2 = "stuff";
+    std::string value1 = "things";
+    std::string value2 = "other things";
+
+    opObserver().onContainerInsert(opCtx(), nss, uuid, ident, key1, value1);
+    opObserver().onContainerDelete(opCtx(), nss, uuid, ident, key2);
+    {
+        std::vector<InsertStatement> insert;
+        insert.emplace_back(BSON("_id" << 0));
+        opObserver().onInserts(opCtx(),
+                               *coll,
+                               insert.begin(),
+                               insert.end(),
+                               {},
+                               std::vector<bool>(insert.size(), false),
+                               false);
+    }
+    {
+        auto doc = BSON("_id" << 1);
+        opObserver().onDelete(opCtx(),
+                              *coll,
+                              kUninitializedStmtId,
+                              doc,
+                              getDocumentKey(*coll, doc),
+                              OplogDeleteEntryArgs{});
+    }
+    {
+        auto doc = BSON("_id" << 2);
+        CollectionUpdateArgs collUpdateArgs{doc};
+        collUpdateArgs.criteria = doc;
+        collUpdateArgs.update = BSON("a" << 2);
+        opObserver().onUpdate(opCtx(), OplogUpdateEntryArgs{&collUpdateArgs, *coll});
+    }
+
+    commitUnpreparedTransaction<OpObserverImpl>(opCtx(), opObserver());
+
+    auto entryObj = getSingleOplogEntry(opCtx());
+    checkCommonFields(entryObj);
+
+    auto entry = assertGet(OplogEntry::parse(entryObj));
+    ASSERT_EQ(entry.getOpType(), repl::OpTypeEnum::kCommand);
+    ASSERT_EQ(entry.getCommandType(), OplogEntry::CommandType::kApplyOps);
+
+    std::vector<repl::OplogEntry> innerEntries;
+    repl::ApplyOps::extractOperationsTo(entry, entry.getEntry().toBSON(), &innerEntries);
+    ASSERT_EQ(innerEntries.size(), 5);
+
+    ASSERT_EQ(innerEntries[0].getOpType(), repl::OpTypeEnum::kContainerInsert);
+    ASSERT_EQ(innerEntries[1].getOpType(), repl::OpTypeEnum::kContainerDelete);
+    ASSERT_EQ(innerEntries[0].getEntry().getContainer(), StringData{ident});
+    ASSERT_EQ(innerEntries[1].getEntry().getContainer(), StringData{ident});
+
+    auto entry1Object = innerEntries[0].getObject();
+    ASSERT_EQ(entry1Object.nFields(), 2);
+    auto entry1Key = entry1Object["k"];
+    ASSERT_EQ(entry1Key.type(), BSONType::numberLong);
+    ASSERT_EQ(entry1Key.numberLong(), key1);
+    auto entry1Value = entry1Object["v"];
+    ASSERT_EQ(entry1Value.type(), BSONType::binData);
+    ASSERT_EQ(entry1Value.binDataType(), BinDataType::BinDataGeneral);
+    int entry1ValueBinDataLength;
+    auto entry1ValueBinData = entry1Value.binData(entry1ValueBinDataLength);
+    ASSERT_EQ(std::string(entry1ValueBinData, entry1ValueBinDataLength), value1);
+
+    auto entry2Object = innerEntries[1].getObject();
+    ASSERT_EQ(entry2Object.nFields(), 1);
+    auto entry2Key = entry2Object["k"];
+    ASSERT_EQ(entry2Key.type(), BSONType::binData);
+    int entry2KeyBinDataLength;
+    auto entry2KeyBinData = entry2Key.binData(entry2KeyBinDataLength);
+    ASSERT_EQ(std::string(entry2KeyBinData, entry2KeyBinDataLength), key2);
+
+    ASSERT_EQ(innerEntries[2].getOpType(), repl::OpTypeEnum::kInsert);
+    ASSERT_BSONOBJ_EQ(innerEntries[2].getObject(), BSON("_id" << 0));
+    ASSERT_EQ(innerEntries[3].getOpType(), repl::OpTypeEnum::kDelete);
+    ASSERT_BSONOBJ_EQ(innerEntries[3].getObject(), BSON("_id" << 1));
+    ASSERT_EQ(innerEntries[4].getOpType(), repl::OpTypeEnum::kUpdate);
+    ASSERT_BSONOBJ_EQ(innerEntries[4].getObject(), BSON("a" << 2));
 }
 
 }  // namespace

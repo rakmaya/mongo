@@ -189,6 +189,26 @@ void checkOverflow(std::unique_ptr<MessageCompressorBase> compressor) {
         compressor->decompressData(tooSmallRange, DataRange(scratch.data(), scratch.size())));
 }
 
+void checkUndersize(const Message& compressedMsg,
+                    std::unique_ptr<MessageCompressorBase> compressor) {
+    MessageCompressorRegistry registry;
+    const auto compressorName = compressor->getName();
+
+    std::vector<std::string> compressorList = {compressorName};
+    registry.setSupportedCompressors(std::move(compressorList));
+    registry.registerImplementation(std::move(compressor));
+    registry.finalizeSupportedCompressors().transitional_ignore();
+
+    MessageCompressorManager mgr(&registry);
+    BSONObjBuilder negotiatorOut;
+    std::vector<StringData> negotiator({compressorName});
+    mgr.serverNegotiate(negotiator, &negotiatorOut);
+    checkNegotiationResult(negotiatorOut.done(), {compressorName});
+
+    auto swm = mgr.decompressMessage(compressedMsg);
+    ASSERT_EQ(ErrorCodes::BadValue, swm.getStatus());
+}
+
 Message buildMessage() {
     const auto data = std::string{"Hello, world!"};
     const auto bufferSize = MsgData::MsgDataHeaderSize + data.size();
@@ -292,6 +312,52 @@ TEST(ZlibMessageCompressor, Overflow) {
 
 TEST(ZstdMessageCompressor, Overflow) {
     checkOverflow(std::make_unique<ZstdMessageCompressor>());
+}
+
+TEST(ZlibMessageCompressor, Mismatch) {
+    checkOverflow(std::make_unique<ZlibMessageCompressor>());
+}
+
+TEST(SnappyMessageCompressor, Undersize) {
+    std::vector<std::uint8_t> payload = {
+        0x41, 0x0, 0x0,  0x0,  0xad, 0xde, 0x0,  0x0,  0x0,  0x0,  0x0,  0x0,  0xdc,
+        0x7,  0x0, 0x0,  0xdd, 0x7,  0x0,  0x0,  0x0,  0x20, 0x0,  0x0,  0x1,  0x27,
+        0x0,  0x0, 0x1,  0x1,  0x84, 0xfb, 0x1f, 0x0,  0x0,  0x5,  0x5f, 0x69, 0x64,
+        0x0,  0x0, 0x10, 0x0,  0x0,  0x0,  0x48, 0x45, 0x41, 0x50, 0x4c, 0x45, 0x41,
+        0x4b, 0x0, 0x0,  0x0,  0x0,  0x0,  0x0,  0x0,  0x0,  0x0,  0x0,  0x0,  0x0};
+
+
+    auto buffer = SharedBuffer::allocate(payload.size());
+    std::copy(payload.begin(), payload.end(), buffer.get());
+
+    checkUndersize(Message(buffer), std::make_unique<SnappyMessageCompressor>());
+}
+
+TEST(ZlibMessageCompressor, Undersize) {
+    std::vector<std::uint8_t> payload = {
+        0x3c, 0x00, 0x00, 0x00, 0xad, 0xde, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xdc, 0x07, 0x00,
+        0x00, 0xdd, 0x07, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x02, 0x78, 0xda, 0x63, 0x60, 0x00,
+        0x82, 0xdf, 0xf2, 0x0c, 0x0c, 0xac, 0xf1, 0x99, 0x29, 0x0c, 0x0c, 0x02, 0x40, 0x9e, 0x87,
+        0xab, 0x63, 0x80, 0x8f, 0xab, 0xa3, 0x37, 0x03, 0x12, 0x00, 0x00, 0x6d, 0x26, 0x04, 0x97};
+
+    auto buffer = SharedBuffer::allocate(payload.size());
+    std::copy(payload.begin(), payload.end(), buffer.get());
+
+    checkUndersize(Message(buffer), std::make_unique<ZlibMessageCompressor>());
+}
+
+TEST(ZstdMessageCompressor, Undersize) {
+    std::vector<std::uint8_t> payload = {
+        0x44, 0x0,  0x0,  0x0,  0xad, 0xde, 0x0,  0x0,  0x0,  0x0,  0x0,  0x0,  0xdc, 0x7,
+        0x0,  0x0,  0xdd, 0x7,  0x0,  0x0,  0x0,  0x20, 0x0,  0x0,  0x3,  0x28, 0xb5, 0x2f,
+        0xfd, 0x20, 0x27, 0x15, 0x1,  0x0,  0xe0, 0x0,  0x0,  0x0,  0x0,  0x0,  0xfb, 0x1f,
+        0x0,  0x0,  0x5,  0x5f, 0x69, 0x64, 0x0,  0x0,  0x10, 0x0,  0x0,  0x0,  0x48, 0x45,
+        0x41, 0x50, 0x4c, 0x45, 0x41, 0x4b, 0x0,  0x1,  0x0,  0x18, 0xc0, 0x9};
+
+    auto buffer = SharedBuffer::allocate(payload.size());
+    std::copy(payload.begin(), payload.end(), buffer.get());
+
+    checkUndersize(Message(buffer), std::make_unique<ZstdMessageCompressor>());
 }
 
 TEST(MessageCompressorManager, SERVER_28008) {
@@ -443,6 +509,93 @@ TEST(MessageCompressorManager, RuntMessage) {
 
     auto status = compManager.decompressMessage(Message(badMessageBuffer), nullptr).getStatus();
     ASSERT_NOT_OK(status);
+}
+
+class ZlibDecompressTest : public unittest::Test {
+public:
+    Status doDecompress(const std::vector<char>& in, std::vector<char>& out) {
+        ConstDataRange inRange(in.data(), in.size());
+        DataRange outRange(out.data(), out.size());
+        auto swSize = compressor->decompressData(inRange, outRange);
+        if (swSize.isOK())
+            out.resize(swSize.getValue());
+        return swSize.getStatus();
+    }
+
+    Status doDecompress(const std::vector<char>& in) {
+        std::vector<char> out(1024);
+        return doDecompress(in, out);
+    }
+
+    std::vector<char> doCompress(const std::vector<char>& in) {
+        std::vector<char> out(compressor->getMaxCompressedSize(in.size()));
+        DataRange outRange(out.data(), out.size());
+        auto swSz = compressor->compressData(in, outRange);
+        ASSERT_OK(swSz);
+        out.resize(swSz.getValue());
+        return out;
+    }
+
+    static std::vector<char> strVec(StringData s) {
+        return std::vector<char>{s.begin(), s.end()};
+    }
+
+    std::unique_ptr<ZlibMessageCompressor> compressor{std::make_unique<ZlibMessageCompressor>()};
+};
+
+TEST_F(ZlibDecompressTest, RejectsEmptyPayload) {
+    ASSERT_EQ(doDecompress({}), ErrorCodes::BadValue);
+}
+
+TEST_F(ZlibDecompressTest, RejectsUndersizedPayload) {
+    ASSERT_EQ(doDecompress({0x78, 0x9c, 0x03, 0x00}), ErrorCodes::BadValue);
+}
+
+TEST_F(ZlibDecompressTest, RejectsBadCompressionMethod) {
+    const char cm = 0;  // Expected to be 8.
+    const char cmf = 0x70 | (cm & 0xf);
+    ASSERT_EQ(doDecompress({cmf, 0x9c, 0x63, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00}),
+              ErrorCodes::BadValue);
+}
+
+TEST_F(ZlibDecompressTest, RoundTripLongerData) {
+    const auto data = strVec("Hello, MongoDB! Compression hardening test.");
+    std::vector<char> out(data.size() + 100);
+    ASSERT_OK(doDecompress(doCompress(data), out));
+    ASSERT_EQ(out, data);
+}
+
+TEST_F(ZlibDecompressTest, RoundTripShortData) {
+    const auto data = strVec("Short");
+    std::vector<char> out(10000);
+    ASSERT_OK(doDecompress(doCompress(data), out));
+    ASSERT_EQ(out, data);
+}
+
+TEST_F(ZlibDecompressTest, ByteCounts) {
+    const auto data = strVec("Hello, MongoDB! Compression hardening test.");
+    uint64_t compressIn = 0;
+    uint64_t compressOut = 0;
+    uint64_t decompressIn = 0;
+    uint64_t decompressOut = 0;
+    for (int i = 0;; ++i) {
+        ASSERT_EQ(compressor->getCompressorBytesIn(), compressIn);
+        ASSERT_EQ(compressor->getCompressorBytesOut(), compressOut);
+        ASSERT_EQ(compressor->getDecompressorBytesIn(), decompressIn);
+        ASSERT_EQ(compressor->getDecompressorBytesOut(), decompressOut);
+        if (i >= 5)
+            break;
+
+        std::vector<char> compressed = doCompress(data);
+        compressIn += data.size();
+        compressOut += compressed.size();
+
+        std::vector<char> out(data.size() + 100);
+        ASSERT_OK(doDecompress(compressed, out));
+        ASSERT_EQ(out, data);
+        decompressIn += compressed.size();
+        decompressOut += data.size();
+    }
 }
 
 }  // namespace

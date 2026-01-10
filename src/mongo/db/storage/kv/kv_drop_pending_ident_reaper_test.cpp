@@ -32,10 +32,10 @@
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/db/client.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/service_context_test_fixture.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
 #include "mongo/db/storage/ident.h"
 #include "mongo/db/storage/key_format.h"
 #include "mongo/db/storage/record_store.h"
@@ -91,6 +91,7 @@ public:
     }
 
     Status createRecordStore(const rss::PersistenceProvider&,
+                             RecoveryUnit& ru,
                              const NamespaceString& nss,
                              StringData ident,
                              const RecordStore::Options& options) override {
@@ -296,14 +297,15 @@ ServiceContext::UniqueOperationContext makeOpCtx() {
     return cc().makeOperationContext();
 }
 
-DEATH_TEST_F(KVDropPendingIdentReaperTest, DoubleDropIdentFails, "invariant") {
+using KVDropPendingIdentReaperTestDeathTest = KVDropPendingIdentReaperTest;
+DEATH_TEST_F(KVDropPendingIdentReaperTestDeathTest, DoubleDropIdentFails, "invariant") {
     const std::string identName = "ident";
     KVDropPendingIdentReaper reaper(nullptr);
     reaper.addDropPendingIdent(Timestamp(1, 0), std::make_shared<Ident>(identName));
     reaper.addDropPendingIdent(Timestamp(1, 0), std::make_shared<Ident>(identName));
 }
 
-DEATH_TEST_F(KVDropPendingIdentReaperTest, TimestampedDropAfterUnknownDrop, "invariant") {
+DEATH_TEST_F(KVDropPendingIdentReaperTestDeathTest, TimestampedDropAfterUnknownDrop, "invariant") {
     const std::string identName = "ident";
     KVDropPendingIdentReaper reaper(nullptr);
     reaper.dropUnknownIdent(Timestamp(1, 0), identName);
@@ -541,7 +543,7 @@ TEST_F(KVDropPendingIdentReaperTest, MarkExpiredIdentInUse) {
     ASSERT_EQUALS(identName, engine->droppedIdents.front());
 }
 
-DEATH_TEST_F(KVDropPendingIdentReaperTest,
+DEATH_TEST_F(KVDropPendingIdentReaperTestDeathTest,
              DropIdentsOlderThanTerminatesIfKVEngineFailsToDropIdent,
              "Failed to remove drop-pending ident") {
     Timestamp dropTimestamp{Seconds{1}, 0};
@@ -670,7 +672,7 @@ TEST_F(KVDropPendingIdentReaperTest, ImmediatelyDropReportsDropErrors) {
                   ErrorCodes::OperationFailed);
 }
 
-DEATH_TEST_F(KVDropPendingIdentReaperTest, ImmediatelyDropIdentInUse, "invariant") {
+DEATH_TEST_F(KVDropPendingIdentReaperTestDeathTest, ImmediatelyDropIdentInUse, "invariant") {
     auto ident = std::make_shared<Ident>("ident");
     auto engine = getEngine();
     KVDropPendingIdentReaper reaper(engine);

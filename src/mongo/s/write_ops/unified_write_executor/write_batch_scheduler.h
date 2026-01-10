@@ -39,19 +39,21 @@ namespace unified_write_executor {
 
 class WriteBatchScheduler {
 public:
-    using CollectionsToCreate = WriteBatchResponseProcessor::CollectionsToCreate;
+    using CollectionsToCreate = ProcessorResult::CollectionsToCreate;
 
     static constexpr size_t kMaxRoundsWithoutProgress = 10;
 
     WriteBatchScheduler(WriteCommandRef cmdRef,
                         WriteOpBatcher& batcher,
                         WriteBatchExecutor& executor,
-                        WriteBatchResponseProcessor& processor)
+                        WriteBatchResponseProcessor& processor,
+                        boost::optional<OID> targetEpoch)
         : _cmdRef(std::move(cmdRef)),
           _nssSet(_cmdRef.getNssSet()),
           _batcher(batcher),
           _executor(executor),
-          _processor(processor) {}
+          _processor(processor),
+          _targetEpoch(targetEpoch) {}
 
     void run(OperationContext* opCtx);
 
@@ -76,6 +78,13 @@ protected:
      * Helper method for handling the case where RoutingContext creation failed.
      */
     void handleInitRoutingContextError(OperationContext* opCtx, const Status& status);
+
+    /**
+     * This method is records errors for the remaining ops. If the write command is ordered or
+     * running in a transaction, this method will only record one error (for the remaining op with
+     * the lowest ID). Otherwise, this method will record errors for all remaining ops.
+     */
+    void recordErrorForRemainingOps(OperationContext* opCtx, const Status& status);
 
     /**
      * Helper method that calls getNextBatch(), handles target errors that occurred during batch
@@ -107,6 +116,7 @@ protected:
     WriteOpBatcher& _batcher;
     WriteBatchExecutor& _executor;
     WriteBatchResponseProcessor& _processor;
+    boost::optional<OID> _targetEpoch;
 };
 
 }  // namespace unified_write_executor

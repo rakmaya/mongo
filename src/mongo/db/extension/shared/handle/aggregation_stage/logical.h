@@ -30,22 +30,31 @@
 
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/extension/public/api.h"
+#include "mongo/db/extension/shared/handle/aggregation_stage/executable_agg_stage.h"
 #include "mongo/db/extension/shared/handle/handle.h"
 #include "mongo/db/query/explain_options.h"
 #include "mongo/util/modules.h"
 
 namespace mongo::extension {
 
+using DistributedPlanLogicHandle = OwnedHandle<::MongoExtensionDistributedPlanLogic>;
+
+class LogicalAggStageAPI;
+
+template <>
+struct c_api_to_cpp_api<::MongoExtensionLogicalAggStage> {
+    using CppApi_t = LogicalAggStageAPI;
+};
+
 /**
- * LogicalAggStageHandle is an owned handle wrapper around a
- * MongoExtensionLogicalAggStage.
+ * LogicalAggStageHandle is a wrapper around a MongoExtensionLogicalAggStage vtable API.
  */
-class LogicalAggStageHandle : public OwnedHandle<::MongoExtensionLogicalAggStage> {
+class LogicalAggStageAPI : public VTableAPI<::MongoExtensionLogicalAggStage> {
 public:
-    LogicalAggStageHandle(::MongoExtensionLogicalAggStage* ptr)
-        : OwnedHandle<::MongoExtensionLogicalAggStage>(ptr) {
-        _assertValidVTable();
-    }
+    LogicalAggStageAPI(::MongoExtensionLogicalAggStage* ptr)
+        : VTableAPI<::MongoExtensionLogicalAggStage>(ptr) {}
+
+    StringData getName() const;
 
     BSONObj serialize() const;
 
@@ -54,11 +63,30 @@ public:
      */
     BSONObj explain(ExplainOptions::Verbosity verbosity) const;
 
-protected:
-    void _assertVTableConstraints(const VTable_t& vtable) const override {
+    /**
+     * Compiles a logical stage into an execution stage.
+     */
+    ExecAggStageHandle compile() const;
+
+    /**
+     * Returns the distributed plan logic for this stage if it requires specific sharding logic. If
+     * a stage can run fully in parallel on the shards, the returned handle is invalid.
+     */
+    DistributedPlanLogicHandle getDistributedPlanLogic() const;
+
+    static void assertVTableConstraints(const VTable_t& vtable) {
+        tassert(
+            11420603, "ExtensionLogicalAggStage 'get_name' is null", vtable.get_name != nullptr);
         tassert(
             11173703, "ExtensionLogicalAggStage 'serialize' is null", vtable.serialize != nullptr);
         tassert(11239401, "ExtensionLogicalAggStage 'explain' is null", vtable.explain != nullptr);
+        tassert(10957200, "ExtensionLogicalAggStage 'compile' is null", vtable.compile != nullptr);
+        tassert(10917600,
+                "ExtensionLogicalAggStage 'get_distributed_plan_logic' is null",
+                vtable.get_distributed_plan_logic != nullptr);
     }
 };
+
+using LogicalAggStageHandle = OwnedHandle<::MongoExtensionLogicalAggStage>;
+
 }  // namespace mongo::extension

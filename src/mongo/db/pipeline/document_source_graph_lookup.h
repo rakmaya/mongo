@@ -82,15 +82,16 @@ struct GraphLookUpParams {
     boost::optional<long long> maxDepth;
 };
 
+DECLARE_STAGE_PARAMS_DERIVED_DEFAULT(GraphLookUp);
+
 class DocumentSourceGraphLookUp final : public DocumentSource {
 public:
     static constexpr StringData kStageName = "$graphLookup"_sd;
 
-    class LiteParsed : public LiteParsedDocumentSourceForeignCollection {
+    class LiteParsed : public LiteParsedDocumentSourceForeignCollection<LiteParsed> {
     public:
-        LiteParsed(std::string parseTimeName, NamespaceString foreignNss)
-            : LiteParsedDocumentSourceForeignCollection(std::move(parseTimeName),
-                                                        std::move(foreignNss)) {}
+        LiteParsed(const BSONElement& spec, NamespaceString foreignNss)
+            : LiteParsedDocumentSourceForeignCollection(spec, std::move(foreignNss)) {}
 
         static std::unique_ptr<LiteParsed> parse(const NamespaceString& nss,
                                                  const BSONElement& spec,
@@ -113,6 +114,10 @@ public:
         PrivilegeVector requiredPrivileges(bool isMongos,
                                            bool bypassDocumentValidation) const override {
             return {Privilege(ResourcePattern::forExactNamespace(_foreignNss), ActionType::find)};
+        }
+
+        std::unique_ptr<StageParams> getStageParams() const override {
+            return std::make_unique<GraphLookUpStageParams>(_originalBson);
         }
     };
 
@@ -240,14 +245,14 @@ public:
         return _params.maxDepth;
     }
 
-protected:
-    boost::optional<ShardId> computeMergeShardId() const final;
-
     /**
      * Attempts to combine with a subsequent $unwind stage, setting the internal '_unwind' field.
      */
-    DocumentSourceContainer::iterator doOptimizeAt(DocumentSourceContainer::iterator itr,
-                                                   DocumentSourceContainer* container) final;
+    DocumentSourceContainer::iterator optimizeAt(DocumentSourceContainer::iterator itr,
+                                                 DocumentSourceContainer* container);
+
+protected:
+    boost::optional<ShardId> computeMergeShardId() const final;
 
 private:
     friend boost::intrusive_ptr<exec::agg::Stage> documentSourceGraphLookUpToStageFn(

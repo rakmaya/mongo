@@ -31,12 +31,15 @@
 
 #include "mongo/s/write_ops/unified_write_executor/write_op_analyzer.h"
 #include "mongo/s/write_ops/unified_write_executor/write_op_producer.h"
+#include "mongo/s/write_ops/write_op_helper.h"
 #include "mongo/util/modules.h"
 
 #include <boost/optional.hpp>
 
 namespace mongo {
 namespace unified_write_executor {
+
+bool analysisTypeSupportsGrouping(AnalysisType type);
 
 struct EmptyBatch {
     std::vector<WriteOp> getWriteOps() const {
@@ -46,23 +49,26 @@ struct EmptyBatch {
     std::set<NamespaceString> getInvolvedNamespaces() const {
         return std::set<NamespaceString>{};
     }
-
-    bool isFindAndModify() const {
-        return false;
-    }
 };
 
 struct SimpleWriteBatch {
-    // Given that a write command can target multiple collections,
-    // we store one shard version per namespace to support batching ops which target the same shard,
-    // but target different namespaces.
+    // Given that a write command can target multiple collections, we store one shard version per
+    // namespace to support batching ops which target different namespaces on the same shard.
     struct ShardRequest {
         std::map<NamespaceString, ShardEndpoint> versionByNss;
+        std::set<NamespaceString> nssIsViewfulTimeseries;
         std::vector<WriteOp> ops;
         std::map<WriteOpId, UUID> sampleIds;
+        int sizeEstimate;  // Stores the size of the base command and all of the ops.
     };
 
     std::map<ShardId, ShardRequest> requestByShardId;
+
+    bool isRetryableWriteWithId = false;
+
+    static SimpleWriteBatch makeEmpty(bool isRetryableWriteWithId) {
+        return SimpleWriteBatch{{}, isRetryableWriteWithId};
+    }
 
     std::vector<WriteOp> getWriteOps() const {
         std::vector<WriteOp> result;
@@ -70,7 +76,7 @@ struct SimpleWriteBatch {
 
         for (const auto& [_, req] : requestByShardId) {
             for (const auto& op : req.ops) {
-                if (dedup.insert(op.getId()).second) {
+                if (dedup.insert(getWriteOpId(op)).second) {
                     result.emplace_back(op);
                 }
             }
@@ -88,15 +94,12 @@ struct SimpleWriteBatch {
         }
         return result;
     }
-
-    bool isFindAndModify() const {
-        return requestByShardId.begin()->second.ops.front().isFindAndModify();
-    }
 };
 
-struct NonTargetedWriteBatch {
+struct TwoPhaseWriteBatch {
     WriteOp op;
     boost::optional<UUID> sampleId;
+    bool isViewfulTimeseries;
 
     std::vector<WriteOp> getWriteOps() const {
         std::vector<WriteOp> result;
@@ -106,10 +109,6 @@ struct NonTargetedWriteBatch {
 
     std::set<NamespaceString> getInvolvedNamespaces() const {
         return {op.getNss()};
-    }
-
-    bool isFindAndModify() const {
-        return op.isFindAndModify();
     }
 };
 
@@ -126,15 +125,12 @@ struct InternalTransactionBatch {
     std::set<NamespaceString> getInvolvedNamespaces() const {
         return {op.getNss()};
     }
-
-    bool isFindAndModify() const {
-        return op.isFindAndModify();
-    }
 };
 
 struct MultiWriteBlockingMigrationsBatch {
     WriteOp op;
     boost::optional<UUID> sampleId;
+    bool isViewfulTimeseries;
 
     std::vector<WriteOp> getWriteOps() const {
         std::vector<WriteOp> result;
@@ -145,16 +141,12 @@ struct MultiWriteBlockingMigrationsBatch {
     std::set<NamespaceString> getInvolvedNamespaces() const {
         return {op.getNss()};
     }
-
-    bool isFindAndModify() const {
-        return op.isFindAndModify();
-    }
 };
 
 struct WriteBatch {
     std::variant<EmptyBatch,
                  SimpleWriteBatch,
-                 NonTargetedWriteBatch,
+                 TwoPhaseWriteBatch,
                  InternalTransactionBatch,
                  MultiWriteBlockingMigrationsBatch>
         data;
@@ -178,9 +170,19 @@ struct WriteBatch {
     std::set<NamespaceString> getInvolvedNamespaces() const {
         return std::visit([](const auto& inner) { return inner.getInvolvedNamespaces(); }, data);
     }
+};
 
-    bool isFindAndModify() const {
-        return std::visit([](const auto& inner) { return inner.isFindAndModify(); }, data);
+struct BatcherResult {
+    WriteBatch batch;
+    std::vector<std::pair<WriteOp, Status>> opsWithErrors;
+    bool transientTxnError = false;
+
+    bool hasTransientTxnError() const {
+        return !opsWithErrors.empty() && transientTxnError;
+    }
+    const Status& getTransientTxnError() const {
+        tassert(11272109, "Expected transient transaction error", hasTransientTxnError());
+        return opsWithErrors.front().second;
     }
 };
 
@@ -190,23 +192,24 @@ struct WriteBatch {
  */
 class WriteOpBatcher {
 public:
-    struct Result {
-        WriteBatch batch;
-        std::vector<std::pair<WriteOp, Status>> opsWithErrors;
-    };
-
-    WriteOpBatcher(WriteOpProducer& producer, WriteOpAnalyzer& analyzer)
-        : _producer(producer), _analyzer(analyzer) {}
+    WriteOpBatcher(WriteOpProducer& producer, WriteOpAnalyzer& analyzer, WriteCommandRef cmdRef)
+        : _producer(producer), _analyzer(analyzer), _cmdRef(std::move(cmdRef)) {}
 
     virtual ~WriteOpBatcher() = default;
 
-    // XXX Update comment
     /**
      * This method makes a new batch using ops taken from the producer and returns it. Depending on
      * the results from analyzing the ops from the producer, the batch returned may have different
      * types. If the producer has no more ops, this function returns an EmptyBatch.
      */
-    virtual Result getNextBatch(OperationContext* opCtx, RoutingContext& routingCtx) = 0;
+    virtual BatcherResult getNextBatch(OperationContext* opCtx, RoutingContext& routingCtx) = 0;
+
+    /**
+     * This method consumes all remaining ops from the producer and returns these ops in a vector.
+     */
+    std::vector<WriteOp> getAllRemainingOps() {
+        return _producer.consumeAllRemainingOps();
+    }
 
     /**
      * Mark a write op to be reprocessed, which will in turn be reanalyzed and rebatched.
@@ -245,15 +248,6 @@ public:
         _producer.stopProducingOps();
     }
 
-    bool getRetryOnTargetError() const {
-        return _retryOnTargetError;
-    }
-
-    void setRetryOnTargetError(bool b) {
-        _retryOnTargetError = b;
-    }
-
-
     /**
      * Marks the shards that ops already succeeded in case we only need to retry parts
      * of any ops.
@@ -285,6 +279,14 @@ public:
     }
 
 protected:
+    /**
+     * If the write command is not in a transaction and '_retryOnTargetError' is true, then discard
+     * the current batch, refresh the catalog cache, set '_retryOnTargetError' to false. The caller
+     * should return an empty batch, and we intentionally do not consume the op or record the error
+     * in this case.
+     */
+    bool retryOnTargetError(RoutingContext& routingCtx, Status status);
+
     WriteOpProducer& _producer;
     WriteOpAnalyzer& _analyzer;
 
@@ -293,22 +295,28 @@ protected:
 
     // Tracks which shards operations already succeeded on.
     std::map<WriteOpId, std::set<ShardId>> _successfulShardMap;
+
+    const WriteCommandRef _cmdRef;
 };
 
 class OrderedWriteOpBatcher : public WriteOpBatcher {
 public:
-    OrderedWriteOpBatcher(WriteOpProducer& producer, WriteOpAnalyzer& analyzer)
-        : WriteOpBatcher(producer, analyzer) {}
+    OrderedWriteOpBatcher(WriteOpProducer& producer,
+                          WriteOpAnalyzer& analyzer,
+                          WriteCommandRef cmdRef)
+        : WriteOpBatcher(producer, analyzer, cmdRef) {}
 
-    Result getNextBatch(OperationContext* opCtx, RoutingContext& routingCtx) override;
+    BatcherResult getNextBatch(OperationContext* opCtx, RoutingContext& routingCtx) override;
 };
 
 class UnorderedWriteOpBatcher : public WriteOpBatcher {
 public:
-    UnorderedWriteOpBatcher(WriteOpProducer& producer, WriteOpAnalyzer& analyzer)
-        : WriteOpBatcher(producer, analyzer) {}
+    UnorderedWriteOpBatcher(WriteOpProducer& producer,
+                            WriteOpAnalyzer& analyzer,
+                            WriteCommandRef cmdRef)
+        : WriteOpBatcher(producer, analyzer, cmdRef) {}
 
-    Result getNextBatch(OperationContext* opCtx, RoutingContext& routingCtx) override;
+    BatcherResult getNextBatch(OperationContext* opCtx, RoutingContext& routingCtx) override;
 };
 
 }  // namespace unified_write_executor

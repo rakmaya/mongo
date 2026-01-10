@@ -34,10 +34,11 @@
 
 namespace mongo {
 
-REGISTER_INTERNAL_DOCUMENT_SOURCE(setMetadata,
-                                  LiteParsedDocumentSourceInternal::parse,
-                                  DocumentSourceSetMetadata::createFromBson,
-                                  true);
+REGISTER_INTERNAL_LITE_PARSED_DOCUMENT_SOURCE(setMetadata, SetMetadataLiteParsed::parse);
+
+REGISTER_DOCUMENT_SOURCE_WITH_STAGE_PARAMS_DEFAULT(setMetadata,
+                                                   DocumentSourceSetMetadata,
+                                                   SetMetadataStageParams);
 
 using MetaType = DocumentMetadataFields::MetaType;
 

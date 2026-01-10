@@ -32,29 +32,28 @@
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/client/read_preference.h"
 #include "mongo/db/generic_argument_util.h"
-#include "mongo/db/global_catalog/catalog_cache/catalog_cache.h"
 #include "mongo/db/global_catalog/chunk_manager.h"
 #include "mongo/db/global_catalog/ddl/cluster_ddl.h"
 #include "mongo/db/global_catalog/ddl/sharded_ddl_commands_gen.h"
-#include "mongo/db/global_catalog/router_role_api/cluster_commands_helpers.h"
-#include "mongo/db/global_catalog/router_role_api/router_role.h"
-#include "mongo/db/global_catalog/type_database_gen.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/pipeline/document_source_cursor.h"
 #include "mongo/db/pipeline/document_source_merge.h"
 #include "mongo/db/pipeline/pipeline_factory.h"
 #include "mongo/db/pipeline/sharded_agg_helpers.h"
+#include "mongo/db/router_role/cluster_commands_helpers.h"
+#include "mongo/db/router_role/router_role.h"
+#include "mongo/db/router_role/routing_cache/catalog_cache.h"
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
+#include "mongo/db/shard_role/shard_catalog/operation_sharding_state.h"
 #include "mongo/db/sharding_environment/client/shard.h"
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/sharding_environment/shard_id.h"
+#include "mongo/db/sharding_environment/shard_shared_state_cache.h"
 #include "mongo/db/sharding_environment/sharding_feature_flags_gen.h"
-#include "mongo/db/topology/shard_registry.h"
 #include "mongo/db/topology/sharding_state.h"
 #include "mongo/db/versioning_protocol/shard_version.h"
 #include "mongo/db/versioning_protocol/shard_version_factory.h"
@@ -67,7 +66,6 @@
 #include "mongo/s/write_ops/batch_write_exec.h"
 #include "mongo/s/write_ops/batched_command_request.h"
 #include "mongo/s/write_ops/batched_command_response.h"
-#include "mongo/util/database_name_util.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/str.h"
 
@@ -82,7 +80,6 @@
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 namespace mongo {
-
 namespace {
 
 // Writes to the local shard. It shall only be used to write to collections that are always
@@ -107,14 +104,35 @@ void writeToLocalShard(OperationContext* opCtx,
         return cmdObjBuilder.obj();
     }();
 
-    const auto cmdResponse =
-        repl::ReplicationCoordinator::get(opCtx)->runCmdOnPrimaryAndAwaitResponse(
-            opCtx,
-            batchedCommandRequest.getNS().dbName(),
-            cmdObj,
-            [](executor::TaskExecutor::CallbackHandle handle) {},
-            [](executor::TaskExecutor::CallbackHandle handle) {});
-    uassertStatusOK(getStatusFromCommandResult(cmdResponse));
+
+    auto shState = ShardingState::get(opCtx);
+    invariant(shState->enabled());
+    auto shardId = shState->shardId();
+    auto shardState = ShardSharedStateCache::get(opCtx).getShardState(shardId);
+
+    Shard::RetryStrategy retryStrategy{ConnectionString::ConnectionType::kLocal,
+                                       *shardState,
+                                       Shard::RetryPolicy::kStrictlyNotIdempotent};
+
+    uassertStatusOK(runWithRetryStrategy(
+        opCtx, retryStrategy, [&](const TargetingMetadata&) -> RetryStrategy::Result<BSONObj> {
+            auto replCoord = repl::ReplicationCoordinator::get(opCtx);
+            const auto primaryHostAndPort = replCoord->getCurrentPrimaryHostAndPort();
+            const auto cmdResponse = replCoord->runCmdOnPrimaryAndAwaitResponse(
+                opCtx,
+                batchedCommandRequest.getNS().dbName(),
+                cmdObj,
+                [](executor::TaskExecutor::CallbackHandle handle) {},
+                [](executor::TaskExecutor::CallbackHandle handle) {});
+
+            const auto status = getStatusFromCommandResult(cmdResponse);
+
+            if (!status.isOK()) {
+                return {status, executor::extractErrorLabels(cmdResponse), primaryHostAndPort};
+            }
+
+            return RetryStrategy::Result{cmdResponse, primaryHostAndPort};
+        }));
 }
 
 }  // namespace
@@ -149,7 +167,7 @@ void ShardServerProcessInterface::checkRoutingInfoEpochOrThrow(
             catalogCache->getCollectionRoutingInfo(expCtx->getOperationContext(), nss));
         auto foundVersion = routingInfo.hasRoutingTable()
             ? routingInfo.getCollectionVersion().placementVersion()
-            : ChunkVersion::UNSHARDED();
+            : ChunkVersion::UNTRACKED();
 
         auto ignoreIndexVersion = ShardVersionFactory::make(foundVersion);
         return ignoreIndexVersion;
@@ -182,7 +200,7 @@ boost::optional<Document> ShardServerProcessInterface::lookupSingleDocument(
         expCtx, nss, std::move(collectionUUID), documentKey, std::move(opts));
 }
 
-Status ShardServerProcessInterface::insert(
+MongoProcessInterface::InsertResult ShardServerProcessInterface::insert(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     const NamespaceString& ns,
     std::unique_ptr<write_ops::InsertCommandRequest> insertCommand,
@@ -204,7 +222,16 @@ Status ShardServerProcessInterface::insert(
                    &response,
                    targetEpoch);
 
-    return response.toStatus();
+    InsertResult result;
+    if (!response.getOk()) {
+        result.emplace_back(0, response.getTopLevelStatus());
+    } else if (response.isErrDetailsSet()) {
+        result.reserve(response.getErrDetails().size());
+        result.assign(response.getErrDetails().begin(), response.getErrDetails().end());
+    } else if (response.isWriteConcernErrorSet()) {
+        result.emplace_back(0, response.getWriteConcernError()->toStatus());
+    }
+    return result;
 }
 
 StatusWith<MongoProcessInterface::UpdateResult> ShardServerProcessInterface::update(
@@ -237,8 +264,10 @@ StatusWith<MongoProcessInterface::UpdateResult> ShardServerProcessInterface::upd
     return {{response.getN(), response.getNModified()}};
 }
 
-BSONObj ShardServerProcessInterface::preparePipelineAndExplain(
-    std::unique_ptr<Pipeline> pipeline, ExplainOptions::Verbosity verbosity) {
+BSONObj ShardServerProcessInterface::finalizePipelineAndExplain(
+    std::unique_ptr<Pipeline> pipeline,
+    ExplainOptions::Verbosity verbosity,
+    std::function<void(Pipeline* pipeline)> optimizePipeline) {
     auto firstStage = pipeline->peekFront();
     // We don't want to send an internal stage to the shards.
     if (firstStage &&
@@ -247,7 +276,8 @@ BSONObj ShardServerProcessInterface::preparePipelineAndExplain(
          typeid(*firstStage) == typeid(DocumentSourceCursor))) {
         pipeline->popFront();
     }
-    return sharded_agg_helpers::targetShardsForExplain(std::move(pipeline));
+    return sharded_agg_helpers::finalizePipelineAndTargetShardsForExplain(std::move(pipeline),
+                                                                          optimizePipeline);
 }
 
 void ShardServerProcessInterface::renameIfOptionsAndIndexesHaveNotChanged(
@@ -258,9 +288,8 @@ void ShardServerProcessInterface::renameIfOptionsAndIndexesHaveNotChanged(
     bool stayTemp,
     const BSONObj& originalCollectionOptions,
     const std::vector<BSONObj>& originalIndexes) {
-    sharding::router::DBPrimaryRouter router(opCtx->getServiceContext(), sourceNs.dbName());
-    router.route(opCtx,
-                 "ShardServerProcessInterface::renameIfOptionsAndIndexesHaveNotChanged",
+    sharding::router::DBPrimaryRouter router(opCtx, sourceNs.dbName());
+    router.route("ShardServerProcessInterface::renameIfOptionsAndIndexesHaveNotChanged",
                  [&](OperationContext* opCtx, const CachedDatabaseInfo& cdb) {
                      auto newCmdObj = CommonMongodProcessInterface::_convertRenameToInternalRename(
                          opCtx, sourceNs, targetNs, originalCollectionOptions, originalIndexes);
@@ -275,7 +304,7 @@ void ShardServerProcessInterface::renameIfOptionsAndIndexesHaveNotChanged(
                          cdb,
                          newCmdObj,
                          ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-                         Shard::RetryPolicy::kNoRetry);
+                         Shard::RetryPolicy::kStrictlyNotIdempotent);
                      uassertStatusOKWithContext(response.swResponse,
                                                 str::stream() << "failed while running command "
                                                               << newCmdObj);
@@ -376,9 +405,8 @@ query_shape::CollectionType ShardServerProcessInterface::getCollectionType(
 std::vector<BSONObj> ShardServerProcessInterface::getIndexSpecs(OperationContext* opCtx,
                                                                 const NamespaceString& ns,
                                                                 bool includeBuildUUIDs) {
-    sharding::router::CollectionRouter router(opCtx->getServiceContext(), ns);
+    sharding::router::CollectionRouter router(opCtx, ns);
     return router.routeWithRoutingContext(
-        opCtx,
         "ShardServerProcessInterface::getIndexSpecs",
         [&](OperationContext* opCtx, RoutingContext& routingCtx) -> std::vector<BSONObj> {
             StatusWith<Shard::QueryResponse> response =
@@ -407,14 +435,12 @@ void ShardServerProcessInterface::_createCollectionCommon(OperationContext* opCt
                                                           const DatabaseName& dbName,
                                                           const BSONObj& cmdObj,
                                                           boost::optional<ShardId> dataShard) {
-    cluster::createDatabase(opCtx, dbName, dataShard);
-
     // TODO (SERVER-77915): Remove the FCV check and keep only the 'else' branch
     if (!feature_flags::g80CollectionCreationPath.isEnabled(
             serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
-        sharding::router::DBPrimaryRouter router(opCtx->getServiceContext(), dbName);
-        router.route(opCtx,
-                     "ShardServerProcessInterface::_createCollectionCommon",
+        sharding::router::DBPrimaryRouter router(opCtx, dbName);
+        router.createDbImplicitlyOnRoute(dataShard);
+        router.route("ShardServerProcessInterface::_createCollectionCommon",
                      [&](OperationContext* opCtx, const CachedDatabaseInfo& cdb) {
                          BSONObjBuilder finalCmdBuilder(cmdObj);
                          finalCmdBuilder.append(WriteConcernOptions::kWriteConcernField,
@@ -457,9 +483,9 @@ void ShardServerProcessInterface::_createCollectionCommon(OperationContext* opCt
         request.setDataShard(dataShard);
 
         shardsvrCollCommand.setShardsvrCreateCollectionRequest(request);
-        sharding::router::DBPrimaryRouter router(opCtx->getServiceContext(), dbName);
-        router.route(opCtx,
-                     "ShardServerProcessInterface::_createCollectionCommon",
+        sharding::router::DBPrimaryRouter router(opCtx, dbName);
+        router.createDbImplicitlyOnRoute(dataShard);
+        router.route("ShardServerProcessInterface::_createCollectionCommon",
                      [&](OperationContext* opCtx, const CachedDatabaseInfo& cdb) {
                          cluster::createCollection(opCtx, shardsvrCollCommand);
                      });
@@ -494,9 +520,8 @@ void ShardServerProcessInterface::createTempCollection(OperationContext* opCtx,
 
 void ShardServerProcessInterface::createIndexesOnEmptyCollection(
     OperationContext* opCtx, const NamespaceString& ns, const std::vector<BSONObj>& indexSpecs) {
-    sharding::router::CollectionRouter router(opCtx->getServiceContext(), ns);
+    sharding::router::CollectionRouter router(opCtx, ns);
     router.routeWithRoutingContext(
-        opCtx,
         fmt::format("copying index for empty collection {}",
                     NamespaceStringUtil::serialize(ns, SerializationContext::stateDefault())),
         [&](OperationContext* opCtx, RoutingContext& routingCtx) {
@@ -512,7 +537,7 @@ void ShardServerProcessInterface::createIndexesOnEmptyCollection(
                 ns,
                 cmdObj,
                 ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-                Shard::RetryPolicy::kNoRetry,
+                Shard::RetryPolicy::kStrictlyNotIdempotent,
                 BSONObj() /*query*/,
                 BSONObj() /*collation*/,
                 boost::none /*letParameters*/,
@@ -539,10 +564,9 @@ void ShardServerProcessInterface::dropCollection(OperationContext* opCtx,
                                                  const NamespaceString& ns) {
     // Build and execute the _shardsvrDropCollection command against the primary shard of the given
     // database.
-    sharding::router::DBPrimaryRouter router(opCtx->getServiceContext(), ns.dbName());
+    sharding::router::DBPrimaryRouter router(opCtx, ns.dbName());
     try {
-        router.route(opCtx,
-                     "ShardServerProcessInterface::dropCollection",
+        router.route("ShardServerProcessInterface::dropCollection",
                      [&](OperationContext* opCtx, const CachedDatabaseInfo& cdb) {
                          ShardsvrDropCollection dropCollectionCommand(ns);
                          generic_argument_util::setMajorityWriteConcern(dropCollectionCommand,
@@ -612,7 +636,7 @@ boost::optional<TimeseriesOptions> ShardServerProcessInterface::_getTimeseriesOp
                                          IDLParserContext("TimeseriesOptions"));
 }
 
-Status ShardServerProcessInterface::insertTimeseries(
+MongoProcessInterface::InsertResult ShardServerProcessInterface::insertTimeseries(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     const NamespaceString& ns,
     std::unique_ptr<write_ops::InsertCommandRequest> insertCommand,
@@ -626,9 +650,7 @@ std::unique_ptr<Pipeline> ShardServerProcessInterface::finalizeAndMaybePreparePi
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     std::unique_ptr<Pipeline> pipeline,
     bool attachCursorAfterOptimizing,
-    std::function<void(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                       Pipeline* pipeline,
-                       CollectionMetadata collData)> finalizePipeline,
+    std::function<void(Pipeline* pipeline)> optimizePipeline,
     ShardTargetingPolicy shardTargetingPolicy,
     boost::optional<BSONObj> readConcern,
     bool shouldUseCollectionDefaultCollator) {
@@ -636,7 +658,7 @@ std::unique_ptr<Pipeline> ShardServerProcessInterface::finalizeAndMaybePreparePi
         expCtx,
         std::move(pipeline),
         attachCursorAfterOptimizing,
-        finalizePipeline,
+        optimizePipeline,
         shardTargetingPolicy,
         readConcern,
         shouldUseCollectionDefaultCollator);
@@ -667,23 +689,23 @@ std::unique_ptr<Pipeline> ShardServerProcessInterface::preparePipelineForExecuti
         shouldUseCollectionDefaultCollator);
 }
 
-std::unique_ptr<MongoProcessInterface::ScopedExpectUnshardedCollection>
-ShardServerProcessInterface::expectUnshardedCollectionInScope(
+std::unique_ptr<MongoProcessInterface::ScopedExpectUntrackedCollection>
+ShardServerProcessInterface::expectUntrackedCollectionInScope(
     OperationContext* opCtx,
     const NamespaceString& nss,
     const boost::optional<DatabaseVersion>& dbVersion) {
-    class ScopedExpectUnshardedCollectionImpl : public ScopedExpectUnshardedCollection {
+    class ScopedExpectUntrackedCollectionImpl : public ScopedExpectUntrackedCollection {
     public:
-        ScopedExpectUnshardedCollectionImpl(OperationContext* opCtx,
+        ScopedExpectUntrackedCollectionImpl(OperationContext* opCtx,
                                             const NamespaceString& nss,
                                             const boost::optional<DatabaseVersion>& dbVersion)
-            : _expectUnsharded(opCtx, nss, ShardVersion::UNSHARDED(), dbVersion) {}
+            : _expectUntracked(opCtx, nss, ShardVersion::UNTRACKED(), dbVersion) {}
 
     private:
-        ScopedSetShardRole _expectUnsharded;
+        ScopedSetShardRole _expectUntracked;
     };
 
-    return std::make_unique<ScopedExpectUnshardedCollectionImpl>(opCtx, nss, dbVersion);
+    return std::make_unique<ScopedExpectUntrackedCollectionImpl>(opCtx, nss, dbVersion);
 }
 
 }  // namespace mongo

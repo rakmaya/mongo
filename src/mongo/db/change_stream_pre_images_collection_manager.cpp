@@ -32,21 +32,18 @@
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/admission/execution_admission_context.h"
+#include "mongo/db/admission/execution_control/execution_admission_context.h"
 #include "mongo/db/collection_crud/collection_write_path.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/database_name.h"
-#include "mongo/db/local_catalog/clustered_collection_options_gen.h"
-#include "mongo/db/local_catalog/clustered_collection_util.h"
-#include "mongo/db/local_catalog/collection_options.h"
-#include "mongo/db/local_catalog/create_collection.h"
-#include "mongo/db/local_catalog/lock_manager/exception_util.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/read_concern_args.h"
+#include "mongo/db/shard_role/shard_catalog/clustered_collection_util.h"
+#include "mongo/db/shard_role/shard_catalog/collection_options.h"
+#include "mongo/db/shard_role/shard_catalog/create_collection.h"
+#include "mongo/db/shard_role/shard_role.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/version_context.h"
 #include "mongo/db/versioning_protocol/shard_version.h"
 #include "mongo/logv2/log.h"
@@ -132,7 +129,7 @@ void ChangeStreamPreImagesCollectionManager::insertPreImage(OperationContext* op
     const auto changeStreamPreImagesCollection = acquireCollection(
         opCtx,
         CollectionAcquisitionRequest(preImagesCollectionNamespace,
-                                     PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                     PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
                                      repl::ReadConcernArgs::get(opCtx),
                                      AcquisitionPrerequisites::kUnreplicatedWrite),
         MODE_IX);
@@ -171,6 +168,7 @@ void ChangeStreamPreImagesCollectionManager::performExpiredChangeStreamPreImages
     ServiceContext::UniqueOperationContext opCtx;
     try {
         opCtx = client->makeOperationContext();
+        // TODO SERVER-114033: Use replicated truncates for change stream pre-images.
         size_t numberOfRemovals = _deleteExpiredPreImagesWithTruncate(opCtx.get());
 
         if (numberOfRemovals > 0) {

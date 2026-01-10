@@ -32,20 +32,19 @@
 #include "mongo/bson/bson_validate_gen.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/client/read_preference.h"
-#include "mongo/db/collection_crud/collection_write_path.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/index_builds/index_builds_coordinator.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/health_log.h"
-#include "mongo/db/local_catalog/health_log_gen.h"
-#include "mongo/db/local_catalog/health_log_interface.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/op_observer/op_observer_impl.h"
 #include "mongo/db/op_observer/op_observer_registry.h"
 #include "mongo/db/op_observer/operation_logger_mock.h"
+#include "mongo/db/repl/dbcheck/health_log.h"
+#include "mongo/db/repl/dbcheck/health_log_gen.h"
+#include "mongo/db/repl/dbcheck/health_log_interface.h"
 #include "mongo/db/repl/storage_interface.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/snapshot_manager.h"
 #include "mongo/util/fail_point.h"
 
@@ -90,8 +89,7 @@ void DbCheckTest::insertDocs(OperationContext* opCtx,
                              int numDocs,
                              const std::vector<std::string>& fieldNames,
                              bool duplicateFieldNames) {
-    const AutoGetCollection coll(opCtx, kNss, MODE_IX);
-    std::vector<InsertStatement> inserts;
+    std::vector<BSONObj> inserts;
     for (int i = 0; i < numDocs; ++i) {
         BSONObjBuilder bsonBuilder;
         bsonBuilder << "_id" << i + startIDNum;
@@ -105,38 +103,29 @@ void DbCheckTest::insertDocs(OperationContext* opCtx,
             bsonBuilder << fieldNames[0] << i + startIDNum + 1;
         }
 
-        const auto obj = bsonBuilder.obj();
-        inserts.push_back(InsertStatement(obj));
+        inserts.push_back(bsonBuilder.obj());
     }
 
-    {
-        WriteUnitOfWork wuow(opCtx);
-        ASSERT_OK(collection_internal::insertDocuments(
-            opCtx, *coll, inserts.begin(), inserts.end(), nullptr, false));
-        wuow.commit();
-    }
+    AutoGetCollection coll(opCtx, kNss, MODE_IX);
+    WriteUnitOfWork wuow(opCtx);
+    ASSERT_OK(Helpers::insert(opCtx, *coll, inserts));
+    wuow.commit();
 }
 
 void DbCheckTest::insertInvalidUuid(OperationContext* opCtx,
                                     int startIDNum,
                                     const std::vector<std::string>& fieldNames) {
-    const AutoGetCollection coll(opCtx, kNss, MODE_IX);
-    std::vector<InsertStatement> inserts;
-
     BSONObjBuilder bsonBuilder;
     bsonBuilder << "_id" << startIDNum;
     uint8_t uuidBytes[] = {0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 0};
     // The UUID is invalid because its length is 10 instead of 16.
     bsonBuilder << "invalid uuid" << BSONBinData(uuidBytes, 10, newUUID);
     const auto obj = bsonBuilder.obj();
-    inserts.push_back(InsertStatement(obj));
 
-    {
-        WriteUnitOfWork wuow(opCtx);
-        ASSERT_OK(collection_internal::insertDocuments(
-            opCtx, *coll, inserts.begin(), inserts.end(), nullptr, false));
-        wuow.commit();
-    }
+    AutoGetCollection coll(opCtx, kNss, MODE_IX);
+    WriteUnitOfWork wuow(opCtx);
+    ASSERT_OK(Helpers::insert(opCtx, *coll, obj));
+    wuow.commit();
 }
 
 void DbCheckTest::deleteDocs(OperationContext* opCtx, int startIDNum, int numDocs) {
@@ -187,7 +176,8 @@ DbCheckCollectionInfo DbCheckTest::createDbCheckCollectionInfo(
         .maxBatchTimeMillis = kDefaultMaxBatchTimeMillis,
         .writeConcern = WriteConcernOptions(),
         .secondaryIndexCheckParameters = params,
-        .dataThrottle = DataThrottle(opCtx, []() { return 0; }),
+        .dataThrottle =
+            DataThrottle(opCtx->fastClockSource().now().toMillisSinceEpoch(), []() { return 0; }),
     };
     return info;
 }
@@ -221,7 +211,8 @@ Status DbCheckTest::runHashForCollectionCheck(
         opCtx, kNss, {RecoveryUnit::ReadSource::kNoTimestamp}, PrepareConflictBehavior::kEnforce);
     const auto& collection = acquisition.collection().getCollectionPtr();
     // Disable throttling for testing.
-    DataThrottle dataThrottle(opCtx, []() { return 0; });
+    DataThrottle dataThrottle(opCtx->fastClockSource().now().toMillisSinceEpoch(),
+                              []() { return 0; });
     auto hasher = DbCheckHasher(opCtx,
                                 acquisition,
                                 start,
@@ -248,7 +239,8 @@ Status DbCheckTest::runHashForExtraIndexKeysCheck(
         opCtx, kNss, {RecoveryUnit::ReadSource::kNoTimestamp}, PrepareConflictBehavior::kEnforce);
     const auto& collection = acquisition.collection().getCollectionPtr();
     // Disable throttling for testing.
-    DataThrottle dataThrottle(opCtx, []() { return 0; });
+    DataThrottle dataThrottle(opCtx->fastClockSource().now().toMillisSinceEpoch(),
+                              []() { return 0; });
     auto hasher = DbCheckHasher(opCtx,
                                 acquisition,
                                 batchStart,

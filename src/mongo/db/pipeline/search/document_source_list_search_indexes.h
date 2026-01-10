@@ -36,6 +36,9 @@
 #include <boost/optional/optional.hpp>
 
 namespace mongo {
+
+DECLARE_STAGE_PARAMS_DERIVED_DEFAULT(ListSearchIndexes);
+
 class DocumentSourceListSearchIndexesSpec;
 
 class DocumentSourceListSearchIndexes final : public DocumentSource {
@@ -47,11 +50,12 @@ public:
     /**
      * A 'LiteParsed' representation of the $listSearchIndexes stage.
      */
-    class LiteParsedListSearchIndexes final : public LiteParsedDocumentSource {
+    class LiteParsedListSearchIndexes final
+        : public LiteParsedDocumentSourceDefault<LiteParsedListSearchIndexes> {
     public:
         static std::unique_ptr<LiteParsedListSearchIndexes> parse(
             const NamespaceString& nss, const BSONElement& spec, const LiteParserOptions& options) {
-            return std::make_unique<LiteParsedListSearchIndexes>(spec.fieldName(), nss);
+            return std::make_unique<LiteParsedListSearchIndexes>(spec, nss);
         }
 
         stdx::unordered_set<NamespaceString> getInvolvedNamespaces() const override {
@@ -82,8 +86,12 @@ public:
             return true;
         }
 
-        explicit LiteParsedListSearchIndexes(std::string parseTimeName, NamespaceString nss)
-            : LiteParsedDocumentSource(std::move(parseTimeName)), _nss(std::move(nss)) {}
+        std::unique_ptr<StageParams> getStageParams() const final {
+            return std::make_unique<ListSearchIndexesStageParams>(_originalBson);
+        }
+
+        LiteParsedListSearchIndexes(const BSONElement& spec, NamespaceString nss)
+            : LiteParsedDocumentSourceDefault(spec), _nss(std::move(nss)) {}
 
     private:
         const NamespaceString _nss;

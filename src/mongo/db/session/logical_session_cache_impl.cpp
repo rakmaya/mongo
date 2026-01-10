@@ -31,7 +31,6 @@
 #include "mongo/db/session/logical_session_cache_impl.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/db/local_catalog/shard_role_catalog/operation_sharding_state.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/member_state.h"
 #include "mongo/db/repl/repl_settings.h"
@@ -42,6 +41,7 @@
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/logical_session_id_helpers.h"
 #include "mongo/db/session/session_killer.h"
+#include "mongo/db/shard_role/shard_catalog/operation_sharding_state.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_severity_suppressor.h"
@@ -89,6 +89,13 @@ LogicalSessionCacheImpl::LogicalSessionCacheImpl(std::unique_ptr<ServiceLiaison>
       _reapSessionsOlderThanFn(std::move(reapSessionsOlderThanFn)) {
     _stats.setLastSessionsCollectionJobTimestamp(_service->now());
     _stats.setLastTransactionReaperJobTimestamp(_service->now());
+    _stats.setLastTransactionReaperJobDurationUpdatedTimestamp(_service->now());
+    _stats.setLastTransactionReaperJobEntriesCleanedUpUpdatedTimestamp(_service->now());
+    _stats.setLastSessionsCollectionJobDurationMillisUpdatedTimestamp(_service->now());
+    _stats.setLastSessionsCollectionJobEntriesRefreshedUpdatedTimestamp(_service->now());
+    _stats.setLastSessionsCollectionJobEntriesEndedUpdatedTimestamp(_service->now());
+    _stats.setLastSessionsCollectionJobCursorsClosedUpdatedTimestamp(_service->now());
+
 
     // Skip initializing this background thread when using 'recoverFromOplogAsStandalone=true',
     // --magicRestore, or --queryableBackupMode as the server is put in read-only mode after oplog
@@ -147,7 +154,13 @@ Status LogicalSessionCacheImpl::vivify(OperationContext* opCtx, const LogicalSes
 Status LogicalSessionCacheImpl::refreshNow(OperationContext* opCtx) {
     try {
         LOGV2_DEBUG(10720700, 1, "Refreshing logical session cache");
-        _refresh(opCtx->getClient());
+        auto res = _refresh(opCtx->getClient());
+        if (!res.isOK()) {
+            LOGV2(94001001,
+                  "Failed to refresh session cache, will try again at the next refresh interval",
+                  "error"_attr = redact(res));
+        }
+        return res;
     } catch (const DBException& ex) {
         LOGV2(20714,
               "Failed to refresh session cache, will try again at the next refresh interval",
@@ -156,7 +169,6 @@ Status LogicalSessionCacheImpl::refreshNow(OperationContext* opCtx) {
     } catch (...) {
         return exceptionToStatus();
     }
-    return Status::OK();
 }
 
 void LogicalSessionCacheImpl::reapNow(OperationContext* opCtx) {
@@ -171,7 +183,12 @@ size_t LogicalSessionCacheImpl::size() {
 void LogicalSessionCacheImpl::_periodicRefresh(Client* client) {
     try {
         LOGV2_DEBUG(10720701, 1, "Refreshing logical session cache due to periodic refresh");
-        _refresh(client);
+        Status res = _refresh(client);
+        if (!res.isOK()) {
+            LOGV2(94001002,
+                  "Failed to refresh session cache, will try again at the next refresh interval",
+                  "error"_attr = redact(res));
+        }
     } catch (const DBException& ex) {
         LOGV2(20710,
               "Failed to refresh session cache, will try again at the next refresh interval",
@@ -208,11 +225,6 @@ Status LogicalSessionCacheImpl::_reap(Client* client) {
     // Take the lock to update some stats.
     {
         stdx::lock_guard<stdx::mutex> lk(_mutex);
-
-        // Clear the last set of stats for our new run.
-        _stats.setLastTransactionReaperJobDurationMillis(0);
-        _stats.setLastTransactionReaperJobEntriesCleanedUp(0);
-
         // Start the new run.
         _stats.setLastTransactionReaperJobTimestamp(_service->now());
         _stats.setTransactionReaperJobCount(_stats.getTransactionReaperJobCount() + 1);
@@ -239,6 +251,7 @@ Status LogicalSessionCacheImpl::_reap(Client* client) {
             stdx::lock_guard<stdx::mutex> lk(_mutex);
             auto millis = _service->now() - _stats.getLastTransactionReaperJobTimestamp();
             _stats.setLastTransactionReaperJobDurationMillis(millis.count());
+            _stats.setLastTransactionReaperJobDurationUpdatedTimestamp(_service->now());
         }
 
         return ex.toStatus();
@@ -248,13 +261,16 @@ Status LogicalSessionCacheImpl::_reap(Client* client) {
         stdx::lock_guard<stdx::mutex> lk(_mutex);
         auto millis = _service->now() - _stats.getLastTransactionReaperJobTimestamp();
         _stats.setLastTransactionReaperJobDurationMillis(millis.count());
+        _stats.setLastTransactionReaperJobDurationUpdatedTimestamp(_service->now());
         _stats.setLastTransactionReaperJobEntriesCleanedUp(numReaped);
+        _stats.setLastTransactionReaperJobEntriesCleanedUpUpdatedTimestamp(_service->now());
     }
 
     return Status::OK();
 }
 
-void LogicalSessionCacheImpl::_refresh(Client* client) {
+Status LogicalSessionCacheImpl::_refresh(Client* client) {
+    Status refreshStatus = Status::OK();
     // get or make an opCtx
     boost::optional<ServiceContext::UniqueOperationContext> uniqueCtx;
     auto* const opCtx = [&client, &uniqueCtx] {
@@ -271,19 +287,12 @@ void LogicalSessionCacheImpl::_refresh(Client* client) {
         replCoord->getMemberState().arbiter()) {
         stdx::lock_guard<stdx::mutex> lk(_mutex);
         _activeSessions.clear();
-        return;
+        return refreshStatus;
     }
 
     // Stats for serverStatus:
     {
         stdx::lock_guard<stdx::mutex> lk(_mutex);
-
-        // Clear the refresh-related stats with the beginning of our run.
-        _stats.setLastSessionsCollectionJobDurationMillis(0);
-        _stats.setLastSessionsCollectionJobEntriesRefreshed(0);
-        _stats.setLastSessionsCollectionJobEntriesEnded(0);
-        _stats.setLastSessionsCollectionJobCursorsClosed(0);
-
         // Start the new run.
         _stats.setLastSessionsCollectionJobTimestamp(_service->now());
         _stats.setSessionsCollectionJobCount(_stats.getSessionsCollectionJobCount() + 1);
@@ -294,6 +303,7 @@ void LogicalSessionCacheImpl::_refresh(Client* client) {
         stdx::lock_guard<stdx::mutex> lk(_mutex);
         auto millis = _service->now() - _stats.getLastSessionsCollectionJobTimestamp();
         _stats.setLastSessionsCollectionJobDurationMillis(millis.count());
+        _stats.setLastSessionsCollectionJobDurationMillisUpdatedTimestamp(_service->now());
     });
 
     ON_BLOCK_EXIT([&opCtx] { clearShardingOperationFailedStatus(opCtx); });
@@ -323,7 +333,7 @@ void LogicalSessionCacheImpl::_refresh(Client* client) {
         }
     };
     ScopeGuard activeSessionsBackSwapper([&] { backSwap(_activeSessions, activeSessions); });
-    auto explicitlyEndingBackSwaper =
+    auto explicitlyEndingBackSwapper =
         ScopeGuard([&] { backSwap(_endingSessions, explicitlyEndingSessions); });
 
     // remove all explicitlyEndingSessions from activeSessions
@@ -331,7 +341,7 @@ void LogicalSessionCacheImpl::_refresh(Client* client) {
         activeSessions.erase(lsid);
     }
 
-    // Refresh all recently active sessions as well as for sessions attached to running ops
+    // Refresh all recently active sessions as well as for sessions attached to running ops.
     LogicalSessionRecordSet activeSessionRecords;
 
     auto runningOpSessions = _service->getActiveOpSessions();
@@ -347,20 +357,49 @@ void LogicalSessionCacheImpl::_refresh(Client* client) {
         activeSessionRecords.insert(it.second);
     }
 
+
     // Refresh the active sessions in the sessions collection.
-    _sessionsColl->refreshSessions(opCtx, activeSessionRecords);
+    auto refreshRes = _sessionsColl->refreshSessions(opCtx, activeSessionRecords);
     activeSessionsBackSwapper.dismiss();
+    if (refreshRes.hasErrors()) {
+        const auto numFailed = refreshRes.failedSessions.size();
+        for (const auto& error : refreshRes.errors) {
+            LOGV2_ERROR(94001000,
+                        "Failed to refresh some active sessions, continuing without these",
+                        "numFailed"_attr = numFailed,
+                        "totalAttempted"_attr = activeSessionRecords.size(),
+                        "error"_attr = redact(error));
+        }
+        // Return the first error to the caller after logging them all.
+        refreshStatus = refreshRes.errors[0];
+    }
     {
         stdx::lock_guard<stdx::mutex> lk(_mutex);
-        _stats.setLastSessionsCollectionJobEntriesRefreshed(activeSessionRecords.size());
-    }
 
+        // Store sessions that failed to update back in _activeSessions to be retried next time.
+        LogicalSessionIdSet failedLsids;
+        for (const auto& record : refreshRes.failedSessions) {
+            failedLsids.insert(record.getId());
+        }
+
+        for (const auto& [lsid, record] : activeSessions) {
+            if (failedLsids.count(lsid) > 0) {
+                _activeSessions.emplace(lsid, record);
+            }
+        }
+
+        size_t successCount = activeSessionRecords.size() - refreshRes.failedSessions.size();
+        _stats.setLastSessionsCollectionJobEntriesRefreshed(successCount);
+        _stats.setLastSessionsCollectionJobEntriesFailedToRefresh(refreshRes.failedSessions.size());
+        _stats.setLastSessionsCollectionJobEntriesRefreshedUpdatedTimestamp(_service->now());
+    }
     // Remove the ending sessions from the sessions collection.
     _sessionsColl->removeRecords(opCtx, explicitlyEndingSessions);
-    explicitlyEndingBackSwaper.dismiss();
+    explicitlyEndingBackSwapper.dismiss();
     {
         stdx::lock_guard<stdx::mutex> lk(_mutex);
         _stats.setLastSessionsCollectionJobEntriesEnded(explicitlyEndingSessions.size());
+        _stats.setLastSessionsCollectionJobEntriesEndedUpdatedTimestamp(_service->now());
     }
 
     // Find which running, but not recently active sessions, are expired, and add them
@@ -382,10 +421,8 @@ void LogicalSessionCacheImpl::_refresh(Client* client) {
         }
     }
 
-    // think about pruning ending and active out of openCursorSessions
     try {
         auto removedSessions = _sessionsColl->findRemovedSessions(opCtx, openCursorSessions);
-
         for (const auto& lsid : removedSessions) {
             patterns.emplace(makeKillAllSessionsByPattern(opCtx, lsid));
         }
@@ -403,7 +440,9 @@ void LogicalSessionCacheImpl::_refresh(Client* client) {
     {
         stdx::lock_guard<stdx::mutex> lk(_mutex);
         _stats.setLastSessionsCollectionJobCursorsClosed(killRes);
+        _stats.setLastSessionsCollectionJobCursorsClosedUpdatedTimestamp(_service->now());
     }
+    return refreshStatus;
 }
 
 void LogicalSessionCacheImpl::endSessions(const LogicalSessionIdSet& sessions) {

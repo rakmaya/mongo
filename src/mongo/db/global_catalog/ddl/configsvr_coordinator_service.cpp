@@ -35,14 +35,14 @@
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/client/dbclient_cursor.h"
-#include "mongo/db/cluster_parameters/set_cluster_parameter_coordinator.h"
-#include "mongo/db/cluster_parameters/sharding_cluster_parameters_gen.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/global_catalog/ddl/configsvr_coordinator.h"
 #include "mongo/db/global_catalog/ddl/sharding_ddl_coordinator_service.h"
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/repl/primary_only_service.h"
-#include "mongo/db/user_write_block/set_user_write_block_mode_coordinator.h"
+#include "mongo/db/topology/cluster_parameters/set_cluster_parameter_coordinator.h"
+#include "mongo/db/topology/cluster_parameters/sharding_cluster_parameters_gen.h"
+#include "mongo/db/topology/user_write_block/set_user_write_block_mode_coordinator.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/future.h"
@@ -153,14 +153,13 @@ void ConfigsvrCoordinatorService::checkIfConflictsWithOtherInstances(
     BSONObj initialState,
     const std::vector<const PrimaryOnlyService::Instance*>& existingInstances) {
     const auto op = extractConfigsvrCoordinatorMetadata(initialState);
-    if (op.getId().getCoordinatorType() != ConfigsvrCoordinatorTypeEnum::kSetClusterParameter) {
-        return;
-    }
 
-    const auto stateDoc = SetClusterParameterCoordinatorDocument::parse(
-        initialState, IDLParserContext("CoordinatorDocument"));
-    if (stateDoc.getCompatibleWithTopologyChange()) {
-        return;
+    if (op.getId().getCoordinatorType() == ConfigsvrCoordinatorTypeEnum::kSetClusterParameter) {
+        const auto stateDoc = SetClusterParameterCoordinatorDocument::parse(
+            initialState, IDLParserContext("CoordinatorDocument"));
+        if (stateDoc.getCompatibleWithTopologyChange().value_or(false)) {
+            return;
+        }
     }
 
     const auto service = ShardingDDLCoordinatorService::getService(opCtx);
@@ -169,7 +168,8 @@ void ConfigsvrCoordinatorService::checkIfConflictsWithOtherInstances(
     }
 
     uassert(ErrorCodes::AddOrRemoveShardInProgress,
-            "Cannot start SetClusterParameterCoordinator because a topology change is in progress",
+            fmt::format("Cannot start {} because a topology change is in progress",
+                        ConfigsvrCoordinatorType_serializer(op.getId().getCoordinatorType())),
             service->areAllCoordinatorsOfTypeFinished(opCtx, DDLCoordinatorTypeEnum::kAddShard));
 }
 

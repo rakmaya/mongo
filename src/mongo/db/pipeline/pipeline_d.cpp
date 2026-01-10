@@ -55,12 +55,6 @@
 #include "mongo/db/exec/shard_filterer_impl.h"
 #include "mongo/db/feature_flag.h"
 #include "mongo/db/index_names.h"
-#include "mongo/db/local_catalog/index_catalog.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
-#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_state.h"
-#include "mongo/db/local_catalog/shard_role_catalog/scoped_collection_metadata.h"
 #include "mongo/db/matcher/expression_algo.h"
 #include "mongo/db/matcher/expression_expr.h"
 #include "mongo/db/matcher/extensions_callback_real.h"
@@ -111,6 +105,12 @@
 #include "mongo/db/query/util/make_data_structure.h"
 #include "mongo/db/server_parameter.h"
 #include "mongo/db/server_parameter_with_storage.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/collection_sharding_state.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
+#include "mongo/db/shard_role/shard_catalog/scoped_collection_metadata.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/sorted_data_interface.h"
 #include "mongo/db/timeseries/bucket_catalog/bucket_catalog.h"
@@ -203,19 +203,20 @@ std::unique_ptr<FindCommandRequest> createFindCommand(
 boost::optional<StringData> extractGeoNearFieldFromIndexesByType(OperationContext* opCtx,
                                                                  const CollectionPtr& collection,
                                                                  const string indexType) {
-    std::vector<const IndexDescriptor*> idxs;
+    std::vector<const IndexCatalogEntry*> idxs;
     const IndexDescriptor* idxToUse = nullptr;
     collection->getIndexCatalog()->findIndexByType(opCtx, indexType, idxs);
-    for (auto it = idxs.begin(); it != idxs.end(); it++) {
+    for (const auto entry : idxs) {
+        const auto desc = entry->descriptor();
         // Ignore hidden indexes, which are indexes that users have explicitly marked as should be
         // ignored/hidden from the query planner.
-        if (!(*it)->hidden()) {
+        if (!desc->hidden()) {
             uassert(ErrorCodes::IndexNotFound,
                     str::stream() << "There is more than one " << indexType << " index on "
                                   << collection->ns().toStringForErrorMsg()
                                   << "; unsure which to use for $geoNear",
                     !idxToUse);
-            idxToUse = *it;
+            idxToUse = desc;
         }
     }
 
@@ -447,6 +448,11 @@ StatusWith<unique_ptr<PlanExecutor, PlanExecutor::Deleter>> PipelineD::createRan
         return std::pair(isSharded, std::move(optFilter));
     }();
 
+    auto tassertOwnershipFilter =
+        [](const boost::optional<ScopedCollectionFilter>& optOwnershipFilter) {
+            tassert(11282933, "Expecting ownership filter in sharded scenario", optOwnershipFilter);
+        };
+
     // Because 'numRecords' includes orphan documents, our initial decision to optimize the $sample
     // cursor may have been mistaken. For sharded collections, build a TRIAL plan that will switch
     // to a collection scan if the ratio of orphaned to owned documents encountered over the first
@@ -498,7 +504,7 @@ StatusWith<unique_ptr<PlanExecutor, PlanExecutor::Deleter>> PipelineD::createRan
         if (isSharded) {
             // In the sharded case, we need to use a ShardFilterer within the ARHASH plan to
             // eliminate orphans from the working set, since the stage owns the cursor.
-            invariant(optOwnershipFilter);
+            tassertOwnershipFilter(optOwnershipFilter);
             maybeShardFilter = std::make_unique<ShardFiltererImpl>(*optOwnershipFilter);
         }
 
@@ -521,7 +527,7 @@ StatusWith<unique_ptr<PlanExecutor, PlanExecutor::Deleter>> PipelineD::createRan
         if (isSharded) {
             // In the sharded case, we need to add a shard-filterer stage to the backup plan to
             // eliminate orphans. The trial plan is thus SHARDING_FILTER-COLLSCAN.
-            invariant(optOwnershipFilter);
+            tassertOwnershipFilter(optOwnershipFilter);
             collScanPlan = std::make_unique<ShardFilterStage>(
                 expCtx.get(), *optOwnershipFilter, ws.get(), std::move(collScanPlan));
         }
@@ -573,8 +579,8 @@ StatusWith<unique_ptr<PlanExecutor, PlanExecutor::Deleter>> PipelineD::createRan
             sampleSize / (numRecords * kMaxSampleRatioForRandCursor), kMaxSampleRatioForRandCursor);
         // Since the incoming operation is sharded, use the CSS to infer the filtering metadata for
         // the collection. We get the shard ownership filter after checking to see if the collection
-        // is sharded to avoid an invariant from being fired in this call.
-        invariant(optOwnershipFilter);
+        // is sharded to avoid an assert from being fired in this call.
+        tassertOwnershipFilter(optOwnershipFilter);
         // The trial plan is SHARDING_FILTER-MULTI_ITERATOR.
         auto randomCursorPlan = std::make_unique<ShardFilterStage>(
             expCtx.get(), *optOwnershipFilter, ws.get(), std::move(root));
@@ -693,8 +699,7 @@ PipelineD::BuildQueryExecutorResult PipelineD::buildInnerQueryExecutor(
     const MultipleCollectionAccessor& collections,
     const NamespaceString& nss,
     const AggregateCommandRequest* aggRequest,
-    Pipeline* pipeline,
-    ExecShardFilterPolicy shardFilterPolicy) {
+    Pipeline* pipeline) {
     auto expCtx = pipeline->getContext();
 
     // We skip the 'requiresInputDocSource' check in the case of pushing $search down into SBE,
@@ -734,8 +739,7 @@ PipelineD::BuildQueryExecutorResult PipelineD::buildInnerQueryExecutor(
                search_helpers::isSearchMetaPipeline(pipeline)) {
         return buildInnerQueryExecutorSearch(collections, nss, aggRequest, pipeline);
     } else {
-        return buildInnerQueryExecutorGeneric(
-            collections, nss, aggRequest, pipeline, shardFilterPolicy);
+        return buildInnerQueryExecutorGeneric(collections, nss, aggRequest, pipeline);
     }
 }
 
@@ -758,11 +762,10 @@ void PipelineD::buildAndAttachInnerQueryExecutorToPipeline(
     const NamespaceString& nss,
     const AggregateCommandRequest* aggRequest,
     Pipeline* pipeline,
-    const boost::intrusive_ptr<CatalogResourceHandle>& catalogResourceHandle,
-    ExecShardFilterPolicy shardFilterPolicy) {
+    const boost::intrusive_ptr<CatalogResourceHandle>& catalogResourceHandle) {
 
     auto [executor, callback, additionalExec] =
-        buildInnerQueryExecutor(collections, nss, aggRequest, pipeline, shardFilterPolicy);
+        buildInnerQueryExecutor(collections, nss, aggRequest, pipeline);
     tassert(7856010, "Unexpected additional executors", additionalExec.empty());
     attachInnerQueryExecutorToPipeline(
         collections, callback, std::move(executor), pipeline, catalogResourceHandle);
@@ -775,34 +778,33 @@ namespace {
  * DISTINCT_SCAN plan that visits the first document in each group (SERVER-9507). If found, return
  * the stage that would replace them in the pipeline on top of DISTINCT_SCAN.
  *
- * Returns a pair of:
- * - first: the optional sort pattern of $group's $top and/or $bottom's common sort pattern.
- * - second: the stage that would replace $group in the pipeline on top of DISTINCT_SCAN.
+ * Returns RewriteOnFirstDocumentResult.
  */
-std::pair<boost::optional<SortPattern>, std::unique_ptr<GroupFromFirstDocumentTransformation>>
-tryDistinctGroupRewrite(const DocumentSourceContainer& sources) {
+RewriteOnFirstDocumentResult tryDistinctGroupRewrite(const DocumentSourceContainer& sources) {
     auto sourcesIt = sources.begin();
+    boost::optional<SortPattern> sortStagePattern{};
     if (sourcesIt != sources.end()) {
         auto sortStage = dynamic_cast<DocumentSourceSort*>(sourcesIt->get());
         if (sortStage) {
             if (!sortStage->hasLimit()) {
+                sortStagePattern = sortStage->getSortKeyPattern();
                 ++sourcesIt;
             } else {
                 // This $sort stage was previously followed by a $limit stage which disqualifies it
                 // from DISTINCT_SCAN.
-                return {boost::none, nullptr};
+                return {};
             }
         }
     }
 
     if (sourcesIt == sources.end()) {
-        return {boost::none, nullptr};
+        return {};
     }
 
     if (auto groupStage = dynamic_cast<DocumentSourceGroupBase*>(sourcesIt->get()); groupStage) {
-        return groupStage->rewriteGroupAsTransformOnFirstDocument();
+        return groupStage->rewriteGroupAsTransformOnFirstDocument(std::move(sortStagePattern));
     } else {
-        return {boost::none, nullptr};
+        return {};
     }
 }
 
@@ -938,7 +940,7 @@ StatusWith<std::unique_ptr<CanonicalQuery>> createCanonicalQuery(
     const MatchExpressionParser::AllowedFeatureSet& matcherFeatures,
     bool timeseriesBoundedSortOptimization,
     bool* shouldProduceEmptyDocs) {
-    invariant(shouldProduceEmptyDocs);
+    tassert(11282932, "Missing shouldProduceEmptyDocs option", shouldProduceEmptyDocs);
 
     // =============================================================================================
     // Do a few last-minute optimizations that push some of the stages from the pipeline into the
@@ -1138,7 +1140,8 @@ tryPrepareDistinctExecutor(const intrusive_ptr<ExpressionContext>& expCtx,
                            std::size_t plannerOpts) {
     // We want to do this before createCanonicalQuery() which does the last-minute optimization to
     // 'pipeline' and hence modifies it.
-    auto [sortPattern, rewrittenGroupStage] = tryDistinctGroupRewrite(pipeline->getSources());
+    auto [sortPattern, sortDirectionChangeIsRequired, rewrittenGroupStage] =
+        tryDistinctGroupRewrite(pipeline->getSources());
 
     const bool isDistinctMultiplanningEnabled =
         expCtx->isFeatureFlagShardFilteringDistinctScanEnabled();
@@ -1192,13 +1195,19 @@ tryPrepareDistinctExecutor(const intrusive_ptr<ExpressionContext>& expCtx,
         plannerOpts |= QueryPlannerParams::RETURN_OWNED_DATA;
     }
 
-    // If the GroupFromFirst transformation was generated for the $last or $bottom case, we will
-    // need to flip the direction of any generated DISTINCT_SCAN to preserve the semantics of
-    // the query.
+    // If the GroupFromFirst transformation was generated for the $last or $bottom case in case of
+    // the same sort directions in the stages or $first and $top in case of the opposite sort
+    // directions, we will need to flip the direction of any generated DISTINCT_SCAN to preserve the
+    // semantics of the query.
     const bool flipDistinctScanDirection = [&, groupStage = rewrittenGroupStage.get()] {
         const auto docsNeeded = groupStage->docsNeeded();
-        return docsNeeded == AccumulatorDocumentsNeeded::kLastInputDocument ||
-            docsNeeded == AccumulatorDocumentsNeeded::kLastOutputDocument;
+        if (sortDirectionChangeIsRequired) {
+            return (docsNeeded == AccumulatorDocumentsNeeded::kFirstInputDocument ||
+                    docsNeeded == AccumulatorDocumentsNeeded::kFirstOutputDocument);
+        } else {
+            return (docsNeeded == AccumulatorDocumentsNeeded::kLastInputDocument ||
+                    docsNeeded == AccumulatorDocumentsNeeded::kLastOutputDocument);
+        }
     }();
 
     cq->setDistinct(CanonicalDistinct(rewrittenGroupStage->groupId(),
@@ -1317,8 +1326,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> prepareExecutor
     bool* shouldProduceEmptyDocs,
     bool timeseriesBoundedSortOptimization,
     std::size_t plannerOpts = QueryPlannerParams::DEFAULT,
-    boost::optional<TraversalPreference> traversalPreference = boost::none,
-    ExecShardFilterPolicy shardFilterPolicy = AutomaticShardFiltering{}) {
+    boost::optional<TraversalPreference> traversalPreference = boost::none) {
     // See if could use DISTINCT_SCAN with the pipeline (SERVER-9507 & SERVER-84347).
     auto swExecOrCq = tryPrepareDistinctExecutor(expCtx,
                                                  collections,
@@ -1384,8 +1392,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> prepareExecutor
                                     plannerOpts,
                                     pipeline,
                                     expCtx->getNeedsMerge(),
-                                    std::move(traversalPreference),
-                                    shardFilterPolicy);
+                                    std::move(traversalPreference));
 
     if (executor.isOK() && executor.getValue()->isUsingDistinctScan()) {
         tassert(9261500,
@@ -1728,8 +1735,7 @@ PipelineD::BuildQueryExecutorResult PipelineD::buildInnerQueryExecutorGeneric(
     const MultipleCollectionAccessor& collections,
     const NamespaceString& nss,
     const AggregateCommandRequest* aggRequest,
-    Pipeline* pipeline,
-    ExecShardFilterPolicy shardFilterPolicy) {
+    Pipeline* pipeline) {
     // Make a last effort to optimize pipeline stages before potentially detaching them to be
     // pushed down into the query executor.
     pipeline_optimization::optimizePipeline(*pipeline);
@@ -1803,7 +1809,9 @@ PipelineD::BuildQueryExecutorResult PipelineD::buildInnerQueryExecutorGeneric(
     }
 
     if (isChangeStream) {
-        invariant(expCtx->getTailableMode() == TailableModeEnum::kTailableAndAwaitData);
+        tassert(11282931,
+                "When querying the change stream expect TailableAndAwaitData mode",
+                expCtx->getTailableMode() == TailableModeEnum::kTailableAndAwaitData);
         plannerOpts |= (QueryPlannerParams::TRACK_LATEST_OPLOG_TS |
                         QueryPlannerParams::ASSERT_MIN_TS_HAS_NOT_FALLEN_OFF_OPLOG);
     }
@@ -1828,8 +1836,7 @@ PipelineD::BuildQueryExecutorResult PipelineD::buildInnerQueryExecutorGeneric(
                                                 &shouldProduceEmptyDocs,
                                                 timeseriesBoundedSortOptimization,
                                                 plannerOpts,
-                                                std::move(traversalPreference),
-                                                shardFilterPolicy));
+                                                std::move(traversalPreference)));
 
     // If this is a query on a time-series collection then it may be eligible for a post-planning
     // sort optimization. We check eligibility and perform the rewrite here.
@@ -1882,8 +1889,8 @@ PipelineD::BuildQueryExecutorResult PipelineD::buildInnerQueryExecutorGeoNear(
     // $geoNear can only run over the main collection.
     const auto& collection = collections.getMainCollection();
     uassert(ErrorCodes::NamespaceNotFound,
-            str::stream() << "$geoNear requires a geo index to run, but "
-                          << nss.toStringForErrorMsg() << " does not exist",
+            str::stream() << "$geoNear needs a collection to run, but " << nss.toStringForErrorMsg()
+                          << " does not exist",
             collection);
 
     auto expCtx = pipeline->getContext();

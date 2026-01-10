@@ -29,9 +29,9 @@
 #include "mongo/db/version_context.h"
 
 #include "mongo/base/string_data.h"
+#include "mongo/bson/bsonmisc.h"
 #include "mongo/unittest/unittest.h"
 
-#include "src/mongo/bson/bsonmisc.h"
 #include <fmt/format.h>
 
 namespace mongo {
@@ -64,6 +64,13 @@ TEST_F(VersionContextTest, FCVConstructorInitializesOFCVToLatest) {
     VersionContext vCtx(GenericFCV::kLatest);
     ASSERT_TRUE(getOFCV(vCtx).has_value());
     ASSERT_EQ(getOFCV(vCtx)->getVersion(), GenericFCV::kLatest);
+}
+
+TEST_F(VersionContextTest, FCVConstructorInitializesOFCVToUninitialized) {
+    // (Generic FCV reference): used for testing, should exist across LTS binary versions
+    VersionContext vCtx{multiversion::FeatureCompatibilityVersion::kUnsetDefaultLastLTSBehavior};
+    ASSERT_TRUE(getOFCV(vCtx).has_value());
+    ASSERT_FALSE(getOFCV(vCtx)->isVersionInitialized());
 }
 
 TEST_F(VersionContextTest, FCVSnapshotConstructorInitializesOFCVToLatest) {
@@ -153,13 +160,17 @@ TEST_F(VersionContextTest, UpdatingThrowsWhenAlreadyInitializedWithDifferentValu
 
 TEST_F(VersionContextTest, SerializeDeserialize) {
     // (Generic FCV reference): used for testing, should exist across LTS binary versions
-    // Verify that stable as well as transitory FCV states can be serialized and deserialized.
-    const std::vector<FCV> fcvs{GenericFCV::kLatest, GenericFCV::kUpgradingFromLastLTSToLatest};
+    // Verify that stable, transitory, as well as uninitialized FCV states can be serialized and
+    // deserialized.
+    const std::vector<FCV> fcvs{
+        GenericFCV::kLatest,
+        GenericFCV::kUpgradingFromLastLTSToLatest,
+        multiversion::FeatureCompatibilityVersion::kUnsetDefaultLastLTSBehavior};
     for (const auto fcv : fcvs) {
         VersionContext vCtxA{fcv};
         VersionContext vCtxB{vCtxA.toBSON()};
         ASSERT_TRUE(getOFCV(vCtxB).has_value());
-        ASSERT_EQ(getOFCV(vCtxB)->getVersion(), fcv);
+        ASSERT_EQ(vCtxB, vCtxA);
     }
 }
 
@@ -167,6 +178,8 @@ TEST_F(VersionContextTest, SerializeDeserialize) {
 constexpr auto kLastLTSFCVString = multiversion::toString(GenericFCV::kLastLTS);
 constexpr auto kLastContinuousFCVString = multiversion::toString(GenericFCV::kLastContinuous);
 constexpr auto kLatestFCVString = multiversion::toString(GenericFCV::kLatest);
+constexpr auto kUninitializedFCVString =
+    multiversion::toString(multiversion::FeatureCompatibilityVersion::kUnsetDefaultLastLTSBehavior);
 
 VersionContext makeFromOFCVString(StringData ofcvString) {
     return VersionContext{BSON(VersionContextMetadata::kOFCVFieldName << ofcvString)};
@@ -184,6 +197,9 @@ TEST_F(VersionContextTest, DeserializeFromValidDocument) {
     ASSERT_EQ(VersionContext{GenericFCV::kLastContinuous},
               makeFromOFCVString(kLastContinuousFCVString));
     ASSERT_EQ(VersionContext{GenericFCV::kLatest}, makeFromOFCVString(kLatestFCVString));
+    ASSERT_EQ(
+        VersionContext{multiversion::FeatureCompatibilityVersion::kUnsetDefaultLastLTSBehavior},
+        makeFromOFCVString(kUninitializedFCVString));
 
     // (Generic FCV reference): used for testing, should exist across LTS binary version
     ASSERT_EQ(VersionContext{GenericFCV::kUpgradingFromLastLTSToLatest},
@@ -228,7 +244,6 @@ TEST_F(VersionContextTest, DeserializeFromInvalidDocument) {
     ASSERT_THROWS_BAD_VALUE(makeFromOFCVString("99999999999999999999999999999999.0"));
 
     ASSERT_THROWS_BAD_VALUE(makeFromOFCVString("invalid"));
-    ASSERT_THROWS_BAD_VALUE(makeFromOFCVString("unset"));
     ASSERT_THROWS_BAD_VALUE(
         makeFromOFCVString(fmt::format(StringData("{}\0", 3), kLastLTSFCVString)));
     ASSERT_THROWS_BAD_VALUE(makeFromOFCVString(
@@ -239,6 +254,47 @@ TEST_F(VersionContextTest, DeserializeFromInvalidDocument) {
     ASSERT_THROWS_BAD_VALUE(makeFromDowngradingOFCVString(kLastLTSFCVString, kLatestFCVString));
     ASSERT_THROWS_BAD_VALUE(makeFromUpgradingOFCVString(kLastLTSFCVString, kLastLTSFCVString));
     ASSERT_THROWS_BAD_VALUE(makeFromDowngradingOFCVString(kLatestFCVString, kLatestFCVString));
+}
+
+// Tests the behavior of the in-memory flag for propagation of VersionContext across shards
+TEST_F(VersionContextTest, PropagationAcrossShardsFlag) {
+    // (Generic FCV reference): used for testing, should exist across LTS binary versions
+    const auto vCtx = VersionContext(GenericFCV::kLatest);
+    const auto vCtxWithPropagation = vCtx.withPropagationAcrossShards_UNSAFE();
+
+    // The flag is disabled by default
+    ASSERT_FALSE(VersionContext().canPropagateAcrossShards());
+    ASSERT_FALSE(kNoVersionContext.canPropagateAcrossShards());
+    ASSERT_FALSE(kVersionContextIgnored_UNSAFE.canPropagateAcrossShards());
+    ASSERT_FALSE(vCtx.canPropagateAcrossShards());
+
+    // Can create a VersionContext with the flag enabled
+    ASSERT_TRUE(vCtxWithPropagation.canPropagateAcrossShards());
+
+    // Copy and assignment conserve the flag
+    ASSERT_TRUE(VersionContext{vCtxWithPropagation}.canPropagateAcrossShards());
+
+    {
+        VersionContext myVCtx;
+        myVCtx = vCtxWithPropagation;
+        ASSERT_TRUE(myVCtx.canPropagateAcrossShards());
+        myVCtx = vCtx;
+        ASSERT_FALSE(myVCtx.canPropagateAcrossShards());
+    }
+
+    // Resetting VersionContext disables the flag
+    {
+        VersionContext myVCtx{vCtxWithPropagation};
+        myVCtx.resetToOperationWithoutOFCV();
+        ASSERT_FALSE(myVCtx.canPropagateAcrossShards());
+    }
+
+    // Equality comparison ignores the flag
+    ASSERT_EQ(vCtx, vCtxWithPropagation);
+
+    // The flag is similarly not serialized or deserialized
+    ASSERT_BSONOBJ_EQ(vCtx.toBSON(), vCtxWithPropagation.toBSON());
+    ASSERT_FALSE(VersionContext{vCtxWithPropagation.toBSON()}.canPropagateAcrossShards());
 }
 
 }  // namespace mongo

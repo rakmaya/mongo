@@ -55,6 +55,7 @@ assert.commandWorked(
 const retrySession = st.s.startSession({retryWrites: true});
 const sessionColl = retrySession.getDatabase(coll.getDB().getName()).getCollection(coll.getName());
 
+// TODO SERVER-114994 findAndModify support for UWE.
 assert.docEq(badDoc, sessionColl.findAndModify({query: {_id: 1}, update: {$set: {shard: 2}}}));
 assert.docEq({shard: 2}, sessionColl.findOne({_id: 1}, {_id: 0, shard: 1}));
 

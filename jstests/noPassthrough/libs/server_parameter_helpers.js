@@ -1,3 +1,5 @@
+import {DiscoverTopology} from "jstests/libs/discover_topology.js";
+import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 /**
  * Contains helper functions for testing server parameters on start up and via get/setParameter.
  */
@@ -20,13 +22,58 @@ export function getParameter(conn, field) {
 export function setParameter(conn, field, value) {
     let cmd = {setParameter: 1};
     cmd[field] = value;
-    return conn.adminCommand(cmd);
+    return setParameters(conn, {[field]: value});
 }
 
-export function setParameterOnAllHosts(hostList, field, value) {
+export function setParameters(conn, paramsToSet) {
+    return conn.adminCommand({setParameter: 1, ...paramsToSet});
+}
+
+/**
+ * Helper for setting a server parameter on all non-config-server hosts.
+ */
+export function setParameterOnAllNonConfigNodes(conn, field, value) {
+    assert(
+        !(TestData.addRemoveShard || TestData.hasRandomShardsAddedRemoved),
+        "Cannot safely execute setParameterOnAllNonConfigNodes in a test suite where the cluster topology is unstable (e.g., shards are being added or removed). Please add the assumes_stable_shard_list tag to the test to exclude it from this specific suite.",
+    );
+    const hostList = DiscoverTopology.findNonConfigNodes(conn);
     for (let host of hostList) {
-        const conn = new Mongo(host);
-        assert.commandWorked(setParameter(conn, field, value));
+        const hostConn = new Mongo(host);
+        assert.commandWorked(setParameter(hostConn, field, value));
+    }
+}
+
+export function setParametersOnAllNonConfigNodes(conn, paramsToSet) {
+    assert(
+        !(TestData.addRemoveShard || TestData.hasRandomShardsAddedRemoved),
+        "Cannot safely execute setParametersOnAllNonConfigNodes in a test suite where the cluster topology is unstable (e.g., shards are being added or removed). Please add the assumes_stable_shard_list tag to the test to exclude it from this specific suite.",
+    );
+    const hostList = DiscoverTopology.findNonConfigNodes(conn);
+    for (let host of hostList) {
+        const hostConn = new Mongo(host);
+        assert.commandWorked(setParameters(hostConn, paramsToSet));
+    }
+}
+
+export function runWithParamsAllNonConfigNodes(db, paramsToSet, fn) {
+    let paramsToGet = {};
+    for (const flag of Object.keys(paramsToSet)) {
+        assert.neq(flag, "setParameter");
+        paramsToGet[flag] = 1;
+    }
+    let prevVals = assert.commandWorked(db.adminCommand({getParameter: 1, ...paramsToGet}));
+    try {
+        setParametersOnAllNonConfigNodes(db.getMongo(), paramsToSet);
+        return fn();
+    } finally {
+        // Only restore parameters that were originally in paramsToSet
+        let paramsToRestore = Object.fromEntries(
+            Object.keys(paramsToSet)
+                .filter((flag) => prevVals.hasOwnProperty(flag))
+                .map((flag) => [flag, prevVals[flag]]),
+        );
+        setParametersOnAllNonConfigNodes(db.getMongo(), paramsToRestore);
     }
 }
 

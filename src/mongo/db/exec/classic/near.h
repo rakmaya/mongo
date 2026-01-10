@@ -106,7 +106,7 @@ protected:
               StageType type,
               WorkingSet* workingSet,
               CollectionAcquisition collection,
-              const IndexDescriptor* indexDescriptor);
+              const IndexCatalogEntry* indexEntry);
 
     //
     // Methods implemented for specific search functionality
@@ -230,8 +230,7 @@ private:
     };
 
     SorterFileStats _sorterFileStats;
-    using ResultBufferSorter =
-        BoundedSorter<SorterKey, SorterValue, SorterKeyComparator, NoOpBound>;
+    using ResultBufferSorter = BoundedSorter<SorterKey, SorterValue, NoOpBound>;
     ResultBufferSorter _resultBuffer;
 
     // Stats

@@ -30,22 +30,36 @@
 #include "mongo/db/pipeline/search/document_source_internal_search_id_lookup.h"
 
 #include "mongo/bson/json.h"
+#include "mongo/db/dbdirectclient.h"
+#include "mongo/db/dbhelpers.h"
 #include "mongo/db/exec/agg/document_source_to_stage_registry.h"
 #include "mongo/db/exec/agg/mock_stage.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/document_value_test_util.h"
+#include "mongo/db/global_catalog/chunk_manager.h"
+#include "mongo/db/global_catalog/shard_key_pattern.h"
+#include "mongo/db/global_catalog/type_chunk.h"
 #include "mongo/db/pipeline/aggregation_context_fixture.h"
-#include "mongo/db/pipeline/document_source_internal_shard_filter.h"
+#include "mongo/db/pipeline/catalog_resource_handle.h"
+#include "mongo/db/pipeline/document_source_cursor.h"
 #include "mongo/db/pipeline/document_source_mock.h"
 #include "mongo/db/pipeline/document_source_project.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/expression_context_builder.h"
+#include "mongo/db/pipeline/pipeline_d.h"
 #include "mongo/db/pipeline/process_interface/stub_lookup_single_document_process_interface.h"
+#include "mongo/db/query/multiple_collection_accessor.h"
 #include "mongo/db/service_context_test_fixture.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_test_fixture.h"
+#include "mongo/db/shard_role/shard_catalog/collection_sharding_runtime.h"
+#include "mongo/db/shard_role/shard_catalog/metadata_manager.h"
+#include "mongo/db/shard_role/shard_catalog/operation_sharding_state.h"
+#include "mongo/db/sharding_environment/shard_server_test_fixture.h"
+#include "mongo/db/versioning_protocol/shard_version_factory.h"
 #include "mongo/unittest/death_test.h"
 #include "mongo/unittest/temp_dir.h"
 
-#include <deque>
 #include <vector>
 
 #include <boost/intrusive_ptr.hpp>
@@ -54,308 +68,12 @@ namespace mongo {
 namespace {
 
 using boost::intrusive_ptr;
-using std::deque;
 using std::vector;
 
-using MockMongoInterface = StubLookupSingleDocumentProcessInterface;
 const NamespaceString kTestNss =
     NamespaceString::createNamespaceString_forTest("unittests.pipeline_test");
 
-
-class MockDSInternalSearchIdLookUpCatalogResourceHandle : public CatalogResourceHandle {
-public:
-    MockDSInternalSearchIdLookUpCatalogResourceHandle() {}
-    ~MockDSInternalSearchIdLookUpCatalogResourceHandle() override {
-        ASSERT_EQ(acquireCalls, releaseCalls);
-    }
-
-    void acquire(OperationContext* opCtx) override {
-        acquireCalls++;
-    }
-
-    void release() override {
-        releaseCalls++;
-    }
-    void checkCanServeReads(OperationContext* opCtx, const PlanExecutor& exec) override {
-        // No-op.
-    }
-
-    int acquireCalls = 0;
-    int releaseCalls = 0;
-};
-class InternalSearchIdLookupTest : public ServiceContextTest {
-public:
-    InternalSearchIdLookupTest() : InternalSearchIdLookupTest(NamespaceString(kTestNss)) {}
-
-    InternalSearchIdLookupTest(NamespaceString nss) {
-        unittest::TempDir tempDir("AggregationContextFixture");
-        _expCtx = ExpressionContextBuilder{}
-                      .opCtx(_opCtx.get())
-                      .ns(nss)
-                      .mongoProcessInterface(std::make_unique<MockMongoInterface>(
-                          std::deque<DocumentSource::GetNextResult>()))
-                      .tmpDir(tempDir.path())
-                      .build();
-    }
-
-    boost::intrusive_ptr<ExpressionContext> getExpCtx() {
-        return _expCtx.get();
-    }
-
-private:
-    ServiceContext::UniqueOperationContext _opCtx = makeOperationContext();
-    boost::intrusive_ptr<ExpressionContext> _expCtx;
-};
-
-
-TEST_F(InternalSearchIdLookupTest, VerifyCatalogResourceHandleAcquiredAndReleased) {
-    auto expCtx = getExpCtx();
-    expCtx->setUUID(UUID::gen());
-
-    auto catalogResourceHandle =
-        make_intrusive<MockDSInternalSearchIdLookUpCatalogResourceHandle>();
-    // Set up the idLookup stage.
-    auto idLookup = make_intrusive<DocumentSourceInternalSearchIdLookUp>(
-        expCtx, 0 /*limit*/, catalogResourceHandle);
-    auto idLookupStage = exec::agg::buildStage(idLookup);
-
-    // Mock its input.
-    auto mockLocalStage = exec::agg::MockStage::createForTest(
-        {Document{{"_id", 0}}, Document{{"_id", 1}}, Document{{"_id", 2}}}, expCtx);
-    idLookupStage->setSource(mockLocalStage.get());
-
-    // Mock documents for this namespace.
-    deque<DocumentSource::GetNextResult> mockDbContents{Document{{"_id", 0}, {"color", "red"_sd}},
-                                                        Document{{"_id", 1}, {"color", "blue"_sd}}};
-    expCtx->setMongoProcessInterface(
-        std::make_unique<StubLookupSingleDocumentProcessInterface>(mockDbContents));
-
-    // We should find one document here with _id = 0.
-    auto next = idLookupStage->getNext();
-    ASSERT_EQ(catalogResourceHandle->acquireCalls, 1);
-    ASSERT_EQ(catalogResourceHandle->releaseCalls, 1);
-    ASSERT_TRUE(next.isAdvanced());
-    ASSERT_DOCUMENT_EQ(next.releaseDocument(), (Document{{"_id", 0}, {"color", "red"_sd}}));
-
-
-    // We should find one document here with _id = 1.
-    next = idLookupStage->getNext();
-    ASSERT_EQ(catalogResourceHandle->acquireCalls, 2);
-    ASSERT_EQ(catalogResourceHandle->releaseCalls, 2);
-    ASSERT_TRUE(next.isAdvanced());
-    ASSERT_DOCUMENT_EQ(next.releaseDocument(), (Document{{"_id", 1}, {"color", "blue"_sd}}));
-
-    // No documents but we still acquire and release the catalogResourceHandle for _id = 2.
-    ASSERT_TRUE(idLookupStage->getNext().isEOF());
-    ASSERT_EQ(catalogResourceHandle->acquireCalls, 3);
-    ASSERT_EQ(catalogResourceHandle->releaseCalls, 3);
-
-    // No more documents, and no acquisition/release of catalogResourceHandle.
-    ASSERT_TRUE(idLookupStage->getNext().isEOF());
-    ASSERT_EQ(catalogResourceHandle->acquireCalls, 3);
-    ASSERT_EQ(catalogResourceHandle->releaseCalls, 3);
-}
-
-TEST_F(InternalSearchIdLookupTest, ShouldSkipResultsWhenIdNotFound) {
-    auto expCtx = getExpCtx();
-    expCtx->setUUID(UUID::gen());
-    auto specObj = BSON("$_internalSearchIdLookup" << BSONObj());
-    auto spec = specObj.firstElement();
-
-    // Set up the idLookup stage.
-    auto idLookup = DocumentSourceInternalSearchIdLookUp::createFromBson(spec, expCtx);
-    auto idLookupStage = exec::agg::buildStage(idLookup);
-
-    // Mock its input.
-    auto mockLocalStage =
-        exec::agg::MockStage::createForTest({Document{{"_id", 0}}, Document{{"_id", 1}}}, expCtx);
-    idLookupStage->setSource(mockLocalStage.get());
-
-    // Mock documents for this namespace.
-    deque<DocumentSource::GetNextResult> mockDbContents{Document{{"_id", 0}, {"color", "red"_sd}}};
-    expCtx->setMongoProcessInterface(
-        std::make_unique<StubLookupSingleDocumentProcessInterface>(mockDbContents));
-
-    // We should find one document here with _id = 0.
-    auto next = idLookupStage->getNext();
-    ASSERT_TRUE(next.isAdvanced());
-    ASSERT_DOCUMENT_EQ(next.releaseDocument(), (Document{{"_id", 0}, {"color", "red"_sd}}));
-
-    ASSERT_TRUE(idLookupStage->getNext().isEOF());
-    ASSERT_TRUE(idLookupStage->getNext().isEOF());
-}
-
-TEST_F(InternalSearchIdLookupTest, ShouldNotRemoveMetadata) {
-    auto expCtx = getExpCtx();
-    expCtx->setUUID(UUID::gen());
-
-    // Create a mock data source.
-    MutableDocument docOne(Document({{"_id", 0}}));
-    docOne.metadata().setSearchScore(0.123);
-    auto searchScoreDetails = BSON("scoreDetails" << "foo");
-    docOne.metadata().setSearchScoreDetails(searchScoreDetails);
-    auto mockLocalStage = exec::agg::MockStage::createForTest({docOne.freeze()}, expCtx);
-
-    // Set up the idLookup stage.
-    auto specObj = BSON("$_internalSearchIdLookup" << BSONObj());
-    auto spec = specObj.firstElement();
-
-    auto idLookup = DocumentSourceInternalSearchIdLookUp::createFromBson(spec, expCtx);
-    auto idLookupStage = exec::agg::buildStage(idLookup);
-    idLookupStage->setSource(mockLocalStage.get());
-
-    // Set up a project stage that asks for metadata.
-    auto projectSpec = fromjson(
-        "{$project: {score: {$meta: \"searchScore\"}, "
-        "scoreInfo: {$meta: \"searchScoreDetails\"},"
-        " _id: 1, color: 1}}");
-    auto project = DocumentSourceProject::createFromBson(projectSpec.firstElement(), expCtx);
-    auto projectStage = exec::agg::buildStage(project);
-    projectStage->setSource(idLookupStage.get());
-
-    // Mock documents for this namespace.
-    deque<DocumentSource::GetNextResult> mockDbContents{
-        Document{{"_id", 0}, {"color", "red"_sd}, {"something else", "will be projected out"_sd}}};
-    expCtx->setMongoProcessInterface(std::make_unique<MockMongoInterface>(mockDbContents));
-
-    // We should find one document here with _id = 0.
-    auto next = projectStage->getNext();
-    ASSERT_TRUE(next.isAdvanced());
-    ASSERT_DOCUMENT_EQ(
-        next.releaseDocument(),
-        (Document{
-            {"_id", 0}, {"color", "red"_sd}, {"score", 0.123}, {"scoreInfo", searchScoreDetails}}));
-
-    ASSERT_TRUE(idLookupStage->getNext().isEOF());
-    ASSERT_TRUE(idLookupStage->getNext().isEOF());
-}
-
-TEST_F(InternalSearchIdLookupTest, ShouldParseFromSerialized) {
-    auto expCtx = getExpCtx();
-    expCtx->setUUID(UUID::gen());
-
-    DocumentSourceInternalSearchIdLookUp idLookupStage(expCtx);
-
-    // Serialize the idLookup stage, as we would on router.
-    vector<Value> serialization;
-    idLookupStage.serializeToArray(serialization);
-    ASSERT_EQ(serialization.size(), 1UL);
-    ASSERT_EQ(serialization[0].getType(), BSONType::object);
-
-    BSONObj spec = BSON("$_internalSearchIdLookup" << BSONObj());
-    ASSERT_BSONOBJ_EQ(serialization[0].getDocument().toBson(), spec);
-
-    // On shard we should be able to re-parse it.
-    expCtx->setInRouter(false);
-    auto idLookupStageShard =
-        DocumentSourceInternalSearchIdLookUp::createFromBson(spec.firstElement(), expCtx);
-    ASSERT_EQ(DocumentSourceInternalSearchIdLookUp::kStageName,
-              idLookupStageShard->getSourceName());
-}
-
-TEST_F(InternalSearchIdLookupTest, ShouldFailToParseInvalidArgumentTypes) {
-    auto expCtx = getExpCtx();
-    expCtx->setUUID(UUID::gen());
-
-    // Test parsing with not an object.
-    ASSERT_THROWS_CODE(
-        DocumentSourceInternalSearchIdLookUp::createFromBson(
-            BSON("$_internalSearchIdLookup" << "string spec").firstElement(), expCtx),
-        AssertionException,
-        ErrorCodes::FailedToParse);
-
-    // Test parsing with an unknown field.
-    ASSERT_THROWS_CODE(
-        DocumentSourceInternalSearchIdLookUp::createFromBson(
-            BSON("$_internalSearchIdLookup" << BSON("unknownParameter" << "a")).firstElement(),
-            expCtx),
-        AssertionException,
-        ErrorCodes::IDLUnknownField);
-}
-
-TEST_F(InternalSearchIdLookupTest, ShouldAllowStringOrObjectIdValues) {
-    auto expCtx = getExpCtx();
-    expCtx->setUUID(UUID::gen());
-    auto specObj = BSON("$_internalSearchIdLookup" << BSONObj());
-    auto spec = specObj.firstElement();
-
-    // Set up the idLookup stage.
-    auto idLookup = DocumentSourceInternalSearchIdLookUp::createFromBson(spec, expCtx);
-    auto idLookupStage = exec::agg::buildStage(idLookup);
-
-    // Mock its input.
-    auto mockLocalStage = exec::agg::MockStage::createForTest(
-        {Document{{"_id", "tango"_sd}},
-         Document{{"_id", Document{{"number", 42}, {"irrelevant", "something"_sd}}}}},
-        expCtx);
-    idLookupStage->setSource(mockLocalStage.get());
-
-    // Mock documents for this namespace.
-    deque<DocumentSource::GetNextResult> mockDbContents{
-        Document{{"_id", "tango"_sd}, {"color", "red"_sd}},
-        Document{{"_id", Document{{"number", 42}, {"irrelevant", "something"_sd}}}}};
-    expCtx->setMongoProcessInterface(std::make_unique<MockMongoInterface>(mockDbContents));
-
-    // Find documents when _id is a string or document.
-    auto next = idLookupStage->getNext();
-    ASSERT_TRUE(next.isAdvanced());
-    ASSERT_DOCUMENT_EQ(next.releaseDocument(),
-                       (Document{{"_id", "tango"_sd}, {"color", "red"_sd}}));
-
-    next = idLookupStage->getNext();
-    ASSERT_TRUE(next.isAdvanced());
-    ASSERT_DOCUMENT_EQ(
-        next.releaseDocument(),
-        (Document{{"_id", Document{{"number", 42}, {"irrelevant", "something"_sd}}}}));
-
-    ASSERT_TRUE(idLookupStage->getNext().isEOF());
-    ASSERT_TRUE(idLookupStage->getNext().isEOF());
-}
-
-TEST_F(InternalSearchIdLookupTest, ShouldNotErrorOnEmptyResult) {
-    auto expCtx = getExpCtx();
-    expCtx->setUUID(UUID::gen());
-    auto specObj = BSON("$_internalSearchIdLookup" << BSONObj());
-    auto spec = specObj.firstElement();
-
-    // Set up the idLookup stage.
-    auto idLookup = DocumentSourceInternalSearchIdLookUp::createFromBson(spec, expCtx);
-    auto idLookupStage = exec::agg::buildStage(idLookup);
-
-    // Mock its input.
-    auto mockLocalStage = exec::agg::MockStage::createForTest({}, expCtx);
-    idLookupStage->setSource(mockLocalStage.get());
-
-    // Mock documents for this namespace.
-    deque<DocumentSource::GetNextResult> mockDbContents{Document{{"_id", 0}, {"color", "red"_sd}}};
-    expCtx->setMongoProcessInterface(std::make_unique<MockMongoInterface>(mockDbContents));
-
-    ASSERT_TRUE(idLookupStage->getNext().isEOF());
-    ASSERT_TRUE(idLookupStage->getNext().isEOF());
-}
-
-TEST_F(InternalSearchIdLookupTest, RedactsCorrectly) {
-    auto expCtx = getExpCtx();
-    expCtx->setUUID(UUID::gen());
-    auto specObj = BSON("$_internalSearchIdLookup" << BSONObj());
-    auto spec = specObj.firstElement();
-
-    auto idLookupStage = DocumentSourceInternalSearchIdLookUp::createFromBson(spec, expCtx);
-
-    auto opts =
-        SerializationOptions{.literalPolicy = LiteralSerializationPolicy::kToDebugTypeString};
-    std::vector<Value> vec;
-    idLookupStage->serializeToArray(vec, opts);
-    ASSERT_BSONOBJ_EQ(vec[0].getDocument().toBson(), specObj);
-
-    vec.clear();
-    auto limitedLookup = DocumentSourceInternalSearchIdLookUp(expCtx, 5);
-    limitedLookup.serializeToArray(vec, opts);
-
-    ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
-        R"({"$_internalSearchIdLookup":{"limit":"?number"}})",
-        vec[0].getDocument().toBson());
-}
+class InternalSearchIdLookupTest : public unittest::Test {};
 
 TEST_F(InternalSearchIdLookupTest, TestSearchIdLookupMetricsGetLookupSuccessRate) {
     // Test the expected / in-bounds modes of the 'getDocsLookupByIdSuccessRate()' function.
@@ -381,7 +99,8 @@ TEST_F(InternalSearchIdLookupTest, TestSearchIdLookupMetricsGetLookupSuccessRate
     ASSERT_EQUALS(double(0.5), searchIdLookupMetrics.getIdLookupSuccessRate());
 }
 
-DEATH_TEST_F(InternalSearchIdLookupTest,
+using InternalSearchIdLookupTestDeathTest = InternalSearchIdLookupTest;
+DEATH_TEST_F(InternalSearchIdLookupTestDeathTest,
              TestSearchIdLookupMetricsGetLookupSuccessRateTAssert,
              "9074400") {
     // Check the (should be impossible) case where the number of documents
@@ -397,6 +116,443 @@ DEATH_TEST_F(InternalSearchIdLookupTest,
 
     // Expect tassert to be tripped here.
     searchIdLookupMetrics.getIdLookupSuccessRate();
+}
+
+class MongoProcessInterfaceForTest : public StubMongoProcessInterface {
+public:
+    std::unique_ptr<Pipeline> attachCursorSourceToPipelineForLocalReadWithCatalog(
+        std::unique_ptr<Pipeline> pipeline,
+        const MultipleCollectionAccessor& collections,
+        const boost::intrusive_ptr<CatalogResourceHandle>& catalogResourceHandle) override {
+
+        const boost::intrusive_ptr<ExpressionContext>& expCtx = pipeline->getContext();
+
+        auto cursorCatalogResourceHandle =
+            make_intrusive<DSCursorCatalogResourceHandle>(catalogResourceHandle->getStasher());
+        PipelineD::buildAndAttachInnerQueryExecutorToPipeline(collections,
+                                                              expCtx->getNamespaceString(),
+                                                              nullptr /*resolvedAggRequest*/,
+                                                              pipeline.get(),
+                                                              cursorCatalogResourceHandle);
+
+        return pipeline;
+    }
+};
+
+class InternalSearchIdLookupWithCatalogTest : public CatalogTestFixture {
+protected:
+    void setUp() final {
+        CatalogTestFixture::setUp();
+        OperationContext* opCtx = operationContext();
+        expCtx = make_intrusive<ExpressionContextForTest>(opCtx, kTestNss);
+        expCtx->setMongoProcessInterface(std::make_shared<MongoProcessInterfaceForTest>());
+        ASSERT_OK(storageInterface()->createCollection(
+            operationContext(), kTestNss, CollectionOptions()));
+    }
+
+    void tearDown() final {
+        expCtx.reset();
+        CatalogTestFixture::tearDown();
+    }
+
+    void insertDocuments(const NamespaceString& nss, std::span<BSONObj> docs) {
+        const auto coll = acquireCollection(
+            operationContext(),
+            CollectionAcquisitionRequest::fromOpCtx(
+                operationContext(), nss, AcquisitionPrerequisites::OperationType::kWrite),
+            MODE_IX);
+        WriteUnitOfWork wuow{operationContext()};
+        ASSERT_OK(Helpers::insert(operationContext(), coll.getCollectionPtr(), docs));
+        wuow.commit();
+    }
+
+    std::pair<boost::intrusive_ptr<ShardRoleTransactionResourcesStasherForPipeline>,
+              MultipleCollectionAccessor>
+    createCatalogResources() {
+
+        auto coll = acquireCollection(
+            operationContext(),
+            CollectionAcquisitionRequest::fromOpCtx(
+                operationContext(), kTestNss, AcquisitionPrerequisites::OperationType::kRead),
+            MODE_IS);
+        auto collections = MultipleCollectionAccessor(
+            std::move(coll), {}, false /* isAnySecondaryNamespaceAViewOrNotFullyLocal */);
+
+        auto transactionResourcesStasher =
+            make_intrusive<ShardRoleTransactionResourcesStasherForPipeline>();
+        stashTransactionResourcesFromOperationContext(operationContext(),
+                                                      transactionResourcesStasher.get());
+        return {transactionResourcesStasher, collections};
+    }
+    boost::intrusive_ptr<ExpressionContext> expCtx;
+};
+
+TEST_F(InternalSearchIdLookupWithCatalogTest, BasicSearchTest) {
+    expCtx->setUUID(UUID::gen());
+    std::vector<BSONObj> docs{BSON("_id" << 0 << "color" << "red"),
+                              BSON("_id" << 1 << "color" << "blue"),
+                              BSON("_id" << 2 << "color" << "yellow")};
+
+    insertDocuments(kTestNss, docs);
+
+    auto idLookup = make_intrusive<DocumentSourceInternalSearchIdLookUp>(expCtx, 0 /*limit*/);
+    // Create catalog resources.
+    auto [sharedStasher, collections] = createCatalogResources();
+    idLookup->bindCatalogInfo(collections, sharedStasher);
+
+    auto idLookupStage = exec::agg::buildStage(idLookup);
+
+    // Mock its input.
+    auto mockLocalStage = exec::agg::MockStage::createForTest(
+        {Document{{"_id", 0}}, Document{{"_id", 1}}, Document{{"_id", 2}}}, expCtx);
+    idLookupStage->setSource(mockLocalStage.get());
+
+    // We should find one document here with _id = 0.
+    auto next = idLookupStage->getNext();
+    ASSERT_DOCUMENT_EQ(next.releaseDocument(), (Document{{"_id", 0}, {"color", "red"_sd}}));
+
+    next = idLookupStage->getNext();
+    ASSERT_DOCUMENT_EQ(next.releaseDocument(), (Document{{"_id", 1}, {"color", "blue"_sd}}));
+
+    next = idLookupStage->getNext();
+    ASSERT_DOCUMENT_EQ(next.releaseDocument(), (Document{{"_id", 2}, {"color", "yellow"_sd}}));
+
+    ASSERT_TRUE(idLookupStage->getNext().isEOF());
+
+    // Clearing collections as it needs to be destroyed before the stasher.
+    collections.clear();
+}
+
+TEST_F(InternalSearchIdLookupWithCatalogTest, ShouldSkipResultsWhenIdNotFound) {
+    expCtx->setUUID(UUID::gen());
+
+    // Create documents for the collection - only _id = 0 exists.
+    std::vector<BSONObj> docs{BSON("_id" << 0 << "color" << "red"_sd)};
+    insertDocuments(kTestNss, docs);
+
+    auto idLookup = make_intrusive<DocumentSourceInternalSearchIdLookUp>(expCtx, 0 /*limit*/);
+    // Create catalog resources.
+    auto [sharedStasher, collections] = createCatalogResources();
+    idLookup->bindCatalogInfo(collections, sharedStasher);
+
+    auto idLookupStage = exec::agg::buildStage(idLookup);
+
+    // Mock input to stage.
+    auto mockLocalStage =
+        exec::agg::MockStage::createForTest({Document{{"_id", 0}}, Document{{"_id", 1}}}, expCtx);
+    idLookupStage->setSource(mockLocalStage.get());
+
+    // We should find one document here with _id = 0.
+    auto next = idLookupStage->getNext();
+    ASSERT_TRUE(next.isAdvanced());
+    ASSERT_DOCUMENT_EQ(next.releaseDocument(), (Document{{"_id", 0}, {"color", "red"_sd}}));
+
+    ASSERT_TRUE(idLookupStage->getNext().isEOF());
+    ASSERT_TRUE(idLookupStage->getNext().isEOF());
+
+    // Clearing collections as it needs to be destroyed before the stasher.
+    collections.clear();
+}
+
+TEST_F(InternalSearchIdLookupWithCatalogTest, ShouldNotRemoveMetadata) {
+    expCtx->setUUID(UUID::gen());
+
+    // Create documents for the collection.
+    std::vector<BSONObj> docs{BSON("_id" << 0 << "color" << "red"_sd << "something else"
+                                         << "will be projected out"_sd)};
+    insertDocuments(kTestNss, docs);
+
+    // Create a mock data source with metadata.
+    MutableDocument docOne(Document({{"_id", 0}}));
+    docOne.metadata().setSearchScore(0.123);
+    auto searchScoreDetails = BSON("scoreDetails" << "foo");
+    docOne.metadata().setSearchScoreDetails(searchScoreDetails);
+    auto mockLocalStage = exec::agg::MockStage::createForTest({docOne.freeze()}, expCtx);
+
+    auto idLookup = make_intrusive<DocumentSourceInternalSearchIdLookUp>(expCtx, 0 /*limit*/);
+    // Create catalog resources.
+    auto [sharedStasher, collections] = createCatalogResources();
+    idLookup->bindCatalogInfo(collections, sharedStasher);
+
+    auto idLookupStage = exec::agg::buildStage(idLookup);
+    idLookupStage->setSource(mockLocalStage.get());
+
+    // Set up a project stage that asks for metadata.
+    auto projectSpec = fromjson(
+        "{$project: {score: {$meta: \"searchScore\"}, "
+        "scoreInfo: {$meta: \"searchScoreDetails\"},"
+        " _id: 1, color: 1}}");
+    auto project = DocumentSourceProject::createFromBson(projectSpec.firstElement(), expCtx);
+    auto projectStage = exec::agg::buildStage(project);
+    projectStage->setSource(idLookupStage.get());
+
+    // We should find one document here with _id = 0.
+    auto next = projectStage->getNext();
+    ASSERT_TRUE(next.isAdvanced());
+    ASSERT_DOCUMENT_EQ(
+        next.releaseDocument(),
+        (Document{
+            {"_id", 0}, {"color", "red"_sd}, {"score", 0.123}, {"scoreInfo", searchScoreDetails}}));
+
+    ASSERT_TRUE(idLookupStage->getNext().isEOF());
+    ASSERT_TRUE(idLookupStage->getNext().isEOF());
+
+    // Clearing collections as it needs to be destroyed before the stasher.
+    collections.clear();
+}
+
+TEST_F(InternalSearchIdLookupWithCatalogTest, ShouldAllowStringOrObjectIdValues) {
+    expCtx->setUUID(UUID::gen());
+
+    // Create documents for the collection with string and document _ids.
+    std::vector<BSONObj> docs{BSON("_id" << "tango"_sd << "color"
+                                         << "red"_sd),
+                              BSON("_id" << BSON("number" << 42 << "irrelevant"
+                                                          << "something"_sd))};
+    insertDocuments(kTestNss, docs);
+
+    // Mock its input with string and document _ids.
+    auto mockLocalStage = exec::agg::MockStage::createForTest(
+        {Document{{"_id", "tango"_sd}},
+         Document{{"_id", Document{{"number", 42}, {"irrelevant", "something"_sd}}}}},
+        expCtx);
+
+    auto idLookup = make_intrusive<DocumentSourceInternalSearchIdLookUp>(expCtx, 0 /*limit*/);
+    // Create catalog resources.
+    auto [sharedStasher, collections] = createCatalogResources();
+    idLookup->bindCatalogInfo(collections, sharedStasher);
+
+    auto idLookupStage = exec::agg::buildStage(idLookup);
+    idLookupStage->setSource(mockLocalStage.get());
+
+    // Find documents when _id is a string or document.
+    auto next = idLookupStage->getNext();
+    ASSERT_TRUE(next.isAdvanced());
+    ASSERT_DOCUMENT_EQ(next.releaseDocument(),
+                       (Document{{"_id", "tango"_sd}, {"color", "red"_sd}}));
+
+    next = idLookupStage->getNext();
+    ASSERT_TRUE(next.isAdvanced());
+    ASSERT_DOCUMENT_EQ(
+        next.releaseDocument(),
+        (Document{{"_id", Document{{"number", 42}, {"irrelevant", "something"_sd}}}}));
+
+    ASSERT_TRUE(idLookupStage->getNext().isEOF());
+    ASSERT_TRUE(idLookupStage->getNext().isEOF());
+
+    // Clearing collections as it needs to be destroyed before the stasher.
+    collections.clear();
+}
+
+TEST_F(InternalSearchIdLookupWithCatalogTest, ShouldNotErrorOnEmptyResult) {
+    expCtx->setUUID(UUID::gen());
+
+    // Create a document for the collection.
+    std::vector<BSONObj> docs{BSON("_id" << 0 << "color" << "red"_sd)};
+    insertDocuments(kTestNss, docs);
+
+    auto idLookup = make_intrusive<DocumentSourceInternalSearchIdLookUp>(expCtx, 0 /*limit*/);
+    // Create catalog resources.
+    auto [sharedStasher, collections] = createCatalogResources();
+    idLookup->bindCatalogInfo(collections, sharedStasher);
+
+    auto idLookupStage = exec::agg::buildStage(idLookup);
+
+    // Mock its input.
+    auto mockLocalStage = exec::agg::MockStage::createForTest({}, expCtx);
+    idLookupStage->setSource(mockLocalStage.get());
+
+    // Should return EOF since the input is empty.
+    ASSERT_TRUE(idLookupStage->getNext().isEOF());
+    ASSERT_TRUE(idLookupStage->getNext().isEOF());
+
+    // Clearing collections as it needs to be destroyed before the stasher.
+    collections.clear();
+}
+
+class InternalSearchIdLookupOrphanFilteringTest : public ShardServerTestFixture {
+protected:
+    void setUp() override {
+        ShardServerTestFixture::setUp();
+        OperationContext* opCtx = operationContext();
+
+        _client = std::make_unique<DBDirectClient>(opCtx);
+        _client->createCollection(kTestNss);
+
+        _expCtx = make_intrusive<ExpressionContextForTest>(opCtx, kTestNss);
+        _expCtx->setMongoProcessInterface(std::make_shared<MongoProcessInterfaceForTest>());
+    }
+
+    void insertDocuments(const std::vector<BSONObj>& docs) {
+        for (const auto& doc : docs) {
+            _client->insert(kTestNss, doc);
+        }
+    }
+
+    /**
+     * Sets up sharding metadata for the collection. The shard key is on the "skey" field.
+     * Documents with skey in [min, splitPoint) are owned by this shard.
+     * Documents with skey in [splitPoint, max) are orphans (owned by other shard).
+     */
+    CollectionMetadata setupShardingMetadata(int splitPoint) {
+        OperationContext* opCtx = operationContext();
+        const UUID uuid = [&] {
+            AutoGetCollection autoColl(opCtx, kTestNss, MODE_IS);
+            return autoColl->uuid();
+        }();
+
+        const ShardKeyPattern shardKeyPattern(BSON("skey" << 1));
+        const KeyPattern keyPattern = shardKeyPattern.getKeyPattern();
+
+        const OID epoch = OID::gen();
+        const Timestamp timestamp(1, 1);
+        ChunkVersion version({epoch, timestamp}, {1, 0});
+
+        // Chunk owned by this shard: [MinKey, splitPoint)
+        ChunkType ownedChunk(uuid,
+                             ChunkRange{keyPattern.globalMin(), BSON("skey" << splitPoint)},
+                             version,
+                             kMyShardName);
+        version.incMinor();
+
+        // Chunk owned by other shard (orphans): [splitPoint, MaxKey)
+        ChunkType orphanChunk(uuid,
+                              ChunkRange{BSON("skey" << splitPoint), keyPattern.globalMax()},
+                              version,
+                              ShardId("otherShard"));
+
+        auto rt = RoutingTableHistory::makeNew(kTestNss,
+                                               uuid,
+                                               keyPattern,
+                                               false, /* unsplittable */
+                                               nullptr,
+                                               false,
+                                               epoch,
+                                               timestamp,
+                                               boost::none /* timeseriesFields */,
+                                               boost::none /* reshardingFields */,
+                                               true /* allowMigrations */,
+                                               {ownedChunk, orphanChunk});
+
+        CurrentChunkManager cm(makeStandaloneRoutingTableHistory(std::move(rt)));
+        ASSERT_EQ(2, cm.numChunks());
+
+        CollectionMetadata metadata(std::move(cm), kMyShardName);
+
+        {
+            AutoGetCollection autoColl(opCtx, kTestNss, MODE_X);
+            auto scopedCsr = CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(
+                opCtx, kTestNss);
+            scopedCsr->setFilteringMetadata(opCtx, metadata);
+        }
+
+        return metadata;
+    }
+
+    std::pair<boost::intrusive_ptr<ShardRoleTransactionResourcesStasherForPipeline>,
+              MultipleCollectionAccessor>
+    createCatalogResources(const CollectionMetadata& metadata) {
+        OperationContext* opCtx = operationContext();
+
+        // Set the shard version to enable shard filtering.
+        ScopedSetShardRole scopedSetShardRole{opCtx,
+                                              kTestNss,
+                                              ShardVersionFactory::make(metadata),
+                                              boost::none /* databaseVersion */};
+
+        auto coll =
+            acquireCollection(opCtx,
+                              CollectionAcquisitionRequest::fromOpCtx(
+                                  opCtx, kTestNss, AcquisitionPrerequisites::OperationType::kRead),
+                              MODE_IS);
+
+        auto collections = MultipleCollectionAccessor(
+            std::move(coll), {}, false /* isAnySecondaryNamespaceAViewOrNotFullyLocal */);
+
+        auto transactionResourcesStasher =
+            make_intrusive<ShardRoleTransactionResourcesStasherForPipeline>();
+        stashTransactionResourcesFromOperationContext(opCtx, transactionResourcesStasher.get());
+
+        return {transactionResourcesStasher, std::move(collections)};
+    }
+
+    boost::intrusive_ptr<ExpressionContext> _expCtx;
+    std::unique_ptr<DBDirectClient> _client;
+};
+
+TEST_F(InternalSearchIdLookupOrphanFilteringTest, ShouldFilterOrphanDocuments) {
+    _expCtx->setUUID(UUID::gen());
+
+    // Insert documents: some owned by this shard, some are orphans.
+    // Using skey field as the shard key. Documents with skey < 10 are owned, skey >= 10 are
+    // orphans.
+    std::vector<BSONObj> docs{
+        BSON("_id" << 0 << "skey" << 0 << "color" << "red"),      // owned
+        BSON("_id" << 1 << "skey" << 5 << "color" << "blue"),     // owned
+        BSON("_id" << 2 << "skey" << 10 << "color" << "green"),   // orphan
+        BSON("_id" << 3 << "skey" << 15 << "color" << "yellow"),  // orphan
+        BSON("_id" << 4 << "skey" << 9 << "color" << "purple"),   // owned
+    };
+    insertDocuments(docs);
+
+    // Set up sharding metadata with split point at 10.
+    auto metadata = setupShardingMetadata(10);
+
+    // Verify that the "orphan" documents actually exist when querying without shard information.
+    auto orphanDoc2 = _client->findOne(kTestNss, BSON("_id" << 2));
+    ASSERT_EQ(orphanDoc2.getIntField("skey"), 10);
+
+    auto orphanDoc3 = _client->findOne(kTestNss, BSON("_id" << 3));
+    ASSERT_EQ(orphanDoc3.getIntField("skey"), 15);
+
+    auto idLookup = make_intrusive<DocumentSourceInternalSearchIdLookUp>(_expCtx, 0 /*limit*/);
+
+    // Create catalog resources with shard filtering enabled.
+    auto [sharedStasher, collections] = createCatalogResources(metadata);
+    idLookup->bindCatalogInfo(collections, sharedStasher);
+
+    auto idLookupStage = exec::agg::buildStage(idLookup);
+
+    // Mock input: request all 5 documents by their _ids.
+    auto mockLocalStage = exec::agg::MockStage::createForTest({Document{{"_id", 0}},
+                                                               Document{{"_id", 1}},
+                                                               Document{{"_id", 2}},
+                                                               Document{{"_id", 3}},
+                                                               Document{{"_id", 4}}},
+                                                              _expCtx);
+    idLookupStage->setSource(mockLocalStage.get());
+
+    // We should only get the 3 non-orphan documents (skey < 10).
+    // Document with _id = 0, skey = 0 (owned)
+    auto next = idLookupStage->getNext();
+    ASSERT_TRUE(next.isAdvanced());
+    ASSERT_DOCUMENT_EQ(next.releaseDocument(),
+                       (Document{{"_id", 0}, {"skey", 0}, {"color", "red"_sd}}));
+
+    // Document with _id = 1, skey = 5 (owned)
+    next = idLookupStage->getNext();
+    ASSERT_TRUE(next.isAdvanced());
+    ASSERT_DOCUMENT_EQ(next.releaseDocument(),
+                       (Document{{"_id", 1}, {"skey", 5}, {"color", "blue"_sd}}));
+
+    // Documents with _id = 2 and _id = 3 are orphans (skey >= 10), they should be skipped.
+
+    // Document with _id = 4, skey = 9 (owned)
+    next = idLookupStage->getNext();
+    ASSERT_TRUE(next.isAdvanced());
+    ASSERT_DOCUMENT_EQ(next.releaseDocument(),
+                       (Document{{"_id", 4}, {"skey", 9}, {"color", "purple"_sd}}));
+
+    // Should be EOF - the orphan documents were filtered out.
+    ASSERT_TRUE(idLookupStage->getNext().isEOF());
+
+    // Verify metrics: 5 docs seen, 3 returned (2 orphans filtered).
+    auto metrics = idLookup->getSearchIdLookupMetrics();
+    ASSERT_EQ(5, metrics->getDocsSeenByIdLookup());
+    ASSERT_EQ(3, metrics->getDocsReturnedByIdLookup());
+
+    // Clearing collections as it needs to be destroyed before the stasher.
+    collections.clear();
 }
 
 }  // namespace

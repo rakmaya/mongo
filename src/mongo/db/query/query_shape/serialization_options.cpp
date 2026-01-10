@@ -27,7 +27,7 @@
  *    it in the license file.
  */
 
-#include "serialization_options.h"
+#include "mongo/db/query/query_shape/serialization_options.h"
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
@@ -513,6 +513,21 @@ std::string SerializationOptions::serializeFieldPathFromString(StringData path) 
         }
     }
     return std::string{path};
+}
+
+std::string SerializationOptions::serializeFieldRef(const FieldRef& fieldRef) const {
+    if (transformIdentifiers) {
+        std::stringstream hmaced;
+        for (size_t i = 0; i < fieldRef.numParts(); ++i) {
+            if (i > 0) {
+                hmaced << ".";
+            }
+            StringData part = fieldRef.getPart(i);
+            hmaced << transformIdentifier(part);
+        }
+        return hmaced.str();
+    }
+    return std::string{fieldRef.dottedField()};
 }
 
 bool SerializationOptions::isDefaultSerialization() const {

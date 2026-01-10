@@ -82,6 +82,11 @@ public:
                            bool fromMigrate,
                            bool isTimeseries) override {}
 
+    void onSetMultikeyMetadata(OperationContext* opCtx,
+                               const NamespaceString& nss,
+                               const std::string& idxName,
+                               const BSONObj& multikeyPaths) override {}
+
     void onInserts(OperationContext* opCtx,
                    const CollectionPtr& coll,
                    std::vector<InsertStatement>::const_iterator begin,
@@ -233,11 +238,9 @@ public:
 
     void onBatchedWriteAbort(OperationContext* opCtx) override {}
 
-    void onPreparedTransactionCommit(
-        OperationContext* opCtx,
-        OplogSlot commitOplogEntryOpTime,
-        Timestamp commitTimestamp,
-        const std::vector<repl::ReplOperation>& statements) noexcept override {}
+    void onPreparedTransactionCommit(OperationContext* opCtx,
+                                     OplogSlot commitOplogEntryOpTime,
+                                     Timestamp commitTimestamp) noexcept override {}
 
     void preTransactionPrepare(
         OperationContext* opCtx,
@@ -284,6 +287,11 @@ public:
                          int64_t bytesDeleted,
                          int64_t docsDeleted,
                          repl::OpTime& opTime) override {}
+
+    void onUpgradeDowngradeViewlessTimeseries(OperationContext* opCtx,
+                                              const NamespaceString& nss,
+                                              const UUID& uuid,
+                                              bool skipViewCreation = false) override {}
 };
 
 }  // namespace mongo

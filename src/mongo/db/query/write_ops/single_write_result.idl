@@ -30,9 +30,11 @@
 
 global:
     cpp_namespace: "mongo"
+    mod_visibility: public
 
 imports:
     - "mongo/db/basic_types.idl"
+    - "mongo/db/query/write_ops/query_stats_metrics.idl"
 
 structs:
     singleWriteResult:
@@ -49,3 +51,7 @@ structs:
             upsertedId:
                 type: object
                 description: "The _id value of the object that was upserted."
+            queryStatsMetrics:
+                type: QueryStatsMetrics
+                optional: true
+                description: "Metrics if requested for this single write"

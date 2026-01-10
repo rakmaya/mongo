@@ -50,12 +50,13 @@
 #include "mongo/util/tracking/allocator.h"
 
 #include <cfloat>
-#include <cinttypes>
 #include <climits>
+#include <concepts>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <type_traits>
@@ -64,6 +65,7 @@
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
 #include <boost/static_assert.hpp>
+#include <fmt/format.h>
 
 namespace mongo {
 
@@ -739,45 +741,36 @@ class StringBuilderImpl {
 public:
     // Sizes are determined based on the number of characters in 64-bit + the trailing '\0'
     static const size_t MONGO_DBL_SIZE = 3 + DBL_MANT_DIG - DBL_MIN_EXP + 1;
-    static const size_t MONGO_S32_SIZE = 12;
-    static const size_t MONGO_U32_SIZE = 11;
-    static const size_t MONGO_S64_SIZE = 23;
-    static const size_t MONGO_U64_SIZE = 22;
-    static const size_t MONGO_S16_SIZE = 7;
     static const size_t MONGO_PTR_SIZE = 19;  // Accounts for the 0x prefix
 
     StringBuilderImpl() {}
 
     StringBuilderImpl& operator<<(double x) {
-        return SBNUM(x, MONGO_DBL_SIZE, "%g");
+        return appendUsingFmt(x, MONGO_DBL_SIZE);
     }
     StringBuilderImpl& operator<<(int x) {
-        return appendIntegral(x, MONGO_S32_SIZE);
+        return appendIntegral(x);
     }
     StringBuilderImpl& operator<<(unsigned x) {
-        return appendIntegral(x, MONGO_U32_SIZE);
+        return appendIntegral(x);
     }
     StringBuilderImpl& operator<<(long x) {
-        return appendIntegral(x, MONGO_S64_SIZE);
+        return appendIntegral(x);
     }
     StringBuilderImpl& operator<<(unsigned long x) {
-        return appendIntegral(x, MONGO_U64_SIZE);
+        return appendIntegral(x);
     }
     StringBuilderImpl& operator<<(long long x) {
-        return appendIntegral(x, MONGO_S64_SIZE);
+        return appendIntegral(x);
     }
     StringBuilderImpl& operator<<(unsigned long long x) {
-        return appendIntegral(x, MONGO_U64_SIZE);
+        return appendIntegral(x);
     }
     StringBuilderImpl& operator<<(short x) {
-        return appendIntegral(x, MONGO_S16_SIZE);
+        return appendIntegral(x);
     }
     StringBuilderImpl& operator<<(const void* x) {
-        if (sizeof(x) == 8) {
-            return SBNUM(x, MONGO_PTR_SIZE, "0x%llX");
-        } else {
-            return SBNUM(x, MONGO_PTR_SIZE, "0x%lX");
-        }
+        return appendUsingFmt(x, MONGO_PTR_SIZE);
     }
     StringBuilderImpl& operator<<(bool val) {
         *_buf.grow(1) = val ? '1' : '0';
@@ -861,14 +854,20 @@ public:
     }
 
 private:
-    template <typename T>
-    StringBuilderImpl& appendIntegral(T val, int maxSize) {
-        MONGO_STATIC_ASSERT(!std::is_same<T, char>());  // char shouldn't append as number.
-        MONGO_STATIC_ASSERT(std::is_integral<T>());
+    template <std::integral T>
+    StringBuilderImpl& appendIntegral(T val) {
+        // char shouldn't append as number.
+        static_assert(!std::is_same<T, char>());
 
-        if (val < 0) {
+        // We rely on the ability to represent the magnitude of val in a uint64_t.
+        // NOTE: Using <=> rather than <= because spaceship correctly handles mixed sign compares.
+        //       This doesn't really matter since max() should be positive, but avoids warnings.
+        static_assert((std::numeric_limits<T>::max() <=> std::numeric_limits<uint64_t>::max()) <=
+                      0);
+
+        if (val < T(0)) {
             *this << '-';
-            append(StringData(ItoA(0 - uint64_t(val))));  // Send the magnitude to ItoA.
+            append(StringData(ItoA(-uint64_t(val))));  // Send the magnitude to ItoA.
         } else {
             append(StringData(ItoA(uint64_t(val))));
         }
@@ -876,13 +875,22 @@ private:
         return *this;
     }
 
+    size_t writeUsingFmt(char* dst, size_t maxSize, double val) {
+        return fmt::format_to_n(dst, maxSize, "{:g}", val).size;
+    }
+
+    size_t writeUsingFmt(char* dst, size_t maxSize, const void* val) {
+        return fmt::format_to_n(dst, maxSize, "0x{:X}", uintptr_t(val)).size;
+    }
+
     template <typename T>
-    StringBuilderImpl& SBNUM(T val, int maxSize, const char* macro) {
-        int prev = _buf.len();
-        int z = snprintf(_buf.grow(maxSize), maxSize, macro, (val));
-        MONGO_verify(z >= 0);
-        MONGO_verify(z < maxSize);
-        _buf.setlen(prev + z);
+    StringBuilderImpl& appendUsingFmt(T val, size_t maxSize) {
+        static_assert(std::is_same_v<T, const void*> || std::is_same_v<T, double>);
+        size_t prev = _buf.len();
+        size_t size = writeUsingFmt(_buf.grow(maxSize), maxSize, val);
+        MONGO_verify(size >= 0);
+        MONGO_verify(size < maxSize);
+        _buf.setlen(prev + size);
         return *this;
     }
 

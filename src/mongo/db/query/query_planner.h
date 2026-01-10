@@ -31,7 +31,6 @@
 
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/db/local_catalog/collection.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
@@ -43,6 +42,7 @@
 #include "mongo/db/query/compiler/physical_model/query_solution/query_solution.h"
 #include "mongo/db/query/plan_cache/classic_plan_cache.h"
 #include "mongo/db/query/query_planner_params.h"
+#include "mongo/util/modules.h"
 
 #include <cstddef>
 #include <functional>
@@ -59,7 +59,7 @@ class CollectionPtr;
  * QueryPlanner's job is to provide an entry point to the query planning and optimization
  * process.
  */
-class QueryPlanner {
+class MONGO_MOD_NEEDS_REPLACEMENT QueryPlanner {
 public:
     /**
      * Holds the result of subqueries planning for rooted $or queries.
@@ -96,22 +96,22 @@ public:
     };
 
     /**
-     * Holds the result of plan enumeration from cost-based ranking.
+     * Holds the result of plan ranking.
      */
-    struct CostBasedRankerResult {
-        // Query solutions resulting from plan enumeration. This set contains the best plan as
-        // determined by the cost-based ranker and plans for which we were unable to estimate a
-        // cost, likely due to the lack of cardinality estimates. These plans are intended to be
-        // passed along to the multi-planner to pick the best one using runtime planning.
+    struct PlanRankingResult {
+        // Query solutions resulting from plan ranking. This set may include one or more solutions.
+        // If there are several that means whichever ranking strategy was used wasn't able to pick a
+        // single best plan and the decision will be deferred to runtime planning by multiplanner.
         std::vector<std::unique_ptr<QuerySolution>> solutions;
 
         // For explain purposes.
 
-        // Query solutions which the cost-based ranker rejects from consideration because their cost
-        // estimate is higher than another plan. Useful for the implementation of explain to expose
-        // why certain plans were not chosen.
+        // Query solutions which the plan ranker rejects from consideration. Useful for the
+        // implementation of explain to expose why certain plans were not chosen.
         std::vector<std::unique_ptr<QuerySolution>> rejectedPlans;
 
+        // Only populated if CBR was involved in plan ranking.
+        //
         // Estimate information for all QuerySolutionNodes in all the plans which we were able to
         // cost. This may include some plans in 'solutions' and all of the plans in 'rejectedPlans'.
         // If two plans contain identical QSNs, they are treated as separate entries in this map.
@@ -143,7 +143,7 @@ public:
      * rejected on the basis of cost, as well as any non-rejected plans from which the caller can
      * select a winner.
      */
-    static StatusWith<CostBasedRankerResult> planWithCostBasedRanking(
+    static StatusWith<PlanRankingResult> planWithCostBasedRanking(
         const CanonicalQuery& query,
         const QueryPlannerParams& params,
         ce::SamplingEstimator* samplingEstimator,

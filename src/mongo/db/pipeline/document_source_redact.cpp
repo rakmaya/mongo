@@ -62,10 +62,12 @@ DocumentSourceRedact::DocumentSourceRedact(const intrusive_ptr<ExpressionContext
     : DocumentSource(kStageName, expCtx),
       _redactProcessor(std::make_shared<RedactProcessor>(expCtx, expression, currentId)) {}
 
-REGISTER_DOCUMENT_SOURCE(redact,
-                         LiteParsedDocumentSourceDefault::parse,
-                         DocumentSourceRedact::createFromBson,
-                         AllowedWithApiStrict::kAlways);
+REGISTER_LITE_PARSED_DOCUMENT_SOURCE(redact,
+                                     RedactLiteParsed::parse,
+                                     AllowedWithApiStrict::kAlways);
+
+REGISTER_DOCUMENT_SOURCE_WITH_STAGE_PARAMS_DEFAULT(redact, DocumentSourceRedact, RedactStageParams);
+
 ALLOCATE_DOCUMENT_SOURCE_ID(redact, DocumentSourceRedact::id)
 
 const char* DocumentSourceRedact::getSourceName() const {
@@ -76,9 +78,9 @@ static const Value descendVal = Value("descend"_sd);
 static const Value pruneVal = Value("prune"_sd);
 static const Value keepVal = Value("keep"_sd);
 
-DocumentSourceContainer::iterator DocumentSourceRedact::doOptimizeAt(
+DocumentSourceContainer::iterator DocumentSourceRedact::optimizeAt(
     DocumentSourceContainer::iterator itr, DocumentSourceContainer* container) {
-    invariant(*itr == this);
+    tassert(11282971, "Expecting DocumentSource iterator pointing to this stage", *itr == this);
 
     if (std::next(itr) == container->end()) {
         return container->end();

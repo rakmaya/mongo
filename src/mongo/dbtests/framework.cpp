@@ -34,18 +34,18 @@
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/index_builds/index_builds_coordinator.h"
 #include "mongo/db/index_builds/index_builds_coordinator_mongod.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_catalog_helper.h"
-#include "mongo/db/local_catalog/collection_impl.h"
-#include "mongo/db/local_catalog/database_holder.h"
-#include "mongo/db/local_catalog/database_holder_impl.h"
-#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_state.h"
-#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_state_factory_shard.h"
-#include "mongo/db/local_catalog/shard_role_catalog/database_sharding_state_factory_shard.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/op_observer/op_observer_registry.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_catalog_helper.h"
+#include "mongo/db/shard_role/shard_catalog/collection_impl.h"
+#include "mongo/db/shard_role/shard_catalog/collection_sharding_state.h"
+#include "mongo/db/shard_role/shard_catalog/collection_sharding_state_factory_shard.h"
+#include "mongo/db/shard_role/shard_catalog/database_holder.h"
+#include "mongo/db/shard_role/shard_catalog/database_holder_impl.h"
+#include "mongo/db/shard_role/shard_catalog/database_sharding_state_factory_shard.h"
 #include "mongo/db/storage/control/storage_control.h"
 #include "mongo/db/topology/sharding_state.h"
 #include "mongo/dbtests/dbtests.h"  // IWYU pragma: keep
@@ -54,10 +54,12 @@
 #include "mongo/scripting/dbdirectclient_factory.h"
 #include "mongo/scripting/engine.h"
 #include "mongo/unittest/unittest.h"
+#include "mongo/unittest/unittest_main_core.h"
 #include "mongo/util/exit.h"
 #include "mongo/util/exit_code.h"
 #include "mongo/util/periodic_runner.h"
 #include "mongo/util/periodic_runner_factory.h"
+#include "mongo/util/quick_exit.h"
 
 #include <cstdlib>
 #include <ctime>
@@ -71,12 +73,21 @@
 namespace mongo {
 namespace dbtests {
 
-int runDbTests(int argc, char** argv) {
-    if (frameworkGlobalParams.suites.empty()) {
-        LOGV2_ERROR(5733802, "The [suite] argument is required for dbtest and not specified here.");
-        return static_cast<int>(ExitCode::fail);
-    }
+unittest::MainProgress initializeDbTests(std::vector<std::string> argVec) {
+    unittest::MainProgress progress(
+        {
+            .suppressGlobalInitializers = true,
+            .testSuites = frameworkGlobalParams.suites,
+            .runsPerTest = frameworkGlobalParams.runsPerTest,
+        },
+        std::move(argVec));
+    progress.initialize();
+    if (auto ec = progress.parseAndAcceptOptions())
+        quickExit(static_cast<int>(*ec));
+    return progress;
+}
 
+int runDbTests(unittest::MainProgress& progress) {
     frameworkGlobalParams.perfHist = 1;
     frameworkGlobalParams.seed = time(nullptr);
     frameworkGlobalParams.runsPerTest = 1;
@@ -124,10 +135,7 @@ int runDbTests(int argc, char** argv) {
     DatabaseShardingStateFactory::set(serviceContext,
                                       std::make_unique<DatabaseShardingStateFactoryShard>());
 
-    int ret = unittest::Suite::run(frameworkGlobalParams.suites,
-                                   frameworkGlobalParams.filter,
-                                   "",
-                                   frameworkGlobalParams.runsPerTest);
+    int ret = progress.test();
 
     // So everything shuts down cleanly
     CollectionShardingStateFactory::clear(serviceContext);

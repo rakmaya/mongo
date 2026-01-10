@@ -46,14 +46,14 @@ NearStage::NearStage(ExpressionContext* expCtx,
                      StageType type,
                      WorkingSet* workingSet,
                      CollectionAcquisition collection,
-                     const IndexDescriptor* indexDescriptor)
-    : RequiresIndexStage(typeName, expCtx, collection, indexDescriptor, workingSet),
+                     const IndexCatalogEntry* indexEntry)
+    : RequiresIndexStage(typeName, expCtx, collection, indexEntry, workingSet),
       _workingSet(workingSet),
       _searchState(SearchState::Initializing),
       _seenDocuments(expCtx),
       _nextIntervalStats(nullptr),
-      _sorterFileStats(nullptr /*sorterTracker*/),
-      _resultBuffer(makeSortOptions(), SorterKeyComparator{}, NoOpBound{}),
+      _sorterFileStats(/*sorterTracker=*/nullptr),
+      _resultBuffer(makeSortOptions(), &_sorterFileStats, SorterKeyComparator{}, NoOpBound{}),
       _stageType(type),
       _nextInterval(nullptr) {}
 
@@ -97,7 +97,8 @@ PlanStage::StageState NearStage::doWork(WorkingSetID* out) {
     } else if (SearchState::Advancing == _searchState) {
         nextState = advanceNext(&toReturn);
     } else {
-        invariant(SearchState::Finished == _searchState);
+        tassert(
+            11051669, "Unknown search state of NearStage", SearchState::Finished == _searchState);
         nextState = PlanStage::IS_EOF;
     }
 
@@ -239,9 +240,7 @@ PlanStage::StageState NearStage::advanceNext(WorkingSetID* toReturn) {
 
 SortOptions NearStage::makeSortOptions() {
     if (feature_flags::gFeatureFlagExtendedAutoSpilling.isEnabled()) {
-        return SortOptions{}
-            .FileStats(&_sorterFileStats)
-            // Spilling will handled externally by NearStage::spill method
+        return SortOptions{}  // Spilling will handled externally by NearStage::spill method
             .MaxMemoryUsageBytes(std::numeric_limits<int64_t>::max())
             .TempDir(expCtx()->getTempDir());
     } else {

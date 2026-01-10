@@ -36,11 +36,11 @@
 #include "mongo/db/exec/sbe/size_estimator.h"
 #include "mongo/db/exec/sbe/values/row.h"
 #include "mongo/db/memory_tracking/operation_memory_usage_tracker.h"
+#include "mongo/db/query/stage_memory_limit_knobs/knobs.h"
 
 #include <utility>
 
 #include <absl/container/flat_hash_set.h>
-#include <absl/container/inlined_vector.h>
 #include <absl/container/node_hash_map.h>
 
 namespace mongo {
@@ -82,8 +82,8 @@ void UniqueStage::prepare(CompileCtx& ctx) {
         _inKeyAccessors.emplace_back(_children[0]->getAccessor(ctx, keySlot));
     }
 
-    _memoryTracker =
-        OperationMemoryUsageTracker::createChunkedSimpleMemoryUsageTrackerForSBE(_opCtx);
+    _memoryTracker = OperationMemoryUsageTracker::createChunkedSimpleMemoryUsageTrackerForSBE(
+        _opCtx, loadMemoryLimit(StageMemoryLimit::SBEUniqueStageMaxMemoryBytes));
 }
 
 value::SlotAccessor* UniqueStage::getAccessor(CompileCtx& ctx, value::SlotId slot) {
@@ -121,6 +121,9 @@ PlanState UniqueStage::getNext() {
             _memoryTracker->add((newSeenSizeBytes - _prevSeenSizeBytes) +
                                 estimateRowSizeBytes(*it));
             _prevSeenSizeBytes = newSeenSizeBytes;
+            uassert(11130301,
+                    "Exceeded memory limit in record id deduplicator for unique stage",
+                    _memoryTracker->withinMemoryLimit());
             return trackPlanState(PlanState::ADVANCED);
         } else {
             // This row has been seen already, so we skip it.
@@ -167,9 +170,8 @@ const SpecificStats* UniqueStage::getSpecificStats() const {
     return &_specificStats;
 }
 
-std::vector<DebugPrinter::Block> UniqueStage::debugPrint() const {
-    auto ret = PlanStage::debugPrint();
-
+void UniqueStage::doDebugPrint(std::vector<DebugPrinter::Block>& ret,
+                               DebugPrintInfo& debugPrintInfo) const {
     ret.emplace_back(DebugPrinter::Block("[`"));
     for (size_t idx = 0; idx < _keySlots.size(); idx++) {
         if (idx) {
@@ -180,9 +182,7 @@ std::vector<DebugPrinter::Block> UniqueStage::debugPrint() const {
     ret.emplace_back(DebugPrinter::Block("`]"));
 
     DebugPrinter::addNewLine(ret);
-    DebugPrinter::addBlocks(ret, _children[0]->debugPrint());
-
-    return ret;
+    DebugPrinter::addBlocks(ret, _children[0]->debugPrint(debugPrintInfo));
 }
 
 size_t UniqueStage::estimateCompileTimeSize() const {
@@ -217,8 +217,8 @@ std::unique_ptr<PlanStage> UniqueRoaringStage::clone() const {
 void UniqueRoaringStage::prepare(CompileCtx& ctx) {
     _children[0]->prepare(ctx);
     _inKeyAccessor = _children[0]->getAccessor(ctx, _keySlot);
-    _memoryTracker =
-        OperationMemoryUsageTracker::createChunkedSimpleMemoryUsageTrackerForSBE(_opCtx);
+    _memoryTracker = OperationMemoryUsageTracker::createChunkedSimpleMemoryUsageTrackerForSBE(
+        _opCtx, loadMemoryLimit(StageMemoryLimit::SBEUniqueStageMaxMemoryBytes));
 }
 
 value::SlotAccessor* UniqueRoaringStage::getAccessor(CompileCtx& ctx, value::SlotId slot) {
@@ -277,6 +277,9 @@ PlanState UniqueRoaringStage::getNext() {
             size_t newSeenSizeBytes = _seen.getApproximateSize();
             _memoryTracker->add(newSeenSizeBytes - _prevSeenSizeBytes);
             _prevSeenSizeBytes = newSeenSizeBytes;
+            uassert(11130300,
+                    "Exceeded memory limit in record id deduplicator for unique_roaring stage",
+                    _memoryTracker->withinMemoryLimit());
             return trackPlanState(PlanState::ADVANCED);
         } else {
             // This row has been seen already, so we skip it.
@@ -323,14 +326,11 @@ const SpecificStats* UniqueRoaringStage::getSpecificStats() const {
     return &_specificStats;
 }
 
-std::vector<DebugPrinter::Block> UniqueRoaringStage::debugPrint() const {
-    auto ret = PlanStage::debugPrint();
-
+void UniqueRoaringStage::doDebugPrint(std::vector<DebugPrinter::Block>& ret,
+                                      DebugPrintInfo& debugPrintInfo) const {
     DebugPrinter::addIdentifier(ret, _keySlot);
     DebugPrinter::addNewLine(ret);
-    DebugPrinter::addBlocks(ret, _children[0]->debugPrint());
-
-    return ret;
+    DebugPrinter::addBlocks(ret, _children[0]->debugPrint(debugPrintInfo));
 }
 
 size_t UniqueRoaringStage::estimateCompileTimeSize() const {

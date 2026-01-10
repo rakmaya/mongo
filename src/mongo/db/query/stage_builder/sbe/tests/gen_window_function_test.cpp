@@ -29,13 +29,10 @@
 #include "mongo/base/string_data.h"
 #include "mongo/bson/json.h"
 #include "mongo/db/exec/sbe/sbe_unittest.h"
-#include "mongo/db/exec/sbe/values/slot.h"
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_set_window_fields.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
-#include "mongo/db/pipeline/window_function/window_function_concat_arrays.h"
-#include "mongo/db/pipeline/window_function/window_function_set_union.h"
 #include "mongo/db/query/collation/collator_interface_mock.h"
 #include "mongo/db/query/stage_builder/sbe/gen_helpers.h"
 #include "mongo/db/query/stage_builder/sbe/tests/sbe_builder_test_fixture.h"
@@ -53,7 +50,7 @@ public:
 
         auto docSrc =
             DocumentSourceInternalSetWindowFields::createFromBson(spec.firstElement(), expCtx);
-        docSrc->optimize();
+        checked_cast<DocumentSourceInternalSetWindowFields*>(docSrc.get())->optimize();
 
         return docSrc;
     }
@@ -97,8 +94,9 @@ public:
         ASSERT_EQ(resultSlots.size(), 1);
 
         // Print the stage explain output and verify.
-        _gctx->printTestHeader(GoldenTestContext::HeaderFormat::Text);
-        _gctx->outStream() << sbe::DebugPrinter().print(*stage.get());
+        _gctx->printTestHeader(unittest::GoldenTestContext::HeaderFormat::Text);
+        sbe::DebugPrintInfo debugPrintInfo{};
+        _gctx->outStream() << sbe::DebugPrinter().print(*stage.get(), debugPrintInfo);
         _gctx->outStream() << std::endl;
         _gctx->verifyOutput();
 

@@ -36,7 +36,6 @@
 #include "mongo/bson/simple_bsonobj_comparator.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/exec/document_value/value.h"
-#include "mongo/db/local_catalog/collection_options.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/repl/apply_ops_gen.h"
 #include "mongo/db/repl/oplog_entry_gen.h"
@@ -44,8 +43,10 @@
 #include "mongo/db/repl/optime_base_gen.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/logical_session_id_gen.h"
+#include "mongo/db/shard_role/shard_catalog/collection_options.h"
 #include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/db/tenant_id.h"
+#include "mongo/db/version_context_feature_flags_gen.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/modules.h"
@@ -82,6 +83,26 @@ constexpr StringData kNewPrimaryMsgField = "msg"_sd;
  * Message string passed in the new term no-op oplog entry after a primary has stepped up.
  */
 constexpr StringData kNewPrimaryMsg = "new primary"_sd;
+
+inline void setVersionContextIfHasOperationFCV(DurableReplOperation& op,
+                                               const VersionContext& vCtx) {
+    if (vCtx.hasOperationFCV() &&
+        // The `versionContext` field is only supported by v8.2+ binaries.
+
+        // We replicate the OFCV in FCV 8.2+, as well as upgrading/downgrading from/to FCV 8.0.
+        // (Note `gReplicateOFCVInOplog` is marked as `enable_on_transitional_fcv_UNSAFE: true`).
+
+        // Feature flag stability for operations with OFCV=8.0 is separately guaranteed, by setFCV
+        // preventing operations spanning from fully downgraded to fully upgraded FCV via draining.
+
+        // The FCV can only be uninitialized if during replication initiation & the initial step up,
+        // the oplog is created before the FCV is initialized. This behavior is only possible
+        // on v8.2+ binaries, so we can assume that the `versionContext` field is also supported.
+        mongo::feature_flags::gReplicateOFCVInOplog.isEnabledUseLatestFCVWhenUninitialized(
+            vCtx, serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+        op.setVersionContext(vCtx);
+    }
+}
 
 /**
  * A parsed DurableReplOperation along with information about the operation that should only exist
@@ -209,6 +230,10 @@ public:
 
     const std::vector<StmtId>& getStatementIds() const {
         return DurableReplOperation::getStatementIds();
+    }
+
+    void setVersionContextIfHasOperationFCV(const VersionContext& vCtx) {
+        repl::setVersionContextIfHasOperationFCV(*this, vCtx);
     }
 
     void setFromMigrateIfTrue(bool value) & {
@@ -409,6 +434,10 @@ public:
 
     void setVersionContext(boost::optional<VersionContext> value) {
         getDurableReplOperation().setVersionContext(std::move(value));
+    }
+
+    void setVersionContextIfHasOperationFCV(const VersionContext& vCtx) {
+        repl::setVersionContextIfHasOperationFCV(getDurableReplOperation(), vCtx);
     }
 
     /**

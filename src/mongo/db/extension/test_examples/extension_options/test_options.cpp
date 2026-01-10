@@ -30,60 +30,28 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/extension/sdk/aggregation_stage.h"
 #include "mongo/db/extension/sdk/extension_factory.h"
-#include "mongo/db/extension/sdk/test_extension_factory.h"
-#include "mongo/db/extension/sdk/test_extension_util.h"
+#include "mongo/db/extension/sdk/tests/transform_test_stages.h"
 
 namespace sdk = mongo::extension::sdk;
 
-DEFAULT_LOGICAL_AST_PARSE(OptionA, "$optionA")
-DEFAULT_LOGICAL_AST_PARSE(OptionB, "$optionB")
 struct ExtensionOptions {
     inline static bool optionA = false;
 };
 
-/**
- * $optionA is a no-op stage.
- *
- * The stage definition must be empty, like {$optionA: {}}, or it will fail to parse.
- */
-class OptionAStageDescriptor : public sdk::AggStageDescriptor {
-public:
-    static inline const std::string kStageName = std::string(OptionAStageName);
-
-    OptionAStageDescriptor()
-        : sdk::AggStageDescriptor(kStageName, MongoExtensionAggStageType::kNoOp) {}
-
-    std::unique_ptr<sdk::AggStageParseNode> parse(mongo::BSONObj stageBson) const override {
-        sdk::validateStageDefinition(stageBson, kStageName, true /* checkEmpty */);
-
-        return std::make_unique<OptionAParseNode>(stageBson);
-    }
-};
-
-/**
- * $optionB is a no-op stage.
- *
- * The stage definition must be empty, like {$optionB: {}}, or it will fail to parse.
- */
-class OptionBStageDescriptor : public sdk::AggStageDescriptor {
-public:
-    static inline const std::string kStageName = std::string(OptionBStageName);
-
-    OptionBStageDescriptor()
-        : sdk::AggStageDescriptor(kStageName, MongoExtensionAggStageType::kNoOp) {}
-
-    std::unique_ptr<sdk::AggStageParseNode> parse(mongo::BSONObj stageBson) const override {
-        sdk::validateStageDefinition(stageBson, kStageName, true /* checkEmpty */);
-
-        return std::make_unique<OptionBParseNode>(stageBson);
-    }
-};
+using OptionAStageDescriptor =
+    sdk::TestStageDescriptor<"$optionA",
+                             sdk::shared_test_stages::TransformAggStageParseNode,
+                             true /* ExpectEmptyStageDefinition */>;
+using OptionBStageDescriptor =
+    sdk::TestStageDescriptor<"$optionB",
+                             sdk::shared_test_stages::TransformAggStageParseNode,
+                             true /* ExpectEmptyStageDefinition */>;
 
 class MyExtension : public sdk::Extension {
 public:
     void initialize(const sdk::HostPortalHandle& portal) override {
-        YAML::Node node = portal.getExtensionOptions();
-        userAssert(10999100, "Extension options must include 'optionA'", node["optionA"]);
+        YAML::Node node = portal->getExtensionOptions();
+        sdk_uassert(10999100, "Extension options must include 'optionA'", node["optionA"]);
         ExtensionOptions::optionA = node["optionA"].as<bool>();
 
         if (ExtensionOptions::optionA) {

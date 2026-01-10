@@ -296,7 +296,7 @@ The `OplogWriter` runs in an endless loop doing the followings:
 
 1. Get a batch from the writer batcher, which is encapsulated in the [`OplogWriterBatcher`](https://github.com/mongodb/mongo/blob/r8.0.1/src/mongo/db/repl/oplog_writer_batcher.cpp#L60).
 2. Write the batch of oplog entries into the oplog.
-3. Update [**oplog visibility**](../catalog/README.md#oplog-visibility) by notifying the storage
+3. Update [**oplog visibility**](../storage/README.md#oplog-visibility) by notifying the storage
    engine of the new oplog entries.
 4. Advance the node's `lastWritten` optime to the last optime in the batch.
 5. Tell the storage engine to flush the journal.
@@ -690,16 +690,14 @@ section.
 
 **Available** read concern behaves identically to local read concern in most cases. The exception is
 reads for sharded collections from secondary shard nodes. Local read concern will wait to refresh
-the routing table cache when the node realizes its
-[metadata is stale](../s/README.md#when-the-routing-table-cache-will-refresh), which requires
+the routing table cache when the node realizes its metadata is stale, which requires
 contacting the shard's primary or config servers before being able to serve the read. Available read
 concern does not provide consistency guarantees because it does not wait for routing table cache
 refreshes. As a result, available read concern potentially serves reads faster and is more tolerant
 to network partitions than any other read concern, since the node does not need to communicate with
 another node in the cluster to serve the read. However, this also means that if the node's metadata
-was stale, available read concern could potentially return
-[orphan documents](../s/README.md#orphan-filtering) or even a stale view of a chunk that has been
-moved a long time ago and modified on another shard.
+was stale, available read concern could potentially return orphan documents or even a stale view of
+a chunk that has been moved a long time ago and modified on another shard.
 
 Available read concern is not allowed to be used with causally consistent sessions or transactions.
 
@@ -803,7 +801,7 @@ exists) on the session by updating our `txnNumber`. Next, we update our `txnStat
 legal state transitions. Finally, we reset the in memory state of the transaction as well as any
 [corresponding transaction metrics](https://github.com/mongodb/mongo/blob/r6.0.0/src/mongo/db/transaction_participant.cpp#L896-L902) from a previous transaction.
 
-When a node starts a transaction, it will [acquire the global lock in intent exclusive mode](https://github.com/mongodb/mongo/blob/master/src/mongo/db/transaction/transaction_participant.cpp#L1569)
+When a node starts a transaction, it will [acquire the global lock in intent exclusive mode](https://github.com/mongodb/mongo/blob/r8.2.2/src/mongo/db/transaction/transaction_participant.cpp#L1767)
 (and as a result, the [RSTL](#replication-state-transition-lock) in intent exclusive as well), which it will
 hold for the duration of the transaction. The only exception is when
 [preparing a transaction](#preparing-a-transaction-on-the-primary), which will release the RSTL and
@@ -872,7 +870,7 @@ Another key piece of the Two Phase Commit Protocol is the [**`TransactionCoordin
 the first shard to receive an operation for a particular transaction. The `TransactionCoordinator`
 will coordinate between all participating shards to ultimately commit or abort the transaction.
 
-When the `TransactionCoordinator` is [told to commit a transaction](https://github.com/mongodb/mongo/blob/master/src/mongo/db/s/transaction_coordinator_service.cpp#L175-L176), it must first make sure that all
+When the `TransactionCoordinator` is [told to commit a transaction](https://github.com/mongodb/mongo/blob/r8.2.2/src/mongo/db/s/transaction_coordinator_service.cpp#L186-L187), it must first make sure that all
 participating shards successfully prepare the transaction before telling them to commit the
 transaction. As a result, the coordinator will [issue the `prepareTransaction` command](https://github.com/mongodb/mongo/blob/be38579dc72a40988cada1f43ab6695dcff8cc36/src/mongo/db/s/transaction_coordinator.cpp#L286-L317), an internal
 command, on each shard participating in the transaction.
@@ -971,7 +969,7 @@ it will first [re-acquire](https://github.com/mongodb/mongo/blob/be38579dc72a409
 transitions from happening while the commit is in progress. It will then [reserve an oplog slot](https://github.com/mongodb/mongo/blob/be38579dc72a40988cada1f43ab6695dcff8cc36/src/mongo/db/transaction/transaction_participant.cpp#L2021-L2030),
 [commit the storage transaction at the `commitTimestamp`](https://github.com/mongodb/mongo/blob/be38579dc72a40988cada1f43ab6695dcff8cc36/src/mongo/db/transaction/transaction_participant.cpp#L2057-L2059),
 [write the `commitTransaction` oplog entry](https://github.com/mongodb/mongo/blob/be38579dc72a40988cada1f43ab6695dcff8cc36/src/mongo/db/transaction/transaction_participant.cpp#L2065-L2069)
-into the oplog, [update the transactions table](https://github.com/mongodb/mongo/blob/master/src/mongo/db/op_observer/op_observer_impl.cpp#L201), transition the `txnState` to `kCommitted`, record
+into the oplog, [update the transactions table](https://github.com/mongodb/mongo/blob/r8.2.2/src/mongo/db/op_observer/op_observer_impl.cpp#L194), transition the `txnState` to `kCommitted`, record
 metrics, and [clean up the transaction resources](https://github.com/mongodb/mongo/blob/be38579dc72a40988cada1f43ab6695dcff8cc36/src/mongo/db/transaction/transaction_participant.cpp#L2073-L2075).
 
 ### Aborting a Prepared Transaction
@@ -1029,7 +1027,7 @@ The prepare state _must_ endure any state transition or failover, so they must b
 reconstructed in all situations. If the in-memory state of a prepared transaction is lost, it can be
 reconstructed using the information in the prepare oplog entry(s).
 
-[Startup recovery](#startup-recovery), [rollback](#rollback), and [initial sync](#initial-sync) all
+[Startup recovery](#startup-recovery), [rollback](../storage/wiredtiger/README.md#rollback-to-stable), and [initial sync](#initial-sync) all
 use the same algorithm to reconstruct prepared transactions. In all situations, the node will go
 through a period of applying oplog entries to get the data caught up with the rest of the replica
 set.
@@ -1359,7 +1357,7 @@ There are a number of ways that a node will run for election:
   longer than `catchUpTakeoverDelayMillis` (default 30 seconds), it will run for election. This
   behvarior is known as a **catchup takeover**. If primary catchup is taking too long, catchup
   takeover can help allow the replica set to accept writes sooner, since a more up-to-date node will
-  not spend as much time (or any time) in catchup. See the [Transitioning to `PRIMARY` section](https://github.com/mongodb/mongo/blob/master/src/mongo/db/repl/README.md#transitioning-to-primary) section for
+  not spend as much time (or any time) in catchup. See the [Transitioning to `PRIMARY` section](/src/mongo/db/repl/README.md#transitioning-to-primary) section for
   further details on primary catchup.
 - The `replSetStepUp` command can be run on an eligible node to cause it to run for election
   immediately. We don't expect users to call this command, but it is run internally for election
@@ -1696,7 +1694,7 @@ and transition to the `SECONDARY` state. This transition must succeed if we ever
 
 Initial sync is the process that we use to add a new node to a replica set. Initial sync is
 initiated by the `ReplicationCoordinator` and done in a registered subclass of
-[**`InitialSyncerInterface`**](./initial_syncer_interface.h). The method used is specified by the server parameter `initialSyncMethod`.
+[**`InitialSyncerInterface`**](initial_sync/initial_syncer_interface.h). The method used is specified by the server parameter `initialSyncMethod`.
 
 There are currently two initial sync methods implemented, [**Logical Initial Sync**](#logical-initial-sync) (the default)
 and File Copy Based Initial Sync, which is available only in MongoDB Enterprise Server.
@@ -1730,7 +1728,7 @@ disk.
 # Logical Initial Sync
 
 Logical initial sync is the default initial sync method, implemented by
-[**`InitialSyncer`**](./initial_syncer.h).
+[**`InitialSyncer`**](initial_sync/initial_syncer.h).
 
 At a high level, there are two phases to initial sync: the [**data clone phase**](#data-clone-phase)
 and the [**oplog application phase**](#oplog-application-phase). During the data clone phase, the
@@ -2126,87 +2124,9 @@ it can safely recover from a stable checkpoint (with a cleared "appliedThrough")
 
 # Flow Control
 
-The Flow Control mechanism aims to keep replica set majority committed lag less than or equal to a
-configured maximum. The default value for this maximum lag is 10 seconds. The Flow Control mechanism
-starts throttling writes on the primary once the majority committed replication lag reaches a
-threshold percentage of the configured maximum. The mechanism uses a "ticket admission"-based
-approach to throttle writes. With this mechanism, in a given period of 1 second, a fixed number of
-"flow control tickets" is available. Operations must acquire a flow control ticket in order to
-acquire a global IX lock to execute a write. Acquisition attempts that occur after this fixed number
-has been granted will stall until the next 1 second period. Certain system operations circumvent the
-ticket admission mechanism and are allowed to proceed even when there are no tickets available.
+Flow Control is a ticket-based admission control mechanism that throttles write operations on the primary to keep majority committed replication lag within configured limits (default: 10 seconds).
 
-To address the possibility of this Flow Control mechanism causing indefinite stalls in
-Primary-Secondary-Arbiter replica sets in which a majority cannot be established, the mechanism only
-executes when read concern majority is enabled. Additionally, the mechanism can be disabled by an
-admin.
-
-Flow Control is configurable via several server parameters. Additionally, currentOp, serverStatus,
-database profiling, and slow op log lines include Flow Control information.
-
-## Flow Control Ticket Admission Mechanism
-
-The ticket admission Flow Control mechanism allows a specified number of global IX lock acquisitions
-every second. Most global IX lock acquisitions (except for those that explicitly circumvent Flow
-Control) must first acquire a "Flow Control ticket" before acquiring a ticket for the lock. When
-there are no more flow control tickets available in a one second period, remaining attempts to
-acquire flow control tickets stall until the next period, when the available flow control tickets
-are replenished. It should be noted that there is no "pool" of flow control tickets that threads
-give and take from; an independent mechanism refreshes the ticket counts every second.
-
-When the Flow Control mechanism refreshes available tickets, it calculates how many tickets it
-should allow in order to address the majority committed lag.
-
-The Flow Control mechanism determines how many flow control tickets to replenish every period based
-on:
-
-1. The current majority committed replication lag with respect to the configured target maximum
-   replication lag
-1. How many operations the secondary sustaining the commit point has applied in the last period
-1. How many IX locks per operation were acquired in the last period
-
-## Configurable constants
-
-Criterion #2 determines a "base" number of flow control tickets to be used in the calculation. When
-the current majority committed lag is greater than or equal to a certain configurable threshold
-percentage of the target maximum, the Flow Control mechanism scales down this "base" number based on
-the discrepancy between the two lag values. For some configurable constant 0 < k < 1, it calculates
-the following:
-
-`base * k ^ ((lag - threshold)/threshold) * fudge factor`
-
-The fudge factor is also configurable and should be close to 1. Its purpose is to assign slightly
-lower than the "base" number of flow control tickets when the current lag is close to the threshold.
-Criterion #3 is then multiplied by the result of the above calculation to translate a count of
-operations into a count of lock acquisitions.
-
-When the majority committed lag is less than the threshold percentage of the target maximum, the
-number of tickets assigned in the previous period is used as the "base" of the calculation. This
-number is added to a configurable constant (the ticket "adder" constant), and the sum is multiplied
-by another configurable constant (the ticket "multiplier" constant). This product is the new number
-of tickets to be assigned in the next period.
-
-When the Flow Control mechanism is disabled, the ticket refresher mechanism always allows one
-billion flow control ticket acquisitions per second. The Flow Control mechanism can be disabled via
-a server parameter. Additionally, the mechanism is disabled on nodes that cannot accept writes.
-
-Criteria #2 and #3 are determined using a sampling mechanism that periodically stores the necessary
-data as primaries process writes. The sampling mechanism executes regardless of whether Flow Control
-is enabled.
-
-## Oscillations
-
-There are known scenarios in which the Flow Control mechanism causes write throughput to
-oscillate. There is no known work that can be done to eliminate oscillations entirely for this
-mechanism without hindering other aspects of the mechanism. Work was done (see SERVER-39867) to
-dampen the oscillations at the expense of throughput.
-
-## Throttling internal operations
-
-The Flow Control mechanism throttles all IX lock acquisitions regardless of whether they are from
-client or system operations unless they are part of an operation that is explicitly excluded from
-Flow Control. Writes that occur as part of replica set elections in particular are excluded. See
-SERVER-39868 for more details.
+For detailed information about Flow Control's ticket admission mechanism, configurable parameters, and behavior, see the [Flow Control README](../admission/README_flow_control.md).
 
 # Feature Compatibility Version
 
@@ -2239,7 +2159,7 @@ replication consistently [maintains that](https://github.com/mongodb/mongo/blob/
 
 **`currentCommittedSnapshot`**: An optime maintained in `ReplicationCoordinator` that is used to
 serve majority reads and is always guaranteed to be <= `lastCommittedOpTime`. This
-is currently [set to the stable optime](hhttps://github.com/mongodb/mongo/blob/c8ebdc8b2ef2379bba978ab688e2eda1ac702b15/src/mongo/db/repl/replication_coordinator_impl.cpp#L5085).
+is currently [set to the stable optime](https://github.com/mongodb/mongo/blob/c8ebdc8b2ef2379bba978ab688e2eda1ac702b15/src/mongo/db/repl/replication_coordinator_impl.cpp#L5085).
 Since it is reset every time we recalculate the stable optime, it will also be up to date.
 
 **`initialDataTimestamp`**: A timestamp used to indicate the timestamp at which history “begins”.

@@ -35,11 +35,13 @@
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/curop_bson_helpers.h"
-#include "mongo/db/local_catalog/local_oplog_info.h"
 #include "mongo/db/profile_filter.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/plan_summary_stats.h"
+#include "mongo/db/repl/local_oplog_info.h"
 #include "mongo/db/repl/read_concern_args.h"
+#include "mongo/db/server_feature_flags_gen.h"
+#include "mongo/db/shard_role/shard_catalog/raw_data_operation.h"
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/metadata/client_metadata.h"
 #include "mongo/util/assert_util.h"
@@ -183,6 +185,7 @@ void OpDebug::report(OperationContext* opCtx,
                      const SingleThreadedLockStats* lockStats,
                      const SingleThreadedStorageMetrics& storageMetrics,
                      long long prepareReadConflicts,
+                     const Date_t* operationDeadline,
                      logv2::DynamicAttributes* pAttrs) const {
     Client* client = opCtx->getClient();
     auto& curop = *CurOp::get(opCtx);
@@ -195,8 +198,13 @@ void OpDebug::report(OperationContext* opCtx,
     }
 
     pAttrs->add("isFromUserConnection", client && client->isFromUserConnection());
+    if (gFeatureFlagDedicatedPortForMaintenanceOperations.isEnabled()) {
+        pAttrs->add("isFromMaintenancePortConnection",
+                    client && client->session() &&
+                        client->session()->isConnectedToMaintenancePort());
+    }
     pAttrs->addDeepCopy("ns", toStringForLogging(curop.getNSS()));
-    pAttrs->addDeepCopy("collectionType", getCollectionType(curop.getNSS()));
+    pAttrs->addDeepCopy("collectionType", getCollectionType(opCtx, curop.getNSS()));
 
     if (client) {
         if (auto clientMetadata = ClientMetadata::get(client)) {
@@ -238,9 +246,10 @@ void OpDebug::report(OperationContext* opCtx,
     if (!curop.getPlanSummary().empty()) {
         pAttrs->addDeepCopy("planSummary", std::string{curop.getPlanSummary()});
     }
-
-    if (planningTime > Microseconds::zero()) {
-        pAttrs->add("planningTimeMicros", durationCount<Microseconds>(planningTime));
+    const AdditiveMetrics& additiveMetrics = getAdditiveMetrics();
+    if (additiveMetrics.planningTime.value_or(Microseconds{0}) > Microseconds::zero()) {
+        pAttrs->add("planningTimeMicros",
+                    durationCount<Microseconds>(getAdditiveMetrics().planningTime.value()));
     }
 
     if (estimatedCost) {
@@ -298,6 +307,11 @@ void OpDebug::report(OperationContext* opCtx,
     if (mongotCursorId) {
         pAttrs->add("mongot", makeMongotDebugStatsObject());
     }
+
+    if (!extensionMetrics.empty()) {
+        pAttrs->add("extensionMetrics", extensionMetrics.serialize());
+    }
+
     OPDEBUG_TOATTR_HELP_BOOL(exhaust);
 
     OPDEBUG_TOATTR_HELP_OPTIONAL("keysExamined", additiveMetrics.keysExamined);
@@ -425,6 +439,10 @@ void OpDebug::report(OperationContext* opCtx,
         pAttrs->add("writeConcern", writeConcern->toBSON());
     }
 
+    if (writeConcernError) {
+        pAttrs->add("writeConcernError", *writeConcernError);
+    }
+
     if (waitForWriteConcernDurationMillis > Milliseconds::zero()) {
         pAttrs->add("waitForWriteConcernDuration", waitForWriteConcernDurationMillis);
     }
@@ -498,6 +516,10 @@ void OpDebug::report(OperationContext* opCtx,
             durationCount<Nanoseconds>(ts->ticksTo<Nanoseconds>(ts->getTicks() - killTime)));
     }
 
+    if (operationDeadline != nullptr && *operationDeadline != Date_t::max()) {
+        pAttrs->add("deadline", *operationDeadline);
+    }
+
     // durationMillis should always be present for any operation
     pAttrs->add("durationMillis",
                 durationCount<Milliseconds>(CurOp::get(opCtx)->elapsedTimeTotal()));
@@ -545,6 +567,12 @@ void OpDebug::append(OperationContext* opCtx,
 
     b.append("ns", curop.getNS());
 
+    if (gFeatureFlagDedicatedPortForMaintenanceOperations.isEnabled()) {
+        b.append("isFromMaintenancePortConnection",
+                 opCtx->getClient() && opCtx->getClient()->session() &&
+                     opCtx->getClient()->session()->isConnectedToMaintenancePort());
+    }
+
     if (!omitCommand) {
         curop_bson_helpers::appendObjectTruncatingAsNecessary(
             "command",
@@ -568,8 +596,14 @@ void OpDebug::append(OperationContext* opCtx,
     if (mongotCursorId) {
         b.append("mongot", makeMongotDebugStatsObject());
     }
+
+    if (!extensionMetrics.empty()) {
+        b.append("extensionMetrics", extensionMetrics.serialize());
+    }
+
     OPDEBUG_APPEND_BOOL(b, exhaust);
 
+    const AdditiveMetrics& additiveMetrics = getAdditiveMetrics();
     OPDEBUG_APPEND_OPTIONAL(b, "keysExamined", additiveMetrics.keysExamined);
     OPDEBUG_APPEND_OPTIONAL(b, "docsExamined", additiveMetrics.docsExamined);
 
@@ -685,6 +719,10 @@ void OpDebug::append(OperationContext* opCtx,
         b.append("writeConcern", writeConcern->toBSON());
     }
 
+    if (writeConcernError) {
+        b.append("writeConcernError", *writeConcernError);
+    }
+
     if (waitForWriteConcernDurationMillis > Milliseconds::zero()) {
         b.append("waitForWriteConcernDuration",
                  durationCount<Milliseconds>(waitForWriteConcernDurationMillis));
@@ -733,8 +771,9 @@ void OpDebug::append(OperationContext* opCtx,
         b.append("planSummary", curop.getPlanSummary());
     }
 
-    if (planningTime > Microseconds::zero()) {
-        b.appendNumber("planningTimeMicros", durationCount<Microseconds>(planningTime));
+    if (additiveMetrics.planningTime.value_or(Microseconds{0}) > Microseconds::zero()) {
+        b.appendNumber("planningTimeMicros",
+                       durationCount<Microseconds>(additiveMetrics.planningTime.value()));
     }
 
     OPDEBUG_APPEND_OPTIONAL(b, "estimatedCost", estimatedCost);
@@ -758,6 +797,10 @@ void OpDebug::append(OperationContext* opCtx,
         b.appendNumber(
             "interruptLatencyNanos",
             durationCount<Nanoseconds>(ts->ticksTo<Nanoseconds>(ts->getTicks() - killTime)));
+    }
+
+    if (auto deadline = opCtx->getDeadline(); deadline != Date_t::max()) {
+        b.appendDate("deadline", deadline);
     }
 }
 
@@ -854,6 +897,13 @@ std::function<BSONObj(ProfileFilter::Args)> OpDebug::appendStaged(OperationConte
     });
     addIfNeeded("ns", [](auto field, auto args, auto& b) { b.append(field, args.curop.getNS()); });
 
+    addIfNeeded("isFromMaintenancePortConnection", [](auto field, auto args, auto& b) {
+        bool isFromMaintenanceConnection = args.opCtx->getClient() &&
+            args.opCtx->getClient()->session() &&
+            args.opCtx->getClient()->session()->isConnectedToMaintenancePort();
+        b.append(field, isFromMaintenanceConnection);
+    });
+
     addIfNeeded("command", [](auto field, auto args, auto& b) {
         curop_bson_helpers::appendObjectTruncatingAsNecessary(
             field,
@@ -881,27 +931,32 @@ std::function<BSONObj(ProfileFilter::Args)> OpDebug::appendStaged(OperationConte
             b.append(field, args.op.makeMongotDebugStatsObject());
         }
     });
+    addIfNeeded("extensionMetrics", [](auto field, auto args, auto& b) {
+        if (!args.op.extensionMetrics.empty()) {
+            b.append(field, args.op.extensionMetrics.serialize());
+        }
+    });
     addIfNeeded("exhaust", [](auto field, auto args, auto& b) {
         OPDEBUG_APPEND_BOOL2(b, field, args.op.exhaust);
     });
 
     addIfNeeded("keysExamined", [](auto field, auto args, auto& b) {
-        OPDEBUG_APPEND_OPTIONAL(b, field, args.op.additiveMetrics.keysExamined);
+        OPDEBUG_APPEND_OPTIONAL(b, field, args.op.getAdditiveMetrics().keysExamined);
     });
     addIfNeeded("docsExamined", [](auto field, auto args, auto& b) {
-        OPDEBUG_APPEND_OPTIONAL(b, field, args.op.additiveMetrics.docsExamined);
+        OPDEBUG_APPEND_OPTIONAL(b, field, args.op.getAdditiveMetrics().docsExamined);
     });
     addIfNeeded("hasSortStage", [](auto field, auto args, auto& b) {
-        OPDEBUG_APPEND_BOOL2(b, field, args.op.additiveMetrics.hasSortStage);
+        OPDEBUG_APPEND_BOOL2(b, field, args.op.getAdditiveMetrics().hasSortStage);
     });
     addIfNeeded("usedDisk", [](auto field, auto args, auto& b) {
-        OPDEBUG_APPEND_BOOL2(b, field, args.op.additiveMetrics.usedDisk);
+        OPDEBUG_APPEND_BOOL2(b, field, args.op.getAdditiveMetrics().usedDisk);
     });
     addIfNeeded("fromMultiPlanner", [](auto field, auto args, auto& b) {
-        OPDEBUG_APPEND_BOOL2(b, field, args.op.additiveMetrics.fromMultiPlanner);
+        OPDEBUG_APPEND_BOOL2(b, field, args.op.getAdditiveMetrics().fromMultiPlanner);
     });
     addIfNeeded("fromPlanCache", [](auto field, auto args, auto& b) {
-        OPDEBUG_APPEND_BOOL2(b, field, args.op.additiveMetrics.fromPlanCache.value_or(false));
+        OPDEBUG_APPEND_BOOL2(b, field, args.op.getAdditiveMetrics().fromPlanCache.value_or(false));
     });
     addIfNeeded("replanned", [](auto field, auto args, auto& b) {
         if (args.op.replanReason) {
@@ -914,32 +969,32 @@ std::function<BSONObj(ProfileFilter::Args)> OpDebug::appendStaged(OperationConte
         }
     });
     addIfNeeded("nMatched", [](auto field, auto args, auto& b) {
-        OPDEBUG_APPEND_OPTIONAL(b, field, args.op.additiveMetrics.nMatched);
+        OPDEBUG_APPEND_OPTIONAL(b, field, args.op.getAdditiveMetrics().nMatched);
     });
     addIfNeeded("nBatches", [](auto field, auto args, auto& b) {
-        OPDEBUG_APPEND_OPTIONAL(b, field, args.op.additiveMetrics.nBatches);
+        OPDEBUG_APPEND_OPTIONAL(b, field, args.op.getAdditiveMetrics().nBatches);
     });
     addIfNeeded("nModified", [](auto field, auto args, auto& b) {
-        OPDEBUG_APPEND_OPTIONAL(b, field, args.op.additiveMetrics.nModified);
+        OPDEBUG_APPEND_OPTIONAL(b, field, args.op.getAdditiveMetrics().nModified);
     });
     addIfNeeded("ninserted", [](auto field, auto args, auto& b) {
-        OPDEBUG_APPEND_OPTIONAL(b, field, args.op.additiveMetrics.ninserted);
+        OPDEBUG_APPEND_OPTIONAL(b, field, args.op.getAdditiveMetrics().ninserted);
     });
     addIfNeeded("ndeleted", [](auto field, auto args, auto& b) {
-        OPDEBUG_APPEND_OPTIONAL(b, field, args.op.additiveMetrics.ndeleted);
+        OPDEBUG_APPEND_OPTIONAL(b, field, args.op.getAdditiveMetrics().ndeleted);
     });
     addIfNeeded("nUpserted", [](auto field, auto args, auto& b) {
-        OPDEBUG_APPEND_OPTIONAL(b, field, args.op.additiveMetrics.nUpserted);
+        OPDEBUG_APPEND_OPTIONAL(b, field, args.op.getAdditiveMetrics().nUpserted);
     });
     addIfNeeded("cursorExhausted", [](auto field, auto args, auto& b) {
         OPDEBUG_APPEND_BOOL2(b, field, args.op.cursorExhausted);
     });
 
     addIfNeeded("keysInserted", [](auto field, auto args, auto& b) {
-        OPDEBUG_APPEND_OPTIONAL(b, field, args.op.additiveMetrics.keysInserted);
+        OPDEBUG_APPEND_OPTIONAL(b, field, args.op.getAdditiveMetrics().keysInserted);
     });
     addIfNeeded("keysDeleted", [](auto field, auto args, auto& b) {
-        OPDEBUG_APPEND_OPTIONAL(b, field, args.op.additiveMetrics.keysDeleted);
+        OPDEBUG_APPEND_OPTIONAL(b, field, args.op.getAdditiveMetrics().keysDeleted);
     });
 
     addIfNeeded("prepareReadConflicts", [](auto field, auto args, auto& b) {
@@ -975,7 +1030,7 @@ std::function<BSONObj(ProfileFilter::Args)> OpDebug::appendStaged(OperationConte
         b.appendNumber(field, args.curop.numYields());
     });
     addIfNeeded("nreturned", [](auto field, auto args, auto& b) {
-        OPDEBUG_APPEND_OPTIONAL(b, field, args.op.additiveMetrics.nreturned);
+        OPDEBUG_APPEND_OPTIONAL(b, field, args.op.getAdditiveMetrics().nreturned);
     });
 
     addIfNeeded("planCacheShapeHash", [](auto field, auto args, auto& b) {
@@ -1117,9 +1172,10 @@ std::function<BSONObj(ProfileFilter::Args)> OpDebug::appendStaged(OperationConte
     });
 
     addIfNeeded("workingMillis", [](auto field, auto args, auto& b) {
-        b.appendNumber(field,
-                       durationCount<Milliseconds>(
-                           args.op.additiveMetrics.clusterWorkingTime.value_or(Milliseconds{0})));
+        b.appendNumber(
+            field,
+            durationCount<Milliseconds>(
+                args.op.getAdditiveMetrics().clusterWorkingTime.value_or(Milliseconds{0})));
     });
 
     addIfNeeded("planSummary", [](auto field, auto args, auto& b) {
@@ -1129,7 +1185,10 @@ std::function<BSONObj(ProfileFilter::Args)> OpDebug::appendStaged(OperationConte
     });
 
     addIfNeeded("planningTimeMicros", [](auto field, auto args, auto& b) {
-        b.appendNumber(field, durationCount<Microseconds>(args.op.planningTime));
+        auto planningTime = args.op.getAdditiveMetrics().planningTime;
+        if (planningTime) {
+            b.appendNumber(field, durationCount<Microseconds>(*planningTime));
+        }
     });
 
     addIfNeeded("estimatedCost", [](auto field, auto args, auto& b) {
@@ -1178,6 +1237,7 @@ void OpDebug::setPlanSummaryMetrics(PlanSummaryStats&& planSummaryStats) {
     // Data-bearing node metrics need to be aggregated here rather than just assigned.
     // Certain operations like $mergeCursors may have already accumulated metrics from remote
     // data-bearing nodes, and we need to add in the work done locally.
+    AdditiveMetrics& additiveMetrics = getAdditiveMetrics();
     additiveMetrics.keysExamined =
         additiveMetrics.keysExamined.value_or(0) + planSummaryStats.totalKeysExamined;
     additiveMetrics.docsExamined =
@@ -1282,6 +1342,7 @@ static void appendResolvedViewsInfoImpl(
 CursorMetrics OpDebug::getCursorMetrics() const {
     CursorMetrics metrics;
 
+    const AdditiveMetrics& additiveMetrics = getAdditiveMetrics();
     metrics.setKeysExamined(additiveMetrics.keysExamined.value_or(0));
     metrics.setDocsExamined(additiveMetrics.docsExamined.value_or(0));
     metrics.setBytesRead(additiveMetrics.bytesRead.value_or(0));
@@ -1297,6 +1358,12 @@ CursorMetrics OpDebug::getCursorMetrics() const {
     metrics.setMaxAcquisitionDelinquencyMillis(
         additiveMetrics.maxAcquisitionDelinquency.value_or(Milliseconds(0)).count());
 
+    metrics.setTotalTimeQueuedMicros(
+        additiveMetrics.totalTimeQueuedMicros.value_or(Microseconds(0)).count());
+    metrics.setTotalAdmissions(additiveMetrics.totalAdmissions.value_or(0));
+    metrics.setWasLoadShed(additiveMetrics.wasLoadShed.value_or(false));
+    metrics.setWasDeprioritized(additiveMetrics.wasDeprioritized.value_or(false));
+
     metrics.setNumInterruptChecks(additiveMetrics.numInterruptChecks.value_or(0));
     metrics.setOverdueInterruptApproxMaxMillis(
         additiveMetrics.overdueInterruptApproxMax.value_or(Milliseconds(0)).count());
@@ -1311,6 +1378,8 @@ CursorMetrics OpDebug::getCursorMetrics() const {
     metrics.setNInserted(additiveMetrics.ninserted.value_or(0));
     metrics.setNDeleted(additiveMetrics.ndeleted.value_or(0));
     metrics.setNUpserted(additiveMetrics.nUpserted.value_or(0));
+
+    metrics.setPlanningTimeMicros(additiveMetrics.planningTime.value_or(Microseconds(0)).count());
     return metrics;
 }
 
@@ -1338,33 +1407,48 @@ void OpDebug::appendResolvedViewsInfo(BSONObjBuilder& builder) const {
     resolvedViewsArr.doneFast();
 }
 
-std::string OpDebug::getCollectionType(const NamespaceString& nss) const {
+std::string OpDebug::getCollectionType(OperationContext* opCtx, const NamespaceString& nss) const {
     if (nss.isEmpty()) {
         return "none";
-    } else if (!resolvedViews.empty()) {
+    }
+
+    if (!resolvedViews.empty()) {
         auto dependencyItr = resolvedViews.find(nss);
         // 'resolvedViews' might be populated if any other collection as a part of the query is on a
         // view. However, it will not have associated dependencies.
-        if (dependencyItr == resolvedViews.end()) {
-            return "normal";
-        }
-        const std::vector<NamespaceString>& dependencies = dependencyItr->second.first;
+        if (dependencyItr != resolvedViews.end()) {
+            const std::vector<NamespaceString>& dependencies = dependencyItr->second.first;
 
-        auto nssIterInDeps = std::find(dependencies.begin(), dependencies.end(), nss);
-        tassert(7589000,
-                str::stream() << "The view with ns: " << nss.toStringForErrorMsg()
-                              << ", should have a valid dependency.",
-                nssIterInDeps != (dependencies.end() - 1) && nssIterInDeps != dependencies.end());
+            auto nssIterInDeps = std::find(dependencies.begin(), dependencies.end(), nss);
+            tassert(7589000,
+                    str::stream() << "The view with ns: " << nss.toStringForErrorMsg()
+                                  << ", should have a valid dependency.",
+                    nssIterInDeps != (dependencies.end() - 1) &&
+                        nssIterInDeps != dependencies.end());
 
-        // The underlying namespace for the view/timeseries collection is the next namespace in the
-        // dependency chain. If the view depends on a timeseries buckets collection, then it is a
-        // timeseries collection, otherwise it is a regular view.
-        const NamespaceString& underlyingNss = *std::next(nssIterInDeps);
-        if (underlyingNss.isTimeseriesBucketsCollection()) {
-            return "timeseries";
+            // The underlying namespace for the view/timeseries collection is the next namespace in
+            // the dependency chain. If the view depends on a timeseries buckets collection, then it
+            // is a timeseries collection, otherwise it is a regular view.
+            const NamespaceString& underlyingNss = *std::next(nssIterInDeps);
+            if (underlyingNss.isTimeseriesBucketsCollection()) {
+                return "timeseries";
+            }
+            return "view";
         }
-        return "view";
-    } else if (nss.isTimeseriesBucketsCollection()) {
+    }
+
+    if (!knownTimeseriesNamespaces.empty()) {
+        auto itr = knownTimeseriesNamespaces.find(nss);
+        if (itr != knownTimeseriesNamespaces.end()) {
+            if (isRawDataOperation(opCtx)) {
+                return "timeseriesBuckets";
+            } else {
+                return "timeseries";
+            }
+        }
+    }
+
+    if (nss.isTimeseriesBucketsCollection()) {
         return "timeseriesBuckets";
     } else if (nss.isSystem()) {
         return "system";
@@ -1428,6 +1512,10 @@ void OpDebug::AdditiveMetrics::add(const AdditiveMetrics& otherMetrics) {
         maxAcquisitionDelinquency = std::max(maxAcquisitionDelinquency.value_or(Milliseconds(0)),
                                              *otherMetrics.maxAcquisitionDelinquency);
     }
+    totalTimeQueuedMicros = addOptionals(totalTimeQueuedMicros, otherMetrics.totalTimeQueuedMicros);
+    totalAdmissions = addOptionals(totalAdmissions, otherMetrics.totalAdmissions);
+    wasLoadShed = addOptionals(wasLoadShed, otherMetrics.wasLoadShed);
+    wasDeprioritized = addOptionals(wasDeprioritized, otherMetrics.wasDeprioritized);
 
     hasSortStage = hasSortStage || otherMetrics.hasSortStage;
     usedDisk = usedDisk || otherMetrics.usedDisk;
@@ -1439,6 +1527,8 @@ void OpDebug::AdditiveMetrics::add(const AdditiveMetrics& otherMetrics) {
         fromPlanCache = true;
     }
     *fromPlanCache = *fromPlanCache && otherMetrics.fromPlanCache.value_or(true);
+
+    planningTime = addOptionals(planningTime, otherMetrics.planningTime);
 }
 
 void OpDebug::AdditiveMetrics::aggregateDataBearingNodeMetrics(
@@ -1461,6 +1551,12 @@ void OpDebug::AdditiveMetrics::aggregateDataBearingNodeMetrics(
     maxAcquisitionDelinquency = std::max(maxAcquisitionDelinquency.value_or(Milliseconds(0)),
                                          metrics.maxAcquisitionDelinquency);
 
+    totalTimeQueuedMicros =
+        totalTimeQueuedMicros.value_or(Microseconds(0)) + metrics.totalTimeQueuedMicros;
+    totalAdmissions = totalAdmissions.value_or(0) + metrics.totalAdmissions;
+    wasLoadShed = wasLoadShed.value_or(false) || metrics.wasLoadShed;
+    wasDeprioritized = wasDeprioritized.value_or(false) || metrics.wasDeprioritized;
+
     numInterruptChecks = numInterruptChecks.value_or(0) + metrics.numInterruptChecks;
     overdueInterruptApproxMax = std::max(overdueInterruptApproxMax.value_or(Milliseconds(0)),
                                          metrics.overdueInterruptApproxMax);
@@ -1475,6 +1571,8 @@ void OpDebug::AdditiveMetrics::aggregateDataBearingNodeMetrics(
         fromPlanCache = true;
     }
     *fromPlanCache = *fromPlanCache && metrics.fromPlanCache;
+
+    planningTime = planningTime.value_or(Microseconds(0)) + metrics.planningTime;
 }
 
 void OpDebug::AdditiveMetrics::aggregateDataBearingNodeMetrics(
@@ -1505,7 +1603,12 @@ void OpDebug::AdditiveMetrics::aggregateCursorMetrics(const CursorMetrics& metri
         static_cast<uint64_t>(metrics.getNUpserted()),
         static_cast<uint64_t>(metrics.getNModified()),
         static_cast<uint64_t>(metrics.getNDeleted()),
-        static_cast<uint64_t>(metrics.getNInserted())});
+        static_cast<uint64_t>(metrics.getNInserted()),
+        Microseconds(metrics.getTotalTimeQueuedMicros()),
+        static_cast<uint64_t>(metrics.getTotalAdmissions()),
+        metrics.getWasLoadShed(),
+        metrics.getWasDeprioritized(),
+        Microseconds(metrics.getPlanningTimeMicros())});
 }
 
 void OpDebug::AdditiveMetrics::aggregateStorageStats(const StorageStats& stats) {

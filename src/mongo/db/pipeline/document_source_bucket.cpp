@@ -57,10 +57,13 @@ using boost::intrusive_ptr;
 using std::list;
 using std::vector;
 
-REGISTER_DOCUMENT_SOURCE(bucket,
-                         DocumentSourceBucket::LiteParsed::parse,
-                         DocumentSourceBucket::createFromBson,
-                         AllowedWithApiStrict::kAlways);
+REGISTER_LITE_PARSED_DOCUMENT_SOURCE(bucket,
+                                     DocumentSourceBucket::LiteParsed::parse,
+                                     AllowedWithApiStrict::kAlways);
+
+REGISTER_DOCUMENT_SOURCE_CONTAINER_WITH_STAGE_PARAMS_DEFAULT(bucket,
+                                                             DocumentSourceBucket,
+                                                             BucketStageParams);
 
 namespace {
 intrusive_ptr<ExpressionConstant> getExpressionConstant(ExpressionContext* const expCtx,

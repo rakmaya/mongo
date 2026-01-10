@@ -31,12 +31,10 @@
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/client/read_preference.h"
-#include "mongo/db/admission/execution_admission_context.h"
+#include "mongo/db/admission/execution_control/execution_admission_context.h"
 #include "mongo/db/api_parameters.h"
 #include "mongo/db/auth/authorization_checks.h"
 #include "mongo/db/auth/authorization_session.h"
@@ -47,11 +45,8 @@
 #include "mongo/db/curop.h"
 #include "mongo/db/curop_failpoint_helpers.h"
 #include "mongo/db/cursor_in_use_info.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/logical_time.h"
-#include "mongo/db/memory_tracking/operation_memory_usage_tracker.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/change_stream_invalidation_info.h"
 #include "mongo/db/query/canonical_query.h"
@@ -70,17 +65,14 @@
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/plan_explainer.h"
 #include "mongo/db/query/plan_summary_stats.h"
-#include "mongo/db/query/query_stats/query_stats.h"
 #include "mongo/db/read_concern.h"
 #include "mongo/db/read_concern_support_result.h"
-#include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/logical_session_id.h"
-#include "mongo/db/session/logical_session_id_gen.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/stats/counters.h"
-#include "mongo/db/stats/top.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/db/transaction/transaction_participant.h"
@@ -102,18 +94,15 @@
 #include "mongo/util/serialization_context.h"
 #include "mongo/util/str.h"
 #include "mongo/util/time_support.h"
-#include "mongo/util/uuid.h"
 
 #include <cstddef>
 #include <cstdint>
 #include <memory>
-#include <mutex>
 #include <set>
 #include <string>
 #include <utility>
 
 #include <boost/cstdint.hpp>
-#include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
 #include <fmt/format.h>
 
@@ -396,8 +385,7 @@ public:
             return _cmd.getGenericArguments();
         }
 
-        bool canRetryOnStaleConfigOrShardCannotRefreshDueToLocksHeld(
-            const OpMsgRequest& request) const override {
+        bool canRetryOnStaleShardMetadataError(const OpMsgRequest& request) const override {
             // Can not rerun the command when executing a GetMore command as the cursor may already
             // be lost.
             return false;
@@ -485,7 +473,8 @@ public:
             // We intentionally set the batch size to the max size_t value for a batch size of 0 in
             // order to simulate "no limit" on the batch size. We will run out of space in the
             // buffer before we reach this limit anyway.
-            size_t batchSize = cmd.getBatchSize().value_or(std::numeric_limits<size_t>::max());
+            size_t batchSize = cmd.getBatchSize() ? static_cast<size_t>(*cmd.getBatchSize())
+                                                  : std::numeric_limits<size_t>::max();
 
             try {
                 return batchedExecute(
@@ -687,7 +676,7 @@ public:
 
             // Collect and increment metrics now that we have enough information. It's important
             // we do so before generating the response so that the response can include metrics.
-            curOp->debug().additiveMetrics.nBatches = 1;
+            curOp->debug().getAdditiveMetrics().nBatches = 1;
             curOp->setEndOfOpMetrics(numResults);
             collectQueryStatsMongod(opCtx, cursorPin);
 
@@ -802,7 +791,7 @@ public:
             }
 
             if (_cmd.getIncludeQueryStatsMetrics()) {
-                curOp->debug().queryStatsInfo.metricsRequested = true;
+                curOp->debug().getQueryStatsInfo().metricsRequested = true;
             }
 
             ClientCursorPin cursorPin = pinCursorWithRetry(opCtx, cursorId, nss);

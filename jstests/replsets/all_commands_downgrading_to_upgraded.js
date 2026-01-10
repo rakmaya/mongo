@@ -132,6 +132,8 @@ const allCommands = {
     _shardsvrMovePrimaryExitCriticalSection: {skip: isAnInternalCommand},
     _shardsvrMoveRange: {skip: isAnInternalCommand},
     _shardsvrNotifyShardingEvent: {skip: isAnInternalCommand},
+    _shardsvrRecreateRangeDeletionTasks: {skip: isAnInternalCommand},
+    _shardsvrRecreateRangeDeletionTasksParticipant: {skip: isAnInternalCommand},
     _shardsvrRenameCollection: {skip: isAnInternalCommand},
     _shardsvrRenameCollectionParticipant: {skip: isAnInternalCommand},
     _shardsvrRenameCollectionParticipantUnblock: {skip: isAnInternalCommand},
@@ -144,6 +146,7 @@ const allCommands = {
     _shardsvrReshardingDonorStartChangeStreamsMonitor: {skip: isAnInternalCommand},
     _shardsvrReshardingOperationTime: {skip: isAnInternalCommand},
     _shardsvrReshardRecipientClone: {skip: isAnInternalCommand},
+    _shardsvrReshardRecipientCriticalSectionStarted: {skip: isAnInternalCommand},
     _shardsvrRefineCollectionShardKey: {skip: isAnInternalCommand},
     _shardsvrSetAllowMigrations: {skip: isAnInternalCommand},
     _shardsvrSetClusterParameter: {skip: isAnInternalCommand},
@@ -176,6 +179,10 @@ const allCommands = {
         skip: requiresParallelShell,
     },
     abortReshardCollection: {
+        // Skipping command because it requires testing through a parallel shell.
+        skip: requiresParallelShell,
+    },
+    abortRewriteCollection: {
         // Skipping command because it requires testing through a parallel shell.
         skip: requiresParallelShell,
     },
@@ -739,6 +746,7 @@ const allCommands = {
         command: {enableSharding: dbName},
     },
     endSessions: {skip: "tested in startSession"},
+    eseRotateActiveKEK: {skip: "requires additional setup"},
     explain: {
         setUp: function (conn) {
             assert.commandWorked(conn.getDB(dbName).runCommand({create: collName}));
@@ -819,6 +827,7 @@ const allCommands = {
         isAdminCommand: true,
         command: {getDiagnosticData: 1},
     },
+    getESERotateActiveKEKStatus: {skip: "requires additional setup"},
     getLog: {
         isAdminCommand: true,
         command: {getLog: "global"},
@@ -1206,6 +1215,17 @@ const allCommands = {
     recipientForgetMigration: {skip: isAnInternalCommand},
     recipientSyncData: {skip: isAnInternalCommand},
     recipientVoteImportedFiles: {skip: isAnInternalCommand},
+    recreateRangeDeletionTasks: {
+        isShardedOnly: true,
+        isAdminCommand: false,
+        setUp: function (conn) {
+            assert.commandWorked(conn.getDB(dbName).adminCommand({shardCollection: fullNs, key: {a: "hashed"}}));
+        },
+        command: {recreateRangeDeletionTasks: collName, skipEmptyRanges: false},
+        teardown: function (conn) {
+            assert.commandWorked(conn.getDB(dbName).runCommand({drop: collName}));
+        },
+    },
     refineCollectionShardKey: {
         isShardedOnly: true,
         isAdminCommand: true,
@@ -1356,6 +1376,7 @@ const allCommands = {
         skip: "Cannot run while downgrading",
     },
     reshardCollection: {skip: cannotRunWhileDowngrading},
+    rewriteCollection: {skip: cannotRunWhileDowngrading},
     revokePrivilegesFromRole: {
         setUp: function (conn) {
             assert.commandWorked(conn.getDB(dbName).runCommand({create: collName}));

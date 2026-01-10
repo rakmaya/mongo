@@ -40,10 +40,10 @@
 #include "mongo/db/commands.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/global_catalog/chunk_manager.h"
-#include "mongo/db/global_catalog/router_role_api/cluster_commands_helpers.h"
-#include "mongo/db/global_catalog/router_role_api/router_role.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/router_role/cluster_commands_helpers.h"
+#include "mongo/db/router_role/router_role.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/sharding_environment/client/shard.h"
 #include "mongo/db/topology/shard_registry.h"
@@ -114,9 +114,9 @@ public:
                 "Performing splitVector across dbs isn't supported via mongos",
                 nss.dbName() == dbName);
 
-        sharding::router::CollectionRouter router{opCtx->getServiceContext(), nss};
+        sharding::router::CollectionRouter router(opCtx, nss);
         return router.routeWithRoutingContext(
-            opCtx, getName(), [&](OperationContext* opCtx, RoutingContext& routingCtx) {
+            getName(), [&](OperationContext* opCtx, RoutingContext& routingCtx) {
                 BSONObj min = cmdObj.getObjectField("min");
                 BSONObj max = cmdObj.getObjectField("max");
                 BSONObj keyPattern = cmdObj.getObjectField("keyPattern");

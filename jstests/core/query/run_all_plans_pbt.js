@@ -15,7 +15,6 @@
  * query_intensive_pbt,
  * # This test runs commands that are not allowed with security token: setParameter.
  * not_allowed_with_signed_security_token,
- * requires_timeseries,
  * assumes_no_implicit_collection_creation_on_get_collection,
  * # Incompatible with setParameter
  * does_not_support_stepdowns,
@@ -34,7 +33,7 @@ import {runDeoptimized, testProperty} from "jstests/libs/property_test_helpers/p
 import {isSlowBuild} from "jstests/libs/query/aggregation_pipeline_utils.js";
 
 if (isSlowBuild(db)) {
-    jsTestLog("Returning early because debug is on, opt is off, or a sanitizer is enabled.");
+    jsTest.log.info("Returning early because debug is on, opt is off, or a sanitizer is enabled.");
     quit();
 }
 
@@ -93,7 +92,15 @@ function hintedQueryHasSameResultsAsControlCollScan(getQuery, testHelpers) {
     return {passed: true};
 }
 
-const aggModel = getQueryAndOptionsModel();
+const is83orAbove = (() => {
+    const {version} = db.adminCommand({getParameter: 1, featureCompatibilityVersion: 1}).featureCompatibilityVersion;
+    return MongoRunner.compareBinVersions(version, "8.3") >= 0;
+})();
+
+const aggModel = getQueryAndOptionsModel().filter(
+    // Older versions suffer from SERVER-101007
+    ({pipeline}) => is83orAbove || !JSON.stringify(pipeline).includes('"$elemMatch"'),
+);
 
 // Test with a regular collection.
 testProperty(
@@ -104,24 +111,3 @@ testProperty(
     makeWorkloadModel({collModel: getCollectionModel({allowPartialIndexes: false}), aggModel, numQueriesPerRun}),
     numRuns,
 );
-
-// TODO SERVER-103381 re-enable timeseries PBT testing.
-// Test with a TS collection.
-// {
-//     // TODO SERVER-83072 re-enable $group in this test, by removing the filter below.
-//     const tsAggModel = aggModel.filter(query => {
-//         for (const stage of query) {
-//             if (Object.keys(stage).includes('$group')) {
-//                 return false;
-//             }
-//         }
-//         return true;
-//     });
-//     testProperty(
-//         hintedQueryHasSameResultsAsControlCollScan,
-//         {controlColl, experimentColl},
-//         makeWorkloadModel(
-//             {collModel: getCollectionModel({isTS: true}), aggModel: tsAggModel,
-//             numQueriesPerRun}),
-//         numRuns);
-// }

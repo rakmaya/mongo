@@ -30,7 +30,6 @@
 #include "mongo/db/index/wildcard_validation.h"
 
 #include "mongo/base/string_data.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/unittest/unittest.h"
 
@@ -113,5 +112,15 @@ TEST(WildcardProjectionValidation, IdField) {
         validateWildcardProjection(BSON("$**" << 1 << "other" << 1), BSON("_id" << 0 << "a" << 1)));
     ASSERT_OK(validateWildcardProjection(BSON("$**" << 1 << "other" << 1),
                                          BSON("_id" << 1 << "a" << 0 << "other" << 0)));
+}
+
+TEST(WildcardProjectionValidation, IdFieldExcludedWithCompoundIndex) {
+    ASSERT_NOT_OK(validateWildcardProjection(BSON("a" << 1 << "$**" << 1), BSON("_id" << 0)));
+    ASSERT_NOT_OK(validateWildcardProjection(BSON("$**" << 1 << "a" << 1), BSON("_id" << 0)));
+    ASSERT_NOT_OK(
+        validateWildcardProjection(BSON("b" << 1 << "$**" << 1 << "a" << 1), BSON("_id" << 0)));
+
+    ASSERT_OK(validateWildcardProjection(BSON("$**" << 1 << "_id" << 1), BSON("_id" << 0)));
+    ASSERT_OK(validateWildcardProjection(BSON("_id" << 1 << "$**" << 1), BSON("_id" << 0)));
 }
 }  // namespace mongo

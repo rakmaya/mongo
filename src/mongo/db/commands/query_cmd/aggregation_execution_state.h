@@ -28,9 +28,6 @@
  */
 #pragma once
 
-#include "mongo/db/global_catalog/catalog_cache/catalog_cache.h"
-#include "mongo/db/local_catalog/db_raii.h"
-#include "mongo/db/local_catalog/external_data_source_scope_guard.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
@@ -40,8 +37,13 @@
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/multiple_collection_accessor.h"
 #include "mongo/db/read_concern.h"
+#include "mongo/db/router_role/routing_cache/catalog_cache.h"
+#include "mongo/db/shard_role/shard_catalog/db_raii.h"
+#include "mongo/db/shard_role/shard_catalog/external_data_source_scope_guard.h"
+#include "mongo/db/shard_role/shard_catalog/operation_sharding_state.h"
 #include "mongo/db/views/resolved_view.h"
 #include "mongo/db/views/view.h"
+#include "mongo/util/modules.h"
 
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
@@ -84,12 +86,14 @@ public:
                const PrivilegeVector& privileges,
                const std::vector<std::pair<NamespaceString, std::vector<ExternalDataSourceInfo>>>&
                    usedExternalDataSources,
-               const boost::optional<ExplainOptions::Verbosity>& verbosity)
+               const boost::optional<ExplainOptions::Verbosity>& verbosity,
+               std::shared_ptr<IncrementalFeatureRolloutContext> ifrContext)
         : _aggReqDerivatives(new AggregateRequestDerivatives(request, liteParsedPipeline, cmdObj)),
           _opCtx(opCtx),
           _executionNss(request.getNamespace()),
           _privileges(privileges),
-          _verbosity(verbosity) {
+          _verbosity(verbosity),
+          _ifrContext(std::move(ifrContext)) {
         // Create virtual collections and drop them when aggregate command is done.
         // If a cursor is registered, the ExternalDataSourceScopeGuard will be stored in the cursor;
         // when the cursor is later destroyed, the scope guard will also be destroyed, and any
@@ -122,6 +126,10 @@ public:
         return getRequest();
     }
 
+    virtual const LiteParsedPipeline& getOriginalLiteParsedPipeline() const {
+        return _aggReqDerivatives->liteParsedPipeline;
+    }
+
     const NamespaceString& getExecutionNss() const {
         return _executionNss;
     }
@@ -152,6 +160,10 @@ public:
 
     boost::optional<ExplainOptions::Verbosity> getVerbosity() const {
         return _verbosity;
+    }
+
+    std::shared_ptr<IncrementalFeatureRolloutContext> getIfrContext() const {
+        return _ifrContext;
     }
 
     /**
@@ -233,7 +245,7 @@ public:
      *     - validation of time-series related stages
      *     - validation of command parameters
      */
-    void performValidationChecks();
+    void performValidationChecks() const;
 
     /**
      * Increments global stage counters corresponding to the stages in this lite parsed pipeline.
@@ -329,7 +341,8 @@ protected:
           _executionNss(std::move(other._executionNss)),
           _privileges(other._privileges),
           _externalDataSourceGuard(std::move(other._externalDataSourceGuard)),
-          _verbosity(other._verbosity) {
+          _verbosity(other._verbosity),
+          _ifrContext(std::move(other._ifrContext)) {
         other._opCtx = nullptr;
     }
 
@@ -356,6 +369,9 @@ private:
     // AggCatalogState::createExpressionContext to populate verbosity on the expression context.
     boost::optional<ExplainOptions::Verbosity> _verbosity;
 
+    // _ifrContext is shared among all copies of the ExpressionContext.
+    std::shared_ptr<IncrementalFeatureRolloutContext> _ifrContext;
+
     /**
      * Upconverts the read concern for a change stream aggregation, if necessary.
      *
@@ -369,14 +385,14 @@ private:
 class ResolvedViewAggExState : public AggExState {
 public:
     ResolvedViewAggExState(AggExState&& baseState,
-                           std::unique_ptr<AggCatalogState>& catalog,
+                           const AggCatalogState& catalog,
                            const ViewDefinition& view);
 
     /**
      * Returns a new ResolvedViewAggExState object after performing a collation compatibility check.
      */
     static StatusWith<std::unique_ptr<ResolvedViewAggExState>> create(
-        AggExState&& aggExState, std::unique_ptr<AggCatalogState>& aggCatalogState);
+        std::shared_ptr<AggExState> aggExState, const AggCatalogState& aggCatalogState);
 
     bool isView() const override {
         return true;
@@ -401,6 +417,11 @@ public:
     const AggregateCommandRequest& getOriginalRequest() const override {
         return _originalAggReqDerivatives->request;
     }
+
+    const LiteParsedPipeline& getOriginalLiteParsedPipeline() const override {
+        return _originalAggReqDerivatives->liteParsedPipeline;
+    }
+
 
     boost::optional<NamespaceString> getViewNss() const override {
         return boost::make_optional(getOriginalNss());
@@ -526,6 +547,8 @@ public:
      * throughout the lifespan of this query.
      */
     boost::intrusive_ptr<ExpressionContext> createExpressionContext();
+
+    BSONObj getShardKey() const;
 
     virtual ~AggCatalogState() {}
 

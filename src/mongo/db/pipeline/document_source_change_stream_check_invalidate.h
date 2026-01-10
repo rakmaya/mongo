@@ -42,6 +42,7 @@
 #include "mongo/db/pipeline/variables.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
 
 #include <set>
 #include <utility>
@@ -51,6 +52,10 @@
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
+
+DECLARE_STAGE_PARAMS_DERIVED_DEFAULT(ChangeStreamCheckInvalidate);
+using ChangeStreamCheckInvalidateLiteParsed =
+    DocumentSourceChangeStreamLiteParsedInternal<ChangeStreamCheckInvalidateStageParams>;
 
 /**
  * This stage is used internally for change stream notifications to artificially generate an
@@ -121,8 +126,10 @@ private:
                                               boost::optional<ResumeTokenData> startAfterInvalidate)
         : DocumentSourceInternalChangeStreamStage(kStageName, expCtx),
           _startAfterInvalidate(std::move(startAfterInvalidate)) {
-        invariant(!_startAfterInvalidate ||
-                  _startAfterInvalidate->fromInvalidate == ResumeTokenData::kFromInvalidate);
+        tassert(11294807,
+                "Expected the passed resume token to be from an invalidate notification",
+                !_startAfterInvalidate ||
+                    _startAfterInvalidate->fromInvalidate == ResumeTokenData::kFromInvalidate);
     }
 
     boost::optional<ResumeTokenData> _startAfterInvalidate;

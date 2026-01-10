@@ -27,39 +27,32 @@
  *    it in the license file.
  */
 
-
 #include "mongo/base/error_codes.h"
-#include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
-#include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/client/read_preference.h"
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/generic_argument_util.h"
-#include "mongo/db/global_catalog/catalog_cache/catalog_cache.h"
 #include "mongo/db/global_catalog/ddl/sharded_ddl_commands_gen.h"
-#include "mongo/db/global_catalog/router_role_api/cluster_commands_helpers.h"
-#include "mongo/db/local_catalog/collection_uuid_mismatch_info.h"
-#include "mongo/db/local_catalog/ddl/drop_gen.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/router_role/cluster_commands_helpers.h"
+#include "mongo/db/router_role/routing_cache/catalog_cache.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/ddl/drop_gen.h"
+#include "mongo/db/shard_role/shard_catalog/collection_uuid_mismatch_info.h"
 #include "mongo/db/sharding_environment/client/shard.h"
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/executor/remote_command_response.h"
 #include "mongo/idl/idl_parser.h"
-#include "mongo/rpc/get_status_from_command_result.h"
-#include "mongo/rpc/op_msg.h"
 #include "mongo/s/async_requests_sender.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/str.h"
 #include "mongo/util/uuid.h"
 
-#include <memory>
-#include <set>
 #include <string>
 
 #include <boost/move/utility_core.hpp>
@@ -67,7 +60,6 @@
 #include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
-
 
 namespace mongo {
 namespace {
@@ -124,10 +116,8 @@ public:
                 generic_argument_util::setMajorityWriteConcern(dropCollectionCommand,
                                                                &opCtx->getWriteConcern());
 
-
-                sharding::router::DBPrimaryRouter router(opCtx->getServiceContext(), nss.dbName());
+                sharding::router::DBPrimaryRouter router(opCtx, nss.dbName());
                 return router.route(
-                    opCtx,
                     Request::kCommandName,
                     [&](OperationContext* opCtx, const CachedDatabaseInfo& dbInfo) {
                         auto cmdResponse =

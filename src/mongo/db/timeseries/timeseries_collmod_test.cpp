@@ -29,11 +29,14 @@
 
 #include "mongo/db/timeseries/timeseries_collmod.h"
 
-#include "mongo/db/local_catalog/create_collection.h"
-#include "mongo/db/local_catalog/ddl/coll_mod_gen.h"
-#include "mongo/db/local_catalog/ddl/create_gen.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
+#include "mongo/db/shard_role/ddl/coll_mod_gen.h"
+#include "mongo/db/shard_role/ddl/create_gen.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/collection_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/create_collection.h"
+#include "mongo/db/shard_role/shard_role.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/timeseries/timeseries_test_fixture.h"
 #include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/util/assert_util.h"
@@ -212,7 +215,7 @@ TEST_F(TimeseriesCollmodTest, ProcessCollModCommandWithTimeseriesTranslation) {
         const auto collectionAcquisition = acquireCollection(
             _opCtx,
             CollectionAcquisitionRequest(bucketsColl,
-                                         PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                         PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
                                          repl::ReadConcernArgs::get(_opCtx),
                                          AcquisitionPrerequisites::kRead),
             MODE_IS);
@@ -270,7 +273,7 @@ TEST_F(TimeseriesCollmodTest, ProcessCollModCommandWithTimeseriesTranslationAndV
         const auto collectionAcquisition = acquireCollection(
             _opCtx,
             CollectionAcquisitionRequest(bucketsColl,
-                                         PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                         PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
                                          repl::ReadConcernArgs::get(_opCtx),
                                          AcquisitionPrerequisites::kRead),
             MODE_IS);
@@ -301,7 +304,7 @@ TEST_F(TimeseriesCollmodTest, ProcessCollModCommandWithTimeseriesTranslationNotT
         const auto collectionAcquisition = acquireCollection(
             _opCtx,
             CollectionAcquisitionRequest(testNss,
-                                         PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                         PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
                                          repl::ReadConcernArgs::get(_opCtx),
                                          AcquisitionPrerequisites::kRead),
             MODE_IS);

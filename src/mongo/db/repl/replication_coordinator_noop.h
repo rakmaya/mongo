@@ -206,6 +206,8 @@ public:
 
     HostAndPort getMyHostAndPort() const final;
 
+    boost::optional<int> getMyMaintenancePort() const final;
+
     Status setFollowerMode(const MemberState&) final;
 
     Status setFollowerModeRollback(OperationContext* opCtx) final;
@@ -225,6 +227,8 @@ public:
                                    ReplSetGetStatusResponseStyle) final;
 
     void appendSecondaryInfoData(BSONObjBuilder*) final;
+
+    ThreadPool* getDbWorkThreadPool() const noexcept final;
 
     ReplSetConfig getConfig() const final;
 

@@ -36,6 +36,7 @@
 #include "mongo/db/query/stage_builder/sbe/abt/syntax/syntax.h"
 #include "mongo/platform/decimal128.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/time_support.h"
 
 #include <cstdint>
@@ -99,7 +100,7 @@ public:
     bool operator==(const Constant& other) const;
 
     auto get() const {
-        return std::pair{_tag, _val};
+        return sbe::value::TagValueView{_tag, _val};
     }
 
     bool isString() const;

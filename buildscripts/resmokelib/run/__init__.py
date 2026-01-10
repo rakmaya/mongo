@@ -548,7 +548,9 @@ class TestRunner(Subcommand):
                 if task:
                     break
 
-        local_args = to_local_args()
+        # Skip mongod/mongos set parameters - they'll be conditionally re-added below if non-empty
+        skip_args = ["mongod_set_parameters", "mongos_set_parameters"]
+        local_args = to_local_args(additional_skipped_args=skip_args)
         local_args = strip_fuzz_config_params(local_args)
 
         # We have two lines that are provided to the user. The local_resmoke_invocation has the --configFuzzSeed and --fuzzMongo(d/s)Configs
@@ -583,15 +585,17 @@ class TestRunner(Subcommand):
                 f" --wiredTigerIndexConfigString '{config.WT_INDEX_CONFIG}'"
             )
 
-        if config.MONGOD_SET_PARAMETERS:
+        if config.MONGOD_SET_PARAMETERS and config.MONGOD_SET_PARAMETERS != "{}":
             local_resmoke_invocation_with_params += f" --mongodSetParameters='{self._get_fuzzed_param_resmoke_invocation(config.MONGOD_SET_PARAMETERS)}'"
 
         if config.MONGOD_EXTRA_CONFIG:
             for k, v in config.MONGOD_EXTRA_CONFIG.items():
-                if v:
+                if v is True:
                     local_resmoke_invocation_with_params += f" --{k}"
+                elif v:  # truthy but not True
+                    local_resmoke_invocation_with_params += f" --{k}={v}"
 
-        if config.MONGOS_SET_PARAMETERS:
+        if config.MONGOS_SET_PARAMETERS and config.MONGOS_SET_PARAMETERS != "{}":
             local_resmoke_invocation_with_params += f" --mongosSetParameters='{self._get_fuzzed_param_resmoke_invocation(config.MONGOS_SET_PARAMETERS)}'"
 
         if multiversion_bin_version:
@@ -781,7 +785,7 @@ class TestRunner(Subcommand):
                     try:
                         proc.kill()
                     except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess) as exc:
-                        proc_msg += f" - target escaped: {type(exc).__name__ }"
+                        proc_msg += f" - target escaped: {type(exc).__name__}"
                     else:
                         proc_msg += " - target destroyed\n"
                     print(proc_msg)
@@ -843,6 +847,8 @@ class TestRunner(Subcommand):
             executor_config.setdefault("hooks", []).append({"class": "FuzzRuntimeStress"})
         if config.FUZZ_RUNTIME_STRESS in ("signals", "all"):
             executor_config.setdefault("hooks", []).append({"class": "PeriodicStackTrace"})
+        if config.NO_HOOKS:
+            executor_config["hooks"] = []
 
         try:
             executor = testing.executor.TestSuiteExecutor(
@@ -1034,12 +1040,18 @@ class TestRunner(Subcommand):
             "YAML configuration of suite {}".format(suite.get_display_name()),
             utils.dump_yaml({"test_kind": suite.get_test_kind_config()}),
             "",
-            utils.dump_yaml({"selector": suite.get_selector_config()}),
-            "",
             utils.dump_yaml({"executor": suite.get_executor_config()}),
             "",
             utils.dump_yaml({"logging": config.LOGGING_CONFIG}),
         ]
+        if config.SHARD_INDEX is None:
+            # Only dump the selector config if sharding is not being used.
+            # When sharding is used, the tests for the current shard will
+            # be a subset of the selector config, and are logged later.
+            sb += [
+                "",
+                utils.dump_yaml({"selector": suite.get_selector_config()}),
+            ]
         self._resmoke_logger.info("\n".join(sb))
 
     @staticmethod
@@ -1231,15 +1243,10 @@ class RunPlugin(PluginInterface):
             "generate-multiversion-exclude-tags",
             "generate-matrix-suites",
         ):
+            configure_resmoke.validate_and_update_config(parser, parsed_args, should_configure_otel)
             if config.EVERGREEN_TASK_ID is not None:
-                configure_resmoke.validate_and_update_config(
-                    parser, parsed_args, should_configure_otel
-                )
                 return TestRunnerEvg(subcommand, **kwargs)
             else:
-                configure_resmoke.validate_and_update_config(
-                    parser, parsed_args, should_configure_otel
-                )
                 return TestRunner(subcommand, **kwargs)
         return None
 
@@ -1249,7 +1256,11 @@ class RunPlugin(PluginInterface):
         parser = subparsers.add_parser("run", help="Runs the specified tests.")
 
         parser.set_defaults(
-            dry_run="off", shuffle="auto", stagger_jobs="off", majority_read_concern="on"
+            dry_run="off",
+            shuffle="auto",
+            stagger_jobs="off",
+            majority_read_concern="on",
+            no_hooks=False,
         )
 
         parser.add_argument(
@@ -1268,6 +1279,13 @@ class RunPlugin(PluginInterface):
                 " positional arguments, they will be run using the suites'"
                 " configurations."
             ),
+        )
+
+        parser.add_argument(
+            "--no-hooks",
+            dest="no_hooks",
+            action="store_true",
+            help=("Disables all test executor hooks. This is useful for debugging purposes."),
         )
 
         parser.add_argument(
@@ -1439,6 +1457,18 @@ class RunPlugin(PluginInterface):
             metavar="TAG",
             default="development",
             help=("The `tag` name to use for images built during a `--dockerComposeBuildImages`."),
+        )
+
+        parser.add_argument(
+            "--dockerComposeTestComposerDirs",
+            dest="docker_compose_test_composer_dirs",
+            metavar="DIR1,DIR2",
+            help=(
+                "Comma separated list of test composer directories to include in the config image"
+                " built with `--dockerComposeBuildImages`. These directories should be relative paths"
+                " within `buildscripts/antithesis/test_composer/`."
+                " Example: `random_resmoke,basic_js_commands`."
+            ),
         )
 
         parser.add_argument(
@@ -1704,7 +1734,7 @@ class RunPlugin(PluginInterface):
             dest="linear_chain",
             choices=("on", "off"),
             metavar="ON|OFF",
-            help="Enable or disable linear chaining for tests using " "ReplicaSetFixture.",
+            help="Enable or disable linear chaining for tests using ReplicaSetFixture.",
         )
 
         parser.add_argument(
@@ -1950,7 +1980,7 @@ class RunPlugin(PluginInterface):
             dest="majority_read_concern",
             choices=("on", "off"),
             metavar="ON|OFF",
-            help=("Enable or disable majority read concern support." " Defaults to %(default)s."),
+            help=("Enable or disable majority read concern support. Defaults to %(default)s."),
         )
 
         mongodb_server_options.add_argument(
@@ -1964,7 +1994,7 @@ class RunPlugin(PluginInterface):
             "--storageEngineCacheSizeGB",
             dest="storage_engine_cache_size_gb",
             metavar="CONFIG",
-            help="Sets the storage engine cache size configuration" " setting for all mongod's.",
+            help="Sets the storage engine cache size configuration setting for all mongod's.",
         )
 
         mongodb_server_options.add_argument(
@@ -2139,6 +2169,14 @@ class RunPlugin(PluginInterface):
         )
 
         internal_options.add_argument(
+            "--hangAnalyzerHookTimeout",
+            type=float,
+            dest="hang_analyzer_hook_timeout",
+            help="The time (in seconds) that hooks are allowed to run after the hang"
+            " analyzer has signaled Resmoke.",
+        )
+
+        internal_options.add_argument(
             "--cedarReportFile",
             dest="cedar_report_file",
             metavar="CEDAR_REPORT",
@@ -2257,7 +2295,7 @@ class RunPlugin(PluginInterface):
             "--distroId",
             dest="distro_id",
             metavar="DISTRO_ID",
-            help=("Sets the identifier for the Evergreen distro running the" " tests."),
+            help=("Sets the identifier for the Evergreen distro running the tests."),
         )
 
         evergreen_options.add_argument(
@@ -2265,14 +2303,14 @@ class RunPlugin(PluginInterface):
             type=int,
             dest="execution_number",
             metavar="EXECUTION_NUMBER",
-            help=("Sets the number for the Evergreen execution running the" " tests."),
+            help=("Sets the number for the Evergreen execution running the tests."),
         )
 
         evergreen_options.add_argument(
             "--gitRevision",
             dest="git_revision",
             metavar="GIT_REVISION",
-            help=("Sets the git revision for the Evergreen task running the" " tests."),
+            help=("Sets the git revision for the Evergreen task running the tests."),
         )
 
         # We intentionally avoid adding a new command line option that starts with --suite so it doesn't
@@ -2292,7 +2330,7 @@ class RunPlugin(PluginInterface):
             "--patchBuild",
             action="store_true",
             dest="patch_build",
-            help=("Indicates that the Evergreen task running the tests is a" " patch build."),
+            help=("Indicates that the Evergreen task running the tests is a patch build."),
         )
 
         evergreen_options.add_argument(
@@ -2327,7 +2365,7 @@ class RunPlugin(PluginInterface):
             "--variantName",
             dest="variant_name",
             metavar="VARIANT_NAME",
-            help=("Sets the name of the Evergreen build variant running the" " tests."),
+            help=("Sets the name of the Evergreen build variant running the tests."),
         )
 
         evergreen_options.add_argument(
@@ -2375,7 +2413,7 @@ class RunPlugin(PluginInterface):
             dest="benchmark_list_tests",
             action="store_true",
             # metavar="BENCHMARK_LIST_TESTS",
-            help=("Lists all Google benchmark test configurations in each" " test file."),
+            help=("Lists all Google benchmark test configurations in each test file."),
         )
 
         benchmark_min_time_help = (
@@ -2496,12 +2534,19 @@ class RunPlugin(PluginInterface):
         )
 
 
-def to_local_args(input_args: Optional[List[str]] = None):
+def to_local_args(
+    input_args: Optional[List[str]] = None, additional_skipped_args: Optional[List[str]] = None
+):
     """
     Return a command line invocation for resmoke.py suitable for being run outside of Evergreen.
 
     This function parses the 'args' list of command line arguments, removes any Evergreen-centric
     options, and returns a new list of command line arguments.
+
+    Args:
+        input_args: If provided, uses these args instead of sys.argv[1:].
+        additional_skipped_args: Additional argument destination names to skip (e.g., ["mongod_set_parameters"]).
+                                 These are added to the default skipped args set for this invocation.
     """
 
     if input_args is None:
@@ -2526,8 +2571,10 @@ def to_local_args(input_args: Optional[List[str]] = None):
 
     run_parser = command_subparser.choices.get("run")
 
-    # arguments that are in the standard run parser that we do not want to include in the local invocation
-    skipped_args = ["install_dir", "tag_files"]
+    # Arguments that we don't want to include in the local invocation
+    skipped_args = {"install_dir", "tag_files", "skip_symbolization"}
+    if additional_skipped_args:
+        skipped_args.update(additional_skipped_args)
 
     suites_arg = None
     storage_engine_arg = None

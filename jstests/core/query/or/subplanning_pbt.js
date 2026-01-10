@@ -6,7 +6,6 @@
  * query_intensive_pbt,
  * # This test runs commands that are not allowed with security token: setParameter.
  * not_allowed_with_signed_security_token,
- * requires_timeseries,
  * assumes_no_implicit_collection_creation_on_get_collection,
  * # Incompatible with setParameter
  * does_not_support_stepdowns,
@@ -24,9 +23,14 @@ import {isSlowBuild} from "jstests/libs/query/aggregation_pipeline_utils.js";
 import {fc} from "jstests/third_party/fast_check/fc-3.1.0.js";
 
 if (isSlowBuild(db)) {
-    jsTestLog("Exiting early because debug is on, opt is off, or a sanitizer is enabled.");
+    jsTest.log.info("Exiting early because debug is on, opt is off, or a sanitizer is enabled.");
     quit();
 }
+
+const is83orAbove = (() => {
+    const {version} = db.adminCommand({getParameter: 1, featureCompatibilityVersion: 1}).featureCompatibilityVersion;
+    return MongoRunner.compareBinVersions(version, "8.3") >= 0;
+})();
 
 const numRuns = 15;
 const numQueriesPerRun = 20;
@@ -45,11 +49,19 @@ const matchWithTopLevelOrArb = getMatchPredicateSpec()
         // queries is quick, this isn't a concern.
         return Object.keys(pred).includes("$or");
     })
+    // Older versions suffer from SERVER-101007
+    .filter((pred) => is83orAbove || !JSON.stringify(pred).includes('"$elemMatch"'))
     .map((pred) => {
         return {$match: pred};
     });
 const aggModel = fc
-    .record({orMatch: matchWithTopLevelOrArb, query: getQueryAndOptionsModel()})
+    .record({
+        orMatch: matchWithTopLevelOrArb,
+        query: getQueryAndOptionsModel().filter(
+            // Older versions suffer from SERVER-101007
+            ({pipeline}) => is83orAbove || !JSON.stringify(pipeline).includes('"$elemMatch"'),
+        ),
+    })
     .map(({orMatch, query}) => {
         return {
             "pipeline": [orMatch, ...query.pipeline],
@@ -64,19 +76,3 @@ testProperty(
     makeWorkloadModel({collModel: getCollectionModel(), aggModel, numQueriesPerRun}),
     numRuns,
 );
-
-// // TODO SERVER-103381 re-enable PBT testing for time-series
-// // Test with a TS collection.
-// TODO SERVER-83072 re-enable $group in this test, by removing the filter below.
-// const tsAggModel = aggModel.filter(query => {
-//     for (const stage of query) {
-//         if (Object.keys(stage).includes('$group')) {
-//             return false;
-//         }
-//     }
-//     return true;
-// });
-// testProperty(correctnessProperty,
-//              {controlColl, experimentColl},
-//              makeWorkloadModel({collModel: getCollectionModel(), aggModel: tsAggModel,
-//              numQueriesPerRun}), numRuns);

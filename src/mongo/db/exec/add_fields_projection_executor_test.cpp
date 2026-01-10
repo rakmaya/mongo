@@ -29,7 +29,6 @@
 
 #include "mongo/db/exec/add_fields_projection_executor.h"
 
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/json.h"
 #include "mongo/db/exec/document_value/document.h"
@@ -40,7 +39,6 @@
 #include "mongo/db/query/compiler/dependency_analysis/dependencies.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/intrusive_counter.h"
 
 #include <vector>
 
@@ -101,8 +99,8 @@ TEST(AddFieldsProjectionExecutorSpec, ThrowsOnCreationWithInvalidFieldPath) {
                   AssertionException);
 }
 
-// Verify that AddFieldsProjectionExecutor rejects specifications that contain empty objects or
-// invalid expressions.
+// Verify that AddFieldsProjectionExecutor rejects specifications that contain invalid
+// expressions.
 TEST(AddFieldsProjectionExecutorSpec, ThrowsOnCreationWithInvalidObjectsOrExpressions) {
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     // Invalid expressions should be rejected.
@@ -320,6 +318,19 @@ TEST(AddFieldsProjectionExecutorOptimize, ShouldOptimizeNestedExpressions) {
     ASSERT_DOCUMENT_EQ(expectedSerialization,
                        addition.serializeTransformation(SerializationOptions{
                            .verbosity = ExplainOptions::Verbosity::kExecAllPlans}));
+}
+
+TEST(AddFieldsProjectionExecutor, NonEmptySpecIsNeverNoop) {
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    ASSERT_FALSE(AddFieldsProjectionExecutor::create(expCtx, BSON("a" << true))->isNoop());
+    ASSERT_FALSE(
+        AddFieldsProjectionExecutor::create(expCtx, BSON("a" << BSON("$const" << 1)))->isNoop());
+    ASSERT_FALSE(AddFieldsProjectionExecutor::create(expCtx, BSON("a.b" << true))->isNoop());
+}
+
+TEST(AddFieldsProjectionExecutor, EmptySpecResultsInNoopExecutor) {
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    ASSERT_TRUE(AddFieldsProjectionExecutor::create(expCtx, BSONObj())->isNoop());
 }
 
 //

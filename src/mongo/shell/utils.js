@@ -353,9 +353,9 @@ let _jsTestOptions = {};
 
 function jsTestOptions() {
     if (TestData) {
-        // TODO (SERVER-112812): Enable OpenTelemetry tracing.
-        // const isMultiversion =
-        //     TestData.useRandomBinVersionsWithinReplicaSet || TestData.mixedBinVersions || TestData.mongosBinVersion;
+        const isMultiversion =
+            TestData.useRandomBinVersionsWithinReplicaSet || TestData.mixedBinVersions || TestData.mongosBinVersion;
+        const enableOTELTracing = TestData.enableOTELTracing ?? !isMultiversion;
 
         return Object.merge(_jsTestOptions, {
             // Test commands should be enabled by default if no enableTestCommands were present in
@@ -457,6 +457,7 @@ function jsTestOptions() {
             skipCheckOrphans: TestData.skipCheckOrphans || false,
             skipCheckRoutingTableConsistency: TestData.skipCheckRoutingTableConsistency || false,
             skipCheckShardFilteringMetadata: TestData.skipCheckShardFilteringMetadata || false,
+            pinToSingleMongos: TestData.pinToSingleMongos || false,
             inEvergreen: TestData.inEvergreen || false,
             defaultReadPreference: TestData.defaultReadPreference,
 
@@ -472,10 +473,9 @@ function jsTestOptions() {
             fuzzMongodConfigs: TestData.fuzzMongodConfigs || false,
             mozJSGCZeal: TestData.mozJSGCZeal || "",
 
-            // TODO (SERVER-112812): Enable OpenTelemetry tracing.
-            enableOTELTracing: false, // TestData.enableOTELTracing ?? !isMultiversion,
-            // TODO (SERVER-100133): Replace the mock 'traceCtx' with the actual one from resmoke.
-            traceCtx: TestData.traceCtx ?? "mockTraceCtx",
+            enableOTELTracing,
+            traceCtx: TestData.traceCtx || null,
+            otelTraceDirectory: enableOTELTracing ? (TestData.otelTraceDirectory ?? null) : null,
         });
     }
     return _jsTestOptions;

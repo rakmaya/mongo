@@ -12,6 +12,7 @@ import {
     kRawOperationSpec,
 } from "jstests/core/libs/raw_operation_utils.js";
 import {getPlanStage} from "jstests/libs/query/analyze_plan.js";
+import {assertExplainTargetsExpectedTimeseriesNamespace} from "jstests/core/timeseries/libs/viewless_timeseries_util.js";
 
 const coll = db[jsTestName()];
 
@@ -46,13 +47,7 @@ const assertExplain = function (commandResult, commandName) {
             )}`,
         );
     } else {
-        assert.eq(
-            commandResult.command[commandName],
-            getTimeseriesCollForRawOps(coll).getName(),
-            `Expected command namespace to be ${tojson(getTimeseriesCollForRawOps(coll).getName())} but got ${tojson(
-                commandResult.command[commandName],
-            )}`,
-        );
+        assertExplainTargetsExpectedTimeseriesNamespace(db, coll, commandResult, commandName);
     }
     assert(kIsRawOperationSupported === (commandResult.command.rawData ?? false));
     assert.isnull(getPlanStage(commandResult, "TS_MODIFY")),

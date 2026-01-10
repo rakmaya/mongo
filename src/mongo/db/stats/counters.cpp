@@ -60,6 +60,7 @@ void OpCounters::_reset() {
     _deleteWasEmpty->store(0);
     _deleteFromMissingNamespace->store(0);
     _acceptableErrorInCommand->store(0);
+    _recordIdsReplicatedDocIdMismatch->store(0);
 }
 
 void OpCounters::_checkWrap(CacheExclusive<AtomicWord<long long>> OpCounters::* counter, int n) {
@@ -91,8 +92,9 @@ BSONObj OpCounters::getObj() const {
     auto deleteWasEmpty = _deleteWasEmpty->loadRelaxed();
     auto deleteFromMissingNamespace = _deleteFromMissingNamespace->loadRelaxed();
     auto acceptableErrorInCommand = _acceptableErrorInCommand->loadRelaxed();
+    auto recordIdsReplicatedDocIdMismatch = _recordIdsReplicatedDocIdMismatch->loadRelaxed();
     auto totalRelaxed = insertOnExistingDoc + updateOnMissingDoc + deleteWasEmpty +
-        deleteFromMissingNamespace + acceptableErrorInCommand;
+        deleteFromMissingNamespace + acceptableErrorInCommand + recordIdsReplicatedDocIdMismatch;
 
     if (totalRelaxed > 0) {
         BSONObjBuilder d(b.subobjStart("constraintsRelaxed"));
@@ -101,6 +103,7 @@ BSONObj OpCounters::getObj() const {
         d.append("deleteWasEmpty", deleteWasEmpty);
         d.append("deleteFromMissingNamespace", deleteFromMissingNamespace);
         d.append("acceptableErrorInCommand", acceptableErrorInCommand);
+        d.append("recordIdsReplicatedDocIdMismatch", recordIdsReplicatedDocIdMismatch);
     }
 
     return b.obj();
@@ -339,16 +342,6 @@ void AuthCounter::append(BSONObjBuilder* b) {
 
     const auto totalAuthenticationTimeMicros = _authenticationCumulativeMicros.load();
     b->append("totalAuthenticationTimeMicros", totalAuthenticationTimeMicros);
-}
-
-OpCounterServerStatusSection::OpCounterServerStatusSection(const std::string& sectionName,
-                                                           ClusterRole role,
-                                                           OpCounters* counters)
-    : ServerStatusSection(sectionName, role), _counters(counters) {}
-
-BSONObj OpCounterServerStatusSection::generateSection(OperationContext* opCtx,
-                                                      const BSONElement& configElement) const {
-    return _counters->getObj();
 }
 
 OpCounters& serviceOpCounters(ClusterRole role) {

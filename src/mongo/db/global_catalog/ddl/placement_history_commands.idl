@@ -27,6 +27,7 @@
 
 global:
     cpp_namespace: "mongo"
+    mod_visibility: needs_replacement
 
 imports:
     - "mongo/db/basic_types.idl"
@@ -88,3 +89,10 @@ commands:
                     "When true, verifies that the supplied 'at' cluster time is not in
                     the future relative to the current config time"
                 default: true
+            ignoreRemovedShards:
+                type: bool
+                description:
+                    "When true, ignores the shards that have been removed from the system and finds
+                    the earliest point in time at or after 'at', at which the collection/database/databases
+                    was allocated to a shard set of which at least one shard has not been removed
+                    from the system (returned in attribute 'openCursorAt')."

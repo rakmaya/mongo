@@ -41,8 +41,6 @@
 #include "mongo/db/global_catalog/ddl/sharding_ddl_coordinator_gen.h"
 #include "mongo/db/global_catalog/ddl/sharding_ddl_coordinator_service.h"
 #include "mongo/db/global_catalog/ddl/sharding_ddl_util.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/persistent_task_store.h"
@@ -54,6 +52,8 @@
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/internal_session_pool.h"
 #include "mongo/db/session/logical_session_id_gen.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/versioning_protocol/database_version.h"
 #include "mongo/executor/scoped_task_executor.h"
 #include "mongo/executor/task_executor.h"
@@ -64,6 +64,7 @@
 #include "mongo/util/cancellation.h"
 #include "mongo/util/future.h"
 #include "mongo/util/future_impl.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/namespace_string_util.h"
 #include "mongo/util/version/releases.h"
 
@@ -80,9 +81,10 @@
 
 namespace mongo {
 
-ShardingDDLCoordinatorMetadata extractShardingDDLCoordinatorMetadata(const BSONObj& coorDoc);
+MONGO_MOD_NEEDS_REPLACEMENT ShardingDDLCoordinatorMetadata
+extractShardingDDLCoordinatorMetadata(const BSONObj& coorDoc);
 
-class ShardingDDLCoordinator
+class MONGO_MOD_NEEDS_REPLACEMENT ShardingDDLCoordinator
     : public repl::PrimaryOnlyService::TypedInstance<ShardingDDLCoordinator> {
 public:
     explicit ShardingDDLCoordinator(ShardingDDLCoordinatorService* service, const BSONObj& coorDoc);
@@ -276,7 +278,7 @@ private:
 };
 
 template <class StateDoc>
-class ShardingDDLCoordinatorImpl : public ShardingDDLCoordinator {
+class MONGO_MOD_NEEDS_REPLACEMENT ShardingDDLCoordinatorImpl : public ShardingDDLCoordinator {
 public:
     boost::optional<BSONObj> reportForCurrentOp(
         MongoProcessInterface::CurrentOpConnectionsMode connMode,
@@ -354,7 +356,8 @@ protected:
 };
 
 template <class StateDoc, class Phase>
-class RecoverableShardingDDLCoordinator : public ShardingDDLCoordinatorImpl<StateDoc> {
+class MONGO_MOD_UNFORTUNATELY_OPEN RecoverableShardingDDLCoordinator
+    : public ShardingDDLCoordinatorImpl<StateDoc> {
 protected:
     using ShardingDDLCoordinatorImpl<StateDoc>::_doc;
     using ShardingDDLCoordinatorImpl<StateDoc>::_docMutex;

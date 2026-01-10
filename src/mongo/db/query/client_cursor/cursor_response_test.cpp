@@ -31,7 +31,6 @@
 
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/json.h"
 #include "mongo/bson/oid.h"
 #include "mongo/db/exec/document_value/document.h"
@@ -59,10 +58,15 @@ static const BSONObj basicMetricsObj = fromjson(R"({
     usedDisk: true,
     fromMultiPlanner: true,
     fromPlanCache: true,
+    planningTimeMicros: {"$numberLong": "0"},
     cpuNanos: {"$numberLong": "18"},
     delinquentAcquisitions: {"$numberLong": "0"},
     totalAcquisitionDelinquencyMillis: {"$numberLong": "0"},
     maxAcquisitionDelinquencyMillis: {"$numberLong": "0"},
+    totalTimeQueuedMicros: {"$numberLong": "0"},
+    totalAdmissions: {"$numberLong": "0"},
+    wasLoadShed: false,
+    wasDeprioritized: false,
     numInterruptChecks: {"$numberLong": "0"},
     overdueInterruptApproxMaxMillis: {"$numberLong": "0"},
     nMatched: {"$numberLong": "0"},
@@ -319,10 +323,15 @@ TEST(CursorResponseTest, parseFromBSONCursorMetrics) {
     ASSERT_TRUE(metrics.getUsedDisk());
     ASSERT_TRUE(metrics.getFromMultiPlanner());
     ASSERT_TRUE(metrics.getFromPlanCache());
+    ASSERT_EQ(metrics.getPlanningTimeMicros(), 0);
     ASSERT_EQ(metrics.getCpuNanos(), 18);
     ASSERT_EQ(metrics.getDelinquentAcquisitions(), 0);
     ASSERT_EQ(metrics.getTotalAcquisitionDelinquencyMillis(), 0);
     ASSERT_EQ(metrics.getMaxAcquisitionDelinquencyMillis(), 0);
+    ASSERT_EQ(metrics.getTotalTimeQueuedMicros(), 0);
+    ASSERT_EQ(metrics.getTotalAdmissions(), 0);
+    ASSERT_FALSE(metrics.getWasLoadShed());
+    ASSERT_FALSE(metrics.getWasDeprioritized());
     ASSERT_EQ(metrics.getNumInterruptChecks(), 0);
     ASSERT_EQ(metrics.getOverdueInterruptApproxMaxMillis(), 0);
     ASSERT_EQ(metrics.getNMatched(), 0);
@@ -364,6 +373,7 @@ TEST(CursorResponseTest, parseFromBSONCursorMetricsIncomplete) {
                                    CursorMetrics::kUsedDiskFieldName,
                                    CursorMetrics::kFromMultiPlannerFieldName,
                                    CursorMetrics::kFromPlanCacheFieldName,
+                                   CursorMetrics::kPlanningTimeMicrosFieldName,
                                    CursorMetrics::kCpuNanosFieldName,
                                    CursorMetrics::kNumInterruptChecksFieldName,
                                    CursorMetrics::kNMatchedFieldName,
@@ -952,6 +962,7 @@ TEST_F(CursorResponseBuilderTest, buildResponseWithAllKnownFields) {
                           true /* usedDisk */,
                           true /* fromMultiPlanner */,
                           false /* fromPlanCache */,
+                          26 /* planningTimeMicros */,
                           -1 /* cpuNanos */,
                           15 /* numInterruptChecks */,
                           1 /* nMatched */,
@@ -987,10 +998,15 @@ TEST_F(CursorResponseBuilderTest, buildResponseWithAllKnownFields) {
     ASSERT_TRUE(parsedMetrics->getUsedDisk());
     ASSERT_TRUE(parsedMetrics->getFromMultiPlanner());
     ASSERT_FALSE(parsedMetrics->getFromPlanCache());
+    ASSERT_EQ(parsedMetrics->getPlanningTimeMicros(), 26);
     ASSERT_EQ(parsedMetrics->getCpuNanos(), -1);
     ASSERT_EQ(parsedMetrics->getDelinquentAcquisitions(), 0);
     ASSERT_EQ(parsedMetrics->getTotalAcquisitionDelinquencyMillis(), 0);
     ASSERT_EQ(parsedMetrics->getMaxAcquisitionDelinquencyMillis(), 0);
+    ASSERT_EQ(parsedMetrics->getTotalTimeQueuedMicros(), 0);
+    ASSERT_EQ(parsedMetrics->getTotalAdmissions(), 0);
+    ASSERT_FALSE(parsedMetrics->getWasLoadShed());
+    ASSERT_FALSE(parsedMetrics->getWasDeprioritized());
     ASSERT_EQ(parsedMetrics->getNumInterruptChecks(), 15);
     ASSERT_EQ(parsedMetrics->getOverdueInterruptApproxMaxMillis(), 0);
     ASSERT_EQ(parsedMetrics->getNMatched(), 1);

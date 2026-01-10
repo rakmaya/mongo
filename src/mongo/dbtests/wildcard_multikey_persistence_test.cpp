@@ -27,9 +27,7 @@
  *    it in the license file.
  */
 
-#include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/json.h"
@@ -39,16 +37,8 @@
 #include "mongo/db/field_ref.h"
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/index/multikey_metadata_access_stats.h"
+#include "mongo/db/index_builds/index_build_test_helpers.h"
 #include "mongo/db/index_builds/multi_index_block.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_options.h"
-#include "mongo/db/local_catalog/index_catalog.h"
-#include "mongo/db/local_catalog/index_catalog_entry.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
-#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/compiler/dependency_analysis/dependencies.h"
@@ -58,13 +48,21 @@
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/storage_interface_impl.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/lock_manager/d_concurrency.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_options.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog_entry.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
+#include "mongo/db/shard_role/shard_role.h"
 #include "mongo/db/storage/index_entry_comparison.h"
 #include "mongo/db/storage/key_format.h"
 #include "mongo/db/storage/key_string/key_string.h"
 #include "mongo/db/storage/snapshot.h"
 #include "mongo/db/storage/sorted_data_interface.h"
 #include "mongo/db/storage/write_unit_of_work.h"
-#include "mongo/dbtests/dbtests.h"
 #include "mongo/logv2/log.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/scopeguard.h"
@@ -77,7 +75,6 @@
 #include <utility>
 #include <vector>
 
-#include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
@@ -112,7 +109,7 @@ CollectionAcquisition acquireCollForRead(OperationContext* opCtx, const Namespac
     return acquireCollection(
         opCtx,
         CollectionAcquisitionRequest(nss,
-                                     PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                     PlacementConcern(boost::none, ShardVersion::UNTRACKED()),
                                      repl::ReadConcernArgs::get(opCtx),
                                      AcquisitionPrerequisites::kRead),
         MODE_IS);
@@ -155,7 +152,7 @@ protected:
         // Verify whether or not the index has been marked as multikey.
         ASSERT_EQ(
             expectIndexIsMultikey,
-            getIndexDesc(collectionPtr, indexName)->getEntry()->isMultikey(opCtx(), collectionPtr));
+            getIndexCatalogEntry(collectionPtr, indexName)->isMultikey(opCtx(), collectionPtr));
 
         // Obtain a cursor over the index, and confirm that the keys are present in order.
         auto indexCursor = getIndexCursor(collectionPtr, indexName);
@@ -263,7 +260,7 @@ protected:
             [&] { indexer.abortIndexBuild(opCtx(), coll, MultiIndexBlock::kNoopOnCleanUpFn); });
 
         // Initialize the index builder and add all documents currently in the collection.
-        ASSERT_OK(dbtests::initializeMultiIndexBlock(opCtx(), coll, indexer, indexSpec));
+        ASSERT_OK(initializeMultiIndexBlock(opCtx(), coll, indexer, indexSpec));
         ASSERT_OK(indexer.insertAllDocumentsInCollection(opCtx(), nss));
         ASSERT_OK(indexer.checkConstraints(opCtx(), coll.get()));
 
@@ -285,14 +282,9 @@ protected:
         return docs;
     }
 
-    const IndexDescriptor* getIndexDesc(const CollectionPtr& collection,
-                                        const StringData indexName) {
-        return collection->getIndexCatalog()->findIndexByName(opCtx(), indexName);
-    }
-
     const IndexCatalogEntry* getIndexCatalogEntry(const CollectionPtr& collection,
                                                   const StringData indexName) {
-        return collection->getIndexCatalog()->getEntry(getIndexDesc(collection, indexName));
+        return collection->getIndexCatalog()->findIndexByName(opCtx(), indexName);
     }
 
     std::unique_ptr<SortedDataInterface::Cursor> getIndexCursor(const CollectionPtr& collection,

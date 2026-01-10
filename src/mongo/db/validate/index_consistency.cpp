@@ -51,13 +51,13 @@
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/index/preallocated_container_pool.h"
 #include "mongo/db/index_names.h"
-#include "mongo/db/local_catalog/index_catalog.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
-#include "mongo/db/local_catalog/index_repair.h"
-#include "mongo/db/local_catalog/lock_manager/exception_util.h"
+#include "mongo/db/index_repair.h"
 #include "mongo/db/multi_key_path_tracker.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/record_id_helpers.h"
+#include "mongo/db/shard_role/lock_manager/exception_util.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
 #include "mongo/db/storage/index_entry_comparison.h"
 #include "mongo/db/storage/key_format.h"
 #include "mongo/db/storage/key_string/key_string.h"
@@ -116,14 +116,13 @@ BSONObj _rehydrateKey(const BSONObj& keyPattern, const BSONObj& indexKey) {
 
 }  // namespace
 
-IndexInfo::IndexInfo(const IndexDescriptor& descriptor)
-    : indexName(descriptor.indexName()),
-      keyPattern(descriptor.keyPattern()),
-      indexNameHash(hash(descriptor.indexName())),
-      ord(Ordering::make(descriptor.keyPattern())),
-      unique(descriptor.unique()),
-      accessMethod(descriptor.getEntry()->accessMethod()),
-      indexType(descriptor.getIndexType()) {}
+IndexInfo::IndexInfo(const IndexCatalogEntry& entry)
+    : indexName(entry.descriptor()->indexName()),
+      keyPattern(entry.descriptor()->keyPattern()),
+      indexNameHash(hash(entry.descriptor()->indexName())),
+      ord(Ordering::make(entry.descriptor()->keyPattern())),
+      unique(entry.descriptor()->unique()),
+      accessMethod(entry.accessMethod()) {}
 
 IndexConsistency::IndexConsistency(OperationContext* opCtx,
                                    CollectionValidation::ValidateState* validateState,
@@ -143,9 +142,9 @@ KeyStringIndexConsistency::KeyStringIndexConsistency(
     const size_t numHashBuckets)
     : IndexConsistency(opCtx, validateState, numHashBuckets) {
     for (const auto& indexIdent : _validateState->getIndexIdents()) {
-        const IndexDescriptor* descriptor =
+        const auto entry =
             validateState->getCollection()->getIndexCatalog()->findIndexByIdent(opCtx, indexIdent);
-        _indexesInfo.emplace(descriptor->indexName(), IndexInfo(*descriptor));
+        _indexesInfo.emplace(entry->descriptor()->indexName(), IndexInfo(*entry));
     }
 }
 
@@ -208,9 +207,8 @@ void KeyStringIndexConsistency::repairIndexEntries(OperationContext* opCtx,
         const KeyFormat keyFormat = _validateState->getCollection()->getRecordStore()->keyFormat();
 
         const std::string& indexName = it->first.first->indexName;
-        const IndexDescriptor* descriptor =
+        const auto entry =
             _validateState->getCollection()->getIndexCatalog()->findIndexByName(opCtx, indexName);
-        const IndexCatalogEntry* entry = descriptor->getEntry();
         int64_t numInserted = index_repair::repairMissingIndexEntry(opCtx,
                                                                     entry,
                                                                     ks,
@@ -314,9 +312,6 @@ void KeyStringIndexConsistency::addDocKey(OperationContext* opCtx,
                                           IndexInfo* indexInfo,
                                           const RecordId& recordId,
                                           ValidateResults* results) {
-    if (skipTrackingIndexKeyCount(*indexInfo)) {
-        return;
-    }
     auto rawHash = ks.hash(indexInfo->indexNameHash);
     auto hashLower = rawHash % kNumHashBuckets;
     auto hashUpper = (rawHash / kNumHashBuckets) % kNumHashBuckets;
@@ -356,9 +351,6 @@ void KeyStringIndexConsistency::addIndexKey(OperationContext* opCtx,
                                             IndexInfo* indexInfo,
                                             const RecordId& recordId,
                                             ValidateResults* results) {
-    if (skipTrackingIndexKeyCount(*indexInfo)) {
-        return;
-    }
     auto rawHash = ks.hash(indexInfo->indexNameHash);
     auto hashLower = rawHash % kNumHashBuckets;
     auto hashUpper = (rawHash / kNumHashBuckets) % kNumHashBuckets;
@@ -397,11 +389,13 @@ void KeyStringIndexConsistency::addIndexKey(OperationContext* opCtx,
                 InsertDeleteOptions options;
                 options.dupsAllowed = !indexInfo->unique;
                 int64_t numDeleted = 0;
+                auto nss = entry->getNSSFromCatalog(opCtx);
                 writeConflictRetry(opCtx, "removingExtraIndexEntries", _validateState->nss(), [&] {
                     WriteUnitOfWork wunit(opCtx);
                     Status status = indexInfo->accessMethod->asSortedData()->removeKeys(
                         opCtx,
                         *shard_role_details::getRecoveryUnit(opCtx),
+                        _validateState->getCollection(),
                         entry,
                         {ks},
                         options,
@@ -423,12 +417,6 @@ void KeyStringIndexConsistency::addIndexKey(OperationContext* opCtx,
             _missingIndexEntries.erase(key);
         }
     }
-}
-
-bool KeyStringIndexConsistency::skipTrackingIndexKeyCount(const IndexInfo& indexInfo) {
-    return indexInfo.indexType == IndexType::INDEX_2D ||
-        indexInfo.indexType == IndexType::INDEX_2DSPHERE ||
-        indexInfo.indexType == IndexType::INDEX_2DSPHERE_BUCKET;
 }
 
 bool KeyStringIndexConsistency::limitMemoryUsageForSecondPhase(ValidateResults* result) {
@@ -571,8 +559,8 @@ void KeyStringIndexConsistency::validateIndexKeyCount(OperationContext* opCtx,
 
     // Ignore any indexes with a special access method. If an access method name is given, the
     // index may be a full text, geo or special index plugin with different semantics.
-    if (results.isValid() && !desc->isSparse() && !desc->isPartial() && !desc->isIdIndex() &&
-        desc->getAccessMethodName() == "" && numTotalKeys < (*numRecords)) {
+    if (results.isValid() && !desc->isSetSparseByUser() && !desc->isPartial() &&
+        !desc->isIdIndex() && desc->getAccessMethodName() == "" && numTotalKeys < (*numRecords)) {
         const std::string msg = str::stream()
             << "index " << desc->indexName() << " is not sparse or partial, but has fewer entries ("
             << numTotalKeys << ") than documents in the index (" << (*numRecords) << ")";
@@ -862,10 +850,10 @@ void KeyStringIndexConsistency::traverseRecord(OperationContext* opCtx,
               "recordId"_attr = recordId,
               "record"_attr = redact(recordBson),
               "error"_attr = ex.toString());
-        results->addError(str::stream()
-                              << "Could not build key for index '" << descriptor->indexName()
-                              << "' from document with recordId '" << recordId << "'",
-                          false);
+        results->addError(fmt::format("Could not build key for index {} with error {}",
+                                      descriptor->indexName(),
+                                      ex.codeString()),
+                          /*stopValidation=*/false);
         return;
     }
 
@@ -897,7 +885,7 @@ void KeyStringIndexConsistency::traverseRecord(OperationContext* opCtx,
             writeConflictRetry(opCtx, "setIndexAsMultikey", coll->ns(), [&] {
                 WriteUnitOfWork wuow(opCtx);
                 coll->getIndexCatalog()->setMultikeyPaths(
-                    opCtx, coll, descriptor, *multikeyMetadataKeys, *documentMultikeyPaths);
+                    opCtx, coll, index, *multikeyMetadataKeys, *documentMultikeyPaths);
                 wuow.commit();
             });
 
@@ -933,7 +921,7 @@ void KeyStringIndexConsistency::traverseRecord(OperationContext* opCtx,
                 writeConflictRetry(opCtx, "increaseMultikeyPathCoverage", coll->ns(), [&] {
                     WriteUnitOfWork wuow(opCtx);
                     coll->getIndexCatalog()->setMultikeyPaths(
-                        opCtx, coll, descriptor, *multikeyMetadataKeys, *documentMultikeyPaths);
+                        opCtx, coll, index, *multikeyMetadataKeys, *documentMultikeyPaths);
                     wuow.commit();
                 });
 

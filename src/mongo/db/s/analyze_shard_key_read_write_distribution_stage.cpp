@@ -31,13 +31,13 @@
 
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/exec/agg/document_source_to_stage_registry.h"
-#include "mongo/db/global_catalog/router_role_api/collection_routing_info_targeter.h"
-#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
+#include "mongo/db/router_role/collection_routing_info_targeter.h"
 #include "mongo/db/s/analyze_shard_key_read_write_distribution.h"
 #include "mongo/db/s/document_source_analyze_shard_key_read_write_distribution.h"
+#include "mongo/db/shard_role/shard_role.h"
 #include "mongo/db/sharding_environment/grid.h"
-#include "mongo/db/vector_clock/vector_clock.h"
+#include "mongo/db/topology/vector_clock/vector_clock.h"
 #include "mongo/s/analyze_shard_key_documents_gen.h"
 
 namespace mongo {
@@ -71,7 +71,8 @@ void fetchSplitPoints(OperationContext* opCtx,
                       const BSONObj& splitPointsFilter,
                       const Timestamp& splitPointsAfterClusterTime,
                       boost::optional<ShardId> splitPointsShard,
-                      std::function<void(const BSONObj&)> callbackFn) {
+                      std::function<void(const BSONObj&)> callbackFn,
+                      std::function<void(const Status&)> resetOnRetry) {
     auto sort = BSON(AnalyzeShardKeySplitPointDocument::kSplitPointFieldName << 1);
     auto readConcern = repl::ReadConcernArgs(LogicalTime{splitPointsAfterClusterTime},
                                              repl::ReadConcernLevel::kLocalReadConcern);
@@ -93,15 +94,19 @@ void fetchSplitPoints(OperationContext* opCtx,
         aggRequest.setWriteConcern(WriteConcernOptions());
         aggRequest.setUnwrappedReadPref(ReadPreferenceSetting::get(opCtx).toContainingBSON());
 
+        // TODO(SERVER-113504): Consider using kIdempotent since onRetry allows read only
+        // aggregation processes to be restarted.
         uassertStatusOK(shard->runAggregation(
             opCtx,
             aggRequest,
+            Shard::RetryPolicy::kStrictlyNotIdempotent,
             [&](const std::vector<BSONObj>& docs, const boost::optional<BSONObj>&) -> bool {
                 for (const auto& doc : docs) {
                     callbackFn(doc);
                 }
                 return true;
-            }));
+            },
+            resetOnRetry));
     } else {
         uassertStatusOK(
             repl::ReplicationCoordinator::get(opCtx)->waitUntilOpTimeForRead(opCtx, readConcern));
@@ -166,6 +171,11 @@ CollectionRoutingInfoTargeter makeCollectionRoutingInfoTargeter(
             auto splitPoint = splitPointDoc.getSplitPoint();
             uassertShardKeyValueNotContainArrays(splitPoint);
             appendChunk(lastChunkMax, splitPoint);
+        },
+        [&](const Status&) {
+            chunks.clear();
+            version = ChunkVersion{{epoch, validAfter}, {1, 0}};
+            lastChunkMax = shardKey.globalMin();
         });
 
     appendChunk(lastChunkMax, shardKey.globalMax());
@@ -183,16 +193,16 @@ CollectionRoutingInfoTargeter makeCollectionRoutingInfoTargeter(
                                                             true /* allowMigrations */,
                                                             chunks);
 
-    auto cm = ChunkManager(RoutingTableHistoryValueHandle(std::make_shared<RoutingTableHistory>(
-                               std::move(routingTableHistory))),
-                           boost::none);
+    CurrentChunkManager cm(RoutingTableHistoryValueHandle(
+        std::make_shared<RoutingTableHistory>(std::move(routingTableHistory))));
 
-    return CollectionRoutingInfoTargeter(
-        nss,
-        CollectionRoutingInfo{
-            std::move(cm),
-            DatabaseTypeValueHandle(DatabaseType{
-                nss.dbName(), ShardId("0"), DatabaseVersion(UUID::gen(), validAfter)})});
+    auto routingCtx = RoutingContext::createSynthetic(
+        {{nss,
+          CollectionRoutingInfo{
+              std::move(cm),
+              DatabaseTypeValueHandle(DatabaseType{
+                  nss.dbName(), ShardId("0"), DatabaseVersion(UUID::gen(), validAfter)})}}});
+    return CollectionRoutingInfoTargeter(nss, *routingCtx);
 }
 
 /**

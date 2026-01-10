@@ -151,7 +151,6 @@ Status CachedPlanStage::pickBestPlan(const QueryPlannerParams& plannerParams,
             _bestPlanChosen = true;
             return Status::OK();
         } else if (PlanStage::NEED_YIELD == state) {
-            invariant(id == WorkingSet::INVALID_ID);
             // Run-time plan selection occurs before a WriteUnitOfWork is opened and it's not
             // subject to TemporarilyUnavailableException's.
             invariant(!expCtx()->getTemporarilyUnavailableException());
@@ -167,8 +166,6 @@ Status CachedPlanStage::pickBestPlan(const QueryPlannerParams& plannerParams,
             if (!yieldStatus.isOK()) {
                 return yieldStatus;
             }
-        } else {
-            invariant(PlanStage::NEED_TIME == state);
         }
     }
 
@@ -285,7 +282,11 @@ Status CachedPlanStage::replan(const QueryPlannerParams& plannerParams,
     }
 
     // Delegate to the MultiPlanStage's plan selection facility.
-    Status pickBestPlanStatus = multiPlanStage->pickBestPlan(yieldPolicy);
+    auto runTrialsStatus = multiPlanStage->runTrials(yieldPolicy);
+    if (!runTrialsStatus.isOK()) {
+        return runTrialsStatus;
+    }
+    Status pickBestPlanStatus = multiPlanStage->pickBestPlan();
     if (!pickBestPlanStatus.isOK()) {
         return pickBestPlanStatus;
     }

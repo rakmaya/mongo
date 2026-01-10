@@ -157,9 +157,16 @@ class TestTimeout(_ResmokeSelftest):
         signal_resmoke_process.start()
 
         # Wait for resmoke_process to be killed by 'run-timeout' so this doesn't hang.
-        self.resmoke_process.wait()
+        try:
+            self.resmoke_process.wait(60)
+            return_code = signal_resmoke_process.wait(60)
+        except subprocess.TimeoutExpired:
+            self.resmoke_process.stop()
+            signal_resmoke_process.stop()
+            self.fail(
+                "Resmoke or the hang analyzer process did not terminate within 60 seconds of starting the hang analyzer."
+            )
 
-        return_code = signal_resmoke_process.wait()
         if return_code != 0:
             self.resmoke_process.stop()
         self.assertEqual(return_code, 0)
@@ -251,6 +258,25 @@ class TestTimeout(_ResmokeSelftest):
         self.assert_dir_file_count(self.test_dir_inner, self.archival_file, archival_dirs_to_expect)
 
         analysis_pids_to_expect = 6  # 2 tests * (2 mongod + 1 mongo)
+        self.assert_dir_file_count(self.test_dir, self.analysis_file, analysis_pids_to_expect)
+
+    def test_timeout_in_python_hook(self):
+        resmoke_args = [
+            "--resmokeModulesPath=buildscripts/tests/resmoke_end2end/test_resmoke_modules.yml",
+            "--suites=buildscripts/tests/resmoke_end2end/suites/sleeping_hook_timeout.yml",
+            "--taskId=123",
+            "--originSuite=resmoke_end2end_tests",
+            "--hangAnalyzerHookTimeout=1",
+            "--archiveMode=test_archival",
+            "--internalParam=test_analysis",
+        ]
+
+        self.execute_resmoke(resmoke_args, sentinel_file="timeout0")
+
+        archival_dirs_to_expect = 2  # 2 mongod nodes
+        self.assert_dir_file_count(self.test_dir, self.archival_file, archival_dirs_to_expect)
+
+        analysis_pids_to_expect = 2  # 2 mongod
         self.assert_dir_file_count(self.test_dir, self.analysis_file, analysis_pids_to_expect)
 
 
@@ -664,7 +690,10 @@ class TestExceptionExtraction(unittest.TestCase):
         ]
         output = execute_resmoke(resmoke_args).stdout
 
-        expected = "The following tests failed (with exit code):\n        buildscripts/tests/resmoke_end2end/failtestfiles/python_failure.py (1 DB Exception)\n            [LAST Part of Exception]"
+        expected = """The following tests failed (with exit code):
+        buildscripts/tests/resmoke_end2end/failtestfiles/python_failure.py (1 DB Exception)
+            [LAST Part of Exception]"""
+
         assert expected in output
 
     def test_resmoke_javascript_exception(self):
@@ -673,7 +702,10 @@ class TestExceptionExtraction(unittest.TestCase):
         ]
         output = execute_resmoke(resmoke_args).stdout
 
-        expected = "The following tests failed (with exit code):\n        buildscripts/tests/resmoke_end2end/failtestfiles/js_failure.js (253 Failure executing JS file)\n            uncaught exception: Error: [true] and [false] are not equal"
+        expected = """The following tests failed (with exit code):
+        buildscripts/tests/resmoke_end2end/failtestfiles/js_failure.js (253 Failure executing JS file)
+            uncaught exception: Error: expected true to equal false"""
+
         assert expected in output
 
     def test_resmoke_fixture_error(self):

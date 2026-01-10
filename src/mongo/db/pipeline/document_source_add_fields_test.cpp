@@ -111,12 +111,22 @@ TEST_F(AddFieldsTest, SetAliasShouldSerializeAndParse) {
 TEST_F(AddFieldsTest, ShouldOptimizeInnerExpressions) {
     auto addFields = DocumentSourceAddFields::create(
         BSON("a" << BSON("$and" << BSON_ARRAY(BSON("$const" << true)))), getExpCtx());
-    addFields->optimize();
+    checked_cast<DocumentSourceSingleDocumentTransformation*>(addFields.get())->optimize();
     // The $and should have been replaced with its only argument.
     vector<Value> serializedArray;
     addFields->serializeToArray(serializedArray);
     ASSERT_BSONOBJ_EQ(serializedArray[0].getDocument().toBson(),
                       fromjson("{$addFields: {a: {$const: true}}}"));
+}
+
+TEST_F(AddFieldsTest, ShouldOptimizeAwayEmptyAddition) {
+    auto notEmpty = DocumentSourceAddFields::create(BSON("a" << true), getExpCtx());
+    ASSERT_TRUE(
+        checked_cast<DocumentSourceSingleDocumentTransformation*>(notEmpty.get())->optimize());
+
+    auto empty = DocumentSourceAddFields::create(BSONObj(), getExpCtx());
+    ASSERT_FALSE(
+        checked_cast<DocumentSourceSingleDocumentTransformation*>(empty.get())->optimize());
 }
 
 TEST_F(AddFieldsTest, ShouldErrorOnNonObjectSpec) {

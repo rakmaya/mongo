@@ -30,7 +30,6 @@
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
@@ -46,7 +45,6 @@
 #include "mongo/db/query/collation/collator_interface_mock.h"
 #include "mongo/db/storage/damage_vector.h"
 #include "mongo/platform/decimal128.h"
-#include "mongo/stdx/type_traits.h"
 #include "mongo/unittest/death_test.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/safe_num.h"
@@ -560,7 +558,7 @@ TEST(ArrayAPI, SimpleNumericArray) {
     ASSERT_FALSE(e1[1].ok());
 }
 
-DEATH_TEST_REGEX(ArrayAPI,
+DEATH_TEST_REGEX(ArrayAPIDeathTest,
                  FindFirstChildNamedOnDeserializedArray,
                  R"#(Invariant failure.*getType\(\) != BSONType::array)#") {
     mmb::Document doc;
@@ -570,7 +568,7 @@ DEATH_TEST_REGEX(ArrayAPI,
     array.findFirstChildNamed("0");
 }
 
-DEATH_TEST_REGEX(ArrayAPI,
+DEATH_TEST_REGEX(ArrayAPIDeathTest,
                  FindFirstChildNamedOnSerializedArray,
                  R"#(Invariant failure.*getType\(\) != BSONType::array)#") {
     auto obj = fromjson("{a: [0, 1]}");

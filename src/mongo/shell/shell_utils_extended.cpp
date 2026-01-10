@@ -53,7 +53,6 @@
 #include "mongo/base/data_range_cursor.h"
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
-#include "mongo/bson/bson_bin_util.h"
 #include "mongo/bson/bson_validate.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
@@ -278,16 +277,16 @@ BSONObj md5sumFile(const BSONObj& args, void* data) {
 
     md5digest d;
     md5_state_t st;
-    md5_init_state(&st);
+    md5_init_state_deprecated(&st);
 
     enum { BUFLEN = 4 * 1024 };
     char buffer[BUFLEN];
     int bytes_read;
     while ((bytes_read = fread(buffer, 1, BUFLEN, f))) {
-        md5_append(&st, (const md5_byte_t*)(buffer), bytes_read);
+        md5_append_deprecated(&st, (const md5_byte_t*)(buffer), bytes_read);
     }
 
-    md5_finish(&st, d);
+    md5_finish_deprecated(&st, d);
     return BSON("" << digestToString(d));
 }
 

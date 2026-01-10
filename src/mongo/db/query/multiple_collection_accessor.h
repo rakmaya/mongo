@@ -29,10 +29,11 @@
 
 #pragma once
 
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/db_raii.h"
-#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
 #include "mongo/db/query/plan_executor.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/db_raii.h"
+#include "mongo/db/shard_role/shard_role.h"
+#include "mongo/util/modules.h"
 
 namespace mongo {
 
@@ -44,7 +45,7 @@ namespace mongo {
  * store the namespace strings and fetch 'collectionPtr' on demand, since they can become invalid
  * during query yields. The main collectionPtr is restored through yield so it can be stored.
  */
-class MultipleCollectionAccessor final {
+class MONGO_MOD_NEEDS_REPLACEMENT MultipleCollectionAccessor final {
 public:
     MultipleCollectionAccessor() = default;
 
@@ -67,6 +68,10 @@ public:
 
     bool hasMainCollection() const {
         return _mainAcq && _mainAcq->collectionExists();
+    }
+
+    bool hasNonExistentMainCollection() const {
+        return _mainAcq && _mainAcq->isCollection() && !_mainAcq->collectionExists();
     }
 
     const CollectionPtr& getMainCollection() const {
@@ -95,6 +100,13 @@ public:
 
     CollectionPtr lookupCollection(const NamespaceString& nss) const {
         return _lookupCollectionAcquisitionAndGetCollPtr(nss);
+    }
+
+    bool knowsNamespace(const NamespaceString& nss) const {
+        if (nss == _mainAcq->nss()) {
+            return true;
+        }
+        return _secondaryAcq.find(nss) != _secondaryAcq.end();
     }
 
     boost::optional<CollectionAcquisition> getCollectionAcquisitionFromUuid(const UUID uuid) const {

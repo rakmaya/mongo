@@ -41,6 +41,10 @@
 
 namespace mongo::rule_based_rewrites {
 
+// Represents a set of tags that can be assigned to a rule. It is up to implementations of `Context`
+// to define the meaning of each bit/tag.
+using TagSet = uint32_t;
+
 /**
  * Represents a rewrite rule, defined by a precondition, transformation and a priority.
  */
@@ -69,16 +73,12 @@ struct Rule {
      * Priority of the rule. Higher value means higher priority.
      */
     double priority = 0;
-};
 
-template <typename Context>
-std::partial_ordering operator<=>(const Rule<Context>& lhs, const Rule<Context>& rhs) {
-    if (auto cmp = lhs.priority <=> rhs.priority; cmp != 0) {
-        return cmp;
-    }
-    // Compare names to break tie. Rule names are assumed to be unique.
-    return lhs.name <=> rhs.name;
-}
+    /**
+     * The engine can be made to only apply rules that have been assigned a certain tag.
+     */
+    TagSet tags = 0;
+};
 
 template <typename Context>
 class RewriteEngine;
@@ -114,9 +114,14 @@ public:
     /**
      * Enqueues given rules to be applied to the current element.
      */
-    void addRules(std::vector<Rule<SubClass>> rules) {
+    void addRules(const std::vector<Rule<SubClass>>& rules) {
+        for (auto&& rule : rules) {
+            addRule(rule);
+        }
+    }
+    void addRule(const Rule<SubClass>& rule) {
         tassert(11010014, "Engine not initialized", _engine);
-        _engine->addRules(std::move(rules));
+        _engine->addRule(rule);
     }
 
     /**
@@ -139,6 +144,18 @@ private:
     RewriteEngine<SubClass>* _engine;
 };
 
+namespace rule_detail {
+// Whether this rule has been assigned least one of the given tags.
+template <typename Context>
+constexpr bool hasTag(const Rule<Context>& rule, TagSet tags) {
+    if (tags == 0) {
+        // Empty tag set denotes that we want to run all rules.
+        return true;
+    }
+    return tags & rule.tags;
+}
+}  // namespace rule_detail
+
 /**
  * Concrete class responsible for driving the rewrite process. Provides an entry point for
  * optimization and manages a queue of rules to be applied. Owns the Context, which is used
@@ -152,20 +169,18 @@ public:
         _context.setEngine(*this);
     }
 
-    void addRule(Rule<Context> rule) {
-        _rules.emplace(std::move(rule));
-    }
-
-    void addRules(std::vector<Rule<Context>> rules) {
-        for (auto&& rule : rules) {
-            addRule(std::move(rule));
+    void addRule(const Rule<Context>& rule) {
+        if (rule_detail::hasTag(rule, _tagsToRun)) {
+            _rules.push(&rule);
         }
     }
 
     /**
      * Entry point to optimization.
      */
-    void applyRules() {
+    void applyRules(TagSet tagsToRun = 0) {
+        _tagsToRun = tagsToRun;
+
         while (_context.hasMore()) {
             // Enqueue rules for the current position. Note that transforms can queue additional
             // rules.
@@ -175,6 +190,7 @@ public:
             switch (nextAction) {
                 case NextAction::Requeue:
                     // Requeue rules that apply to the current element without advancing.
+                    clearRules();
                     break;
                 case NextAction::Advance:
                     // Did not update position. Advance to the next element.
@@ -187,6 +203,47 @@ public:
     }
 
 private:
+    /**
+     * Similar to std::priority_queue, but allows us clear() the queue without changing capacity,
+     * which helps performance when rules are being requeued over and over again.
+     */
+    class RuleQueue {
+    public:
+        const Rule<Context>* pop() {
+            std::pop_heap(_queue.begin(), _queue.end(), _compare);
+            auto& result = _queue.back();
+            _queue.pop_back();
+            return result;
+        }
+
+        void push(const Rule<Context>* rule) {
+            _queue.push_back(rule);
+            std::push_heap(_queue.begin(), _queue.end(), _compare);
+        }
+
+        bool empty() const {
+            return _queue.empty();
+        }
+
+        void clear() {
+            _queue.clear();
+        }
+
+        size_t size() const {
+            return _queue.size();
+        }
+
+    private:
+        struct HighestPriorityFirst {
+            bool operator()(const Rule<Context>* a, const Rule<Context>* b) const {
+                return a->priority < b->priority;
+            }
+        };
+
+        HighestPriorityFirst _compare{};
+        std::vector<const Rule<Context>*> _queue;
+    };
+
     enum class NextAction {
         Requeue,
         Advance,
@@ -206,8 +263,7 @@ private:
                 return NextAction::Bail;
             }
 
-            const auto rule = std::move(_rules.top());
-            _rules.pop();
+            const auto& rule = *_rules.pop();
             const size_t rulesBefore = _rules.size();
 
             LOGV2_DEBUG(11010013,
@@ -230,9 +286,7 @@ private:
                 tassert(11010015,
                         "Should not add new rules from a rule that requires requeueing",
                         rulesBefore == _rules.size());
-
                 // Discard remaining rules and requeue because we changed position.
-                clearRules();
                 return NextAction::Requeue;
             }
         }
@@ -241,11 +295,13 @@ private:
     }
 
     void clearRules() {
-        _rules = {};
+        _rules.clear();
     }
 
     Context _context;
-    std::priority_queue<Rule<Context>> _rules;
+    RuleQueue _rules;
+    // Only rules with at least one of these tags will be applied.
+    TagSet _tagsToRun{0};
 
     const size_t _maxRewrites;
     size_t _rewritesApplied{0};

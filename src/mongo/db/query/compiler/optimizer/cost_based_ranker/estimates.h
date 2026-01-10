@@ -36,6 +36,7 @@
 #include "mongo/util/fixed_string.h"
 #include "mongo/util/modules.h"
 
+#include <compare>
 #include <limits>
 
 #include <boost/functional/hash.hpp>
@@ -46,7 +47,7 @@ namespace mongo::cost_based_ranker {
  * Convert nanoseconds to milliseconds.
  */
 constexpr double operator""_ms(long double v) {
-    return v * 1.0e-6;
+    return static_cast<double>(v) * 1.0e-6;
 }
 
 
@@ -79,8 +80,8 @@ QUERY_UTIL_NAMED_ENUM_DEFINE(EstimationUnit, ESTIMATION_UNITS_NAMES);
  * Heuristics  - the estimate is computed via heuristic CE
  * Mixed  - the estimate is a result of some computation that mixes estimates of different types
  * Metadata - the estimate comes from database metadata like collection cardinality
- * Code - the estimate is computed directly in C++, for instance a constant, or expression.
- *         Most often used for internal testing.
+ * Code - the estimate is computed directly in C++, for instance a constant, expression, or
+ *         computation via exactCE. Most often used for internal testing.
  */
 #define ESTIMATION_SOURCE_NAMES(F) \
     F(Histogram)                   \
@@ -139,16 +140,10 @@ struct CostCoefficientTagParam {
     // The smallest cost coefficient is equal to the cost of the fastest QE
     // operation. This is typically the cost of a simple binary comparison of a
     // scalar value.
-    // TODO (SERVER-94981): based on Bonsai cost calibration it is 1 ns, assuming
-    //  all cost calibration measurements are in 'ms'. Should be updated with a
-    //  reference to the relevant cost coefficient in the new cost model.
-    static constexpr double kMin = 10.0_ms;
+    static constexpr double kMin = 11.67_ms;
     // The maximum value of a cost coefficient is the most expensive operation per
     // document according to the cost model.
-    // TODO (SERVER-94981): Currently this is based on Bonsai calibration, and it
-    //  should be updated to reference the relevant cost coefficient in the new cost
-    //  model.
-    static constexpr double kMax = 15000.0_ms;
+    static constexpr double kMax = 24067.01_ms;
     // TODO (SERVER-94981): Define this value based on cost model sensitivity.
     static constexpr double kEpsilon = 1.0e-5;
 };
@@ -211,6 +206,8 @@ public:
 
     bool operator==(const StrongDouble<TypeTag>& other) const = default;
 
+    auto operator<=>(const StrongDouble& other) const = default;
+
     // The minimum and maximum values of this type, inclusive.
     static StrongDouble<TypeTag> minValue() {
         static StrongDouble<TypeTag> theValue(TypeTag::kMinValue);
@@ -256,6 +253,8 @@ public:
 
     friend CardinalityEstimate operator*(const SelectivityEstimate& s,
                                          const CardinalityEstimate& ce);
+    friend CardinalityEstimate operator/(const CardinalityEstimate& ce,
+                                         const SelectivityEstimate& s);
 
 private:
     double _v;
@@ -370,20 +369,9 @@ public:
         return !(*this == e);
     }
 
-    bool operator>(const OptimizerEstimate<ValueType, EstimateType>& e) const {
-        return (*this != e) && this->_estimate._v > e._estimate._v;
-    }
-
-    bool operator>=(const OptimizerEstimate<ValueType, EstimateType>& e) const {
-        return (*this == e) || this->_estimate._v > e._estimate._v;
-    }
-
-    bool operator<(const OptimizerEstimate<ValueType, EstimateType>& e) const {
-        return (*this != e) && this->_estimate._v < e._estimate._v;
-    }
-
-    bool operator<=(const OptimizerEstimate<ValueType, EstimateType>& e) const {
-        return (*this == e) || this->_estimate._v < e._estimate._v;
+    auto operator<=>(const OptimizerEstimate<ValueType, EstimateType>& e) const {
+        return *this == e ? std::partial_ordering::equivalent
+                          : this->_estimate._v <=> e._estimate._v;
     }
 
     // Arithmetic operators.
@@ -463,6 +451,9 @@ public:
 
     friend CardinalityEstimate operator*(const CardinalityEstimate& ce,
                                          const SelectivityEstimate& s);
+
+    friend CardinalityEstimate operator/(const CardinalityEstimate& ce,
+                                         const SelectivityEstimate& s);
 };
 
 /**
@@ -477,6 +468,13 @@ public:
     CostType cost() const {
         return _estimate;
     }
+
+    // Multiplication is undefined for two costs - this operation has no meaning - the unit of the
+    // result would be CostEstimate^2. However, it is useful to multiply costs by some unitless
+    // factor.
+    friend CostEstimate operator*(const CostEstimate& c, double factor);
+
+    friend CostEstimate operator*(double factor, const CostEstimate& c);
 };
 
 /**
@@ -546,6 +544,9 @@ public:
 
     friend CardinalityEstimate operator*(const CardinalityEstimate& ce,
                                          const SelectivityEstimate& s);
+
+    friend CardinalityEstimate operator/(const CardinalityEstimate& ce,
+                                         const SelectivityEstimate& s);
 };
 
 CardinalityEstimate operator*(const CardinalityEstimate& ce, double factor);
@@ -588,6 +589,10 @@ inline const CardinalityEstimate zeroMetadataCE{CardinalityType{0.0}, Estimation
 inline const CardinalityEstimate oneCE{CardinalityType{1}, EstimationSource::Code};
 inline const CardinalityEstimate minCE{CardinalityType::minValue(), EstimationSource::Code};
 inline const CardinalityEstimate maxCE{CardinalityType::maxValue(), EstimationSource::Code};
+
+// TODO(SERVER-100603): Remove these hardcoded values once we can estimate them
+inline constexpr int32_t kAverageDocumentSizeBytes = 1024;
+inline constexpr int32_t kAverageIndexEntrySizeBytes = 256;
 
 inline const SelectivityEstimate zeroSel{SelectivityType{0.0}, EstimationSource::Code};
 inline const SelectivityEstimate oneSel{SelectivityType{1.0}, EstimationSource::Code};

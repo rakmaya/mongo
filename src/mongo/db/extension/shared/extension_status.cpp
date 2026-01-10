@@ -45,6 +45,7 @@ const ::MongoExtensionStatusVTable extension::ExtensionStatusOK::VTABLE = {
     .get_reason = &ExtensionStatusOK::_extGetReason,
     .set_code = &ExtensionStatusOK::_extSetCode,
     .set_reason = &ExtensionStatusOK::_extSetReason,
+    .clone = &ExtensionStatusOK::_extClone,
 };
 
 const ::MongoExtensionStatusVTable extension::ExtensionStatusException::VTABLE = {
@@ -53,6 +54,7 @@ const ::MongoExtensionStatusVTable extension::ExtensionStatusException::VTABLE =
     .get_reason = &ExtensionStatusException::_extGetReason,
     .set_code = &ExtensionStatusException::_extSetCode,
     .set_reason = &ExtensionStatusException::_extSetReason,
+    .clone = &ExtensionStatusException::_extClone,
 };
 
 const ::MongoExtensionStatusVTable extension::ExtensionGenericStatus::VTABLE = {
@@ -61,6 +63,7 @@ const ::MongoExtensionStatusVTable extension::ExtensionGenericStatus::VTABLE = {
     .get_reason = &ExtensionGenericStatus::_extGetReason,
     .set_code = &ExtensionGenericStatus::_extSetCode,
     .set_reason = &ExtensionGenericStatus::_extSetReason,
+    .clone = &ExtensionGenericStatus::_extClone,
 };
 
 void convertStatusToException(StatusHandle status) {
@@ -79,4 +82,20 @@ void convertStatusToException(StatusHandle status) {
     }
     throw ExtensionDBException(std::move(status));
 }
+
+void StatusAPI::setCode(int code) {
+    vtable().set_code(get(), code);
+}
+
+void StatusAPI::setReason(std::string_view reason) {
+    auto byteView = stringViewAsByteView(reason);
+    invokeCAndConvertStatusToException([&]() { return vtable().set_reason(get(), byteView); });
+}
+
+StatusHandle StatusAPI::clone() const {
+    ::MongoExtensionStatus* cloneTarget{nullptr};
+    invokeCAndConvertStatusToException([&]() { return vtable().clone(get(), &cloneTarget); });
+    return StatusHandle(cloneTarget);
+}
+
 }  // namespace mongo::extension

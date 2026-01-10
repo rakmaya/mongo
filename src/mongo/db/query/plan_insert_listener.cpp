@@ -30,13 +30,12 @@
 #include "mongo/db/query/plan_insert_listener.h"
 
 #include "mongo/db/curop.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_catalog.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/query/find_common.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/logv2/log.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/util/clock_source.h"
@@ -69,7 +68,11 @@ bool shouldWaitForInserts(OperationContext* opCtx,
     // we should wait for inserts.
     if (shouldListenForInserts(opCtx, cq)) {
         // We expect awaitData cursors to be yielding.
-        invariant(yieldPolicy->canReleaseLocksDuringExecution());
+        tassert(
+            11321502,
+            fmt::format("Cannot create notifier with non-yielding PlanYieldPolicy::YieldPolicy {}",
+                        static_cast<int>(yieldPolicy->getPolicy())),
+            yieldPolicy->canReleaseLocksDuringExecution());
 
         // For operations with a last committed opTime, we are fetching oplog entries and should not
         // wait if the replication coordinator's lastCommittedOpTime has progressed past the
@@ -85,11 +88,15 @@ bool shouldWaitForInserts(OperationContext* opCtx,
     return false;
 }
 
-std::unique_ptr<Notifier> getCappedInsertNotifier(OperationContext* opCtx,
-                                                  const NamespaceString& nss,
-                                                  PlanYieldPolicy* yieldPolicy) {
+std::unique_ptr<Notifier> getCappedInsertNotifier(
+    OperationContext* opCtx,
+    const boost::optional<CollectionAcquisition>& collection,
+    PlanYieldPolicy* yieldPolicy) {
     // We don't expect to need a capped insert notifier for non-yielding plans.
-    invariant(yieldPolicy->canReleaseLocksDuringExecution());
+    tassert(11321503,
+            fmt::format("Cannot create notifier with non-yielding PlanYieldPolicy::YieldPolicy {}",
+                        static_cast<int>(yieldPolicy->getPolicy())),
+            yieldPolicy->canReleaseLocksDuringExecution());
 
     // In case of the read concern majority, return a majority committed point notifier, otherwise,
     // a notifier associated with that capped collection
@@ -100,11 +107,10 @@ std::unique_ptr<Notifier> getCappedInsertNotifier(OperationContext* opCtx,
         RecoveryUnit::kMajorityCommitted) {
         return std::make_unique<MajorityCommittedPointNotifier>();
     } else {
-        auto collection = CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, nss);
-        invariant(collection);
+        tassert(11321504, "collection must not be null", collection && collection->exists());
 
         return std::make_unique<LocalCappedInsertNotifier>(
-            collection->getRecordStore()->capped()->getInsertNotifier());
+            collection->getCollectionPtr()->getRecordStore()->capped()->getInsertNotifier());
     }
 }
 

@@ -29,7 +29,6 @@
 
 #include "mongo/db/exec/sbe/stages/hash_lookup.h"
 
-#include <set>
 
 // IWYU pragma: no_include "ext/alloc_traits.h"
 #include "mongo/db/curop.h"
@@ -39,7 +38,6 @@
 #include "mongo/db/exec/sbe/stages/stage_visitors.h"
 #include "mongo/db/query/stage_memory_limit_knobs/knobs.h"
 
-#include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
 
 namespace mongo::sbe {
@@ -177,12 +175,10 @@ void HashLookupStage::open(bool reOpen) {
 
     // Insert the inner side into the hash table.
     innerChild()->open(false);
+    value::FixedSizeRow<1 /*N*/> value{1};
     while (innerChild()->getNext() == PlanState::ADVANCED) {
-        value::MaterializedRow value{1};
-
         // Copy the projected value.
-        auto [tag, val] = _inInnerProjectAccessor->getCopyOfValue();
-        value.reset(0, true, tag, val);
+        value.reset(0, _inInnerProjectAccessor->getCopyOfValue());
 
         // This where we put the value in here. This can grow need to spill.
         size_t bufferIndex = _hashTable.bufferValueOrSpill(value);
@@ -211,13 +207,12 @@ void HashLookupStage::open(bool reOpen) {
 template <typename Container>
 void HashLookupStage::accumulateFromValueIndices(const Container* bufferIndices) {
     for (const size_t bufferIdx : *bufferIndices) {
-        boost::optional<std::pair<value::TypeTags, value::Value>> innerMatch =
-            _hashTable.getValueAtIndex(bufferIdx);
-        _outInnerProjectAccessor.reset(false /* owned */, innerMatch->first, innerMatch->second);
+        boost::optional<value::TagValueView> innerMatch = _hashTable.getValueAtIndex(bufferIdx);
+        tassert(10801300, "Expected non-empty innerMatch", innerMatch);
+        _outInnerProjectAccessor.reset(*innerMatch);
 
         // Run the VM code to "accumulate" the current inner doc into the lookup output array.
-        auto [owned, tag, val] = _bytecode.run(_aggCode.get());
-        _lookupStageOutput.reset(0 /* column */, owned, tag, val);
+        _lookupStageOutput.reset(0 /* column */, _bytecode.run(_aggCode.get()));
     }
 }  // HashLookupStage::accumulateFromValueIndices
 
@@ -277,9 +272,8 @@ const SpecificStats* HashLookupStage::getSpecificStats() const {
     return _hashTable.getHashLookupStats();
 }
 
-std::vector<DebugPrinter::Block> HashLookupStage::debugPrint() const {
-    auto ret = PlanStage::debugPrint();
-
+void HashLookupStage::doDebugPrint(std::vector<DebugPrinter::Block>& ret,
+                                   DebugPrintInfo& debugPrintInfo) const {
     ret.emplace_back(DebugPrinter::Block("[`"));
     auto& [slot, expr] = _innerAgg;
     DebugPrinter::addIdentifier(ret, slot);
@@ -296,7 +290,7 @@ std::vector<DebugPrinter::Block> HashLookupStage::debugPrint() const {
     DebugPrinter::addKeyword(ret, "outer");
     DebugPrinter::addIdentifier(ret, _outerKeySlot);
     ret.emplace_back(DebugPrinter::Block::cmdIncIndent);
-    DebugPrinter::addBlocks(ret, outerChild()->debugPrint());
+    DebugPrinter::addBlocks(ret, outerChild()->debugPrint(debugPrintInfo));
     ret.emplace_back(DebugPrinter::Block::cmdDecIndent);
 
     DebugPrinter::addKeyword(ret, "inner");
@@ -304,13 +298,15 @@ std::vector<DebugPrinter::Block> HashLookupStage::debugPrint() const {
     DebugPrinter::addIdentifier(ret, _innerProjectSlot);
 
     ret.emplace_back(DebugPrinter::Block::cmdIncIndent);
-    DebugPrinter::addBlocks(ret, innerChild()->debugPrint());
+    DebugPrinter::addBlocks(ret, innerChild()->debugPrint(debugPrintInfo));
     ret.emplace_back(DebugPrinter::Block::cmdDecIndent);
 
     ret.emplace_back(DebugPrinter::Block::cmdDecIndent);
 
-    return ret;
-}  // HashLookupStage::debugPrint
+    if (debugPrintInfo.printBytecode) {
+        PlanStage::debugPrintBytecode(ret, _aggCode, "AGGREGATE" /*title*/);
+    }
+}  // HashLookupStage::doDebugPrint
 
 size_t HashLookupStage::estimateCompileTimeSize() const {
     size_t size = sizeof(*this);

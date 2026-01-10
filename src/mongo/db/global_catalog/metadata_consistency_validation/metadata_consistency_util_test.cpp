@@ -38,11 +38,11 @@
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/keypattern.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/create_collection.h"
-#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_runtime.h"
-#include "mongo/db/local_catalog/shard_role_catalog/database_sharding_state_mock.h"
 #include "mongo/db/query/collation/collator_factory_icu.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_sharding_runtime.h"
+#include "mongo/db/shard_role/shard_catalog/create_collection.h"
+#include "mongo/db/shard_role/shard_catalog/database_sharding_state_mock.h"
 #include "mongo/db/sharding_environment/shard_server_test_fixture.h"
 #include "mongo/db/timeseries/timeseries_options.h"
 #include "mongo/db/versioning_protocol/chunk_version.h"
@@ -107,8 +107,8 @@ TimeseriesOptions generateTimeseriesOptions(
     return options;
 }
 
-std::vector<CollectionPtr> getLocalCatalogCollections(OperationContext* opCtx,
-                                                      const NamespaceString& nss) {
+std::pair<const std::shared_ptr<const CollectionCatalog>, std::vector<CollectionPtr>>
+getLocalCatalog(OperationContext* opCtx, const NamespaceString& nss) {
     std::vector<CollectionPtr> localCatalogCollections;
     auto collCatalogSnapshot = [&] {
         AutoGetCollection coll(opCtx,
@@ -124,7 +124,7 @@ std::vector<CollectionPtr> getLocalCatalogCollections(OperationContext* opCtx,
         // it's controlled by the test. The initialization is therefore safe.
         localCatalogCollections.emplace_back(CollectionPtr::CollectionPtr_UNSAFE(coll));
     }
-    return localCatalogCollections;
+    return {collCatalogSnapshot, std::move(localCatalogCollections)};
 }
 
 class MetadataConsistencyTest : public ShardServerTestFixture {
@@ -388,7 +388,7 @@ TEST_F(MetadataConsistencyTest, CappedAndShardedCollection) {
     cmd.getCreateCollectionRequest().setSize(100);
     createTestCollection(opCtx, _nss, cmd.toBSON());
 
-    const auto localCatalogCollections = getLocalCatalogCollections(opCtx, _nss);
+    const auto [localCatalogSnapshot, localCatalogCollections] = getLocalCatalog(opCtx, _nss);
     ASSERT_EQ(1, localCatalogCollections.size());
 
     // Create a CollectionType for a non-unsplittable collection to mock the collection info
@@ -401,6 +401,7 @@ TEST_F(MetadataConsistencyTest, CappedAndShardedCollection) {
         _shardId,
         _shardId,
         {configColl},
+        localCatalogSnapshot,
         localCatalogCollections,
         false /*checkRangeDeletionIndexes*/);
     assertCollectionOptionsMismatchInconsistencyFound(
@@ -436,7 +437,7 @@ TEST_F(MetadataConsistencyTest, DefaultCollationMismatchBetweenLocalAndShardingC
         }
         createTestCollection(opCtx, nss, cmd.toBSON());
 
-        const auto localCatalogCollections = getLocalCatalogCollections(opCtx, nss);
+        const auto [localCatalogSnapshot, localCatalogCollections] = getLocalCatalog(opCtx, nss);
         ASSERT_EQ(1, localCatalogCollections.size());
 
         // Create a CollectionType to mock the collection metadata fetched from the config server.
@@ -451,6 +452,7 @@ TEST_F(MetadataConsistencyTest, DefaultCollationMismatchBetweenLocalAndShardingC
             _shardId,
             _shardId,
             {configColl},
+            localCatalogSnapshot,
             localCatalogCollections,
             false /*checkRangeDeletionIndexes*/);
 
@@ -517,7 +519,8 @@ TEST_F(MetadataConsistencyTest, TimeseriesOptionsMismatchBetweenLocalAndSharding
 
             const auto& actualNss = (localTimeseries ? nss.makeTimeseriesBucketsNamespace() : nss);
 
-            const auto localCatalogCollections = getLocalCatalogCollections(opCtx, actualNss);
+            const auto [localCatalogSnapshot, localCatalogCollections] =
+                getLocalCatalog(opCtx, actualNss);
             ASSERT_EQ(1, localCatalogCollections.size());
 
             // Create a CollectionType to mock the collection metadata fetched from the config
@@ -537,6 +540,7 @@ TEST_F(MetadataConsistencyTest, TimeseriesOptionsMismatchBetweenLocalAndSharding
                     _shardId,
                     _shardId,
                     {configColl},
+                    localCatalogSnapshot,
                     localCatalogCollections,
                     false /*checkRangeDeletionIndexes*/);
 
@@ -742,6 +746,39 @@ TEST_F(MetadataConsistencyTest, FindMatchingDurableDatabaseMetadataInWrongShard)
         MetadataInconsistencyTypeEnum::kMisplacedDatabaseMetadataInShardCatalog, inconsistencies);
 }
 
+TEST_F(MetadataConsistencyTest, CheckDatabaseMetadataConsistency_CriticalSection) {
+    RAIIServerParameterControllerForTest featureFlagControllerForDDL(
+        "featureFlagShardAuthoritativeDbMetadataDDL", true);
+    RAIIServerParameterControllerForTest featureFlagControllerForCRUD(
+        "featureFlagShardAuthoritativeDbMetadataCRUD", true);
+
+    // Use the same database metadata for the global catalog and the shard catalog.
+    Timestamp dbTimestamp{1, 0};
+    DatabaseVersion dbVersion{_dbUuid, dbTimestamp};
+    DatabaseType dbInGlobalCatalog{_dbName, kMyShardName, dbVersion};
+    DBDirectClient client(operationContext());
+    client.insert(NamespaceString::kConfigShardCatalogDatabasesNamespace,
+                  dbInGlobalCatalog.toBSON());
+
+    // Mock that the critical section is acquired in the DSS.
+    {
+        AutoGetDb autoDb(operationContext(), _dbName, MODE_IX);
+        auto scopedDsr = DatabaseShardingRuntime::acquireExclusive(operationContext(), _dbName);
+        scopedDsr->enterCriticalSectionCatchUpPhase(BSON("reason" << "test"));
+        scopedDsr->enterCriticalSectionCommitPhase(BSON("reason" << "test"));
+    }
+
+
+    // Validate that throws in case the critical section is acquired by another thread.
+    ASSERT_THROWS_CODE(metadata_consistency_util::checkDatabaseMetadataConsistency(
+                           operationContext(), dbInGlobalCatalog),
+                       AssertionException,
+                       ErrorCodes::StaleDbVersion);
+
+    auto scopedDsr = DatabaseShardingRuntime::acquireExclusive(operationContext(), _dbName);
+    scopedDsr->exitCriticalSectionNoChecks();
+}
+
 TEST_F(MetadataConsistencyTest, FindInconsistentDurableDatabaseMetadataInShard) {
     RAIIServerParameterControllerForTest featureFlagControllerForDDL(
         "featureFlagShardAuthoritativeDbMetadataDDL", true);
@@ -775,7 +812,7 @@ TEST_F(MetadataConsistencyTest, ShardUntrackedCollectionInconsistencyTest) {
 
     createTestCollection(opCtx, _nss);
 
-    const auto localCatalogCollections = getLocalCatalogCollections(opCtx, _nss);
+    const auto [localCatalogSnapshot, localCatalogCollections] = getLocalCatalog(opCtx, _nss);
     ASSERT_EQ(1, localCatalogCollections.size());
 
     auto configColl = generateCollectionType(_nss, localCatalogCollections[0]->uuid());
@@ -785,6 +822,7 @@ TEST_F(MetadataConsistencyTest, ShardUntrackedCollectionInconsistencyTest) {
         _shardId,
         _shardId,
         {configColl},
+        localCatalogSnapshot,
         localCatalogCollections,
         false /*checkRangeDeletionIndexes*/);
     assertOneInconsistencyFound(
@@ -804,6 +842,7 @@ TEST_F(MetadataConsistencyTest, ShardUntrackedCollectionInconsistencyTest) {
         _shardId,
         _shardId,
         {configColl},
+        localCatalogSnapshot,
         localCatalogCollections,
         false /*checkRangeDeletionIndexes*/);
     ASSERT_EQ(0, inconsistencies.size());
@@ -814,7 +853,7 @@ TEST_F(MetadataConsistencyTest, ShardTrackedCollectionInconsistencyTest) {
 
     createTestCollection(opCtx, _nss);
 
-    const auto localCatalogCollections = getLocalCatalogCollections(opCtx, _nss);
+    const auto [localCatalogSnapshot, localCatalogCollections] = getLocalCatalog(opCtx, _nss);
     ASSERT_EQ(1, localCatalogCollections.size());
 
     {
@@ -841,8 +880,7 @@ TEST_F(MetadataConsistencyTest, ShardTrackedCollectionInconsistencyTest) {
             std::make_shared<RoutingTableHistory>(std::move(rt)),
             ComparableChunkVersion::makeComparableChunkVersion(version));
 
-        const auto collectionMetadata =
-            CollectionMetadata(ChunkManager(rtHandle, boost::none), _shardId);
+        const auto collectionMetadata = CollectionMetadata(CurrentChunkManager(rtHandle), _shardId);
 
         auto scopedCSR = CollectionShardingRuntime::acquireExclusive(opCtx, _nss);
         scopedCSR->setFilteringMetadata(opCtx, collectionMetadata);
@@ -852,7 +890,8 @@ TEST_F(MetadataConsistencyTest, ShardTrackedCollectionInconsistencyTest) {
         opCtx,
         _shardId,
         _shardId,
-        {},
+        {} /* shardingCatalogCollections */,
+        localCatalogSnapshot,
         localCatalogCollections,
         false /*checkRangeDeletionIndexes*/);
     assertOneInconsistencyFound(
@@ -871,7 +910,8 @@ TEST_F(MetadataConsistencyTest, ShardTrackedCollectionInconsistencyTest) {
         opCtx,
         _shardId,
         _shardId,
-        {},
+        {} /* shardingCatalogCollections */,
+        localCatalogSnapshot,
         localCatalogCollections,
         false /*checkRangeDeletionIndexes*/);
     ASSERT_EQ(0, inconsistencies.size());

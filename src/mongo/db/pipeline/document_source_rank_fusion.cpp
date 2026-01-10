@@ -40,6 +40,7 @@
 #include "mongo/db/pipeline/lite_parsed_document_source.h"
 #include "mongo/db/pipeline/lite_parsed_pipeline.h"
 #include "mongo/db/pipeline/pipeline.h"
+#include "mongo/db/pipeline/pipeline_factory.h"
 #include "mongo/db/pipeline/rank_fusion_pipeline_builder.h"
 #include "mongo/db/query/allowed_contexts.h"
 #include "mongo/db/query/util/rank_fusion_util.h"
@@ -56,10 +57,13 @@
 
 namespace mongo {
 
-REGISTER_DOCUMENT_SOURCE(rankFusion,
-                         DocumentSourceRankFusion::LiteParsed::parse,
-                         DocumentSourceRankFusion::createFromBson,
-                         AllowedWithApiStrict::kNeverInVersion1);
+REGISTER_LITE_PARSED_DOCUMENT_SOURCE(rankFusion,
+                                     DocumentSourceRankFusion::LiteParsed::parse,
+                                     AllowedWithApiStrict::kNeverInVersion1);
+
+REGISTER_DOCUMENT_SOURCE_CONTAINER_WITH_STAGE_PARAMS_DEFAULT(rankFusion,
+                                                             DocumentSourceRankFusion,
+                                                             RankFusionStageParams);
 
 std::unique_ptr<DocumentSourceRankFusion::LiteParsed> DocumentSourceRankFusion::LiteParsed::parse(
     const NamespaceString& nss, const BSONElement& spec, const LiteParserOptions& options) {
@@ -79,7 +83,7 @@ std::unique_ptr<DocumentSourceRankFusion::LiteParsed> DocumentSourceRankFusion::
         [nss](const auto& elem) { return LiteParsedPipeline(nss, parsePipelineFromBSON(elem)); });
 
     return std::make_unique<DocumentSourceRankFusion::LiteParsed>(
-        spec.fieldName(), nss, std::move(liteParsedPipelines));
+        spec, nss, std::move(liteParsedPipelines));
 }
 
 /**
@@ -134,7 +138,8 @@ std::map<std::string, std::unique_ptr<Pipeline>> parseAndValidateRankedSelection
         // Ensure that all pipelines are valid ranked selection pipelines.
         rankFusionBsonPipelineValidator(bsonPipeline);
 
-        auto pipeline = Pipeline::parse(bsonPipeline, pExpCtx);
+        auto pipeline = pipeline_factory::makePipeline(
+            bsonPipeline, pExpCtx, pipeline_factory::kOptionsMinimal);
 
         // Validate pipeline name.
         auto inputName = innerPipelineBsonElem.fieldName();

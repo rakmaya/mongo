@@ -46,7 +46,7 @@
 #include "mongo/db/query/collation/collation_index_key.h"
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/sharding_environment/mongod_and_mongos_server_parameters_gen.h"
-#include "mongo/s/shard_targeting_helpers.h"
+#include "mongo/s/query/shard_targeting_collation_helpers.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
 
@@ -826,7 +826,7 @@ void ChunkManager::getShardIdsForRange(const BSONObj& min,
     // owns chunks when it used to at _clusterTime.
     if (!_clusterTime && ChunkMap::allElementsAreOfType(BSONType::minKey, min) &&
         ChunkMap::allElementsAreOfType(BSONType::maxKey, max)) {
-        getAllShardIds(shardIds);
+        _rt->optRt->getAllShardIds(shardIds);
         if (chunkRanges) {
             getAllChunkRanges(chunkRanges);
         }
@@ -871,8 +871,8 @@ bool ChunkManager::rangeOverlapsShard(const ChunkRange& range, const ShardId& sh
     return overlapFound;
 }
 
-boost::optional<Chunk> ChunkManager::getNextChunkOnShard(const BSONObj& shardKey,
-                                                         const ShardId& shardId) const {
+boost::optional<Chunk> CurrentChunkManager::getNextChunkOnShard(const BSONObj& shardKey,
+                                                                const ShardId& shardId) const {
     tassert(7626422, "Expected routing table to be initialized", _rt->optRt);
     tassert(8719704,
             "Should never call getNextChunkOnShard when ChunkManager is at point-in-time",
@@ -914,10 +914,6 @@ void RoutingTableHistory::getAllChunkRanges(std::set<ChunkRange>* all) const {
         all->insert(chunkInfo->getRange());
         return true;
     });
-}
-
-ChunkManager ChunkManager::makeAtTime(const ChunkManager& cm, Timestamp clusterTime) {
-    return ChunkManager(cm._rt, clusterTime);
 }
 
 bool ChunkManager::allowMigrations() const {
@@ -1106,9 +1102,9 @@ ShardEndpoint::ShardEndpoint(const ShardId& shardName,
       shardVersion(std::move(shardVersionParam)),
       databaseVersion(std::move(dbVersionParam)) {
     if (databaseVersion)
-        invariant(shardVersion && *shardVersion == ShardVersion::UNSHARDED());
+        invariant(shardVersion && *shardVersion == ShardVersion::UNTRACKED());
     else if (shardVersion)
-        invariant(*shardVersion != ShardVersion::UNSHARDED());
+        invariant(*shardVersion != ShardVersion::UNTRACKED());
     else
         invariant(shardName == ShardId::kConfigServerId);
 }

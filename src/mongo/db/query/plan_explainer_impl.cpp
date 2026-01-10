@@ -42,7 +42,6 @@
 #include "mongo/db/exec/classic/multi_plan.h"
 #include "mongo/db/exec/classic/near.h"
 #include "mongo/db/exec/classic/plan_stage.h"
-#include "mongo/db/exec/classic/sort.h"
 #include "mongo/db/exec/classic/text_match.h"
 #include "mongo/db/exec/plan_stats.h"
 #include "mongo/db/field_ref.h"
@@ -241,6 +240,11 @@ void statsToBSON(const stage_builder::PlanStageToQsnMap& planStageQsnMap,
     if (isCached) {
         bob->append("isCached", *isCached);
     }
+    // The join optimization feature is incompatible with the classic engine. If the knob is
+    // enabled, note that the join optmization was not used to make debugging easier.
+    if (internalEnableJoinOptimization.load()) {
+        bob->append("usedJoinOptimization", false);
+    }
 
     // Stage name.
     bob->append("stage", stats.common.stageTypeStr);
@@ -331,6 +335,11 @@ void statsToBSON(const stage_builder::PlanStageToQsnMap& planStageQsnMap,
         }
     } else if (STAGE_COLLSCAN == stats.stageType) {
         CollectionScanStats* spec = static_cast<CollectionScanStats*>(stats.specific.get());
+        if (auto qsnNode = dynamic_cast<const CollectionScanNode*>(querySolutionNode); qsnNode) {
+            bob->append(
+                "nss",
+                NamespaceStringUtil::serialize(qsnNode->nss, SerializationContext::stateDefault()));
+        }
         bob->append("direction", spec->direction > 0 ? "forward" : "backward");
         if (spec->minRecord) {
             spec->minRecord->appendToBSONAs(bob, "minRecord");
@@ -355,6 +364,11 @@ void statsToBSON(const stage_builder::PlanStageToQsnMap& planStageQsnMap,
             bob->appendNumber("keysExamined", static_cast<long long>(spec->keysExamined));
         }
 
+        if (auto qsnNode = dynamic_cast<const CountScanNode*>(querySolutionNode); qsnNode) {
+            bob->append(
+                "nss",
+                NamespaceStringUtil::serialize(qsnNode->nss, SerializationContext::stateDefault()));
+        }
         bob->append("keyPattern", spec->keyPattern);
         bob->append("indexName", spec->indexName);
         if (!spec->collation.isEmpty()) {
@@ -365,7 +379,7 @@ void statsToBSON(const stage_builder::PlanStageToQsnMap& planStageQsnMap,
             appendMultikeyPaths(spec->keyPattern, spec->multiKeyPaths, bob);
         }
         bob->appendBool("isUnique", spec->isUnique);
-        bob->appendBool("isSparse", spec->isSparse);
+        bob->appendBool("isSparse", spec->isSetSparseByUser);
         bob->appendBool("isPartial", spec->isPartial);
         bob->append("indexVersion", spec->indexVersion);
 
@@ -393,7 +407,7 @@ void statsToBSON(const stage_builder::PlanStageToQsnMap& planStageQsnMap,
             appendMultikeyPaths(spec->keyPattern, spec->multiKeyPaths, bob);
         }
         bob->appendBool("isUnique", spec->isUnique);
-        bob->appendBool("isSparse", spec->isSparse);
+        bob->appendBool("isSparse", spec->isSetSparseByUser);
         bob->appendBool("isPartial", spec->isPartial);
         if (spec->isShardFilteringDistinctScanEnabled) {
             bob->appendBool("isShardFiltering", spec->isShardFiltering);
@@ -425,6 +439,11 @@ void statsToBSON(const stage_builder::PlanStageToQsnMap& planStageQsnMap,
         }
     } else if (STAGE_FETCH == stats.stageType) {
         FetchStats* spec = static_cast<FetchStats*>(stats.specific.get());
+        if (auto qsnNode = dynamic_cast<const FetchNode*>(querySolutionNode); qsnNode) {
+            bob->append(
+                "nss",
+                NamespaceStringUtil::serialize(qsnNode->nss, SerializationContext::stateDefault()));
+        }
         if (verbosity >= ExplainOptions::Verbosity::kExecStats) {
             bob->appendNumber("docsExamined", static_cast<long long>(spec->docsExamined));
             bob->appendNumber("alreadyHasObj", static_cast<long long>(spec->alreadyHasObj));
@@ -432,6 +451,16 @@ void statsToBSON(const stage_builder::PlanStageToQsnMap& planStageQsnMap,
     } else if (STAGE_GEO_NEAR_2D == stats.stageType || STAGE_GEO_NEAR_2DSPHERE == stats.stageType) {
         NearStats* spec = static_cast<NearStats*>(stats.specific.get());
 
+        if (auto qsnNode = dynamic_cast<const GeoNear2DNode*>(querySolutionNode); qsnNode) {
+            bob->append(
+                "nss",
+                NamespaceStringUtil::serialize(qsnNode->nss, SerializationContext::stateDefault()));
+        } else if (auto qsnNode = dynamic_cast<const GeoNear2DSphereNode*>(querySolutionNode);
+                   qsnNode) {
+            bob->append(
+                "nss",
+                NamespaceStringUtil::serialize(qsnNode->nss, SerializationContext::stateDefault()));
+        }
         bob->append("keyPattern", spec->keyPattern);
         bob->append("indexName", spec->indexName);
         bob->append("indexVersion", spec->indexVersion);
@@ -468,6 +497,11 @@ void statsToBSON(const stage_builder::PlanStageToQsnMap& planStageQsnMap,
     } else if (STAGE_IXSCAN == stats.stageType) {
         IndexScanStats* spec = static_cast<IndexScanStats*>(stats.specific.get());
 
+        if (auto qsnNode = dynamic_cast<const IndexScanNode*>(querySolutionNode); qsnNode) {
+            bob->append(
+                "nss",
+                NamespaceStringUtil::serialize(qsnNode->nss, SerializationContext::stateDefault()));
+        }
         bob->append("keyPattern", spec->keyPattern);
         bob->append("indexName", spec->indexName);
         if (!spec->collation.isEmpty()) {
@@ -478,7 +512,7 @@ void statsToBSON(const stage_builder::PlanStageToQsnMap& planStageQsnMap,
             appendMultikeyPaths(spec->keyPattern, spec->multiKeyPaths, bob);
         }
         bob->appendBool("isUnique", spec->isUnique);
-        bob->appendBool("isSparse", spec->isSparse);
+        bob->appendBool("isSparse", spec->isSetSparseByUser);
         bob->appendBool("isPartial", spec->isPartial);
         bob->append("indexVersion", spec->indexVersion);
         bob->append("direction", spec->direction > 0 ? "forward" : "backward");
@@ -585,6 +619,11 @@ void statsToBSON(const stage_builder::PlanStageToQsnMap& planStageQsnMap,
     } else if (STAGE_TEXT_MATCH == stats.stageType) {
         TextMatchStats* spec = static_cast<TextMatchStats*>(stats.specific.get());
 
+        if (auto qsnNode = dynamic_cast<const TextMatchNode*>(querySolutionNode); qsnNode) {
+            bob->append(
+                "nss",
+                NamespaceStringUtil::serialize(qsnNode->nss, SerializationContext::stateDefault()));
+        }
         bob->append("indexPrefix", spec->indexPrefix);
         bob->append("indexName", spec->indexName);
         bob->append("parsedTextQuery", spec->parsedTextQuery);
@@ -976,7 +1015,7 @@ PlanExplainer::PlanStatsDetails PlanExplainerImpl::getWinningPlanStats(
         bob.append("solutionHashUnstable", (long long)candidateSolutionHash);
     }
     statsToBSON(_planStageQsnMap,
-                _cbrResult.estimates,
+                _planRankingResult.estimates,
                 *stats,
                 verbosity,
                 winningPlanIdx,
@@ -1014,7 +1053,7 @@ std::vector<PlanExplainer::PlanStatsDetails> PlanExplainerImpl::getRejectedPlans
                 }
                 auto stats = _root->getStats();
                 statsToBSON(_planStageQsnMap,
-                            _cbrResult.estimates,
+                            _planRankingResult.estimates,
                             *stats,
                             verbosity,
                             i,
@@ -1039,10 +1078,10 @@ std::vector<PlanExplainer::PlanStatsDetails> PlanExplainerImpl::getRejectedPlans
     // For each rejected plan via CBR, explain it, and look up the corresponding cost and CE.
     tassert(10872501,
             "CBR PlanStage and QuerySolution vectors must have equal length.",
-            _cbrRejectedPlanStages.size() == _cbrResult.rejectedPlans.size());
+            _cbrRejectedPlanStages.size() == _planRankingResult.rejectedPlans.size());
     for (size_t i = 0; i < _cbrRejectedPlanStages.size(); ++i) {
         auto&& rejectedPlan = _cbrRejectedPlanStages[i];
-        auto&& rejectedSoln = _cbrResult.rejectedPlans[i];
+        auto&& rejectedSoln = _planRankingResult.rejectedPlans[i];
         const auto candidateSolutionHash = rejectedSoln->hash();
         bool isCached = _cachedPlanHash && (*_cachedPlanHash == candidateSolutionHash);
         BSONObjBuilder bob;
@@ -1050,8 +1089,14 @@ std::vector<PlanExplainer::PlanStatsDetails> PlanExplainerImpl::getRejectedPlans
             bob.append("solutionHashUnstable", (long long)candidateSolutionHash);
         }
         auto stats = rejectedPlan->getStats();
-        statsToBSON(
-            _planStageQsnMap, _cbrResult.estimates, *stats, verbosity, i, &bob, &bob, isCached);
+        statsToBSON(_planStageQsnMap,
+                    _planRankingResult.estimates,
+                    *stats,
+                    verbosity,
+                    i,
+                    &bob,
+                    &bob,
+                    isCached);
         res.push_back({bob.obj(), boost::none /*summary*/});
     }
 

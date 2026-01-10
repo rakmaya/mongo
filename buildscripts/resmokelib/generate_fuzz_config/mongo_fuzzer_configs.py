@@ -225,7 +225,14 @@ def generate_encryption_config(rng: random.Random):
 def generate_normal_mongo_parameters(rng, value):
     """Returns the value assigned the mongod or mongos parameter based on the fields of the parameters in the config_fuzzer_limits.py."""
 
-    if "isUniform" in value:
+    if "document" in value:
+        ret = {}
+        for doc_key, doc_value in value["document"].items():
+            if "exclude_prob" in doc_value and rng.random() < doc_value["exclude_prob"]:
+                # Exclude this key from the document
+                continue
+            ret[doc_key] = generate_normal_mongo_parameters(rng, doc_value)
+    elif "isUniform" in value:
         ret = rng.uniform(value["min"], value["max"])
     elif "isRandomizedChoice" in value:
         choices = value["choices"]
@@ -244,47 +251,33 @@ def generate_normal_mongo_parameters(rng, value):
 
 def generate_special_mongod_parameters(rng, ret, params):
     """Returns the value assigned the mongod parameter based on the fields of the parameters in config_fuzzer_limits.py for special parameters (parameters with different assignment behaviors)."""
-    ret["storageEngineConcurrencyAdjustmentAlgorithm"] = rng.choices(
-        params["storageEngineConcurrencyAdjustmentAlgorithm"]["choices"], weights=[10, 1]
-    )[0]
 
-    # We assign the wiredTigerConcurrent(Read/Write)Transactions only if the storageEngineConcurrencyAdjustmentAlgorithm is fixedConcurrentTransactions.
-    # Otherwise, we will disable throughput probing.
-    if ret["storageEngineConcurrencyAdjustmentAlgorithm"] == "fixedConcurrentTransactions":
-        ret["wiredTigerConcurrentReadTransactions"] = rng.randint(
-            params["wiredTigerConcurrentReadTransactions"]["min"],
-            params["wiredTigerConcurrentReadTransactions"]["max"],
-        )
-        ret["wiredTigerConcurrentWriteTransactions"] = rng.randint(
-            params["wiredTigerConcurrentWriteTransactions"]["min"],
-            params["wiredTigerConcurrentWriteTransactions"]["max"],
-        )
-    # We assign the throughputProbing* parameters only if the storageEngineConcurrencyAdjustmentAlgorithm is throughputProbing.
-    else:
-        # throughputProbingConcurrencyMovingAverageWeight is the only parameter that uses rng.random().
-        ret["throughputProbingConcurrencyMovingAverageWeight"] = 1 - rng.random()
+    # throughputProbingConcurrencyMovingAverageWeight is the only parameter that uses rng.random().
+    ret["throughputProbingConcurrencyMovingAverageWeight"] = 1 - rng.random()
 
-        # We assign throughputProbingInitialConcurrency first because throughputProbingMinConcurrency and throughputProbingMaxConcurrency depend on it.
-        ret["throughputProbingInitialConcurrency"] = rng.randint(
-            params["throughputProbingInitialConcurrency"]["min"],
-            params["throughputProbingInitialConcurrency"]["max"],
-        )
-        ret["throughputProbingMinConcurrency"] = rng.randint(
-            params["throughputProbingMinConcurrency"]["min"],
-            ret["throughputProbingInitialConcurrency"],
-        )
-        ret["throughputProbingMaxConcurrency"] = rng.randint(
-            ret["throughputProbingInitialConcurrency"],
-            params["throughputProbingMaxConcurrency"]["max"],
-        )
-        ret["throughputProbingReadWriteRatio"] = rng.uniform(
-            params["throughputProbingReadWriteRatio"]["min"],
-            params["throughputProbingReadWriteRatio"]["max"],
-        )
-        ret["throughputProbingStepMultiple"] = rng.uniform(
-            params["throughputProbingStepMultiple"]["min"],
-            params["throughputProbingStepMultiple"]["max"],
-        )
+    # We assign throughputProbingInitialConcurrency first, then derive min/max to satisfy:
+    # 2 * minConcurrency <= initialConcurrency <= 2 * maxConcurrency
+    # (initialConcurrency is TOTAL while min/maxConcurrency are PER-POOL)
+    ret["throughputProbingInitialConcurrency"] = rng.randint(
+        params["throughputProbingInitialConcurrency"]["min"],
+        params["throughputProbingInitialConcurrency"]["max"],
+    )
+    ret["throughputProbingMinConcurrency"] = rng.randint(
+        params["throughputProbingMinConcurrency"]["min"],
+        ret["throughputProbingInitialConcurrency"] // 2,
+    )
+    ret["throughputProbingMaxConcurrency"] = rng.randint(
+        ret["throughputProbingInitialConcurrency"] // 2,
+        params["throughputProbingMaxConcurrency"]["max"],
+    )
+    ret["throughputProbingReadWriteRatio"] = rng.uniform(
+        params["throughputProbingReadWriteRatio"]["min"],
+        params["throughputProbingReadWriteRatio"]["max"],
+    )
+    ret["throughputProbingStepMultiple"] = rng.uniform(
+        params["throughputProbingStepMultiple"]["min"],
+        params["throughputProbingStepMultiple"]["max"],
+    )
 
     # mirrorReads sets a nested samplingRate field.
     ret["mirrorReads"] = {"samplingRate": rng.choice(params["mirrorReads"]["choices"])}
@@ -364,6 +357,7 @@ def generate_mongod_parameters(rng):
         param: val
         for param, val in config_fuzzer_params["mongod"].items()
         if "startup" in val.get("fuzz_at", [])
+        and not (val.get("enterprise_only", False) and "enterprise" not in config.MODULES)
     }
 
     # Parameter sets with different behaviors.
@@ -388,15 +382,12 @@ def generate_mongod_parameters(rng):
         "logicalSessionRefreshMillis",
         "maxNumberOfTransactionOperationsInSingleOplogEntry",
         "mirrorReads",
-        "storageEngineConcurrencyAdjustmentAlgorithm",
         "throughputProbingConcurrencyMovingAverageWeight",
         "throughputProbingInitialConcurrency",
         "throughputProbingMinConcurrency",
         "throughputProbingMaxConcurrency",
         "throughputProbingReadWriteRatio",
         "throughputProbingStepMultiple",
-        "wiredTigerConcurrentReadTransactions",
-        "wiredTigerConcurrentWriteTransactions",
         "failpoint.hangAfterPreCommittingCatalogUpdates",
         "failpoint.hangBeforePublishingCatalogUpdates",
     ]
@@ -424,10 +415,19 @@ def generate_mongod_extra_configs(rng):
         config_fuzzer_extra_configs,
     )
 
-    return {
+    generated_config = {
         key: generate_normal_mongo_parameters(rng, value)
         for key, value in config_fuzzer_extra_configs["mongod"].items()
+        if not (value.get("enterprise_only", False) and "enterprise" not in config.MODULES)
     }
+
+    # This is needed for our antithesis setup
+    # Our antithesis setup runs twice, once for setup and once at runtime
+    # If this option is different between the two runs, the hook can fail
+    if config.NOOP_MONGO_D_S_PROCESSES:
+        generated_config["auditRuntimeConfiguration"] = "on"
+
+    return generated_config
 
 
 def generate_mongos_parameters(rng):
@@ -441,6 +441,7 @@ def generate_mongos_parameters(rng):
         param: val
         for param, val in config_fuzzer_params["mongos"].items()
         if "startup" in val.get("fuzz_at", [])
+        and not (val.get("enterprise_only", False) and "enterprise" not in config.MODULES)
     }
 
     return {key: generate_normal_mongo_parameters(rng, value) for key, value in params.items()}

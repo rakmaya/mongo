@@ -119,17 +119,33 @@ void testSimple8b(const std::vector<boost::optional<T>>& expectedValues,
     assertValuesEqual(s8b, expectedValues);
 
     make_signed_t<T> sum = 0;
+    boost::optional<T> last = T{0};
     for (auto&& val : expectedValues) {
         if (val) {
             sum = add(sum, Simple8bTypeUtil::decodeInt(*val));
         }
+        last = val;
     }
 
-    uint64_t prev = 0xE;  // Tests in this file assume that the previous value was '0'. This is
-                          // different semantics from BSONColumn.
+    uint64_t prev = simple8b::kSingleZero;
     auto s = simple8b::sum<make_signed_t<T>>(
         reinterpret_cast<const char*>(expectedBinary.data()), expectedBinary.size(), prev);
     ASSERT_EQ(s, sum);
+
+    // Test last
+    prev = simple8b::kSingleZero;
+    ASSERT_EQ(last,
+              simple8b::last<T>(reinterpret_cast<const char*>(expectedBinary.data()),
+                                expectedBinary.size(),
+                                prev));
+    if (last.has_value()) {
+        prev = simple8b::kSingleZero;
+        ASSERT_EQ(
+            Simple8bTypeUtil::decodeInt(*last),
+            simple8b::last<make_signed_t<T>>(
+                reinterpret_cast<const char*>(expectedBinary.data()), expectedBinary.size(), prev));
+    }
+
 
     auto testPrefixSum = [&](auto prefix) {
         make_signed_t<T> sum = prefix;
@@ -142,8 +158,7 @@ void testSimple8b(const std::vector<boost::optional<T>>& expectedValues,
             }
         }
 
-        uint64_t prev = 0xE;  // Tests in this file assume that the previous value was '0'. This is
-                              // different semantics from BSONColumn.
+        uint64_t prev = simple8b::kSingleZero;
         auto ps = simple8b::prefixSum<make_signed_t<T>>(
             reinterpret_cast<const char*>(expectedBinary.data()),
             expectedBinary.size(),
@@ -923,15 +938,13 @@ TEST(Simple8b, Selector8SmallStartWith8SelectorAndAddSmallerValues) {
 
     uint64_t val = 7340032;
     std::vector<boost::optional<uint64_t>> expectedInts(3, val);
+    expectedInts.reserve(7);
 
     val = 57344;
     expectedInts.insert(expectedInts.end(), 3, val);
 
     val = 6;
-    MONGO_COMPILER_DIAGNOSTIC_PUSH
-    MONGO_COMPILER_DIAGNOSTIC_IGNORED_TRANSITIONAL("-Wstringop-overflow")
     expectedInts.insert(expectedInts.end(), 1, val);
-    MONGO_COMPILER_DIAGNOSTIC_POP
 
     // test that buffer was correct
     std::vector<uint8_t> expectedBinary = {0x18, 0x75, 0x75, 0x75, 0xE3, 0xE3, 0xE3, 0x60};

@@ -31,6 +31,7 @@
 
 #include "mongo/db/service_context_test_fixture.h"
 #include "mongo/db/versioning_protocol/shard_version_factory.h"
+#include "mongo/s/session_catalog_router.h"
 #include "mongo/s/write_ops/unified_write_executor/write_op_analyzer.h"
 #include "mongo/s/write_ops/unified_write_executor/write_op_producer.h"
 #include "mongo/unittest/unittest.h"
@@ -47,7 +48,7 @@ public:
     StatusWith<Analysis> analyze(OperationContext* opCtx,
                                  RoutingContext& routingCtx,
                                  const WriteOp& writeOp) override {
-        auto it = _opAnalysis.find(writeOp.getId());
+        auto it = _opAnalysis.find(writeOp.getIndex());
         tassert(
             10346702, "Write op id should be found in the analysis data", it != _opAnalysis.end());
         return it->second;
@@ -80,11 +81,15 @@ public:
     const ShardEndpoint nss0Shard1 = ShardEndpoint(shardId1, shardVersionNss0Shard1, boost::none);
     const ShardEndpoint nss1Shard0 = ShardEndpoint(shardId0, shardVersionNss1Shard0, boost::none);
     const ShardEndpoint nss1Shard1 = ShardEndpoint(shardId1, shardVersionNss1Shard1, boost::none);
+    const bool nss0IsViewfulTimeseries = false;
+    const bool nss1IsViewfulTimeseries = true;
+    const std::set<NamespaceString> nssIsViewfulTimeseries{nss1};
 
     void assertMultiShardSimpleWriteBatch(
         const WriteBatch& batch,
         WriteOpId expectedOpId,
         std::vector<ShardEndpoint> expectedShardVersions,
+        std::vector<bool> expectedIsViewfulTimeseries,
         boost::optional<analyze_shard_key::TargetedSampleId> expectedSampleId = boost::none) {
         ASSERT_TRUE(std::holds_alternative<SimpleWriteBatch>(batch.data));
         auto& simpleBatch = std::get<SimpleWriteBatch>(batch.data);
@@ -95,7 +100,7 @@ public:
             ASSERT_NOT_EQUALS(shardRequestIt, simpleBatch.requestByShardId.end());
             auto& shardRequest = shardRequestIt->second;
             ASSERT_EQ(shardRequest.ops.size(), 1);
-            ASSERT_EQ(shardRequest.ops.front().getId(), expectedOpId);
+            ASSERT_EQ(shardRequest.ops.front().getIndex(), expectedOpId);
             ASSERT_EQ(shardRequest.versionByNss.size(), 1);
             ASSERT_EQ(shardRequest.versionByNss.begin()->second, expectedShard);
 
@@ -121,21 +126,23 @@ public:
         auto& simpleBatch = std::get<SimpleWriteBatch>(batch.data);
         for (auto& [shardId, request] : simpleBatch.requestByShardId) {
             for (auto& op : request.ops) {
-                if (reprocessOpIds.contains(op.getId())) {
+                if (reprocessOpIds.contains(op.getIndex())) {
                     batcher.markOpReprocess({op});
                 }
             }
         }
     }
 
-    void assertNonTargetedWriteBatch(const WriteBatch& batch,
-                                     WriteOpId expectedOpId,
-                                     boost::optional<UUID> expectedSampleId = boost::none) {
-        ASSERT_TRUE(std::holds_alternative<NonTargetedWriteBatch>(batch.data));
-        auto& nonTargetedWriteBatch = std::get<NonTargetedWriteBatch>(batch.data);
-        const auto& op = nonTargetedWriteBatch.op;
-        ASSERT_EQ(op.getId(), expectedOpId);
-        ASSERT_EQ(nonTargetedWriteBatch.sampleId, expectedSampleId);
+    void assertTwoPhaseWriteBatch(const WriteBatch& batch,
+                                  WriteOpId expectedOpId,
+                                  bool expectedIsViewfulTimeseries,
+                                  boost::optional<UUID> expectedSampleId = boost::none) {
+        ASSERT_TRUE(std::holds_alternative<TwoPhaseWriteBatch>(batch.data));
+        auto& twoPhaseWriteBatch = std::get<TwoPhaseWriteBatch>(batch.data);
+        const auto& op = twoPhaseWriteBatch.op;
+        ASSERT_EQ(op.getIndex(), expectedOpId);
+        ASSERT_EQ(twoPhaseWriteBatch.isViewfulTimeseries, expectedIsViewfulTimeseries);
+        ASSERT_EQ(twoPhaseWriteBatch.sampleId, expectedSampleId);
     }
 
     void assertInternalTransactionBatch(const WriteBatch& batch,
@@ -144,7 +151,7 @@ public:
         ASSERT_TRUE(std::holds_alternative<InternalTransactionBatch>(batch.data));
         auto& internalTransactionBatch = std::get<InternalTransactionBatch>(batch.data);
         const auto& op = internalTransactionBatch.op;
-        ASSERT_EQ(op.getId(), expectedOpId);
+        ASSERT_EQ(op.getIndex(), expectedOpId);
         ASSERT_EQ(internalTransactionBatch.sampleId, expectedSampleId);
     }
 
@@ -156,7 +163,7 @@ public:
         auto& multiWriteBlockingMigrations =
             std::get<MultiWriteBlockingMigrationsBatch>(batch.data);
         const auto& op = multiWriteBlockingMigrations.op;
-        ASSERT_EQ(op.getId(), expectedOpId);
+        ASSERT_EQ(op.getIndex(), expectedOpId);
         ASSERT_EQ(multiWriteBlockingMigrations.sampleId, expectedSampleId);
     }
 
@@ -183,6 +190,7 @@ public:
     void assertSingleShardSimpleWriteBatch(const WriteBatch& batch,
                                            std::vector<WriteOpId> expectedOpIds,
                                            std::vector<ShardEndpoint> expectedShardVersions,
+                                           std::vector<bool> expectedIsViewfulTimeseries,
                                            std::map<WriteOpId, UUID> expectedSampleIds = {}) {
         ASSERT_TRUE(std::holds_alternative<SimpleWriteBatch>(batch.data));
         auto& simpleBatch = std::get<SimpleWriteBatch>(batch.data);
@@ -192,10 +200,14 @@ public:
         ASSERT_EQ(shardRequest.ops.size(), expectedShardVersions.size());
         for (size_t i = 0; i < shardRequest.ops.size(); i++) {
             const auto& op = shardRequest.ops[i];
-            ASSERT_EQ(op.getId(), expectedOpIds[i]);
+            ASSERT_EQ(op.getIndex(), expectedOpIds[i]);
+
             auto opShard = shardRequest.versionByNss.find(op.getNss());
             ASSERT_TRUE(opShard != shardRequest.versionByNss.end());
             ASSERT_EQ(expectedShardVersions[i], opShard->second);
+
+            auto opIsViewfulTimeseries = shardRequest.nssIsViewfulTimeseries.contains(op.getNss());
+            ASSERT_EQ(expectedIsViewfulTimeseries[i], opIsViewfulTimeseries);
         }
         assertSampleIds(shardRequest.sampleIds, expectedSampleIds);
     }
@@ -224,12 +236,19 @@ public:
 
             for (size_t i = 0; i < expectedShardRequest.ops.size(); i++) {
                 const auto& op = shardRequest.ops[i];
-                ASSERT_EQ(op.getId(), expectedShardRequest.ops[i].getId());
+                ASSERT_EQ(op.getIndex(), expectedShardRequest.ops[i].getIndex());
 
                 auto opShard = shardRequest.versionByNss.find(op.getNss());
                 ASSERT_TRUE(opShard != shardRequest.versionByNss.end());
                 ASSERT_EQ(expectedBatch.requestByShardId.at(shardId).versionByNss.at(op.getNss()),
                           opShard->second);
+
+                auto opIsViewfulTimeseries =
+                    shardRequest.nssIsViewfulTimeseries.contains(op.getNss());
+                ASSERT_EQ(
+                    expectedBatch.requestByShardId.at(shardId).nssIsViewfulTimeseries.contains(
+                        op.getNss()),
+                    opIsViewfulTimeseries);
             }
 
             assertSampleIds(shardRequest.sampleIds, expectedShardRequest.sampleIds);
@@ -246,29 +265,29 @@ TEST_F(OrderedUnifiedWriteExecutorBatcherTest,
     WriteOpProducer producer(request);
 
     WriteOpAnalyzerMock analyzer({
-        {0, Analysis{kSingleShard, {nss0Shard0}}},
-        {1, Analysis{kSingleShard, {nss0Shard1}}},
-        {2, Analysis{kSingleShard, {nss0Shard0}}},
+        {0, Analysis{kSingleShard, {nss0Shard0}, nss0IsViewfulTimeseries}},
+        {1, Analysis{kSingleShard, {nss0Shard1}, nss0IsViewfulTimeseries}},
+        {2, Analysis{kSingleShard, {nss0Shard0}, nss0IsViewfulTimeseries}},
     });
 
     auto routingCtx = RoutingContext::createSynthetic({});
-    auto batcher = OrderedWriteOpBatcher(producer, analyzer);
+    auto batcher = OrderedWriteOpBatcher(producer, analyzer, WriteCommandRef{request});
 
     // Output batches: [0], [1], [2]
-    auto [batch1, errors1] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_FALSE(batch1.isEmptyBatch());
-    assertSingleShardSimpleWriteBatch(batch1, {0}, {nss0Shard0});
+    auto result1 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result1.batch.isEmptyBatch());
+    assertSingleShardSimpleWriteBatch(result1.batch, {0}, {nss0Shard0}, {nss0IsViewfulTimeseries});
 
-    auto [batch2, errors2] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_FALSE(batch2.isEmptyBatch());
-    assertSingleShardSimpleWriteBatch(batch2, {1}, {nss0Shard1});
+    auto result2 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result2.batch.isEmptyBatch());
+    assertSingleShardSimpleWriteBatch(result2.batch, {1}, {nss0Shard1}, {nss0IsViewfulTimeseries});
 
-    auto [batch3, errors3] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_FALSE(batch3.isEmptyBatch());
-    assertSingleShardSimpleWriteBatch(batch3, {2}, {nss0Shard0});
+    auto result3 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result3.batch.isEmptyBatch());
+    assertSingleShardSimpleWriteBatch(result3.batch, {2}, {nss0Shard0}, {nss0IsViewfulTimeseries});
 
-    auto [batch4, errors4] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_TRUE(batch4.isEmptyBatch());
+    auto result4 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_TRUE(result4.batch.isEmptyBatch());
 }
 
 TEST_F(OrderedUnifiedWriteExecutorBatcherTest,
@@ -281,26 +300,32 @@ TEST_F(OrderedUnifiedWriteExecutorBatcherTest,
     WriteOpProducer producer(request);
 
     WriteOpAnalyzerMock analyzer({
-        {0, Analysis{kSingleShard, {nss0Shard0}}},
-        {1, Analysis{kSingleShard, {nss1Shard0}}},
-        {2, Analysis{kSingleShard, {nss0Shard1}}},
-        {3, Analysis{kSingleShard, {nss1Shard1}}},
+        {0, Analysis{kSingleShard, {nss0Shard0}, nss0IsViewfulTimeseries}},
+        {1, Analysis{kSingleShard, {nss1Shard0}, nss1IsViewfulTimeseries}},
+        {2, Analysis{kSingleShard, {nss0Shard1}, nss0IsViewfulTimeseries}},
+        {3, Analysis{kSingleShard, {nss1Shard1}, nss1IsViewfulTimeseries}},
     });
 
     auto routingCtx = RoutingContext::createSynthetic({});
-    auto batcher = OrderedWriteOpBatcher(producer, analyzer);
+    auto batcher = OrderedWriteOpBatcher(producer, analyzer, WriteCommandRef{request});
 
     // Output batches: [0, 1], [2, 3]
-    auto [batch1, errors1] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_FALSE(batch1.isEmptyBatch());
-    assertSingleShardSimpleWriteBatch(batch1, {0, 1}, {nss0Shard0, nss1Shard0});
+    auto result1 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result1.batch.isEmptyBatch());
+    assertSingleShardSimpleWriteBatch(result1.batch,
+                                      {0, 1},
+                                      {nss0Shard0, nss1Shard0},
+                                      {nss0IsViewfulTimeseries, nss1IsViewfulTimeseries});
 
-    auto [batch2, errors2] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_FALSE(batch2.isEmptyBatch());
-    assertSingleShardSimpleWriteBatch(batch2, {2, 3}, {nss0Shard1, nss1Shard1});
+    auto result2 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result2.batch.isEmptyBatch());
+    assertSingleShardSimpleWriteBatch(result2.batch,
+                                      {2, 3},
+                                      {nss0Shard1, nss1Shard1},
+                                      {nss0IsViewfulTimeseries, nss1IsViewfulTimeseries});
 
-    auto [batch3, errors3] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_TRUE(batch3.isEmptyBatch());
+    auto result3 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_TRUE(result3.batch.isEmptyBatch());
 }
 
 TEST_F(OrderedUnifiedWriteExecutorBatcherTest, OrderedBatcherBatchesSingleShardOpByWriteType) {
@@ -313,31 +338,40 @@ TEST_F(OrderedUnifiedWriteExecutorBatcherTest, OrderedBatcherBatchesSingleShardO
     WriteOpProducer producer(request);
 
     WriteOpAnalyzerMock analyzer({
-        {0, Analysis{kSingleShard, {nss0Shard0}}},
-        {1, Analysis{kSingleShard, {nss1Shard0}}},
-        {2, Analysis{kMultiShard, {nss0Shard0, nss0Shard1}}},
-        {3, Analysis{kSingleShard, {nss1Shard1}}},
-        {4, Analysis{kSingleShard, {nss0Shard1}}},
+        {0, Analysis{kSingleShard, {nss0Shard0}, nss0IsViewfulTimeseries}},
+        {1, Analysis{kSingleShard, {nss1Shard0}, nss1IsViewfulTimeseries}},
+        {2, Analysis{kMultiShard, {nss0Shard0, nss0Shard1}, nss0IsViewfulTimeseries}},
+        {3, Analysis{kSingleShard, {nss1Shard1}, nss1IsViewfulTimeseries}},
+        {4, Analysis{kSingleShard, {nss0Shard1}, nss0IsViewfulTimeseries}},
     });
 
     auto routingCtx = RoutingContext::createSynthetic({});
-    auto batcher = OrderedWriteOpBatcher(producer, analyzer);
+    auto batcher = OrderedWriteOpBatcher(producer, analyzer, WriteCommandRef{request});
 
     // Output batches: [0, 1], [2], [3, 4]
-    auto [batch1, errors1] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_FALSE(batch1.isEmptyBatch());
-    assertSingleShardSimpleWriteBatch(batch1, {0, 1}, {nss0Shard0, nss1Shard0});
+    auto result1 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result1.batch.isEmptyBatch());
+    assertSingleShardSimpleWriteBatch(result1.batch,
+                                      {0, 1},
+                                      {nss0Shard0, nss1Shard0},
+                                      {nss0IsViewfulTimeseries, nss1IsViewfulTimeseries});
 
-    auto [batch2, errors2] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_FALSE(batch2.isEmptyBatch());
-    assertMultiShardSimpleWriteBatch(batch2, 2, {nss0Shard0, nss0Shard1});
+    auto result2 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result2.batch.isEmptyBatch());
+    assertMultiShardSimpleWriteBatch(result2.batch,
+                                     2,
+                                     {nss0Shard0, nss0Shard1},
+                                     {nss0IsViewfulTimeseries, nss0IsViewfulTimeseries});
 
-    auto [batch3, errors3] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_FALSE(batch3.isEmptyBatch());
-    assertSingleShardSimpleWriteBatch(batch3, {3, 4}, {nss1Shard1, nss0Shard1});
+    auto result3 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result3.batch.isEmptyBatch());
+    assertSingleShardSimpleWriteBatch(result3.batch,
+                                      {3, 4},
+                                      {nss1Shard1, nss0Shard1},
+                                      {nss1IsViewfulTimeseries, nss0IsViewfulTimeseries});
 
-    auto [batch4, errors4] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_TRUE(batch4.isEmptyBatch());
+    auto result4 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_TRUE(result4.batch.isEmptyBatch());
 }
 
 TEST_F(OrderedUnifiedWriteExecutorBatcherTest, OrderedBatcherBatchesMultiShardOpSeparately) {
@@ -347,24 +381,30 @@ TEST_F(OrderedUnifiedWriteExecutorBatcherTest, OrderedBatcherBatchesMultiShardOp
     WriteOpProducer producer(request);
 
     WriteOpAnalyzerMock analyzer({
-        {0, Analysis{kMultiShard, {nss0Shard0, nss0Shard1}}},
-        {1, Analysis{kMultiShard, {nss0Shard0, nss0Shard1}}},
+        {0, Analysis{kMultiShard, {nss0Shard0, nss0Shard1}, nss0IsViewfulTimeseries}},
+        {1, Analysis{kMultiShard, {nss0Shard0, nss0Shard1}, nss0IsViewfulTimeseries}},
     });
 
     auto routingCtx = RoutingContext::createSynthetic({});
-    auto batcher = OrderedWriteOpBatcher(producer, analyzer);
+    auto batcher = OrderedWriteOpBatcher(producer, analyzer, WriteCommandRef{request});
 
     // Output batches: [0], [1]
-    auto [batch1, errors1] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_FALSE(batch1.isEmptyBatch());
-    assertMultiShardSimpleWriteBatch(batch1, 0, {nss0Shard0, nss0Shard1});
+    auto result1 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result1.batch.isEmptyBatch());
+    assertMultiShardSimpleWriteBatch(result1.batch,
+                                     0,
+                                     {nss0Shard0, nss0Shard1},
+                                     {nss0IsViewfulTimeseries, nss0IsViewfulTimeseries});
 
-    auto [batch2, errors2] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_FALSE(batch2.isEmptyBatch());
-    assertMultiShardSimpleWriteBatch(batch2, 1, {nss0Shard0, nss0Shard1});
+    auto result2 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result2.batch.isEmptyBatch());
+    assertMultiShardSimpleWriteBatch(result2.batch,
+                                     1,
+                                     {nss0Shard0, nss0Shard1},
+                                     {nss0IsViewfulTimeseries, nss0IsViewfulTimeseries});
 
-    auto [batch3, errors3] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_TRUE(batch3.isEmptyBatch());
+    auto result3 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_TRUE(result3.batch.isEmptyBatch());
 }
 
 TEST_F(OrderedUnifiedWriteExecutorBatcherTest, OrderedBatcherBatchesQuaruntineOpsSeparately) {
@@ -392,44 +432,46 @@ TEST_F(OrderedUnifiedWriteExecutorBatcherTest, OrderedBatcherBatchesQuaruntineOp
     WriteOpProducer producer(request);
 
     WriteOpAnalyzerMock analyzer({
-        {0, Analysis{kSingleShard, {nss0Shard0}}},
-        {1, Analysis{kNonTargetedWrite, {nss0Shard0}}},
-        {2, Analysis{kSingleShard, {nss0Shard0}}},
-        {3, Analysis{kInternalTransaction, {nss0Shard0}}},
-        {4, Analysis{kSingleShard, {nss0Shard0}}},
-        {5, Analysis{kMultiWriteBlockingMigrations, {nss0Shard0, nss0Shard1}}},
+        {0, Analysis{kSingleShard, {nss0Shard0}, nss0IsViewfulTimeseries}},
+        {1, Analysis{kTwoPhaseWrite, {nss0Shard0}, nss0IsViewfulTimeseries}},
+        {2, Analysis{kSingleShard, {nss0Shard0}, nss0IsViewfulTimeseries}},
+        {3, Analysis{kInternalTransaction, {nss0Shard0}, nss0IsViewfulTimeseries}},
+        {4, Analysis{kSingleShard, {nss0Shard0}, nss0IsViewfulTimeseries}},
+        {5,
+         Analysis{
+             kMultiWriteBlockingMigrations, {nss0Shard0, nss0Shard1}, nss0IsViewfulTimeseries}},
     });
 
     auto routingCtx = RoutingContext::createSynthetic({});
-    auto batcher = OrderedWriteOpBatcher(producer, analyzer);
+    auto batcher = OrderedWriteOpBatcher(producer, analyzer, WriteCommandRef{request});
 
     // Output batches: [0], [1], [2], [3]
-    auto [batch1, errors1] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_FALSE(batch1.isEmptyBatch());
-    assertSingleShardSimpleWriteBatch(batch1, {0}, {nss0Shard0});
+    auto result1 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result1.batch.isEmptyBatch());
+    assertSingleShardSimpleWriteBatch(result1.batch, {0}, {nss0Shard0}, {nss0IsViewfulTimeseries});
 
-    auto [batch2, errors2] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_FALSE(batch2.isEmptyBatch());
-    assertNonTargetedWriteBatch(batch2, 1);
+    auto result2 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result2.batch.isEmptyBatch());
+    assertTwoPhaseWriteBatch(result2.batch, 1, nss0IsViewfulTimeseries);
 
-    auto [batch3, errors3] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_FALSE(batch3.isEmptyBatch());
-    assertSingleShardSimpleWriteBatch(batch3, {2}, {nss0Shard0});
+    auto result3 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result3.batch.isEmptyBatch());
+    assertSingleShardSimpleWriteBatch(result3.batch, {2}, {nss0Shard0}, {nss0IsViewfulTimeseries});
 
-    auto [batch4, errors4] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_FALSE(batch4.isEmptyBatch());
-    assertInternalTransactionBatch(batch4, 3);
+    auto result4 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result4.batch.isEmptyBatch());
+    assertInternalTransactionBatch(result4.batch, 3);
 
-    auto [batch5, errors5] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_FALSE(batch5.isEmptyBatch());
-    assertSingleShardSimpleWriteBatch(batch5, {4}, {nss0Shard0});
+    auto result5 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result5.batch.isEmptyBatch());
+    assertSingleShardSimpleWriteBatch(result5.batch, {4}, {nss0Shard0}, {nss0IsViewfulTimeseries});
 
-    auto [batch6, errors6] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_FALSE(batch6.isEmptyBatch());
-    assertMultiWriteBlockingMigrationsBatch(batch6, 5);
+    auto result6 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result6.batch.isEmptyBatch());
+    assertMultiWriteBlockingMigrationsBatch(result6.batch, 5);
 
-    auto [batch7, errors7] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_TRUE(batch7.isEmptyBatch());
+    auto result7 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_TRUE(result7.batch.isEmptyBatch());
 }
 
 TEST_F(OrderedUnifiedWriteExecutorBatcherTest, OrderedBatcherReprocessesWriteOps) {
@@ -441,32 +483,38 @@ TEST_F(OrderedUnifiedWriteExecutorBatcherTest, OrderedBatcherReprocessesWriteOps
     WriteOpProducer producer(request);
 
     WriteOpAnalyzerMock analyzer({
-        {0, Analysis{kSingleShard, {nss0Shard0}}},
-        {1, Analysis{kSingleShard, {nss1Shard0}}},
-        {2, Analysis{kSingleShard, {nss0Shard1}}},
-        {3, Analysis{kSingleShard, {nss1Shard1}}},
+        {0, Analysis{kSingleShard, {nss0Shard0}, nss0IsViewfulTimeseries}},
+        {1, Analysis{kSingleShard, {nss1Shard0}, nss1IsViewfulTimeseries}},
+        {2, Analysis{kSingleShard, {nss0Shard1}, nss0IsViewfulTimeseries}},
+        {3, Analysis{kSingleShard, {nss1Shard1}, nss1IsViewfulTimeseries}},
     });
 
     auto routingCtx = RoutingContext::createSynthetic({});
-    auto batcher = OrderedWriteOpBatcher(producer, analyzer);
+    auto batcher = OrderedWriteOpBatcher(producer, analyzer, WriteCommandRef{request});
 
     // Output batches: [0, 1], [1(reprocess)], [2, 3]
-    auto [batch1, errors1] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_FALSE(batch1.isEmptyBatch());
-    assertSingleShardSimpleWriteBatch(batch1, {0, 1}, {nss0Shard0, nss1Shard0});
+    auto result1 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result1.batch.isEmptyBatch());
+    assertSingleShardSimpleWriteBatch(result1.batch,
+                                      {0, 1},
+                                      {nss0Shard0, nss1Shard0},
+                                      {nss0IsViewfulTimeseries, nss1IsViewfulTimeseries});
 
-    reprocessWriteOp(batcher, batch1, {1});
+    reprocessWriteOp(batcher, result1.batch, {1});
 
-    auto [batch2, errors2] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_FALSE(batch2.isEmptyBatch());
-    assertSingleShardSimpleWriteBatch(batch2, {1}, {nss1Shard0});
+    auto result2 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result2.batch.isEmptyBatch());
+    assertSingleShardSimpleWriteBatch(result2.batch, {1}, {nss1Shard0}, {nss1IsViewfulTimeseries});
 
-    auto [batch3, errors3] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_FALSE(batch3.isEmptyBatch());
-    assertSingleShardSimpleWriteBatch(batch3, {2, 3}, {nss0Shard1, nss1Shard1});
+    auto result3 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result3.batch.isEmptyBatch());
+    assertSingleShardSimpleWriteBatch(result3.batch,
+                                      {2, 3},
+                                      {nss0Shard1, nss1Shard1},
+                                      {nss0IsViewfulTimeseries, nss1IsViewfulTimeseries});
 
-    auto [batch4, errors4] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_TRUE(batch4.isEmptyBatch());
+    auto result4 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_TRUE(result4.batch.isEmptyBatch());
 }
 
 TEST_F(OrderedUnifiedWriteExecutorBatcherTest,
@@ -478,32 +526,38 @@ TEST_F(OrderedUnifiedWriteExecutorBatcherTest,
     WriteOpProducer producer(request);
 
     WriteOpAnalyzerMock analyzer({
-        {0, Analysis{kSingleShard, {nss0Shard0}}},
-        {1, Analysis{kSingleShard, {nss1Shard0}}},
-        {2, Analysis{kSingleShard, {nss0Shard1}}},
+        {0, Analysis{kSingleShard, {nss0Shard0}, nss0IsViewfulTimeseries}},
+        {1, Analysis{kSingleShard, {nss1Shard0}, nss1IsViewfulTimeseries}},
+        {2, Analysis{kSingleShard, {nss0Shard1}, nss0IsViewfulTimeseries}},
     });
 
     auto routingCtx = RoutingContext::createSynthetic({});
-    auto batcher = OrderedWriteOpBatcher(producer, analyzer);
+    auto batcher = OrderedWriteOpBatcher(producer, analyzer, WriteCommandRef{request});
 
     // Output batches: [0, 1], [1(reprocess), 2]
-    auto [batch1, errors1] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_FALSE(batch1.isEmptyBatch());
-    assertSingleShardSimpleWriteBatch(batch1, {0, 1}, {nss0Shard0, nss1Shard0});
+    auto result1 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result1.batch.isEmptyBatch());
+    assertSingleShardSimpleWriteBatch(result1.batch,
+                                      {0, 1},
+                                      {nss0Shard0, nss1Shard0},
+                                      {nss0IsViewfulTimeseries, nss1IsViewfulTimeseries});
 
-    reprocessWriteOp(batcher, batch1, {1});
+    reprocessWriteOp(batcher, result1.batch, {1});
     analyzer.setOpAnalysis({
-        {0, Analysis{kSingleShard, {nss0Shard0}}},
-        {1, Analysis{kSingleShard, {nss1Shard1}}},
-        {2, Analysis{kSingleShard, {nss0Shard1}}},
+        {0, Analysis{kSingleShard, {nss0Shard0}, nss0IsViewfulTimeseries}},
+        {1, Analysis{kSingleShard, {nss1Shard1}, nss1IsViewfulTimeseries}},
+        {2, Analysis{kSingleShard, {nss0Shard1}, nss0IsViewfulTimeseries}},
     });
 
-    auto [batch2, errors2] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_FALSE(batch2.isEmptyBatch());
-    assertSingleShardSimpleWriteBatch(batch2, {1, 2}, {nss1Shard1, nss0Shard1});
+    auto result2 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result2.batch.isEmptyBatch());
+    assertSingleShardSimpleWriteBatch(result2.batch,
+                                      {1, 2},
+                                      {nss1Shard1, nss0Shard1},
+                                      {nss1IsViewfulTimeseries, nss0IsViewfulTimeseries});
 
-    auto [batch3, errors3] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_TRUE(batch3.isEmptyBatch());
+    auto result3 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_TRUE(result3.batch.isEmptyBatch());
 }
 
 TEST_F(OrderedUnifiedWriteExecutorBatcherTest, OrderedBatcherStopsOnWriteError) {
@@ -518,17 +572,17 @@ TEST_F(OrderedUnifiedWriteExecutorBatcherTest, OrderedBatcherStopsOnWriteError) 
     });
 
     auto routingCtx = RoutingContext::createSynthetic({});
-    auto batcher = OrderedWriteOpBatcher(producer, analyzer);
+    auto batcher = OrderedWriteOpBatcher(producer, analyzer, WriteCommandRef{request});
 
     // Output batches: [0], <stop>
-    auto [batch1, errors1] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_FALSE(batch1.isEmptyBatch());
-    assertSingleShardSimpleWriteBatch(batch1, {0}, {nss0Shard0});
+    auto result1 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result1.batch.isEmptyBatch());
+    assertSingleShardSimpleWriteBatch(result1.batch, {0}, {nss0Shard0}, {nss0IsViewfulTimeseries});
 
     batcher.stopMakingBatches();
 
-    auto [batch2, errors2] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_TRUE(batch2.isEmptyBatch());
+    auto result2 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_TRUE(result2.batch.isEmptyBatch());
 }
 
 TEST_F(OrderedUnifiedWriteExecutorBatcherTest, OrderedBatcherAttachesSampleIdToBatches) {
@@ -551,54 +605,139 @@ TEST_F(OrderedUnifiedWriteExecutorBatcherTest, OrderedBatcherAttachesSampleIdToB
          Analysis{
              kSingleShard,
              {nss0Shard0},
+             nss0IsViewfulTimeseries,
              analyze_shard_key::TargetedSampleId(sampleId0, shardId0),
          }},
         {1,
          Analysis{
              kMultiShard,
              {nss0Shard0, nss0Shard1},
+             nss0IsViewfulTimeseries,
          }},
         {2,
          Analysis{
-             kNonTargetedWrite,
+             kTwoPhaseWrite,
              {nss0Shard0, nss0Shard1},
+             nss0IsViewfulTimeseries,
              analyze_shard_key::TargetedSampleId(sampleId2, shardId0),
          }},
         {3,
          Analysis{
              kInternalTransaction,
              {nss0Shard0, nss0Shard1},
+             nss0IsViewfulTimeseries,
          }},
     });
 
     auto routingCtx = RoutingContext::createSynthetic({});
-    auto batcher = OrderedWriteOpBatcher(producer, analyzer);
+    auto batcher = OrderedWriteOpBatcher(producer, analyzer, WriteCommandRef{request});
 
     // Output batches: [0], [1], [2], [3], <stop>
     size_t expectedOpId = 0;
-    auto [batch1, errors1] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_FALSE(batch1.isEmptyBatch());
-    assertSingleShardSimpleWriteBatch(
-        batch1, {expectedOpId}, {nss0Shard0}, {{expectedOpId, sampleId0}});
+    auto result1 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result1.batch.isEmptyBatch());
+    assertSingleShardSimpleWriteBatch(result1.batch,
+                                      {expectedOpId},
+                                      {nss0Shard0},
+                                      {nss0IsViewfulTimeseries},
+                                      {{expectedOpId, sampleId0}});
     expectedOpId++;
 
-    auto [batch2, errors2] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_FALSE(batch2.isEmptyBatch());
-    assertMultiShardSimpleWriteBatch(batch2, expectedOpId, {nss0Shard0, nss0Shard1});
+    auto result2 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result2.batch.isEmptyBatch());
+    assertMultiShardSimpleWriteBatch(result2.batch,
+                                     expectedOpId,
+                                     {nss0Shard0, nss0Shard1},
+                                     {nss0IsViewfulTimeseries, nss0IsViewfulTimeseries});
     expectedOpId++;
 
-    auto [batch3, errors3] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_FALSE(batch3.isEmptyBatch());
-    assertNonTargetedWriteBatch(batch3, expectedOpId, sampleId2);
+    auto result3 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result3.batch.isEmptyBatch());
+    assertTwoPhaseWriteBatch(result3.batch, expectedOpId, nss0IsViewfulTimeseries, sampleId2);
     expectedOpId++;
 
-    auto [batch4, errors4] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_FALSE(batch4.isEmptyBatch());
-    assertInternalTransactionBatch(batch4, expectedOpId);
+    auto result4 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result4.batch.isEmptyBatch());
+    assertInternalTransactionBatch(result4.batch, expectedOpId);
     expectedOpId++;
 
-    auto [batch5, errors5] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_TRUE(batch5.isEmptyBatch());
+    auto result5 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_TRUE(result5.batch.isEmptyBatch());
+}
+
+TEST_F(OrderedUnifiedWriteExecutorBatcherTest, OrderedBatcherTxnAnalysisError) {
+    // Necessary for TransactionRouter::get to be non-null for this opCtx.
+    auto* opCtx = getOperationContext();
+    auto lsid = LogicalSessionId(UUID::gen(), SHA256Block());
+    opCtx->setLogicalSessionId(lsid);
+    TxnNumber txnNumber = 0;
+    opCtx->setTxnNumber(txnNumber);
+    opCtx->setInMultiDocumentTransaction();
+    RouterOperationContextSession rocs(opCtx);
+
+    BulkWriteCommandRequest request({BulkWriteInsertOp(0, BSONObj()),
+                                     BulkWriteInsertOp(1, BSONObj()),
+                                     BulkWriteInsertOp(0, BSONObj())},
+                                    {NamespaceInfoEntry(nss0), NamespaceInfoEntry(nss1)});
+    WriteOpProducer producer(request);
+    const Status error(ErrorCodes::BadValue, "bad analysis :(");
+    WriteOpAnalyzerMock analyzer({
+        {0, Analysis{kSingleShard, {nss0Shard0}}},
+        {1, Analysis{kSingleShard, {nss1Shard1}}},
+        {2, StatusWith<Analysis>(error)},
+    });
+
+    auto routingCtx = RoutingContext::createSynthetic({});
+    auto batcher = OrderedWriteOpBatcher(producer, analyzer, WriteCommandRef{request});
+
+    // Output batches: [0], <error>.
+    // First batch references first write op.
+    WriteOpId expectedOpId = 0;
+    auto result1 = batcher.getNextBatch(opCtx, *routingCtx);
+    ASSERT_FALSE(result1.batch.isEmptyBatch());
+    assertSingleShardSimpleWriteBatch(result1.batch,
+                                      {expectedOpId},
+                                      {nss0Shard0},
+                                      {nss0IsViewfulTimeseries, nss1IsViewfulTimeseries});
+
+    // Next batch is empty because we encounter an error.
+    auto result2 = batcher.getNextBatch(opCtx, *routingCtx);
+    ASSERT_TRUE(result2.batch.isEmptyBatch());
+    ASSERT_EQ(result2.opsWithErrors.size(), 1);
+    std::pair<WriteOp, Status> opWithError = std::make_pair(WriteOp(request, 2), error);
+    ASSERT_EQ(result2.opsWithErrors[0], opWithError);
+    ASSERT_FALSE(result2.transientTxnError);
+
+    // Try again, but this time, with a transient txn error.
+    WriteOpProducer transientProducer(request);
+    const Status transientError(ErrorCodes::PreparedTransactionInProgress,
+                                "prepared txn in progress");
+    analyzer = WriteOpAnalyzerMock({
+        {0, Analysis{kSingleShard, {nss0Shard0}}},
+        {1, Analysis{kSingleShard, {nss1Shard1}}},
+        {2, StatusWith<Analysis>(error)},
+    });
+    routingCtx = RoutingContext::createSynthetic({});
+    auto transitentBatcher =
+        OrderedWriteOpBatcher(transientProducer, analyzer, WriteCommandRef{request});
+
+    // First batch references first write op.
+    result1 = transitentBatcher.getNextBatch(opCtx, *routingCtx);
+    ASSERT_FALSE(result1.batch.isEmptyBatch());
+    assertSingleShardSimpleWriteBatch(result1.batch,
+                                      {expectedOpId},
+                                      {nss0Shard0},
+                                      {nss0IsViewfulTimeseries, nss1IsViewfulTimeseries});
+
+    // Next batch is empty because we encounter an error.
+    result2 = transitentBatcher.getNextBatch(opCtx, *routingCtx);
+    ASSERT_TRUE(result2.batch.isEmptyBatch());
+    ASSERT_EQ(result2.opsWithErrors.size(), 1);
+    opWithError = std::make_pair(WriteOp(request, 2), error);
+    ASSERT_EQ(result2.opsWithErrors[0], opWithError);
+
+    // The OrderedBatcher does distinguish between transient txn errors and other errors.
+    ASSERT_FALSE(result2.transientTxnError);
 }
 
 TEST_F(OrderedUnifiedWriteExecutorBatcherTest, OrderedBatcherSkipsDoneBatches) {
@@ -620,21 +759,21 @@ TEST_F(OrderedUnifiedWriteExecutorBatcherTest, OrderedBatcherSkipsDoneBatches) {
     WriteOpProducer producer(request);
 
     WriteOpAnalyzerMock analyzer({
-        {0, Analysis{kSingleShard, {nss1Shard0}}},
-        {1, Analysis{kSingleShard, {nss1Shard0}}},
-        {2, Analysis{kMultiShard, {nss0Shard0, nss0Shard1}}},
-        {3, Analysis{kSingleShard, {nss1Shard1}}},
-        {4, Analysis{kMultiShard, {nss0Shard0, nss0Shard1}}},
-        {5, Analysis{kSingleShard, {nss0Shard1}}},
-        {6, Analysis{kMultiShard, {nss0Shard0, nss0Shard1}}},
-        {7, Analysis{kSingleShard, {nss1Shard0}}},
-        {8, Analysis{kMultiShard, {nss0Shard0, nss0Shard1}}},
-        {9, Analysis{kSingleShard, {nss1Shard0}}},
-        {10, Analysis{kMultiShard, {nss0Shard0, nss0Shard1}}},
+        {0, Analysis{kSingleShard, {nss1Shard0}, nss1IsViewfulTimeseries}},
+        {1, Analysis{kSingleShard, {nss1Shard0}, nss1IsViewfulTimeseries}},
+        {2, Analysis{kMultiShard, {nss0Shard0, nss0Shard1}, nss0IsViewfulTimeseries}},
+        {3, Analysis{kSingleShard, {nss1Shard1}, nss1IsViewfulTimeseries}},
+        {4, Analysis{kMultiShard, {nss0Shard0, nss0Shard1}, nss0IsViewfulTimeseries}},
+        {5, Analysis{kSingleShard, {nss0Shard1}, nss0IsViewfulTimeseries}},
+        {6, Analysis{kMultiShard, {nss0Shard0, nss0Shard1}, nss0IsViewfulTimeseries}},
+        {7, Analysis{kSingleShard, {nss1Shard0}, nss1IsViewfulTimeseries}},
+        {8, Analysis{kMultiShard, {nss0Shard0, nss0Shard1}, nss0IsViewfulTimeseries}},
+        {9, Analysis{kSingleShard, {nss1Shard0}, nss1IsViewfulTimeseries}},
+        {10, Analysis{kMultiShard, {nss0Shard0, nss0Shard1}, nss0IsViewfulTimeseries}},
     });
 
     auto routingCtx = RoutingContext::createSynthetic({});
-    auto batcher = OrderedWriteOpBatcher(producer, analyzer);
+    auto batcher = OrderedWriteOpBatcher(producer, analyzer, WriteCommandRef{request});
 
     // Note a few operations to have all shards already successfully written to.
     const std::map<WriteOpId, std::set<ShardId>> successfulShardsToAdd{
@@ -647,24 +786,365 @@ TEST_F(OrderedUnifiedWriteExecutorBatcherTest, OrderedBatcherSkipsDoneBatches) {
     batcher.noteSuccessfulShards(successfulShardsToAdd);
 
     // Output batches: [1], [2], [3, 5]
-    auto [batch1, errors1] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_FALSE(batch1.isEmptyBatch());
-    assertSingleShardSimpleWriteBatch(batch1, {1}, {nss1Shard0});
+    auto result1 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result1.batch.isEmptyBatch());
+    assertSingleShardSimpleWriteBatch(result1.batch, {1}, {nss1Shard0}, {nss1IsViewfulTimeseries});
 
-    auto [batch2, errors2] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_FALSE(batch2.isEmptyBatch());
-    assertMultiShardSimpleWriteBatch(batch2, 2, {nss0Shard0, nss0Shard1});
+    auto result2 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result2.batch.isEmptyBatch());
+    assertMultiShardSimpleWriteBatch(result2.batch,
+                                     2,
+                                     {nss0Shard0, nss0Shard1},
+                                     {nss0IsViewfulTimeseries, nss0IsViewfulTimeseries});
 
-    auto [batch3, errors3] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_FALSE(batch3.isEmptyBatch());
-    assertSingleShardSimpleWriteBatch(batch3, {3, 5}, {nss1Shard1, nss0Shard1});
+    auto result3 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result3.batch.isEmptyBatch());
+    assertSingleShardSimpleWriteBatch(result3.batch,
+                                      {3, 5},
+                                      {nss1Shard1, nss0Shard1},
+                                      {nss1IsViewfulTimeseries, nss0IsViewfulTimeseries});
 
-    auto [batch4, errors4] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_FALSE(batch4.isEmptyBatch());
-    assertMultiShardSimpleWriteBatch(batch4, 8, {nss0Shard0, nss0Shard1});
+    auto result4 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result4.batch.isEmptyBatch());
+    assertMultiShardSimpleWriteBatch(result4.batch,
+                                     8,
+                                     {nss0Shard0, nss0Shard1},
+                                     {nss0IsViewfulTimeseries, nss0IsViewfulTimeseries});
 
-    auto [batch5, errors5] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_TRUE(batch5.isEmptyBatch());
+    auto result5 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_TRUE(result5.batch.isEmptyBatch());
+}
+
+TEST_F(OrderedUnifiedWriteExecutorBatcherTest,
+       OrderedBatcherSplitsBulkCommandBatchesWhenExceedsBSONMax) {
+    BulkWriteCommandRequest request;
+    int kNumOps = 17;
+    int kLetSize = 15 * 1024 * 1024;  // 15 MB.
+    int kOpSize = 100 * 1024;         // 0.1 MB.
+
+    // This is an approximate estimate but should work with the request overhead since we round
+    // down.
+    int kNumOpsInBatch1 = (BSONObjMaxUserSize - kLetSize) / kOpSize;
+    ASSERT_LT(kNumOpsInBatch1, kNumOps);
+
+    // Create a large let.
+    auto giantLet = BSON("a" << std::string(kLetSize, 'a'));
+
+    // Create documents to insert.
+    auto insertDoc = BSON("x" << 1 << "b" << std::string(kOpSize, 'b'));
+    std::vector<BulkWriteOpVariant> ops;
+    for (auto i = 0; i < kNumOps; i++) {
+        auto op = BulkWriteInsertOp(0, insertDoc);
+        ops.push_back(op);
+    }
+
+    request.setLet(giantLet);
+    request.setOps(ops);
+    request.setDbName(DatabaseName::kAdmin);
+    request.setNsInfo({NamespaceInfoEntry(nss0)});
+
+    ASSERT_GT(request.toBSON().objsize(), BSONObjMaxUserSize);
+
+    WriteOpProducer producer(request);
+
+    std::map<WriteOpId, StatusWith<Analysis>> opAnalysis;
+    for (auto i = 0; i < kNumOps; i++) {
+        opAnalysis.emplace(i, Analysis{kSingleShard, {nss0Shard0}, nss0IsViewfulTimeseries});
+    }
+    WriteOpAnalyzerMock analyzer({std::move(opAnalysis)});
+
+    auto routingCtx = RoutingContext::createSynthetic({});
+    auto batcher = OrderedWriteOpBatcher(producer, analyzer, WriteCommandRef{request});
+
+    // The batcher should split the batches to honor the max bson size even though they target the
+    // same namespace.
+    std::vector<WriteOpId> expectedOps;
+    std::vector<ShardEndpoint> expectedShardVersions;
+    std::vector<bool> expectedIsViewfulTimeseries;
+    for (int i = 0; i < kNumOpsInBatch1; i++) {
+        expectedOps.push_back(i);
+        expectedShardVersions.push_back(nss0Shard0);
+        expectedIsViewfulTimeseries.push_back(nss0IsViewfulTimeseries);
+    }
+    auto result1 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result1.batch.isEmptyBatch());
+    assertSingleShardSimpleWriteBatch(result1.batch,
+                                      std::move(expectedOps),
+                                      std::move(expectedShardVersions),
+                                      std::move(expectedIsViewfulTimeseries));
+
+
+    std::vector<WriteOpId> expectedOps2;
+    std::vector<ShardEndpoint> expectedShardVersions2;
+    std::vector<bool> expectedIsViewfulTimeseries2;
+    for (int i = kNumOpsInBatch1; i < kNumOps; i++) {
+        expectedOps2.push_back(i);
+        expectedShardVersions2.push_back(nss0Shard0);
+        expectedIsViewfulTimeseries2.push_back(nss0IsViewfulTimeseries);
+    }
+    auto result2 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result2.batch.isEmptyBatch());
+    assertSingleShardSimpleWriteBatch(result2.batch,
+                                      std::move(expectedOps2),
+                                      std::move(expectedShardVersions2),
+                                      std::move(expectedIsViewfulTimeseries2));
+
+    auto result3 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_TRUE(result3.batch.isEmptyBatch());
+}
+
+TEST_F(OrderedUnifiedWriteExecutorBatcherTest,
+       OrderedBatcherSplitsBatchedUpdateBatchesWhenExceedsBSONMax) {
+    int kNumOps = 17;
+    int kLetSize = 15 * 1024 * 1024;  // 15 MB.
+    int kOpSize = 100 * 1024;         // 0.1 MB.
+
+    // This is an approximate estimate but should work with the request overhead since we round
+    // down.
+    int kNumOpsInBatch1 = (BSONObjMaxUserSize - kLetSize) / kOpSize;
+    ASSERT_LT(kNumOpsInBatch1, kNumOps);
+
+    // Create a ~15 MB let.
+    auto giantLet = BSON("a" << std::string(kLetSize, 'a'));
+
+    // Create a ~.1 MB update document.
+    auto updateDoc = write_ops::UpdateOpEntry(BSON("x" << 1),
+                                              write_ops::UpdateModification::parseFromClassicUpdate(
+                                                  BSON("b" << std::string(kOpSize, 'b'))));
+    std::vector<write_ops::UpdateOpEntry> ops;
+    for (auto i = 0; i < kNumOps; i++) {
+        ops.push_back(updateDoc);
+    }
+
+    // Create the BatchedCommandRequested with updates.
+    BatchedCommandRequest request([&] {
+        write_ops::UpdateCommandRequest updateOp(nss0);
+        updateOp.setWriteCommandRequestBase([] {
+            write_ops::WriteCommandRequestBase writeCommandBase;
+            writeCommandBase.setOrdered(true);
+            return writeCommandBase;
+        }());
+        updateOp.setLet(giantLet);
+        updateOp.setUpdates(ops);
+        return updateOp;
+    }());
+
+    ASSERT_GT(request.toBSON().objsize(), BSONObjMaxUserSize);
+
+    WriteOpProducer producer(request);
+
+    std::map<WriteOpId, StatusWith<Analysis>> opAnalysis;
+    for (auto i = 0; i < kNumOps; i++) {
+        opAnalysis.emplace(i, Analysis{kSingleShard, {nss0Shard0}, nss0IsViewfulTimeseries});
+    }
+    WriteOpAnalyzerMock analyzer({std::move(opAnalysis)});
+
+    auto routingCtx = RoutingContext::createSynthetic({});
+    auto batcher = OrderedWriteOpBatcher(producer, analyzer, WriteCommandRef{request});
+
+    // The batcher should split the batches to honor the max bson size even though they target the
+    // same namespace.
+    std::vector<WriteOpId> expectedOps;
+    std::vector<ShardEndpoint> expectedShardVersions;
+    std::vector<bool> expectedIsViewfulTimeseries;
+    for (int i = 0; i < kNumOpsInBatch1; i++) {
+        expectedOps.push_back(i);
+        expectedShardVersions.push_back(nss0Shard0);
+        expectedIsViewfulTimeseries.push_back(nss0IsViewfulTimeseries);
+    }
+    auto result1 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result1.batch.isEmptyBatch());
+    assertSingleShardSimpleWriteBatch(result1.batch,
+                                      std::move(expectedOps),
+                                      std::move(expectedShardVersions),
+                                      std::move(expectedIsViewfulTimeseries));
+
+
+    std::vector<WriteOpId> expectedOps2;
+    std::vector<ShardEndpoint> expectedShardVersions2;
+    std::vector<bool> expectedIsViewfulTimeseries2;
+    for (int i = kNumOpsInBatch1; i < kNumOps; i++) {
+        expectedOps2.push_back(i);
+        expectedShardVersions2.push_back(nss0Shard0);
+        expectedIsViewfulTimeseries2.push_back(nss0IsViewfulTimeseries);
+    }
+    auto result2 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result2.batch.isEmptyBatch());
+    assertSingleShardSimpleWriteBatch(result2.batch,
+                                      std::move(expectedOps2),
+                                      std::move(expectedShardVersions2),
+                                      std::move(expectedIsViewfulTimeseries2));
+
+    auto result3 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_TRUE(result3.batch.isEmptyBatch());
+}
+
+TEST_F(OrderedUnifiedWriteExecutorBatcherTest,
+       OrderedBatcherSplitsBatchedInsertBatchesWhenExceedsBSONMax) {
+    int kNumOps = 17;
+    int kCommentSize = 15 * 1024 * 1024;  // 15 MB.
+    int kOpSize = 100 * 1024;             // 0.1 MB.
+
+    // This is an approximate estimate but should work with the request overhead since we round
+    // down.
+    int kNumOpsInBatch1 = (BSONObjMaxUserSize - kCommentSize) / kOpSize;
+    ASSERT_LT(kNumOpsInBatch1, kNumOps);
+
+    // Create a ~15 MB comment.
+    auto giantComment = IDLAnyTypeOwned(BSON("key" << std::string(kCommentSize, 'b'))["key"]);
+
+    // Create a ~.1 MB document to insert.
+    auto insertDoc = BSON("a" << std::string(kOpSize, 'x'));
+    std::vector<BSONObj> ops;
+    for (auto i = 0; i < kNumOps; i++) {
+        ops.push_back(insertDoc);
+    }
+
+    // Create the BatchedCommandRequested with inserts.
+    BatchedCommandRequest request([&] {
+        write_ops::InsertCommandRequest insertOp(nss0);
+        insertOp.setWriteCommandRequestBase([] {
+            write_ops::WriteCommandRequestBase writeCommandBase;
+            writeCommandBase.setOrdered(true);
+            return writeCommandBase;
+        }());
+        insertOp.setComment(giantComment);
+        insertOp.setDocuments(ops);
+        return insertOp;
+    }());
+
+    ASSERT_GT(request.toBSON().objsize(), BSONObjMaxUserSize);
+
+    WriteOpProducer producer(request);
+
+    std::map<WriteOpId, StatusWith<Analysis>> opAnalysis;
+    for (auto i = 0; i < kNumOps; i++) {
+        opAnalysis.emplace(i, Analysis{kSingleShard, {nss0Shard0}, nss0IsViewfulTimeseries});
+    }
+    WriteOpAnalyzerMock analyzer({std::move(opAnalysis)});
+
+    auto routingCtx = RoutingContext::createSynthetic({});
+    auto batcher = OrderedWriteOpBatcher(producer, analyzer, WriteCommandRef{request});
+
+    // The batcher should split the batches to honor the max bson size even though they target the
+    // same namespace.
+    std::vector<WriteOpId> expectedOps;
+    std::vector<ShardEndpoint> expectedShardVersions;
+    std::vector<bool> expectedIsViewfulTimeseries;
+    for (int i = 0; i < kNumOpsInBatch1; i++) {
+        expectedOps.push_back(i);
+        expectedShardVersions.push_back(nss0Shard0);
+        expectedIsViewfulTimeseries.push_back(nss0IsViewfulTimeseries);
+    }
+    auto result1 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result1.batch.isEmptyBatch());
+    assertSingleShardSimpleWriteBatch(result1.batch,
+                                      std::move(expectedOps),
+                                      std::move(expectedShardVersions),
+                                      std::move(expectedIsViewfulTimeseries));
+
+
+    std::vector<WriteOpId> expectedOps2;
+    std::vector<ShardEndpoint> expectedShardVersions2;
+    std::vector<bool> expectedIsViewfulTimeseries2;
+    for (int i = kNumOpsInBatch1; i < kNumOps; i++) {
+        expectedOps2.push_back(i);
+        expectedShardVersions2.push_back(nss0Shard0);
+        expectedIsViewfulTimeseries2.push_back(nss0IsViewfulTimeseries);
+    }
+    auto result2 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result2.batch.isEmptyBatch());
+    assertSingleShardSimpleWriteBatch(result2.batch,
+                                      std::move(expectedOps2),
+                                      std::move(expectedShardVersions2),
+                                      std::move(expectedIsViewfulTimeseries2));
+
+    auto result3 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_TRUE(result3.batch.isEmptyBatch());
+}
+
+TEST_F(OrderedUnifiedWriteExecutorBatcherTest,
+       OrderedBatcherSplitsBatchedDeleteBatchesWhenExceedsBSONMax) {
+    int kNumOps = 17;
+    int kCommentSize = 15 * 1024 * 1024;  // 15 MB.
+    int kOpSize = 100 * 1024;             // 0.1 MB.
+
+    // This is an approximate estimate but should work with the request overhead since we round
+    // down.
+    int kNumOpsInBatch1 = (BSONObjMaxUserSize - kCommentSize) / kOpSize;
+    ASSERT_LT(kNumOpsInBatch1, kNumOps);
+
+    // Create a ~15 MB comment.
+    auto giantComment = IDLAnyTypeOwned(BSON("key" << std::string(kCommentSize, 'b'))["key"]);
+
+    // Create a ~.1 MB delete document.
+    auto deleteDoc = write_ops::DeleteOpEntry(BSON("a" << std::string(kOpSize, 'x')), false);
+    std::vector<write_ops::DeleteOpEntry> ops;
+    for (auto i = 0; i < kNumOps; i++) {
+        ops.push_back(deleteDoc);
+    }
+
+    // Create the BatchedCommandRequested with deletes.
+    BatchedCommandRequest request([&] {
+        write_ops::DeleteCommandRequest deleteOp(nss0);
+        deleteOp.setWriteCommandRequestBase([] {
+            write_ops::WriteCommandRequestBase writeCommandBase;
+            writeCommandBase.setOrdered(true);
+            return writeCommandBase;
+        }());
+        deleteOp.setComment(giantComment);
+        deleteOp.setDeletes(ops);
+        return deleteOp;
+    }());
+
+    ASSERT_GT(request.toBSON().objsize(), BSONObjMaxUserSize);
+
+    WriteOpProducer producer(request);
+
+    std::map<WriteOpId, StatusWith<Analysis>> opAnalysis;
+    for (auto i = 0; i < kNumOps; i++) {
+        opAnalysis.emplace(i, Analysis{kSingleShard, {nss0Shard0}, nss0IsViewfulTimeseries});
+    }
+    WriteOpAnalyzerMock analyzer({std::move(opAnalysis)});
+
+    auto routingCtx = RoutingContext::createSynthetic({});
+    auto batcher = OrderedWriteOpBatcher(producer, analyzer, WriteCommandRef{request});
+
+    // The batcher should split the batches to honor the max bson size even though they target the
+    // same namespace.
+    std::vector<WriteOpId> expectedOps;
+    std::vector<ShardEndpoint> expectedShardVersions;
+    std::vector<bool> expectedIsViewfulTimeseries;
+    for (int i = 0; i < kNumOpsInBatch1; i++) {
+        expectedOps.push_back(i);
+        expectedShardVersions.push_back(nss0Shard0);
+        expectedIsViewfulTimeseries.push_back(nss0IsViewfulTimeseries);
+    }
+    auto result1 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result1.batch.isEmptyBatch());
+    assertSingleShardSimpleWriteBatch(result1.batch,
+                                      std::move(expectedOps),
+                                      std::move(expectedShardVersions),
+                                      std::move(expectedIsViewfulTimeseries));
+
+
+    std::vector<WriteOpId> expectedOps2;
+    std::vector<ShardEndpoint> expectedShardVersions2;
+    std::vector<bool> expectedIsViewfulTimeseries2;
+    for (int i = kNumOpsInBatch1; i < kNumOps; i++) {
+        expectedOps2.push_back(i);
+        expectedShardVersions2.push_back(nss0Shard0);
+        expectedIsViewfulTimeseries2.push_back(nss0IsViewfulTimeseries);
+    }
+    auto result2 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result2.batch.isEmptyBatch());
+    assertSingleShardSimpleWriteBatch(result2.batch,
+                                      std::move(expectedOps2),
+                                      std::move(expectedShardVersions2),
+                                      std::move(expectedIsViewfulTimeseries2));
+
+    auto result3 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_TRUE(result3.batch.isEmptyBatch());
 }
 
 TEST_F(UnorderedUnifiedWriteExecutorBatcherTest,
@@ -676,26 +1156,27 @@ TEST_F(UnorderedUnifiedWriteExecutorBatcherTest,
     WriteOpProducer producer(request);
 
     WriteOpAnalyzerMock analyzer({
-        {0, Analysis{kSingleShard, {nss0Shard0}}},
-        {1, Analysis{kSingleShard, {nss0Shard0}}},
-        {2, Analysis{kSingleShard, {nss1Shard1}}},
+        {0, Analysis{kSingleShard, {nss0Shard0}, nss0IsViewfulTimeseries}},
+        {1, Analysis{kSingleShard, {nss0Shard0}, nss0IsViewfulTimeseries}},
+        {2, Analysis{kSingleShard, {nss1Shard1}, nss1IsViewfulTimeseries}},
     });
 
     auto routingCtx = RoutingContext::createSynthetic({});
-    auto batcher = UnorderedWriteOpBatcher(producer, analyzer);
+    auto batcher = UnorderedWriteOpBatcher(producer, analyzer, WriteCommandRef{request});
 
-    SimpleWriteBatch::ShardRequest shardRequest1{{{nss0, nss0Shard0}},
-                                                 {WriteOp(request, 0), WriteOp(request, 1)}};
-    SimpleWriteBatch::ShardRequest shardRequest2{{{nss1, nss1Shard1}}, {WriteOp(request, 2)}};
+    SimpleWriteBatch::ShardRequest shardRequest1{
+        {{nss0, nss0Shard0}}, nssIsViewfulTimeseries, {WriteOp(request, 0), WriteOp(request, 1)}};
+    SimpleWriteBatch::ShardRequest shardRequest2{
+        {{nss1, nss1Shard1}}, nssIsViewfulTimeseries, {WriteOp(request, 2)}};
     SimpleWriteBatch expectedBatch1{{{shardId0, shardRequest1}, {shardId1, shardRequest2}}};
 
     // Output batch: [0, 1, 2]
-    auto [batch1, errors1] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_FALSE(batch1.isEmptyBatch());
-    assertUnorderedSimpleWriteBatch(batch1, expectedBatch1);
+    auto result1 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result1.batch.isEmptyBatch());
+    assertUnorderedSimpleWriteBatch(result1.batch, expectedBatch1);
 
-    auto [batch2, errors2] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_TRUE(batch2.isEmptyBatch());
+    auto result2 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_TRUE(result2.batch.isEmptyBatch());
 }
 
 TEST_F(UnorderedUnifiedWriteExecutorBatcherTest, UnorderedBatcherBatchesMultiShardOpsInOwnBatch) {
@@ -712,18 +1193,19 @@ TEST_F(UnorderedUnifiedWriteExecutorBatcherTest, UnorderedBatcherBatchesMultiSha
     WriteOpProducer producer(request);
 
     WriteOpAnalyzerMock analyzer({
-        {0, Analysis{kMultiShard, {nss0Shard0, nss0Shard1}}},
-        {1, Analysis{kSingleShard, {nss0Shard0}}},
-        {2, Analysis{kSingleShard, {nss1Shard1}}},
-        {3, Analysis{kMultiShard, {{nss0Shard0, nss0Shard1}}}},
-        {4, Analysis{kSingleShard, {nss0Shard0}}},
-        {5, Analysis{kMultiShard, {{nss1Shard0, nss1Shard1}}}},
+        {0, Analysis{kMultiShard, {nss0Shard0, nss0Shard1}, nss0IsViewfulTimeseries}},
+        {1, Analysis{kSingleShard, {nss0Shard0}, nss0IsViewfulTimeseries}},
+        {2, Analysis{kSingleShard, {nss1Shard1}, nss1IsViewfulTimeseries}},
+        {3, Analysis{kMultiShard, {{nss0Shard0, nss0Shard1}}, nss0IsViewfulTimeseries}},
+        {4, Analysis{kSingleShard, {nss0Shard0}, nss0IsViewfulTimeseries}},
+        {5, Analysis{kMultiShard, {{nss1Shard0, nss1Shard1}}, nss1IsViewfulTimeseries}},
     });
 
     auto routingCtx = RoutingContext::createSynthetic({});
-    auto batcher = UnorderedWriteOpBatcher(producer, analyzer);
+    auto batcher = UnorderedWriteOpBatcher(producer, analyzer, WriteCommandRef{request});
 
     SimpleWriteBatch::ShardRequest shardRequest1{{{nss0, nss0Shard0}, {nss1, nss1Shard0}},
+                                                 nssIsViewfulTimeseries,
                                                  {WriteOp(request, 0),
                                                   WriteOp(request, 1),
                                                   WriteOp(request, 3),
@@ -731,14 +1213,15 @@ TEST_F(UnorderedUnifiedWriteExecutorBatcherTest, UnorderedBatcherBatchesMultiSha
                                                   WriteOp(request, 5)}};
     SimpleWriteBatch::ShardRequest shardRequest2{
         {{nss0, nss0Shard1}, {nss1, nss1Shard1}},
+        nssIsViewfulTimeseries,
         {WriteOp(request, 0), WriteOp(request, 2), WriteOp(request, 3), WriteOp(request, 5)}};
     SimpleWriteBatch expectedBatch1{{{shardId0, shardRequest1}, {shardId1, shardRequest2}}};
-    auto [batch1, errors1] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_FALSE(batch1.isEmptyBatch());
-    assertUnorderedSimpleWriteBatch(batch1, expectedBatch1);
+    auto result1 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result1.batch.isEmptyBatch());
+    assertUnorderedSimpleWriteBatch(result1.batch, expectedBatch1);
 
-    auto [batch2, errors2] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_TRUE(batch2.isEmptyBatch());
+    auto result2 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_TRUE(result2.batch.isEmptyBatch());
 }
 
 TEST_F(UnorderedUnifiedWriteExecutorBatcherTest, UnorderedBatcherBatchesQuaruntineOpSeparately) {
@@ -769,51 +1252,54 @@ TEST_F(UnorderedUnifiedWriteExecutorBatcherTest, UnorderedBatcherBatchesQuarunti
     WriteOpProducer producer(request);
 
     WriteOpAnalyzerMock analyzer({
-        {0, Analysis{kSingleShard, {nss0Shard0}}},
-        {1, Analysis{kNonTargetedWrite, {nss0Shard0, nss0Shard1}}},
-        {2, Analysis{kSingleShard, {nss0Shard0}}},
-        {3, Analysis{kNonTargetedWrite, {nss0Shard0, nss0Shard1}}},
-        {4, Analysis{kNonTargetedWrite, {nss0Shard0, nss0Shard1}}},
-        {5, Analysis{kSingleShard, {nss0Shard0}}},
-        {6, Analysis{kInternalTransaction, {nss0Shard0}}},
-        {7, Analysis{kSingleShard, {nss0Shard0}}},
-        {8, Analysis{kMultiWriteBlockingMigrations, {nss0Shard0, nss0Shard1}}},
+        {0, Analysis{kSingleShard, {nss0Shard0}, nss0IsViewfulTimeseries}},
+        {1, Analysis{kTwoPhaseWrite, {nss0Shard0, nss0Shard1}, nss0IsViewfulTimeseries}},
+        {2, Analysis{kSingleShard, {nss0Shard0}, nss0IsViewfulTimeseries}},
+        {3, Analysis{kTwoPhaseWrite, {nss0Shard0, nss0Shard1}, nss0IsViewfulTimeseries}},
+        {4, Analysis{kTwoPhaseWrite, {nss0Shard0, nss0Shard1}, nss0IsViewfulTimeseries}},
+        {5, Analysis{kSingleShard, {nss0Shard0}, nss0IsViewfulTimeseries}},
+        {6, Analysis{kInternalTransaction, {nss0Shard0}, nss0IsViewfulTimeseries}},
+        {7, Analysis{kSingleShard, {nss0Shard0}, nss0IsViewfulTimeseries}},
+        {8,
+         Analysis{
+             kMultiWriteBlockingMigrations, {nss0Shard0, nss0Shard1}, nss0IsViewfulTimeseries}},
     });
 
     auto routingCtx = RoutingContext::createSynthetic({});
-    auto batcher = UnorderedWriteOpBatcher(producer, analyzer);
+    auto batcher = UnorderedWriteOpBatcher(producer, analyzer, WriteCommandRef{request});
 
     SimpleWriteBatch::ShardRequest shardRequest1{
         {{nss0, nss0Shard0}},
+        nssIsViewfulTimeseries,
         {WriteOp(request, 0), WriteOp(request, 2), WriteOp(request, 5), WriteOp(request, 7)}};
     SimpleWriteBatch expectedBatch1{{{shardId0, shardRequest1}}};
 
-    auto [batch1, errors1] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_FALSE(batch1.isEmptyBatch());
-    assertUnorderedSimpleWriteBatch(batch1, expectedBatch1);
+    auto result1 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result1.batch.isEmptyBatch());
+    assertUnorderedSimpleWriteBatch(result1.batch, expectedBatch1);
 
-    auto [batch2, errors2] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_FALSE(batch2.isEmptyBatch());
-    assertNonTargetedWriteBatch(batch2, 1);
+    auto result2 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result2.batch.isEmptyBatch());
+    assertTwoPhaseWriteBatch(result2.batch, 1, nss0IsViewfulTimeseries);
 
-    auto [batch3, errors3] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_FALSE(batch3.isEmptyBatch());
-    assertNonTargetedWriteBatch(batch3, 3);
+    auto result3 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result3.batch.isEmptyBatch());
+    assertTwoPhaseWriteBatch(result3.batch, 3, nss0IsViewfulTimeseries);
 
-    auto [batch4, errors4] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_FALSE(batch4.isEmptyBatch());
-    assertNonTargetedWriteBatch(batch4, 4);
+    auto result4 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result4.batch.isEmptyBatch());
+    assertTwoPhaseWriteBatch(result4.batch, 4, nss0IsViewfulTimeseries);
 
-    auto [batch5, errors5] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_FALSE(batch5.isEmptyBatch());
-    assertInternalTransactionBatch(batch5, 6);
+    auto result5 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result5.batch.isEmptyBatch());
+    assertInternalTransactionBatch(result5.batch, 6);
 
-    auto [batch6, errors6] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_FALSE(batch6.isEmptyBatch());
-    assertMultiWriteBlockingMigrationsBatch(batch6, 8);
+    auto result6 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result6.batch.isEmptyBatch());
+    assertMultiWriteBlockingMigrationsBatch(result6.batch, 8);
 
-    auto [batch7, errors7] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_TRUE(batch7.isEmptyBatch());
+    auto result7 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_TRUE(result7.batch.isEmptyBatch());
 }
 
 TEST_F(UnorderedUnifiedWriteExecutorBatcherTest, UnorderedBatcherTargetErrorsTransient) {
@@ -840,15 +1326,12 @@ TEST_F(UnorderedUnifiedWriteExecutorBatcherTest, UnorderedBatcherTargetErrorsTra
     });
 
     auto routingCtx = RoutingContext::createSynthetic({});
-    auto batcher = UnorderedWriteOpBatcher(producer, analyzer);
+    auto batcher = UnorderedWriteOpBatcher(producer, analyzer, WriteCommandRef{request});
 
-    ASSERT_TRUE(batcher.getRetryOnTargetError());
+    auto result1 = batcher.getNextBatch(getOperationContext(), *routingCtx);
 
-    auto [batch1, errors1] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-
-    ASSERT_TRUE(batch1.isEmptyBatch());
-    ASSERT_TRUE(errors1.empty());
-    ASSERT_FALSE(batcher.getRetryOnTargetError());
+    ASSERT_TRUE(result1.batch.isEmptyBatch());
+    ASSERT_TRUE(result1.opsWithErrors.empty());
 
     analyzer.setOpAnalysis({
         {0, Analysis{kSingleShard, {nss0Shard0}}},
@@ -859,13 +1342,14 @@ TEST_F(UnorderedUnifiedWriteExecutorBatcherTest, UnorderedBatcherTargetErrorsTra
 
     SimpleWriteBatch::ShardRequest shardRequest2{
         {{nss0, nss0Shard0}},
+        nssIsViewfulTimeseries,
         {WriteOp(request, 0), WriteOp(request, 1), WriteOp(request, 2), WriteOp(request, 3)}};
     SimpleWriteBatch expectedBatch2{{{shardId0, shardRequest2}}};
 
-    auto [batch2, errors2] = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    auto result2 = batcher.getNextBatch(getOperationContext(), *routingCtx);
 
-    assertUnorderedSimpleWriteBatch(batch2, expectedBatch2);
-    ASSERT_TRUE(errors2.empty());
+    assertUnorderedSimpleWriteBatch(result2.batch, expectedBatch2);
+    ASSERT_TRUE(result2.opsWithErrors.empty());
 }
 
 TEST_F(UnorderedUnifiedWriteExecutorBatcherTest, UnorderedBatcherTargetErrorsNonTransient) {
@@ -892,28 +1376,25 @@ TEST_F(UnorderedUnifiedWriteExecutorBatcherTest, UnorderedBatcherTargetErrorsNon
     });
 
     auto routingCtx = RoutingContext::createSynthetic({});
-    auto batcher = UnorderedWriteOpBatcher(producer, analyzer);
+    auto batcher = UnorderedWriteOpBatcher(producer, analyzer, WriteCommandRef{request});
 
-    ASSERT_TRUE(batcher.getRetryOnTargetError());
+    auto result1 = batcher.getNextBatch(getOperationContext(), *routingCtx);
 
-    auto [batch1, errors1] = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_TRUE(result1.batch.isEmptyBatch());
+    ASSERT_TRUE(result1.opsWithErrors.empty());
 
-    ASSERT_TRUE(batch1.isEmptyBatch());
-    ASSERT_TRUE(errors1.empty());
-    ASSERT_FALSE(batcher.getRetryOnTargetError());
-
-    SimpleWriteBatch::ShardRequest shardRequest2{{{nss0, nss0Shard0}},
-                                                 {WriteOp(request, 0), WriteOp(request, 3)}};
+    SimpleWriteBatch::ShardRequest shardRequest2{
+        {{nss0, nss0Shard0}}, nssIsViewfulTimeseries, {WriteOp(request, 0), WriteOp(request, 3)}};
     SimpleWriteBatch expectedBatch2{{{shardId0, shardRequest2}}};
 
-    auto [batch2, errors2] = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    auto result2 = batcher.getNextBatch(getOperationContext(), *routingCtx);
 
-    ASSERT_FALSE(batch2.isEmptyBatch());
-    assertUnorderedSimpleWriteBatch(batch2, expectedBatch2);
+    ASSERT_FALSE(result2.batch.isEmptyBatch());
+    assertUnorderedSimpleWriteBatch(result2.batch, expectedBatch2);
 
-    ASSERT_TRUE(errors2.size() == 2);
-    ASSERT_TRUE(errors2[0].first.getId() == 1);
-    ASSERT_TRUE(errors2[1].first.getId() == 2);
+    ASSERT_TRUE(result2.opsWithErrors.size() == 2);
+    ASSERT_TRUE(result2.opsWithErrors[0].first.getIndex() == 1);
+    ASSERT_TRUE(result2.opsWithErrors[1].first.getIndex() == 2);
 }
 
 TEST_F(UnorderedUnifiedWriteExecutorBatcherTest,
@@ -928,30 +1409,31 @@ TEST_F(UnorderedUnifiedWriteExecutorBatcherTest,
     WriteOpProducer producer(request);
 
     WriteOpAnalyzerMock analyzer({
-        {0, Analysis{kSingleShard, {nss0Shard0}}},
-        {1, Analysis{kSingleShard, {nss1Shard0}}},
-        {2, Analysis{kSingleShard, {nss0Shard0VersionIgnored}}},
+        {0, Analysis{kSingleShard, {nss0Shard0}, nss0IsViewfulTimeseries}},
+        {1, Analysis{kSingleShard, {nss1Shard0}, nss1IsViewfulTimeseries}},
+        {2, Analysis{kSingleShard, {nss0Shard0VersionIgnored}, nss0IsViewfulTimeseries}},
     });
 
     auto routingCtx = RoutingContext::createSynthetic({});
-    auto batcher = UnorderedWriteOpBatcher(producer, analyzer);
+    auto batcher = UnorderedWriteOpBatcher(producer, analyzer, WriteCommandRef{request});
 
     SimpleWriteBatch::ShardRequest shardRequest1{{{nss0, nss0Shard0}, {nss1, nss1Shard0}},
+                                                 nssIsViewfulTimeseries,
                                                  {WriteOp(request, 0), WriteOp(request, 1)}};
     SimpleWriteBatch expectedBatch1{{{shardId0, shardRequest1}}};
-    auto [batch1, errors1] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_FALSE(batch1.isEmptyBatch());
-    assertUnorderedSimpleWriteBatch(batch1, expectedBatch1);
+    auto result1 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result1.batch.isEmptyBatch());
+    assertUnorderedSimpleWriteBatch(result1.batch, expectedBatch1);
 
-    shardRequest1 =
-        SimpleWriteBatch::ShardRequest{{{nss0, nss0Shard0VersionIgnored}}, {WriteOp(request, 2)}};
+    shardRequest1 = SimpleWriteBatch::ShardRequest{
+        {{nss0, nss0Shard0VersionIgnored}}, nssIsViewfulTimeseries, {WriteOp(request, 2)}};
     SimpleWriteBatch expectedBatch2{{{shardId0, shardRequest1}}};
-    auto [batch2, errors2] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_FALSE(batch2.isEmptyBatch());
-    assertUnorderedSimpleWriteBatch(batch2, expectedBatch2);
+    auto result2 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result2.batch.isEmptyBatch());
+    assertUnorderedSimpleWriteBatch(result2.batch, expectedBatch2);
 
-    auto [batch3, errors3] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_TRUE(batch3.isEmptyBatch());
+    auto result3 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_TRUE(result3.batch.isEmptyBatch());
 }
 
 TEST_F(UnorderedUnifiedWriteExecutorBatcherTest, UnorderedBatcherReprocessesWriteOps) {
@@ -964,40 +1446,44 @@ TEST_F(UnorderedUnifiedWriteExecutorBatcherTest, UnorderedBatcherReprocessesWrit
     WriteOpProducer producer(request);
 
     std::map<WriteOpId, StatusWith<Analysis>> ops = {
-        {0, Analysis{kMultiShard, {nss0Shard0, nss0Shard1}}},
-        {1, Analysis{kSingleShard, {nss0Shard0}}},
-        {2, Analysis{kSingleShard, {nss0Shard0}}},
-        {3, Analysis{kSingleShard, {nss1Shard1}}},
-        {4, Analysis{kMultiShard, {nss1Shard0, nss1Shard1}}}};
+        {0, Analysis{kMultiShard, {nss0Shard0, nss0Shard1}, nss0IsViewfulTimeseries}},
+        {1, Analysis{kSingleShard, {nss0Shard0}, nss0IsViewfulTimeseries}},
+        {2, Analysis{kSingleShard, {nss0Shard0}, nss0IsViewfulTimeseries}},
+        {3, Analysis{kSingleShard, {nss1Shard1}, nss1IsViewfulTimeseries}},
+        {4, Analysis{kMultiShard, {nss1Shard0, nss1Shard1}, nss1IsViewfulTimeseries}}};
     WriteOpAnalyzerMock analyzer(ops);
 
     auto routingCtx = RoutingContext::createSynthetic({});
-    auto batcher = UnorderedWriteOpBatcher(producer, analyzer);
+    auto batcher = UnorderedWriteOpBatcher(producer, analyzer, WriteCommandRef{request});
 
     SimpleWriteBatch::ShardRequest shardRequest1{
         {{nss0, nss0Shard0}, {nss1, nss1Shard0}},
+        nssIsViewfulTimeseries,
         {WriteOp(request, 0), WriteOp(request, 1), WriteOp(request, 2), WriteOp(request, 4)}};
     SimpleWriteBatch::ShardRequest shardRequest2{
         {{nss0, nss0Shard1}, {nss1, nss1Shard1}},
+        nssIsViewfulTimeseries,
         {WriteOp(request, 0), WriteOp(request, 3), WriteOp(request, 4)}};
     SimpleWriteBatch expectedBatch1{{{shardId0, shardRequest1}, {shardId1, shardRequest2}}};
-    auto [batch1, errors1] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_FALSE(batch1.isEmptyBatch());
-    assertUnorderedSimpleWriteBatch(batch1, expectedBatch1);
+    auto result1 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result1.batch.isEmptyBatch());
+    assertUnorderedSimpleWriteBatch(result1.batch, expectedBatch1);
 
-    reprocessWriteOp(batcher, batch1, {0});
-    reprocessWriteOp(batcher, batch1, {3});
+    reprocessWriteOp(batcher, result1.batch, {0});
+    reprocessWriteOp(batcher, result1.batch, {3});
 
-    shardRequest1 = SimpleWriteBatch::ShardRequest{{{nss0, nss0Shard0}}, {WriteOp(request, 0)}};
+    shardRequest1 = SimpleWriteBatch::ShardRequest{
+        {{nss0, nss0Shard0}}, nssIsViewfulTimeseries, {WriteOp(request, 0)}};
     shardRequest2 = SimpleWriteBatch::ShardRequest{{{nss0, nss0Shard1}, {nss1, nss1Shard1}},
+                                                   nssIsViewfulTimeseries,
                                                    {WriteOp(request, 0), WriteOp(request, 3)}};
     SimpleWriteBatch expectedBatch2{{{shardId0, shardRequest1}, {shardId1, shardRequest2}}};
-    auto [batch2, errors2] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_FALSE(batch2.isEmptyBatch());
-    assertUnorderedSimpleWriteBatch(batch2, expectedBatch2);
+    auto result2 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result2.batch.isEmptyBatch());
+    assertUnorderedSimpleWriteBatch(result2.batch, expectedBatch2);
 
-    auto [batch3, errors3] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_TRUE(batch3.isEmptyBatch());
+    auto result3 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_TRUE(result3.batch.isEmptyBatch());
 }
 
 TEST_F(UnorderedUnifiedWriteExecutorBatcherTest,
@@ -1009,39 +1495,41 @@ TEST_F(UnorderedUnifiedWriteExecutorBatcherTest,
     WriteOpProducer producer(request);
 
     WriteOpAnalyzerMock analyzer({
-        {0, Analysis{kSingleShard, {nss0Shard0}}},
-        {1, Analysis{kSingleShard, {nss1Shard0}}},
-        {2, Analysis{kSingleShard, {nss0Shard0}}},
+        {0, Analysis{kSingleShard, {nss0Shard0}, nss0IsViewfulTimeseries}},
+        {1, Analysis{kSingleShard, {nss1Shard0}, nss1IsViewfulTimeseries}},
+        {2, Analysis{kSingleShard, {nss0Shard0}, nss0IsViewfulTimeseries}},
     });
 
     auto routingCtx = RoutingContext::createSynthetic({});
-    auto batcher = UnorderedWriteOpBatcher(producer, analyzer);
+    auto batcher = UnorderedWriteOpBatcher(producer, analyzer, WriteCommandRef{request});
 
     // Output batches: [0, 1, 2], [1(reprocess)]
     SimpleWriteBatch::ShardRequest shardRequest1{
         {{nss0, nss0Shard0}, {nss1, nss1Shard0}},
+        nssIsViewfulTimeseries,
         {WriteOp(request, 0), WriteOp(request, 1), WriteOp(request, 2)}};
     SimpleWriteBatch expectedBatch1{{{shardId0, shardRequest1}}};
 
-    auto [batch1, errors1] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_FALSE(batch1.isEmptyBatch());
-    assertUnorderedSimpleWriteBatch(batch1, expectedBatch1);
+    auto result1 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result1.batch.isEmptyBatch());
+    assertUnorderedSimpleWriteBatch(result1.batch, expectedBatch1);
 
-    reprocessWriteOp(batcher, batch1, {1});
+    reprocessWriteOp(batcher, result1.batch, {1});
     analyzer.setOpAnalysis({
-        {0, Analysis{kSingleShard, {nss0Shard0}}},
-        {1, Analysis{kSingleShard, {nss1Shard1}}},
-        {2, Analysis{kSingleShard, {nss0Shard0}}},
+        {0, Analysis{kSingleShard, {nss0Shard0}, nss0IsViewfulTimeseries}},
+        {1, Analysis{kSingleShard, {nss1Shard1}, nss1IsViewfulTimeseries}},
+        {2, Analysis{kSingleShard, {nss0Shard0}, nss0IsViewfulTimeseries}},
     });
 
-    shardRequest1 = SimpleWriteBatch::ShardRequest{{{nss1, nss1Shard1}}, {WriteOp(request, 1)}};
+    shardRequest1 = SimpleWriteBatch::ShardRequest{
+        {{nss1, nss1Shard1}}, nssIsViewfulTimeseries, {WriteOp(request, 1)}};
     SimpleWriteBatch expectedBatch2{{{shardId1, shardRequest1}}};
-    auto [batch2, errors2] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_FALSE(batch2.isEmptyBatch());
-    assertUnorderedSimpleWriteBatch(batch2, expectedBatch2);
+    auto result2 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result2.batch.isEmptyBatch());
+    assertUnorderedSimpleWriteBatch(result2.batch, expectedBatch2);
 
-    auto [batch3, errors3] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_TRUE(batch3.isEmptyBatch());
+    auto result3 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_TRUE(result3.batch.isEmptyBatch());
 }
 
 TEST_F(UnorderedUnifiedWriteExecutorBatcherTest, UnorderedBatcherReprocessBatch) {
@@ -1052,32 +1540,33 @@ TEST_F(UnorderedUnifiedWriteExecutorBatcherTest, UnorderedBatcherReprocessBatch)
     WriteOpProducer producer(request);
 
     WriteOpAnalyzerMock analyzer({
-        {0, Analysis{kSingleShard, {nss0Shard0}}},
-        {1, Analysis{kSingleShard, {nss1Shard0}}},
-        {2, Analysis{kSingleShard, {nss0Shard0}}},
+        {0, Analysis{kSingleShard, {nss0Shard0}, nss0IsViewfulTimeseries}},
+        {1, Analysis{kSingleShard, {nss1Shard0}, nss1IsViewfulTimeseries}},
+        {2, Analysis{kSingleShard, {nss0Shard0}, nss0IsViewfulTimeseries}},
     });
 
     auto routingCtx = RoutingContext::createSynthetic({});
-    auto batcher = UnorderedWriteOpBatcher(producer, analyzer);
+    auto batcher = UnorderedWriteOpBatcher(producer, analyzer, WriteCommandRef{request});
 
     // Output batches: [0, 1, 2], [0(reprocess), 1(reprocess), 2(reprocess)]
     SimpleWriteBatch::ShardRequest shardRequest1{
         {{nss0, nss0Shard0}, {nss1, nss1Shard0}},
+        nssIsViewfulTimeseries,
         {WriteOp(request, 0), WriteOp(request, 1), WriteOp(request, 2)}};
     SimpleWriteBatch expectedBatch1{{{shardId0, shardRequest1}}};
 
-    auto [batch1, errors1] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_FALSE(batch1.isEmptyBatch());
-    assertUnorderedSimpleWriteBatch(batch1, expectedBatch1);
+    auto result1 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result1.batch.isEmptyBatch());
+    assertUnorderedSimpleWriteBatch(result1.batch, expectedBatch1);
 
-    batcher.markBatchReprocess(batch1);
+    batcher.markBatchReprocess(result1.batch);
 
-    auto [batch2, errors2] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_FALSE(batch2.isEmptyBatch());
-    assertUnorderedSimpleWriteBatch(batch2, expectedBatch1);
+    auto result2 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result2.batch.isEmptyBatch());
+    assertUnorderedSimpleWriteBatch(result2.batch, expectedBatch1);
 
-    auto [batch3, errors3] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_TRUE(batch3.isEmptyBatch());
+    auto result3 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_TRUE(result3.batch.isEmptyBatch());
 }
 
 TEST_F(UnorderedUnifiedWriteExecutorBatcherTest, UnorderedBatcherDoesNotStopOnWriteError) {
@@ -1091,31 +1580,95 @@ TEST_F(UnorderedUnifiedWriteExecutorBatcherTest, UnorderedBatcherDoesNotStopOnWr
     WriteOpProducer producer(request);
 
     WriteOpAnalyzerMock analyzer({
-        {0, Analysis{kSingleShard, {nss0Shard0}}},
-        {1, Analysis{kSingleShard, {nss1Shard0}}},
-        {2, Analysis{kSingleShard, {nss0Shard0VersionIgnored}}},
+        {0, Analysis{kSingleShard, {nss0Shard0}, nss0IsViewfulTimeseries}},
+        {1, Analysis{kSingleShard, {nss1Shard0}, nss1IsViewfulTimeseries}},
+        {2, Analysis{kSingleShard, {nss0Shard0VersionIgnored}, nss0IsViewfulTimeseries}},
     });
 
     auto routingCtx = RoutingContext::createSynthetic({});
-    auto batcher = UnorderedWriteOpBatcher(producer, analyzer);
+    auto batcher = UnorderedWriteOpBatcher(producer, analyzer, WriteCommandRef{request});
 
     // Output batches: [0, 1], [2]
     SimpleWriteBatch::ShardRequest shardRequest1{{{nss0, nss0Shard0}, {nss1, nss1Shard0}},
+                                                 nssIsViewfulTimeseries,
                                                  {WriteOp(request, 0), WriteOp(request, 1)}};
     SimpleWriteBatch expectedBatch1{{{shardId0, shardRequest1}}};
-    auto [batch1, errors1] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_FALSE(batch1.isEmptyBatch());
-    assertUnorderedSimpleWriteBatch(batch1, expectedBatch1);
+    auto result1 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result1.batch.isEmptyBatch());
+    assertUnorderedSimpleWriteBatch(result1.batch, expectedBatch1);
 
-    shardRequest1 =
-        SimpleWriteBatch::ShardRequest{{{nss0, nss0Shard0VersionIgnored}}, {WriteOp(request, 2)}};
+    shardRequest1 = SimpleWriteBatch::ShardRequest{
+        {{nss0, nss0Shard0VersionIgnored}}, nssIsViewfulTimeseries, {WriteOp(request, 2)}};
     SimpleWriteBatch expectedBatch2{{{shardId0, shardRequest1}}};
-    auto [batch2, errors2] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_FALSE(batch2.isEmptyBatch());
-    assertUnorderedSimpleWriteBatch(batch2, expectedBatch2);
+    auto result2 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result2.batch.isEmptyBatch());
+    assertUnorderedSimpleWriteBatch(result2.batch, expectedBatch2);
 
-    auto [batch3, errors3] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_TRUE(batch3.isEmptyBatch());
+    auto result3 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_TRUE(result3.batch.isEmptyBatch());
+}
+
+TEST_F(UnorderedUnifiedWriteExecutorBatcherTest, UnorderedBatcherTxnAnalysisError) {
+    // Necessary for TransactionRouter::get to be non-null for this opCtx.
+    auto* opCtx = getOperationContext();
+    auto lsid = LogicalSessionId(UUID::gen(), SHA256Block());
+    opCtx->setLogicalSessionId(lsid);
+    TxnNumber txnNumber = 0;
+    opCtx->setTxnNumber(txnNumber);
+    opCtx->setInMultiDocumentTransaction();
+    RouterOperationContextSession rocs(opCtx);
+
+    BulkWriteCommandRequest request(
+        {
+            BulkWriteInsertOp(0, BSONObj()),
+            BulkWriteInsertOp(1, BSONObj()),
+            BulkWriteInsertOp(0, BSONObj()),
+        },
+        {NamespaceInfoEntry(nss0), NamespaceInfoEntry(nss1)});
+    WriteOpProducer producer(request);
+
+    const Status error(ErrorCodes::BadValue, "bad analysis :(");
+    WriteOpAnalyzerMock analyzer({
+        {0, Analysis{kSingleShard, {nss0Shard0}}},
+        {1, Analysis{kSingleShard, {nss1Shard0}}},
+        {2, StatusWith<Analysis>(error)},
+    });
+
+    auto routingCtx = RoutingContext::createSynthetic({});
+    auto batcher = UnorderedWriteOpBatcher(producer, analyzer, WriteCommandRef{request});
+
+    // Single empty batch because we encounter an error.
+    auto result = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_TRUE(result.batch.isEmptyBatch());
+    ASSERT_EQ(result.opsWithErrors.size(), 1);
+    std::pair<WriteOp, Status> opWithError = std::make_pair(WriteOp(request, 2), error);
+    ASSERT_EQ(result.opsWithErrors[0], opWithError);
+    ASSERT_FALSE(result.transientTxnError);
+
+    WriteOpProducer transientProducer(request);
+    const Status transientError(ErrorCodes::PreparedTransactionInProgress,
+                                "prepared txn in progress");
+
+    // Try again, but this time, with a transient txn error.
+    analyzer = WriteOpAnalyzerMock({
+        {0, Analysis{kSingleShard, {nss0Shard0}}},
+        {1, Analysis{kSingleShard, {nss1Shard0}}},
+        {2, StatusWith<Analysis>(transientError)},
+    });
+
+    routingCtx = RoutingContext::createSynthetic({});
+    auto transitentBatcher =
+        UnorderedWriteOpBatcher(transientProducer, analyzer, WriteCommandRef{request});
+
+    // Single empty batch because we encounter an error.
+    result = transitentBatcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_TRUE(result.batch.isEmptyBatch());
+    ASSERT_EQ(result.opsWithErrors.size(), 1);
+    opWithError = std::make_pair(WriteOp(request, 2), transientError);
+    ASSERT_EQ(result.opsWithErrors[0], opWithError);
+
+    // The UnorderedBatcher doesn't distinguish between transient txn errors and other errors.
+    ASSERT_FALSE(result.transientTxnError);
 }
 
 TEST_F(UnorderedUnifiedWriteExecutorBatcherTest, UnorderedBatcherSkipsDoneBatches) {
@@ -1137,13 +1690,13 @@ TEST_F(UnorderedUnifiedWriteExecutorBatcherTest, UnorderedBatcherSkipsDoneBatche
         {1, Analysis{kSingleShard, {nss0Shard0}}},
         {2, Analysis{kMultiShard, {{nss0Shard0, nss0Shard1}}}},
         {3, Analysis{kMultiShard, {{nss0Shard0, nss0Shard1}}}},
-        {4, Analysis{kNonTargetedWrite, {nss0Shard0}}},
+        {4, Analysis{kTwoPhaseWrite, {nss0Shard0}}},
         {5, Analysis{kMultiShard, {{nss0Shard0, nss0Shard1}}}},
         {6, Analysis{kSingleShard, {nss1Shard0}}},
     });
 
     auto routingCtx = RoutingContext::createSynthetic({});
-    auto batcher = UnorderedWriteOpBatcher(producer, analyzer);
+    auto batcher = UnorderedWriteOpBatcher(producer, analyzer, WriteCommandRef{request});
 
     // Note a few operations to have all shards already successfully written to.
     const std::map<WriteOpId, std::set<ShardId>> successfulShardsToAdd{
@@ -1153,21 +1706,22 @@ TEST_F(UnorderedUnifiedWriteExecutorBatcherTest, UnorderedBatcherSkipsDoneBatche
         {WriteOpId(6), std::set<ShardId>{nss1Shard0.shardName}}};
     batcher.noteSuccessfulShards(successfulShardsToAdd);
 
-    SimpleWriteBatch::ShardRequest shardRequest1{{{nss0, nss0Shard0}},
-                                                 {WriteOp(request, 1), WriteOp(request, 3)}};
-    SimpleWriteBatch::ShardRequest shardRequest2{{{nss0, nss0Shard1}}, {WriteOp(request, 3)}};
+    SimpleWriteBatch::ShardRequest shardRequest1{
+        {{nss0, nss0Shard0}}, nssIsViewfulTimeseries, {WriteOp(request, 1), WriteOp(request, 3)}};
+    SimpleWriteBatch::ShardRequest shardRequest2{
+        {{nss0, nss0Shard1}}, nssIsViewfulTimeseries, {WriteOp(request, 3)}};
     SimpleWriteBatch expectedBatch1{{{shardId0, shardRequest1}, {shardId1, shardRequest2}}};
 
-    auto [batch1, errors1] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_FALSE(batch1.isEmptyBatch());
-    assertUnorderedSimpleWriteBatch(batch1, expectedBatch1);
+    auto result1 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result1.batch.isEmptyBatch());
+    assertUnorderedSimpleWriteBatch(result1.batch, expectedBatch1);
 
-    auto [batch2, errors2] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_FALSE(batch2.isEmptyBatch());
-    assertNonTargetedWriteBatch(batch2, 4);
+    auto result2 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result2.batch.isEmptyBatch());
+    assertTwoPhaseWriteBatch(result2.batch, 4, nss0IsViewfulTimeseries);
 
-    auto [batch3, errors3] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_TRUE(batch3.isEmptyBatch());
+    auto result3 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_TRUE(result3.batch.isEmptyBatch());
 }
 
 TEST_F(UnorderedUnifiedWriteExecutorBatcherTest, UnorderedBatcherAttachesSampleIdToBatches) {
@@ -1190,17 +1744,20 @@ TEST_F(UnorderedUnifiedWriteExecutorBatcherTest, UnorderedBatcherAttachesSampleI
          Analysis{
              kSingleShard,
              {nss0Shard0},
+             nss0IsViewfulTimeseries,
              analyze_shard_key::TargetedSampleId(sampleId0, shardId0),
          }},
         {1,
          Analysis{
              kMultiShard,
              {nss0Shard0, nss0Shard1},
+             nss0IsViewfulTimeseries,
          }},
         {2,
          Analysis{
-             kNonTargetedWrite,
+             kTwoPhaseWrite,
              {nss0Shard0, nss0Shard1},
+             nss0IsViewfulTimeseries,
              analyze_shard_key::TargetedSampleId(sampleId2, shardId0),
          }},
         {3,
@@ -1211,29 +1768,616 @@ TEST_F(UnorderedUnifiedWriteExecutorBatcherTest, UnorderedBatcherAttachesSampleI
     });
 
     auto routingCtx = RoutingContext::createSynthetic({});
-    auto batcher = UnorderedWriteOpBatcher(producer, analyzer);
+    auto batcher = UnorderedWriteOpBatcher(producer, analyzer, WriteCommandRef{request});
 
     // Output batches: [0, 1], [2], [3], <stop>
-    auto [batch1, errors1] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_FALSE(batch1.isEmptyBatch());
-    auto shardRequest1 = SimpleWriteBatch::ShardRequest{
-        {{nss0, nss0Shard0}}, {WriteOp(request, 0), WriteOp(request, 1)}, {{0, sampleId0}}};
-    auto shardRequest2 =
-        SimpleWriteBatch::ShardRequest{{{nss0, nss0Shard1}}, {WriteOp(request, 1)}};
+    auto result1 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result1.batch.isEmptyBatch());
+    auto shardRequest1 = SimpleWriteBatch::ShardRequest{{{nss0, nss0Shard0}},
+                                                        nssIsViewfulTimeseries,
+                                                        {WriteOp(request, 0), WriteOp(request, 1)},
+                                                        {{0, sampleId0}}};
+    auto shardRequest2 = SimpleWriteBatch::ShardRequest{
+        {{nss0, nss0Shard1}}, nssIsViewfulTimeseries, {WriteOp(request, 1)}};
     SimpleWriteBatch expectedBatch1{{{shardId0, shardRequest1}, {shardId1, shardRequest2}}};
-    assertUnorderedSimpleWriteBatch(batch1, expectedBatch1);
+    assertUnorderedSimpleWriteBatch(result1.batch, expectedBatch1);
 
-    auto [batch2, errors2] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_FALSE(batch2.isEmptyBatch());
-    assertNonTargetedWriteBatch(batch2, 2, sampleId2);
+    auto result2 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result2.batch.isEmptyBatch());
+    assertTwoPhaseWriteBatch(result2.batch, 2, nss0IsViewfulTimeseries, sampleId2);
 
-    auto [batch3, errors3] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_FALSE(batch3.isEmptyBatch());
-    assertInternalTransactionBatch(batch3, 3);
+    auto result3 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result3.batch.isEmptyBatch());
+    assertInternalTransactionBatch(result3.batch, 3);
 
-    auto [batch4, errors4] = batcher.getNextBatch(getOperationContext(), *routingCtx);
-    ASSERT_TRUE(batch4.isEmptyBatch());
+    auto result4 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_TRUE(result4.batch.isEmptyBatch());
 }
+
+TEST_F(UnorderedUnifiedWriteExecutorBatcherTest,
+       UnorderedBatcherSplitsBulkCommandBatchesWhenExceedsBSONMax) {
+    BulkWriteCommandRequest request;
+    int kNumOps = 17;
+    int kLetSize = 15 * 1024 * 1024;  // 15 MB.
+    int kOpSize = 200 * 1024;         // 0.2 MB.
+
+    // This is an approximate estimate but should work with the request overhead since we round
+    // down.
+    int kNumOpsInBatch1 = (BSONObjMaxUserSize - kLetSize) / kOpSize;
+    ASSERT_LT(kNumOpsInBatch1, kNumOps);
+
+    // Create a ~15 MB let.
+    auto giantLet = BSON("a" << std::string(kLetSize, 'a'));
+
+    // Create a ~.2 MB document to insert. We insert 17, 9 targeted to shard0 and 8 to shard1,
+    // expecting 8 to fit in one batch.
+    auto insertDoc = BSON("x" << 1 << "b" << std::string(kOpSize, 'b'));
+    std::vector<BulkWriteOpVariant> ops;
+    for (auto i = 0; i < kNumOps; i++) {
+        auto op = BulkWriteInsertOp(i % 2, insertDoc);
+        ops.push_back(op);
+    }
+
+    request.setLet(giantLet);
+    request.setOps(ops);
+    request.setDbName(DatabaseName::kAdmin);
+    request.setNsInfo({NamespaceInfoEntry(nss0), NamespaceInfoEntry(nss1)});
+
+    ASSERT_GT(request.toBSON().objsize(), BSONObjMaxUserSize);
+
+    WriteOpProducer producer(request);
+
+    std::map<WriteOpId, StatusWith<Analysis>> opAnalysis;
+    for (auto i = 0; i < kNumOps; i++) {
+        auto shardAffected = i % 2 ? nss1Shard1 : nss0Shard0;
+        auto isViewfulTimeseries = i % 2 ? nss1IsViewfulTimeseries : nss0IsViewfulTimeseries;
+        opAnalysis.emplace(i, Analysis{kSingleShard, {shardAffected}, isViewfulTimeseries});
+    }
+    WriteOpAnalyzerMock analyzer({std::move(opAnalysis)});
+
+    auto routingCtx = RoutingContext::createSynthetic({});
+    auto batcher = UnorderedWriteOpBatcher(producer, analyzer, WriteCommandRef{request});
+
+    // The batcher should split the ops to honor the max bson size.
+    std::vector<WriteOp> expectedShard0Ops;
+    std::vector<WriteOp> expectedShard1Ops;
+    for (int i = 0; i < 2 * kNumOpsInBatch1; i++) {
+        if (i % 2) {
+            expectedShard1Ops.push_back(WriteOp(request, i));
+        } else {
+            expectedShard0Ops.push_back(WriteOp(request, i));
+        }
+    }
+    auto shard0Request = SimpleWriteBatch::ShardRequest{
+        {{nss0, nss0Shard0}}, nssIsViewfulTimeseries, std::move(expectedShard0Ops)};
+    auto shard1Request = SimpleWriteBatch::ShardRequest{
+        {{nss1, nss1Shard1}}, nssIsViewfulTimeseries, std::move(expectedShard1Ops)};
+    SimpleWriteBatch expectedBatch1{{{shardId0, shard0Request}, {shardId1, shard1Request}}};
+
+    auto result1 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result1.batch.isEmptyBatch());
+    assertUnorderedSimpleWriteBatch(result1.batch, expectedBatch1);
+
+    std::vector<WriteOp> expectedShard0Ops2;
+    std::vector<WriteOp> expectedShard1Ops2;
+    for (int i = 2 * kNumOpsInBatch1; i < kNumOps; i++) {
+        if (i % 2) {
+            expectedShard1Ops2.push_back(WriteOp(request, i));
+        } else {
+            expectedShard0Ops2.push_back(WriteOp(request, i));
+        }
+    }
+    auto shard0Request2 = SimpleWriteBatch::ShardRequest{
+        {{nss0, nss0Shard0}}, nssIsViewfulTimeseries, std::move(expectedShard0Ops2)};
+    auto shard1Request2 = SimpleWriteBatch::ShardRequest{
+        {{nss1, nss1Shard1}}, nssIsViewfulTimeseries, std::move(expectedShard1Ops2)};
+    SimpleWriteBatch expectedBatch2{{{shardId0, shard0Request2}, {shardId1, shard1Request2}}};
+    auto result2 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result2.batch.isEmptyBatch());
+    assertUnorderedSimpleWriteBatch(result2.batch, expectedBatch2);
+
+    auto result3 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_TRUE(result3.batch.isEmptyBatch());
+}
+
+TEST_F(UnorderedUnifiedWriteExecutorBatcherTest,
+       UnorderedBatcherSplitsBatchedUpdateBatchesWhenExceedsBSONMax) {
+    int kNumOps = 17;
+    int kCommentSize = 15 * 1024 * 1024;  // 15 MB.
+    int kOpSize = 200 * 1024;             // 0.2 MB.
+
+    // This is an approximate estimate but should work with the request overhead since we round
+    // down.
+    int kNumOpsInBatch1 = (BSONObjMaxUserSize - kCommentSize) / kOpSize;
+    ASSERT_LT(kNumOpsInBatch1, kNumOps);
+
+    // Create a ~15 MB comment.
+    auto giantComment = IDLAnyTypeOwned(BSON("key" << std::string(kCommentSize, 'b'))["key"]);
+
+    // Create a ~.2 MB update document. We have 17, 9 targeted to shard0 and 8 to shard1,
+    // expecting 8 to fit in one batch.
+    auto updateDoc = write_ops::UpdateOpEntry(BSON("x" << 1),
+                                              write_ops::UpdateModification::parseFromClassicUpdate(
+                                                  BSON("b" << std::string(kOpSize, 'b'))));
+    std::vector<write_ops::UpdateOpEntry> ops;
+    for (auto i = 0; i < kNumOps; i++) {
+        ops.push_back(updateDoc);
+    }
+
+    // Create the BatchedCommandRequested with updates.
+    BatchedCommandRequest request([&] {
+        write_ops::UpdateCommandRequest updateOp(nss0);
+        updateOp.setWriteCommandRequestBase([] {
+            write_ops::WriteCommandRequestBase writeCommandBase;
+            writeCommandBase.setOrdered(true);
+            return writeCommandBase;
+        }());
+        updateOp.setComment(giantComment);
+        updateOp.setUpdates(ops);
+        return updateOp;
+    }());
+
+    ASSERT_GT(request.toBSON().objsize(), BSONObjMaxUserSize);
+
+    WriteOpProducer producer(request);
+
+    std::map<WriteOpId, StatusWith<Analysis>> opAnalysis;
+    for (auto i = 0; i < kNumOps; i++) {
+        auto shardAffected = i % 2 ? nss0Shard1 : nss0Shard0;
+        opAnalysis.emplace(i, Analysis{kSingleShard, {shardAffected}, nss0IsViewfulTimeseries});
+    }
+    WriteOpAnalyzerMock analyzer({std::move(opAnalysis)});
+
+    auto routingCtx = RoutingContext::createSynthetic({});
+    auto batcher = UnorderedWriteOpBatcher(producer, analyzer, WriteCommandRef{request});
+
+    // The batcher should split the ops to honor the max bson size.
+    std::vector<WriteOp> expectedShard0Ops;
+    std::vector<WriteOp> expectedShard1Ops;
+    for (int i = 0; i < 2 * kNumOpsInBatch1; i++) {
+        if (i % 2) {
+            expectedShard1Ops.push_back(WriteOp(request, i));
+        } else {
+            expectedShard0Ops.push_back(WriteOp(request, i));
+        }
+    }
+    auto shard0Request = SimpleWriteBatch::ShardRequest{
+        {{nss0, nss0Shard0}}, nssIsViewfulTimeseries, std::move(expectedShard0Ops)};
+    auto shard1Request = SimpleWriteBatch::ShardRequest{
+        {{nss0, nss0Shard1}}, nssIsViewfulTimeseries, std::move(expectedShard1Ops)};
+    SimpleWriteBatch expectedBatch1{{{shardId0, shard0Request}, {shardId1, shard1Request}}};
+
+    auto result1 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result1.batch.isEmptyBatch());
+    assertUnorderedSimpleWriteBatch(result1.batch, expectedBatch1);
+
+    std::vector<WriteOp> expectedShard0Ops2;
+    std::vector<WriteOp> expectedShard1Ops2;
+    for (int i = 2 * kNumOpsInBatch1; i < kNumOps; i++) {
+        if (i % 2) {
+            expectedShard1Ops2.push_back(WriteOp(request, i));
+        } else {
+            expectedShard0Ops2.push_back(WriteOp(request, i));
+        }
+    }
+    auto shard0Request2 = SimpleWriteBatch::ShardRequest{
+        {{nss0, nss0Shard0}}, nssIsViewfulTimeseries, std::move(expectedShard0Ops2)};
+    auto shard1Request2 = SimpleWriteBatch::ShardRequest{
+        {{nss0, nss0Shard1}}, nssIsViewfulTimeseries, std::move(expectedShard1Ops2)};
+    SimpleWriteBatch expectedBatch2{{{shardId0, shard0Request2}, {shardId1, shard1Request2}}};
+    auto result2 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result2.batch.isEmptyBatch());
+    assertUnorderedSimpleWriteBatch(result2.batch, expectedBatch2);
+
+    auto result3 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_TRUE(result3.batch.isEmptyBatch());
+}
+
+TEST_F(UnorderedUnifiedWriteExecutorBatcherTest,
+       UnorderedBatcherSplitsBatchedInsertBatchesWhenExceedsBSONMax) {
+    int kNumOps = 17;
+    int kCommentSize = 15 * 1024 * 1024;  // 15 MB.
+    int kOpSize = 200 * 1024;             // 0.2 MB.
+
+    // This is an approximate estimate but should work with the request overhead since we round
+    // down.
+    int kNumOpsInBatch1 = (BSONObjMaxUserSize - kCommentSize) / kOpSize;
+    ASSERT_LT(kNumOpsInBatch1, kNumOps);
+
+    // Create a ~15 MB comment.
+    auto giantComment = IDLAnyTypeOwned(BSON("key" << std::string(kCommentSize, 'b'))["key"]);
+
+    // Create a ~.2 MB document to insert.
+    auto insertDoc = BSON("a" << std::string(kOpSize, 'x'));
+    std::vector<BSONObj> ops;
+    for (auto i = 0; i < kNumOps; i++) {
+        ops.push_back(insertDoc);
+    }
+
+    // Create an insert command request with the docs. We have 17, 9 targeted to shard0 and 8 to
+    // shard1, expecting 8 to fit in one batch.
+    BatchedCommandRequest request([&] {
+        write_ops::InsertCommandRequest insertOp(nss0);
+        insertOp.setWriteCommandRequestBase([] {
+            write_ops::WriteCommandRequestBase writeCommandBase;
+            writeCommandBase.setOrdered(true);
+            return writeCommandBase;
+        }());
+        insertOp.setComment(giantComment);
+        insertOp.setDocuments(ops);
+        return insertOp;
+    }());
+
+    ASSERT_GT(request.toBSON().objsize(), BSONObjMaxUserSize);
+
+    WriteOpProducer producer(request);
+
+    std::map<WriteOpId, StatusWith<Analysis>> opAnalysis;
+    for (auto i = 0; i < kNumOps; i++) {
+        auto shardAffected = i % 2 ? nss0Shard1 : nss0Shard0;
+        opAnalysis.emplace(i, Analysis{kSingleShard, {shardAffected}, nss0IsViewfulTimeseries});
+    }
+    WriteOpAnalyzerMock analyzer({std::move(opAnalysis)});
+
+    auto routingCtx = RoutingContext::createSynthetic({});
+    auto batcher = UnorderedWriteOpBatcher(producer, analyzer, WriteCommandRef{request});
+
+    // The batcher should split the ops to honor the max bson size.
+    std::vector<WriteOp> expectedShard0Ops;
+    std::vector<WriteOp> expectedShard1Ops;
+    for (int i = 0; i < 2 * kNumOpsInBatch1; i++) {
+        if (i % 2) {
+            expectedShard1Ops.push_back(WriteOp(request, i));
+        } else {
+            expectedShard0Ops.push_back(WriteOp(request, i));
+        }
+    }
+    auto shard0Request = SimpleWriteBatch::ShardRequest{
+        {{nss0, nss0Shard0}}, nssIsViewfulTimeseries, std::move(expectedShard0Ops)};
+    auto shard1Request = SimpleWriteBatch::ShardRequest{
+        {{nss0, nss0Shard1}}, nssIsViewfulTimeseries, std::move(expectedShard1Ops)};
+    SimpleWriteBatch expectedBatch1{{{shardId0, shard0Request}, {shardId1, shard1Request}}};
+
+    auto result1 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result1.batch.isEmptyBatch());
+    assertUnorderedSimpleWriteBatch(result1.batch, expectedBatch1);
+
+    std::vector<WriteOp> expectedShard0Ops2;
+    std::vector<WriteOp> expectedShard1Ops2;
+    for (int i = 2 * kNumOpsInBatch1; i < kNumOps; i++) {
+        if (i % 2) {
+            expectedShard1Ops2.push_back(WriteOp(request, i));
+        } else {
+            expectedShard0Ops2.push_back(WriteOp(request, i));
+        }
+    }
+    auto shard0Request2 = SimpleWriteBatch::ShardRequest{
+        {{nss0, nss0Shard0}}, nssIsViewfulTimeseries, std::move(expectedShard0Ops2)};
+    auto shard1Request2 = SimpleWriteBatch::ShardRequest{
+        {{nss0, nss0Shard1}}, nssIsViewfulTimeseries, std::move(expectedShard1Ops2)};
+    SimpleWriteBatch expectedBatch2{{{shardId0, shard0Request2}, {shardId1, shard1Request2}}};
+    auto result2 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result2.batch.isEmptyBatch());
+    assertUnorderedSimpleWriteBatch(result2.batch, expectedBatch2);
+
+    auto result3 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_TRUE(result3.batch.isEmptyBatch());
+}
+
+TEST_F(UnorderedUnifiedWriteExecutorBatcherTest,
+       UnorderedBatcherSplitsBatchedDeleteBatchesWhenExceedsBSONMax) {
+    int kNumOps = 17;
+    int kLetSize = 15 * 1024 * 1024;  // 15 MB.
+    int kOpSize = 200 * 1024;         // 0.2 MB.
+
+    // This is an approximate estimate but should work with the request overhead since we round
+    // down.
+    int kNumOpsInBatch1 = (BSONObjMaxUserSize - kLetSize) / kOpSize;
+    ASSERT_LT(kNumOpsInBatch1, kNumOps);
+
+    // Create a ~15 MB let.
+    auto giantLet = BSON("a" << std::string(kLetSize, 'a'));
+
+    // Create a ~.2 MB delete. We have 17, 9 targeted to shard0 and 8 to shard1, expecting 8 to fit
+    // in one batch.
+    auto deleteDoc = write_ops::DeleteOpEntry(BSON("b" << std::string(kOpSize, 'b')), false);
+
+    std::vector<write_ops::DeleteOpEntry> ops;
+    for (auto i = 0; i < kNumOps; i++) {
+        ops.push_back(deleteDoc);
+    }
+
+    // Create the BatchedCommandRequested with deletes.
+    BatchedCommandRequest request([&] {
+        write_ops::DeleteCommandRequest deleteOp(nss0);
+        deleteOp.setWriteCommandRequestBase([] {
+            write_ops::WriteCommandRequestBase writeCommandBase;
+            writeCommandBase.setOrdered(true);
+            return writeCommandBase;
+        }());
+        deleteOp.setLet(giantLet);
+        deleteOp.setDeletes(ops);
+        return deleteOp;
+    }());
+
+    ASSERT_GT(request.toBSON().objsize(), BSONObjMaxUserSize);
+
+    WriteOpProducer producer(request);
+
+    std::map<WriteOpId, StatusWith<Analysis>> opAnalysis;
+    for (auto i = 0; i < kNumOps; i++) {
+        auto shardAffected = i % 2 ? nss0Shard1 : nss0Shard0;
+        opAnalysis.emplace(i, Analysis{kSingleShard, {shardAffected}, nss0IsViewfulTimeseries});
+    }
+    WriteOpAnalyzerMock analyzer({std::move(opAnalysis)});
+
+    auto routingCtx = RoutingContext::createSynthetic({});
+    auto batcher = UnorderedWriteOpBatcher(producer, analyzer, WriteCommandRef{request});
+
+    // The batcher should split the ops to honor the max bson size.
+    std::vector<WriteOp> expectedShard0Ops;
+    std::vector<WriteOp> expectedShard1Ops;
+    for (int i = 0; i < 2 * kNumOpsInBatch1; i++) {
+        if (i % 2) {
+            expectedShard1Ops.push_back(WriteOp(request, i));
+        } else {
+            expectedShard0Ops.push_back(WriteOp(request, i));
+        }
+    }
+    auto shard0Request = SimpleWriteBatch::ShardRequest{
+        {{nss0, nss0Shard0}}, nssIsViewfulTimeseries, std::move(expectedShard0Ops)};
+    auto shard1Request = SimpleWriteBatch::ShardRequest{
+        {{nss0, nss0Shard1}}, nssIsViewfulTimeseries, std::move(expectedShard1Ops)};
+    SimpleWriteBatch expectedBatch1{{{shardId0, shard0Request}, {shardId1, shard1Request}}};
+
+    auto result1 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result1.batch.isEmptyBatch());
+    assertUnorderedSimpleWriteBatch(result1.batch, expectedBatch1);
+
+    std::vector<WriteOp> expectedShard0Ops2;
+    std::vector<WriteOp> expectedShard1Ops2;
+    for (int i = 2 * kNumOpsInBatch1; i < kNumOps; i++) {
+        if (i % 2) {
+            expectedShard1Ops2.push_back(WriteOp(request, i));
+        } else {
+            expectedShard0Ops2.push_back(WriteOp(request, i));
+        }
+    }
+    auto shard0Request2 = SimpleWriteBatch::ShardRequest{
+        {{nss0, nss0Shard0}}, nssIsViewfulTimeseries, std::move(expectedShard0Ops2)};
+    auto shard1Request2 = SimpleWriteBatch::ShardRequest{
+        {{nss0, nss0Shard1}}, nssIsViewfulTimeseries, std::move(expectedShard1Ops2)};
+    SimpleWriteBatch expectedBatch2{{{shardId0, shard0Request2}, {shardId1, shard1Request2}}};
+    auto result2 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_FALSE(result2.batch.isEmptyBatch());
+    assertUnorderedSimpleWriteBatch(result2.batch, expectedBatch2);
+
+    auto result3 = batcher.getNextBatch(getOperationContext(), *routingCtx);
+    ASSERT_TRUE(result3.batch.isEmptyBatch());
+}
+
+class UnifiedWriteExecutorSizeEstimatorTest : public ServiceContextTest {
+public:
+    UnifiedWriteExecutorSizeEstimatorTest() : _opCtx(makeOperationContext()) {}
+
+    const NamespaceString nss0 = NamespaceString::createNamespaceString_forTest("test", "coll0");
+    const NamespaceString nss1 = NamespaceString::createNamespaceString_forTest("test", "coll1");
+    const ShardId shardId0 = ShardId("shard0");
+    const ShardId shardId1 = ShardId("shard1");
+
+    OperationContext* getOperationContext() {
+        return _opCtx.get();
+    }
+
+private:
+    ServiceContext::UniqueOperationContext _opCtx;
+};
+
+TEST_F(UnifiedWriteExecutorSizeEstimatorTest, BulkWriteCommandBaseSizeEstimate) {
+    BulkWriteCommandRequest request;
+    int kLetSize = 500 * 1024;      // 0.5 MB.
+    int kCommentSize = 700 * 1024;  // 0.7 MB.
+
+    // Add optional/variable fields to the request to make sure we account for them.
+    auto let = BSON("a" << std::string(kLetSize, 'a'));
+    request.setLet(let);
+    request.setDbName(DatabaseName::kAdmin);
+    request.setBypassEmptyTsReplacement(true);
+    request.setComment(IDLAnyTypeOwned(BSON("key" << std::string(kCommentSize, 'b'))["key"]));
+
+    // We set NS Info and ops to empty arrays since we're checking the base size and these are added
+    // per op.
+    request.setNsInfo({});
+    request.setOps({});
+
+    BSONObjBuilder builder;
+    request.serialize(&builder);
+    auto requestSize = builder.obj().objsize();
+
+    auto sizeEstimator = write_op_helpers::BulkCommandSizeEstimator{getOperationContext(), request};
+
+    // Expect the estimated size to be larger and reasonably similar.
+    const int diff = sizeEstimator.getBaseSizeEstimate() - requestSize;
+    ASSERT_GT(diff, 0);
+    ASSERT_LT(diff, 50);
+}
+
+TEST_F(UnifiedWriteExecutorSizeEstimatorTest, BulkWriteCommandOpSizeEstimates) {
+    // Create a mix of inserts, updates, and deletes to add to the bulk write.
+    auto insertDoc = BSON("x" << 1 << "b" << std::string(200 * 1024, 'b'));
+    auto updateFilter = BSON("x" << -1);
+    auto updateMods = write_ops::UpdateModification(BSON("$set" << BSON("a" << 1)));
+    auto deleteDoc = BSON("x" << 1 << "_id" << 1);
+
+    std::vector<BulkWriteOpVariant> ops = {BulkWriteInsertOp(0, insertDoc),
+                                           BulkWriteInsertOp(0, insertDoc),
+                                           BulkWriteInsertOp(1, insertDoc),
+                                           BulkWriteInsertOp(1, insertDoc),
+                                           BulkWriteUpdateOp(0, updateFilter, updateMods),
+                                           BulkWriteUpdateOp(1, updateFilter, updateMods),
+                                           BulkWriteDeleteOp(0, deleteDoc),
+                                           BulkWriteDeleteOp(1, deleteDoc)};
+
+    BulkWriteCommandRequest request(ops, {NamespaceInfoEntry(nss0), NamespaceInfoEntry(nss1)});
+    request.setDbName(DatabaseName::kAdmin);
+
+    auto sizeEstimator = write_op_helpers::BulkCommandSizeEstimator{getOperationContext(), request};
+
+    int totalEstimate = sizeEstimator.getBaseSizeEstimate();
+
+    // Get the estimate and add the op so we register the nss.
+    int firstNss0InsertSize = sizeEstimator.getOpSizeEstimate(0, shardId0);
+    sizeEstimator.addOpToBatch(0, shardId0);
+
+    int secondNss0InsertSize = sizeEstimator.getOpSizeEstimate(1, shardId0);
+    sizeEstimator.addOpToBatch(1, shardId0);
+
+    // The first insert should also account for adding the NSS but the second shouldn't as we've
+    // already accounted for it.
+    ASSERT_GT(firstNss0InsertSize, secondNss0InsertSize);
+
+    totalEstimate += firstNss0InsertSize;
+    totalEstimate += secondNss0InsertSize;
+
+    for (int i = 2; i < static_cast<int>(ops.size()); i++) {
+        totalEstimate += sizeEstimator.getOpSizeEstimate(i, shardId0);
+        sizeEstimator.addOpToBatch(i, shardId0);
+    }
+
+    BSONObjBuilder builder;
+    request.serialize(&builder);
+    auto requestSize = builder.obj().objsize();
+
+    // Expect the estimated size to be larger and reasonably similar.
+    const int diff = totalEstimate - requestSize;
+    ASSERT_GT(diff, 0);
+    ASSERT_LT(diff, 1000);
+}
+
+TEST_F(UnifiedWriteExecutorSizeEstimatorTest, BatchedWriteInsertCommandBaseSizeEstimate) {
+    BatchedCommandRequest batchedRequest([&] {
+        write_ops::InsertCommandRequest insertOp(nss0);
+        insertOp.setWriteCommandRequestBase([] {
+            write_ops::WriteCommandRequestBase writeCommandBase;
+            writeCommandBase.setOrdered(true);
+            writeCommandBase.setBypassEmptyTsReplacement(true);
+            return writeCommandBase;
+        }());
+        insertOp.setDocuments({});
+        return insertOp;
+    }());
+
+    BSONObjBuilder builder;
+    batchedRequest.serialize(&builder);
+    auto requestSize = builder.obj().objsize();
+
+    auto sizeEstimator =
+        write_op_helpers::BatchedCommandSizeEstimator{getOperationContext(), batchedRequest};
+
+    // Expect the estimated size to be larger and reasonably similar.
+    const int diff = sizeEstimator.getBaseSizeEstimate() - requestSize;
+    ASSERT_GT(diff, 0);
+    ASSERT_LT(diff, 25);
+}
+
+TEST_F(UnifiedWriteExecutorSizeEstimatorTest, BatchedWriteDeleteCommandBaseSizeEstimate) {
+    auto let = BSON("a" << std::string(500 * 1024, 'a'));
+
+    BatchedCommandRequest batchedRequest([&] {
+        write_ops::DeleteCommandRequest deleteOp(nss0);
+        deleteOp.setWriteCommandRequestBase([] {
+            write_ops::WriteCommandRequestBase writeCommandBase;
+            writeCommandBase.setOrdered(false);
+            return writeCommandBase;
+        }());
+        deleteOp.setLet(let);
+        deleteOp.setDeletes({});
+        return deleteOp;
+    }());
+
+    BSONObjBuilder builder;
+    batchedRequest.serialize(&builder);
+    auto requestSize = builder.obj().objsize();
+
+    auto sizeEstimator =
+        write_op_helpers::BatchedCommandSizeEstimator{getOperationContext(), batchedRequest};
+
+    // Expect the estimated size to be larger and reasonably similar.
+    const int diff = sizeEstimator.getBaseSizeEstimate() - requestSize;
+    ASSERT_GT(diff, 0);
+    ASSERT_LT(diff, 50);
+}
+
+TEST_F(UnifiedWriteExecutorSizeEstimatorTest, BatchedWriteUpdateCommandBaseSizeEstimate) {
+    auto let = BSON("a" << std::string(500 * 1024, 'a'));
+
+    BatchedCommandRequest batchedRequest([&] {
+        write_ops::UpdateCommandRequest updateOp(nss0);
+        updateOp.setWriteCommandRequestBase([] {
+            write_ops::WriteCommandRequestBase writeCommandBase;
+            writeCommandBase.setBypassEmptyTsReplacement(true);
+            return writeCommandBase;
+        }());
+        updateOp.setLet(let);
+        updateOp.setUpdates({});
+        return updateOp;
+    }());
+
+
+    BSONObjBuilder builder;
+    batchedRequest.serialize(&builder);
+    auto requestSize = builder.obj().objsize();
+
+    auto sizeEstimator =
+        write_op_helpers::BatchedCommandSizeEstimator{getOperationContext(), batchedRequest};
+
+    // Expect the estimated size to be larger and reasonably similar.
+    const int diff = sizeEstimator.getBaseSizeEstimate() - requestSize;
+    ASSERT_GT(diff, 0);
+    ASSERT_LT(diff, 25);
+}
+
+TEST_F(UnifiedWriteExecutorSizeEstimatorTest, BatchedWriteCommandOpSizeEstimate) {
+    const int kNumDocs = 15;
+    auto insertDoc = BSON("a" << std::string(200, 'x'));
+    std::vector<BSONObj> docsToInsert;
+    docsToInsert.reserve(kNumDocs);
+    for (int i = 0; i < kNumDocs; i++) {
+        docsToInsert.push_back(insertDoc);
+    }
+
+    // Create the BatchedCommandRequested with inserts.
+    BatchedCommandRequest batchedRequest([&] {
+        write_ops::InsertCommandRequest insertOp(nss0);
+        insertOp.setWriteCommandRequestBase([] {
+            write_ops::WriteCommandRequestBase writeCommandBase;
+            writeCommandBase.setOrdered(true);
+            return writeCommandBase;
+        }());
+        insertOp.setDocuments(docsToInsert);
+        return insertOp;
+    }());
+
+    auto sizeEstimator =
+        write_op_helpers::BatchedCommandSizeEstimator{getOperationContext(), batchedRequest};
+
+    int totalEstimate = sizeEstimator.getBaseSizeEstimate();
+
+    for (int i = 0; i < static_cast<int>(docsToInsert.size()); i++) {
+        totalEstimate += sizeEstimator.getOpSizeEstimate(i, shardId0);
+        sizeEstimator.addOpToBatch(i, shardId0);
+    }
+
+    BSONObjBuilder builder;
+    batchedRequest.serialize(&builder);
+    auto requestSize = builder.obj().objsize();
+
+    const int diff = totalEstimate - requestSize;
+    ASSERT_GT(diff, 0);
+    ASSERT_LT(diff, 100);
+}
+
+
 }  // namespace
 }  // namespace unified_write_executor
 }  // namespace mongo

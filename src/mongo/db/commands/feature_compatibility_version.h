@@ -34,15 +34,16 @@
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/commands/set_feature_compatibility_version_gen.h"
 #include "mongo/db/feature_compatibility_version_document_gen.h"
-#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/server_options.h"
+#include "mongo/db/shard_role/lock_manager/d_concurrency.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/version/releases.h"
 
 #include <boost/optional/optional.hpp>
 
-namespace mongo {
+namespace MONGO_MOD_PUB mongo {
 
 class FeatureCompatibilityVersion {
 public:
@@ -60,13 +61,6 @@ public:
      * Fatally asserts if the featureCompatibilityVersion is not properly initialized after startup.
      */
     static void fassertInitializedAfterStartup(OperationContext* opCtx);
-
-    /**
-     * Adds a transition that allows users to downgrade from latest FCV to last continuous FCV.
-     * This function should only be called if the 'disableTransitionFromLatestToLastContinuous'
-     * server parameter is set to 'false'. That parameter is test-only and defaulted to 'true'.
-     */
-    static void addTransitionFromLatestToLastContinuous();
 
     /**
      * Adds transitions that allow users to downgrade back to the originalFCV after a failed
@@ -117,9 +111,11 @@ public:
      * If 'term' is provided, writes FCV with a timestamp and replicates it in oplog.
      * Returns FCV's Timestamp.
      */
-    static Timestamp setIfCleanStartup(OperationContext* opCtx,
-                                       repl::StorageInterface* storageInterface,
-                                       long long term = repl::OpTime::kUninitializedTerm);
+    static Timestamp setIfCleanStartup(
+        OperationContext* opCtx,
+        repl::StorageInterface* storageInterface,
+        const multiversion::FeatureCompatibilityVersion& minimumRequiredFCV,
+        long long term = repl::OpTime::kUninitializedTerm);
 
     /**
      * Returns true if the server has no replicated collections.
@@ -179,4 +175,4 @@ private:
     Lock::SharedLock _lk;
 };
 
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUB mongo

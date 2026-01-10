@@ -42,6 +42,7 @@
 #include "mongo/db/query/plan_yield_policy_sbe.h"
 #include "mongo/db/query/query_planner_params.h"
 #include "mongo/db/query/stage_builder/sbe/builder_data.h"
+#include "mongo/util/modules.h"
 
 namespace mongo::classic_runtime_planner_for_sbe {
 
@@ -49,15 +50,17 @@ namespace mongo::classic_runtime_planner_for_sbe {
  * Data that any runtime planner needs to perform the planning.
  */
 struct PlannerDataForSBE final : public PlannerData {
-    PlannerDataForSBE(OperationContext* opCtx,
-                      CanonicalQuery* cq,
-                      std::unique_ptr<WorkingSet> workingSet,
-                      const MultipleCollectionAccessor& collections,
-                      std::unique_ptr<QueryPlannerParams> plannerParams,
-                      PlanYieldPolicy::YieldPolicy yieldPolicy,
-                      boost::optional<size_t> cachedPlanHash,
-                      std::unique_ptr<PlanYieldPolicySBE> sbeYieldPolicy,
-                      bool useSbePlanCache)
+    PlannerDataForSBE(
+        OperationContext* opCtx,
+        CanonicalQuery* cq,
+        std::unique_ptr<WorkingSet> workingSet,
+        const MultipleCollectionAccessor& collections,
+        // To be shared between all instances of this type and the prepare helper creating them.
+        std::shared_ptr<const QueryPlannerParams> plannerParams,
+        PlanYieldPolicy::YieldPolicy yieldPolicy,
+        boost::optional<size_t> cachedPlanHash,
+        std::unique_ptr<PlanYieldPolicySBE> sbeYieldPolicy,
+        bool useSbePlanCache)
         : PlannerData(opCtx,
                       cq,
                       std::move(workingSet),
@@ -216,6 +219,22 @@ public:
     std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> makeExecutor(
         std::unique_ptr<CanonicalQuery> canonicalQuery) override;
 
+
+    /**
+     * Runs the trial period by working all candidate plans for as long as given in 'trialConfig'.
+     */
+    Status runTrials(trial_period::TrialPhaseConfig trialConfig);
+
+    /**
+     * Returns the specific stats for the multi-plan stage.
+     */
+    const MultiPlanStats* getSpecificStats() const;
+
+    /**
+     * Extracts and returns the winning QuerySolution from the multi-plan stage.
+     */
+    std::unique_ptr<QuerySolution> extractQuerySolution();
+
 private:
     using SbePlanAndData = std::pair<std::unique_ptr<sbe::PlanStage>, stage_builder::PlanStageData>;
 
@@ -350,8 +369,8 @@ public:
      * Test-only helper for swapping in a mock SBE plan for the one that was built from the cache
      * entry.
      */
-    void setSbePlan_forTest(std::unique_ptr<sbe::PlanStage> sbePlan,
-                            stage_builder::PlanStageData data) {
+    MONGO_MOD_NEEDS_REPLACEMENT void setSbePlan_forTest(std::unique_ptr<sbe::PlanStage> sbePlan,
+                                                        stage_builder::PlanStageData data) {
         _sbePlan = std::move(sbePlan);
         _planStageData = std::move(data);
     }

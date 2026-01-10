@@ -27,67 +27,56 @@
  *    it in the license file.
  */
 
-#include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/bson/timestamp.h"
-#include "mongo/db/admission/execution_admission_context.h"
-#include "mongo/db/admission/ingress_admission_context.h"
-#include "mongo/db/repl/read_concern_args.h"
+#include "mongo/db/transaction/transaction_participant.h"
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-// IWYU pragma: no_include "cxxabi.h"
-// IWYU pragma: no_include "ext/alloc_traits.h"
-#include "mongo/base/status.h"
-#include "mongo/base/status_with.h"
 #include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/bsontypes_util.h"
-#include "mongo/bson/util/builder.h"
+#include "mongo/bson/timestamp.h"
+#include "mongo/db/admission/execution_control/execution_admission_context.h"
+#include "mongo/db/admission/ingress_admission_context.h"
 #include "mongo/db/client.h"
-#include "mongo/db/collection_crud/collection_write_path.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/global_settings.h"
-#include "mongo/db/local_catalog/catalog_control.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_catalog.h"
-#include "mongo/db/local_catalog/collection_options.h"
-#include "mongo/db/local_catalog/database.h"
-#include "mongo/db/local_catalog/local_oplog_info.h"
-#include "mongo/db/local_catalog/lock_manager/exception_util.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/op_observer/op_observer_impl.h"
 #include "mongo/db/op_observer/op_observer_noop.h"
 #include "mongo/db/op_observer/op_observer_registry.h"
 #include "mongo/db/op_observer/operation_logger_impl.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/repl/member_state.h"
+#include "mongo/db/repl/local_oplog_info.h"
 #include "mongo/db/repl/mock_repl_coord_server_fixture.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/repl/oplog_entry_gen.h"
 #include "mongo/db/repl/optime.h"
+#include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/repl/repl_settings.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
-#include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/repl/storage_interface_impl.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/service_context_d_test_fixture.h"
 #include "mongo/db/session/internal_session_pool.h"
+#include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/logical_session_id_helpers.h"
 #include "mongo/db/session/session_catalog.h"
 #include "mongo/db/session/session_catalog_mongod.h"
 #include "mongo/db/session/session_txn_record_gen.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_control.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/collection_options.h"
+#include "mongo/db/shard_role/shard_catalog/database.h"
+#include "mongo/db/shard_role/shard_role.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/durable_history_pin.h"
 #include "mongo/db/storage/execution_context.h"
 #include "mongo/db/storage/record_data.h"
@@ -97,7 +86,6 @@
 #include "mongo/db/topology/cluster_role.h"
 #include "mongo/db/transaction/server_transactions_metrics.h"
 #include "mongo/db/transaction/session_catalog_mongod_transaction_interface_impl.h"
-#include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/db/transaction/transaction_participant_gen.h"
 #include "mongo/db/txn_retry_counter_too_old_info.h"
 #include "mongo/idl/idl_parser.h"
@@ -127,8 +115,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
-#include <future>
-#include <iterator>
+
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
@@ -204,17 +192,13 @@ public:
         };
 
 
-    void onPreparedTransactionCommit(
-        OperationContext* opCtx,
-        OplogSlot commitOplogEntryOpTime,
-        Timestamp commitTimestamp,
-        const std::vector<repl::ReplOperation>& statements) noexcept override;
+    void onPreparedTransactionCommit(OperationContext* opCtx,
+                                     OplogSlot commitOplogEntryOpTime,
+                                     Timestamp commitTimestamp) noexcept override;
     bool onPreparedTransactionCommitThrowsException = false;
     bool preparedTransactionCommitted = false;
-    std::function<void(OplogSlot, Timestamp, const std::vector<repl::ReplOperation>&)>
-        onPreparedTransactionCommitFn = [](OplogSlot commitOplogEntryOpTime,
-                                           Timestamp commitTimestamp,
-                                           const std::vector<repl::ReplOperation>& statements) {
+    std::function<void(OplogSlot, Timestamp)> onPreparedTransactionCommitFn =
+        [](OplogSlot commitOplogEntryOpTime, Timestamp commitTimestamp) {
         };
 
     void onTransactionAbort(OperationContext* opCtx,
@@ -266,22 +250,19 @@ void OpObserverMock::onUnpreparedTransactionCommit(
     onUnpreparedTransactionCommitFn(statements);
 }
 
-void OpObserverMock::onPreparedTransactionCommit(
-    OperationContext* opCtx,
-    OplogSlot commitOplogEntryOpTime,
-    Timestamp commitTimestamp,
-    const std::vector<repl::ReplOperation>& statements) noexcept {
+void OpObserverMock::onPreparedTransactionCommit(OperationContext* opCtx,
+                                                 OplogSlot commitOplogEntryOpTime,
+                                                 Timestamp commitTimestamp) noexcept {
     ASSERT_FALSE(shard_role_details::getLocker(opCtx)->inAWriteUnitOfWork());
     // The 'commitTimestamp' must be cleared before we write the oplog entry.
     ASSERT(shard_role_details::getRecoveryUnit(opCtx)->getCommitTimestamp().isNull());
 
-    OpObserverNoop::onPreparedTransactionCommit(
-        opCtx, commitOplogEntryOpTime, commitTimestamp, statements);
+    OpObserverNoop::onPreparedTransactionCommit(opCtx, commitOplogEntryOpTime, commitTimestamp);
     uassert(ErrorCodes::OperationFailed,
             "onPreparedTransactionCommit() failed",
             !onPreparedTransactionCommitThrowsException);
     preparedTransactionCommitted = true;
-    onPreparedTransactionCommitFn(commitOplogEntryOpTime, commitTimestamp, statements);
+    onPreparedTransactionCommitFn(commitOplogEntryOpTime, commitTimestamp);
 }
 
 void OpObserverMock::onTransactionAbort(OperationContext* opCtx,
@@ -504,13 +485,8 @@ void insertTxnRecord(OperationContext* opCtx, unsigned i, DurableTxnStateEnum st
     WriteUnitOfWork wuow(opCtx);
     auto coll = CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, nss);
     ASSERT(coll);
-    OpDebug* const nullOpDebug = nullptr;
     // TODO(SERVER-103411): Investigate usage validity of CollectionPtr::CollectionPtr_UNSAFE
-    ASSERT_OK(collection_internal::insertDocument(opCtx,
-                                                  CollectionPtr::CollectionPtr_UNSAFE(coll),
-                                                  InsertStatement(record.toBSON()),
-                                                  nullOpDebug,
-                                                  false));
+    ASSERT_OK(Helpers::insert(opCtx, CollectionPtr::CollectionPtr_UNSAFE(coll), record.toBSON()));
     wuow.commit();
 }
 }  // namespace
@@ -708,7 +684,8 @@ TEST_F(TxnParticipantTest, AutocommitRequiredOnEveryTxnOp) {
                                    TransactionParticipant::TransactionActions::kContinue);
 }
 
-DEATH_TEST_F(TxnParticipantTest, AutocommitCannotBeTrue3, "invariant") {
+using TxnParticipantTestDeathTest = TxnParticipantTest;
+DEATH_TEST_F(TxnParticipantTestDeathTest, AutocommitCannotBeTrue3, "invariant") {
     auto sessionCheckout = checkOutSession();
     auto txnParticipant = TransactionParticipant::get(opCtx());
 
@@ -872,16 +849,12 @@ TEST_F(TxnParticipantTest, CommitTransactionSetsCommitTimestampOnPreparedTransac
     const auto commitTS = Timestamp(prepareTimestamp.getSecs(), prepareTimestamp.getInc() + 1);
 
     auto originalFn = _opObserver->onPreparedTransactionCommitFn;
-    _opObserver->onPreparedTransactionCommitFn =
-        [&](OplogSlot commitOplogEntryOpTime,
-            Timestamp commitTimestamp,
-            const std::vector<repl::ReplOperation>& statements) {
-            originalFn(commitOplogEntryOpTime, commitTimestamp, statements);
+    _opObserver->onPreparedTransactionCommitFn = [&](OplogSlot commitOplogEntryOpTime,
+                                                     Timestamp commitTimestamp) {
+        originalFn(commitOplogEntryOpTime, commitTimestamp);
 
-            ASSERT_GT(commitTimestamp, prepareTimestamp);
-
-            ASSERT(statements.empty());
-        };
+        ASSERT_GT(commitTimestamp, prepareTimestamp);
+    };
 
     txnParticipant.commitPreparedTransaction(opCtx(), commitTS, {});
 
@@ -2081,7 +2054,7 @@ TEST_F(TxnParticipantTest, ThrowDuringUnpreparedOnTransactionAbort) {
         txnParticipant.abortTransaction(opCtx()), AssertionException, ErrorCodes::OperationFailed);
 }
 
-DEATH_TEST_F(TxnParticipantTest,
+DEATH_TEST_F(TxnParticipantTestDeathTest,
              ThrowDuringPreparedOnTransactionAbortIsFatal,
              "Caught exception during abort of transaction") {
     auto sessionCheckout = checkOutSession();
@@ -3590,25 +3563,36 @@ TEST_F(TransactionsMetricsTest, AdditiveMetricsObjectsShouldBeAddedTogetherUponS
     auto txnParticipant = TransactionParticipant::get(opCtx());
 
     // Initialize field values for both AdditiveMetrics objects.
-    txnParticipant.getSingleTransactionStatsForTest().getOpDebug()->additiveMetrics.keysExamined =
+    txnParticipant.getSingleTransactionStatsForTest()
+        .getOpDebug()
+        ->getAdditiveMetrics()
+        .keysExamined = 1;
+    CurOp::get(opCtx())->debug().getAdditiveMetrics().keysExamined = 5;
+    txnParticipant.getSingleTransactionStatsForTest()
+        .getOpDebug()
+        ->getAdditiveMetrics()
+        .docsExamined = 2;
+    CurOp::get(opCtx())->debug().getAdditiveMetrics().docsExamined = 0;
+    txnParticipant.getSingleTransactionStatsForTest().getOpDebug()->getAdditiveMetrics().nMatched =
+        3;
+    txnParticipant.getSingleTransactionStatsForTest().getOpDebug()->getAdditiveMetrics().nModified =
         1;
-    CurOp::get(opCtx())->debug().additiveMetrics.keysExamined = 5;
-    txnParticipant.getSingleTransactionStatsForTest().getOpDebug()->additiveMetrics.docsExamined =
-        2;
-    CurOp::get(opCtx())->debug().additiveMetrics.docsExamined = 0;
-    txnParticipant.getSingleTransactionStatsForTest().getOpDebug()->additiveMetrics.nMatched = 3;
-    txnParticipant.getSingleTransactionStatsForTest().getOpDebug()->additiveMetrics.nModified = 1;
-    CurOp::get(opCtx())->debug().additiveMetrics.nModified = 1;
-    CurOp::get(opCtx())->debug().additiveMetrics.ninserted = 4;
-    txnParticipant.getSingleTransactionStatsForTest().getOpDebug()->additiveMetrics.keysInserted =
-        1;
-    CurOp::get(opCtx())->debug().additiveMetrics.keysInserted = 1;
-    txnParticipant.getSingleTransactionStatsForTest().getOpDebug()->additiveMetrics.keysDeleted = 0;
-    CurOp::get(opCtx())->debug().additiveMetrics.keysDeleted = 0;
+    CurOp::get(opCtx())->debug().getAdditiveMetrics().nModified = 1;
+    CurOp::get(opCtx())->debug().getAdditiveMetrics().ninserted = 4;
+    txnParticipant.getSingleTransactionStatsForTest()
+        .getOpDebug()
+        ->getAdditiveMetrics()
+        .keysInserted = 1;
+    CurOp::get(opCtx())->debug().getAdditiveMetrics().keysInserted = 1;
+    txnParticipant.getSingleTransactionStatsForTest()
+        .getOpDebug()
+        ->getAdditiveMetrics()
+        .keysDeleted = 0;
+    CurOp::get(opCtx())->debug().getAdditiveMetrics().keysDeleted = 0;
 
     auto additiveMetricsToCompare =
-        txnParticipant.getSingleTransactionStatsForTest().getOpDebug()->additiveMetrics;
-    additiveMetricsToCompare.add(CurOp::get(opCtx())->debug().additiveMetrics);
+        txnParticipant.getSingleTransactionStatsForTest().getOpDebug()->getAdditiveMetrics();
+    additiveMetricsToCompare.add(CurOp::get(opCtx())->debug().getAdditiveMetrics());
 
     txnParticipant.unstashTransactionResources(opCtx(), "insert");
     // The transaction machinery cannot store an empty locker.
@@ -3617,8 +3601,9 @@ TEST_F(TransactionsMetricsTest, AdditiveMetricsObjectsShouldBeAddedTogetherUponS
     }
     txnParticipant.stashTransactionResources(opCtx());
 
-    ASSERT(txnParticipant.getSingleTransactionStatsForTest().getOpDebug()->additiveMetrics.equals(
-        additiveMetricsToCompare));
+    ASSERT(
+        txnParticipant.getSingleTransactionStatsForTest().getOpDebug()->getAdditiveMetrics().equals(
+            additiveMetricsToCompare));
 }
 
 TEST_F(TransactionsMetricsTest, AdditiveMetricsObjectsShouldBeAddedTogetherUponCommit) {
@@ -3626,25 +3611,34 @@ TEST_F(TransactionsMetricsTest, AdditiveMetricsObjectsShouldBeAddedTogetherUponC
     auto txnParticipant = TransactionParticipant::get(opCtx());
 
     // Initialize field values for both AdditiveMetrics objects.
-    txnParticipant.getSingleTransactionStatsForTest().getOpDebug()->additiveMetrics.keysExamined =
-        3;
-    CurOp::get(opCtx())->debug().additiveMetrics.keysExamined = 2;
-    txnParticipant.getSingleTransactionStatsForTest().getOpDebug()->additiveMetrics.docsExamined =
-        0;
-    CurOp::get(opCtx())->debug().additiveMetrics.docsExamined = 2;
-    txnParticipant.getSingleTransactionStatsForTest().getOpDebug()->additiveMetrics.nMatched = 4;
-    txnParticipant.getSingleTransactionStatsForTest().getOpDebug()->additiveMetrics.nModified = 5;
-    CurOp::get(opCtx())->debug().additiveMetrics.nModified = 1;
-    CurOp::get(opCtx())->debug().additiveMetrics.ninserted = 1;
-    txnParticipant.getSingleTransactionStatsForTest().getOpDebug()->additiveMetrics.ndeleted = 4;
-    CurOp::get(opCtx())->debug().additiveMetrics.ndeleted = 0;
-    txnParticipant.getSingleTransactionStatsForTest().getOpDebug()->additiveMetrics.keysInserted =
-        1;
-    CurOp::get(opCtx())->debug().additiveMetrics.keysInserted = 1;
+    txnParticipant.getSingleTransactionStatsForTest()
+        .getOpDebug()
+        ->getAdditiveMetrics()
+        .keysExamined = 3;
+    CurOp::get(opCtx())->debug().getAdditiveMetrics().keysExamined = 2;
+    txnParticipant.getSingleTransactionStatsForTest()
+        .getOpDebug()
+        ->getAdditiveMetrics()
+        .docsExamined = 0;
+    CurOp::get(opCtx())->debug().getAdditiveMetrics().docsExamined = 2;
+    txnParticipant.getSingleTransactionStatsForTest().getOpDebug()->getAdditiveMetrics().nMatched =
+        4;
+    txnParticipant.getSingleTransactionStatsForTest().getOpDebug()->getAdditiveMetrics().nModified =
+        5;
+    CurOp::get(opCtx())->debug().getAdditiveMetrics().nModified = 1;
+    CurOp::get(opCtx())->debug().getAdditiveMetrics().ninserted = 1;
+    txnParticipant.getSingleTransactionStatsForTest().getOpDebug()->getAdditiveMetrics().ndeleted =
+        4;
+    CurOp::get(opCtx())->debug().getAdditiveMetrics().ndeleted = 0;
+    txnParticipant.getSingleTransactionStatsForTest()
+        .getOpDebug()
+        ->getAdditiveMetrics()
+        .keysInserted = 1;
+    CurOp::get(opCtx())->debug().getAdditiveMetrics().keysInserted = 1;
 
     auto additiveMetricsToCompare =
-        txnParticipant.getSingleTransactionStatsForTest().getOpDebug()->additiveMetrics;
-    additiveMetricsToCompare.add(CurOp::get(opCtx())->debug().additiveMetrics);
+        txnParticipant.getSingleTransactionStatsForTest().getOpDebug()->getAdditiveMetrics();
+    additiveMetricsToCompare.add(CurOp::get(opCtx())->debug().getAdditiveMetrics());
 
     txnParticipant.unstashTransactionResources(opCtx(), "insert");
     // The transaction machinery cannot store an empty locker.
@@ -3653,8 +3647,9 @@ TEST_F(TransactionsMetricsTest, AdditiveMetricsObjectsShouldBeAddedTogetherUponC
     }
     txnParticipant.commitUnpreparedTransaction(opCtx());
 
-    ASSERT(txnParticipant.getSingleTransactionStatsForTest().getOpDebug()->additiveMetrics.equals(
-        additiveMetricsToCompare));
+    ASSERT(
+        txnParticipant.getSingleTransactionStatsForTest().getOpDebug()->getAdditiveMetrics().equals(
+            additiveMetricsToCompare));
 }
 
 TEST_F(TransactionsMetricsTest, AdditiveMetricsObjectsShouldBeAddedTogetherUponAbort) {
@@ -3662,25 +3657,36 @@ TEST_F(TransactionsMetricsTest, AdditiveMetricsObjectsShouldBeAddedTogetherUponA
     auto txnParticipant = TransactionParticipant::get(opCtx());
 
     // Initialize field values for both AdditiveMetrics objects.
-    txnParticipant.getSingleTransactionStatsForTest().getOpDebug()->additiveMetrics.keysExamined =
+    txnParticipant.getSingleTransactionStatsForTest()
+        .getOpDebug()
+        ->getAdditiveMetrics()
+        .keysExamined = 2;
+    CurOp::get(opCtx())->debug().getAdditiveMetrics().keysExamined = 4;
+    txnParticipant.getSingleTransactionStatsForTest()
+        .getOpDebug()
+        ->getAdditiveMetrics()
+        .docsExamined = 1;
+    CurOp::get(opCtx())->debug().getAdditiveMetrics().docsExamined = 3;
+    txnParticipant.getSingleTransactionStatsForTest().getOpDebug()->getAdditiveMetrics().nMatched =
         2;
-    CurOp::get(opCtx())->debug().additiveMetrics.keysExamined = 4;
-    txnParticipant.getSingleTransactionStatsForTest().getOpDebug()->additiveMetrics.docsExamined =
-        1;
-    CurOp::get(opCtx())->debug().additiveMetrics.docsExamined = 3;
-    txnParticipant.getSingleTransactionStatsForTest().getOpDebug()->additiveMetrics.nMatched = 2;
-    txnParticipant.getSingleTransactionStatsForTest().getOpDebug()->additiveMetrics.nModified = 0;
-    CurOp::get(opCtx())->debug().additiveMetrics.nModified = 3;
-    CurOp::get(opCtx())->debug().additiveMetrics.ndeleted = 5;
-    txnParticipant.getSingleTransactionStatsForTest().getOpDebug()->additiveMetrics.keysInserted =
-        1;
-    CurOp::get(opCtx())->debug().additiveMetrics.keysInserted = 1;
-    txnParticipant.getSingleTransactionStatsForTest().getOpDebug()->additiveMetrics.keysDeleted = 6;
-    CurOp::get(opCtx())->debug().additiveMetrics.keysDeleted = 0;
+    txnParticipant.getSingleTransactionStatsForTest().getOpDebug()->getAdditiveMetrics().nModified =
+        0;
+    CurOp::get(opCtx())->debug().getAdditiveMetrics().nModified = 3;
+    CurOp::get(opCtx())->debug().getAdditiveMetrics().ndeleted = 5;
+    txnParticipant.getSingleTransactionStatsForTest()
+        .getOpDebug()
+        ->getAdditiveMetrics()
+        .keysInserted = 1;
+    CurOp::get(opCtx())->debug().getAdditiveMetrics().keysInserted = 1;
+    txnParticipant.getSingleTransactionStatsForTest()
+        .getOpDebug()
+        ->getAdditiveMetrics()
+        .keysDeleted = 6;
+    CurOp::get(opCtx())->debug().getAdditiveMetrics().keysDeleted = 0;
 
     auto additiveMetricsToCompare =
-        txnParticipant.getSingleTransactionStatsForTest().getOpDebug()->additiveMetrics;
-    additiveMetricsToCompare.add(CurOp::get(opCtx())->debug().additiveMetrics);
+        txnParticipant.getSingleTransactionStatsForTest().getOpDebug()->getAdditiveMetrics();
+    additiveMetricsToCompare.add(CurOp::get(opCtx())->debug().getAdditiveMetrics());
 
     txnParticipant.unstashTransactionResources(opCtx(), "insert");
     // The transaction machinery cannot store an empty locker.
@@ -3689,8 +3695,9 @@ TEST_F(TransactionsMetricsTest, AdditiveMetricsObjectsShouldBeAddedTogetherUponA
     }
     txnParticipant.abortTransaction(opCtx());
 
-    ASSERT(txnParticipant.getSingleTransactionStatsForTest().getOpDebug()->additiveMetrics.equals(
-        additiveMetricsToCompare));
+    ASSERT(
+        txnParticipant.getSingleTransactionStatsForTest().getOpDebug()->getAdditiveMetrics().equals(
+            additiveMetricsToCompare));
 }
 
 TEST_F(TransactionsMetricsTest, StorageMetricsObjectsShouldBeAddedTogetherUponStash) {
@@ -4229,14 +4236,14 @@ TEST_F(TransactionsMetricsTest, LastClientInfoShouldUpdateUponAbort) {
  * Sets up the additive metrics for Transactions Metrics test.
  */
 void setupAdditiveMetrics(const int metricValue, OperationContext* opCtx) {
-    CurOp::get(opCtx)->debug().additiveMetrics.keysExamined = metricValue;
-    CurOp::get(opCtx)->debug().additiveMetrics.docsExamined = metricValue;
-    CurOp::get(opCtx)->debug().additiveMetrics.nMatched = metricValue;
-    CurOp::get(opCtx)->debug().additiveMetrics.nModified = metricValue;
-    CurOp::get(opCtx)->debug().additiveMetrics.ninserted = metricValue;
-    CurOp::get(opCtx)->debug().additiveMetrics.ndeleted = metricValue;
-    CurOp::get(opCtx)->debug().additiveMetrics.keysInserted = metricValue;
-    CurOp::get(opCtx)->debug().additiveMetrics.keysDeleted = metricValue;
+    CurOp::get(opCtx)->debug().getAdditiveMetrics().keysExamined = metricValue;
+    CurOp::get(opCtx)->debug().getAdditiveMetrics().docsExamined = metricValue;
+    CurOp::get(opCtx)->debug().getAdditiveMetrics().nMatched = metricValue;
+    CurOp::get(opCtx)->debug().getAdditiveMetrics().nModified = metricValue;
+    CurOp::get(opCtx)->debug().getAdditiveMetrics().ninserted = metricValue;
+    CurOp::get(opCtx)->debug().getAdditiveMetrics().ndeleted = metricValue;
+    CurOp::get(opCtx)->debug().getAdditiveMetrics().keysInserted = metricValue;
+    CurOp::get(opCtx)->debug().getAdditiveMetrics().keysDeleted = metricValue;
 }
 
 void setupPrepareConflictMetrics(const int metricValue, OperationContext* opCtx) {
@@ -4564,7 +4571,10 @@ TEST_F(TransactionsMetricsTest, TestPreparedTransactionInfoForLogAfterAbort) {
     ASSERT_BSONOBJ_EQ(testTransactionInfo, expectedTransactionInfo);
 }
 
-DEATH_TEST_F(TransactionsMetricsTest, TestTransactionInfoForLogWithNoLockerInfoStats, "invariant") {
+using TransactionsMetricsTestDeathTest = TransactionsMetricsTest;
+DEATH_TEST_F(TransactionsMetricsTestDeathTest,
+             TestTransactionInfoForLogWithNoLockerInfoStats,
+             "invariant") {
     auto sessionCheckout = checkOutSession();
 
     APIParameters apiParameters = APIParameters();
@@ -5166,7 +5176,7 @@ TEST_F(TxnParticipantTest, CommitPreparedTransactionAsSecondarySetsTheFinishOpTi
     ASSERT_TRUE(txnParticipant.transactionIsCommitted());
 }
 
-DEATH_TEST_F(TxnParticipantTest,
+DEATH_TEST_F(TxnParticipantTestDeathTest,
              CommitPreparedTransactionAsSecondaryWithNullCommitOplogEntryOpTimeShouldFail,
              "invariant") {
     repl::ReplClientInfo::forClient(opCtx()->getClient()).clearLastOp();
@@ -5190,7 +5200,7 @@ DEATH_TEST_F(TxnParticipantTest,
     txnParticipant.commitPreparedTransaction(opCtx(), commitTimestamp, {});
 }
 
-DEATH_TEST_F(TxnParticipantTest,
+DEATH_TEST_F(TxnParticipantTestDeathTest,
              CommitPreparedTransactionAsPrimaryWithNonNullCommitOplogEntryOpTimeShouldFail,
              "invariant") {
     repl::ReplClientInfo::forClient(opCtx()->getClient()).clearLastOp();
@@ -5327,9 +5337,13 @@ TEST_F(TxnParticipantTest, OldestActiveTransactionTimestamp) {
         AutoGetDb autoDb(opCtx(), nss.dbName(), MODE_X);
         auto db = autoDb.ensureDbExists(opCtx());
         ASSERT(db);
+        auto acquisition = acquireCollection(
+            opCtx(),
+            CollectionAcquisitionRequest::fromOpCtx(opCtx(), nss, AcquisitionPrerequisites::kWrite),
+            MODE_X);
+        ASSERT(acquisition.exists());
+        auto& coll = acquisition.getCollectionPtr();
         WriteUnitOfWork wuow(opCtx());
-        auto coll = CollectionCatalog::get(opCtx())->lookupCollectionByNamespace(opCtx(), nss);
-        ASSERT(coll);
         auto cursor = coll->getCursor(opCtx());
         while (auto record = cursor->next()) {
             auto bson = record.value().data.toBson();
@@ -5338,13 +5352,7 @@ TEST_F(TxnParticipantTest, OldestActiveTransactionTimestamp) {
             }
 
             if (bson["startOpTime"]["ts"].timestamp() == ts) {
-                // TODO(SERVER-103411): Investigate usage validity of
-                // CollectionPtr::CollectionPtr_UNSAFE
-                collection_internal::deleteDocument(opCtx(),
-                                                    CollectionPtr::CollectionPtr_UNSAFE(coll),
-                                                    kUninitializedStmtId,
-                                                    record->id,
-                                                    nullptr);
+                Helpers::deleteByRid(opCtx(), acquisition, record->id);
                 wuow.commit();
                 return;
             }
@@ -5494,7 +5502,8 @@ TEST_F(TxnParticipantTest, CanOnlySpecifyTxnRetryCounterInShardedClusters) {
         ErrorCodes::InvalidOptions);
 }
 
-DEATH_TEST_F(ShardTxnParticipantTest,
+using ShardTxnParticipantTestDeathTest = ShardTxnParticipantTest;
+DEATH_TEST_F(ShardTxnParticipantTestDeathTest,
              CannotSpecifyNegativeTxnRetryCounter,
              "Cannot specify a negative txnRetryCounter") {
     auto mongoDSessionCatalog = MongoDSessionCatalog::get(opCtx());
@@ -5506,7 +5515,7 @@ DEATH_TEST_F(ShardTxnParticipantTest,
                                    TransactionParticipant::TransactionActions::kStart);
 }
 
-DEATH_TEST_F(ShardTxnParticipantTest,
+DEATH_TEST_F(ShardTxnParticipantTestDeathTest,
              CannotSpecifyTxnRetryCounterForRetryableWrite,
              "Cannot specify a txnRetryCounter for retryable write") {
     auto mongoDSessionCatalog = MongoDSessionCatalog::get(opCtx());
@@ -6812,7 +6821,7 @@ boost::optional<CollectionAcquisition> acquireUserColl(OperationContext* opCtx) 
     return boost::make_optional<CollectionAcquisition>(acquireCollection(
         opCtx,
         CollectionAcquisitionRequest(kNss,
-                                     PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                     PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
                                      repl::ReadConcernArgs::get(opCtx),
                                      AcquisitionPrerequisites::kRead),
         MODE_IX));
@@ -6834,8 +6843,6 @@ TEST_F(TxnParticipantTest, AbortSplitPreparedTransaction) {
     OperationContext* opCtx = this->opCtx();
     DurableHistoryRegistry::set(opCtx->getServiceContext(),
                                 std::make_unique<DurableHistoryRegistry>());
-
-    OpDebug* const nullOpDbg = nullptr;
 
     dynamic_cast<repl::ReplicationCoordinatorMock*>(repl::ReplicationCoordinator::get(opCtx))
         ->setUpdateCommittedSnapshot(false);
@@ -6864,23 +6871,17 @@ TEST_F(TxnParticipantTest, AbortSplitPreparedTransaction) {
     const std::vector<repl::SplitSessionInfo>& splitSessions = splitPrepareManager->splitSession(
         opCtx->getLogicalSessionId().get(), opCtx->getTxnNumber().get(), requesterIds);
     // Insert an `_id: 1` document.
-    callUnderSplitSession(splitSessions[0].session, [nullOpDbg](OperationContext* opCtx) {
+    callUnderSplitSession(splitSessions[0].session, [](OperationContext* opCtx) {
         auto userColl = acquireUserColl(opCtx);
         ASSERT_OK(
-            collection_internal::insertDocument(opCtx,
-                                                userColl->getCollectionPtr(),
-                                                InsertStatement(BSON("_id" << 1 << "value" << 1)),
-                                                nullOpDbg));
+            Helpers::insert(opCtx, userColl->getCollectionPtr(), BSON("_id" << 1 << "value" << 1)));
     });
 
     // Insert an `_id: 2` document.
-    callUnderSplitSession(splitSessions[1].session, [nullOpDbg](OperationContext* opCtx) {
+    callUnderSplitSession(splitSessions[1].session, [](OperationContext* opCtx) {
         auto userColl = acquireUserColl(opCtx);
         ASSERT_OK(
-            collection_internal::insertDocument(opCtx,
-                                                userColl->getCollectionPtr(),
-                                                InsertStatement(BSON("_id" << 2 << "value" << 1)),
-                                                nullOpDbg));
+            Helpers::insert(opCtx, userColl->getCollectionPtr(), BSON("_id" << 2 << "value" << 1)));
     });
 
     // Mimic the methods to call for a secondary performing a split prepare. Those are called inside
@@ -6942,11 +6943,9 @@ TEST_F(TxnParticipantTest, AbortSplitPreparedTransaction) {
 
     {
         WriteUnitOfWork wuow(opCtx);
-        ASSERT_DOES_NOT_THROW(auto _ = collection_internal::insertDocument(
-                                  opCtx,
-                                  userColl->getCollectionPtr(),
-                                  InsertStatement(BSON("_id" << 1 << "value" << 1)),
-                                  nullOpDbg));
+        ASSERT_DOES_NOT_THROW(auto _ = Helpers::insert(opCtx,
+                                                       userColl->getCollectionPtr(),
+                                                       BSON("_id" << 1 << "value" << 1)));
         wuow.commit();
     }
 
@@ -6965,7 +6964,7 @@ TEST_F(TxnParticipantTest, AbortSplitPreparedTransaction) {
     auto configTransactions = acquireCollection(
         opCtx,
         CollectionAcquisitionRequest(NamespaceString::kSessionTransactionsTableNamespace,
-                                     PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                     PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
                                      repl::ReadConcernArgs::get(opCtx),
                                      AcquisitionPrerequisites::kRead),
         MODE_IS);
@@ -7015,8 +7014,6 @@ TEST_F(TxnParticipantTest, CommitSplitPreparedTransaction) {
     DurableHistoryRegistry::set(opCtx->getServiceContext(),
                                 std::make_unique<DurableHistoryRegistry>());
 
-    OpDebug* const nullOpDbg = nullptr;
-
     dynamic_cast<repl::ReplicationCoordinatorMock*>(repl::ReplicationCoordinator::get(opCtx))
         ->setUpdateCommittedSnapshot(false);
     // Initiate the term from 0 to 1 for familiarity.
@@ -7046,28 +7043,22 @@ TEST_F(TxnParticipantTest, CommitSplitPreparedTransaction) {
     const auto& splitSessions = splitPrepareManager->splitSession(
         opCtx->getLogicalSessionId().get(), opCtx->getTxnNumber().get(), requesterIds);
     // Insert an `_id: 1` document.
-    callUnderSplitSession(splitSessions[0].session, [nullOpDbg](OperationContext* opCtx) {
+    callUnderSplitSession(splitSessions[0].session, [](OperationContext* opCtx) {
         auto userColl = acquireUserColl(opCtx);
         ASSERT_OK(
-            collection_internal::insertDocument(opCtx,
-                                                userColl->getCollectionPtr(),
-                                                InsertStatement(BSON("_id" << 1 << "value" << 1)),
-                                                nullOpDbg));
+            Helpers::insert(opCtx, userColl->getCollectionPtr(), BSON("_id" << 1 << "value" << 1)));
     });
 
     // Insert an `_id: 2` document.
-    callUnderSplitSession(splitSessions[1].session, [nullOpDbg](OperationContext* opCtx) {
+    callUnderSplitSession(splitSessions[1].session, [](OperationContext* opCtx) {
         auto userColl = acquireUserColl(opCtx);
         ASSERT_OK(
-            collection_internal::insertDocument(opCtx,
-                                                userColl->getCollectionPtr(),
-                                                InsertStatement(BSON("_id" << 2 << "value" << 1)),
-                                                nullOpDbg));
+            Helpers::insert(opCtx, userColl->getCollectionPtr(), BSON("_id" << 2 << "value" << 1)));
     });
 
     // Update `2` to increment its `value` to 2. This must be done in the same split session as the
     // insert.
-    callUnderSplitSession(splitSessions[1].session, [nullOpDbg](OperationContext* opCtx) {
+    callUnderSplitSession(splitSessions[1].session, [](OperationContext* opCtx) {
         auto userColl = acquireUserColl(opCtx);
         Helpers::update(opCtx, *userColl, BSON("_id" << 2), BSON("$inc" << BSON("value" << 1)));
     });
@@ -7156,7 +7147,7 @@ TEST_F(TxnParticipantTest, CommitSplitPreparedTransaction) {
         auto configTransactions = acquireCollection(
             opCtx,
             CollectionAcquisitionRequest(NamespaceString::kSessionTransactionsTableNamespace,
-                                         PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                         PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
                                          repl::ReadConcernArgs::get(opCtx),
                                          AcquisitionPrerequisites::kRead),
             MODE_IS);
@@ -7236,7 +7227,7 @@ TEST_F(TxnParticipantTest, CommitSplitPreparedTransaction) {
     auto configTransactions = acquireCollection(
         opCtx,
         CollectionAcquisitionRequest(NamespaceString::kSessionTransactionsTableNamespace,
-                                     PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                     PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
                                      repl::ReadConcernArgs::get(opCtx),
                                      AcquisitionPrerequisites::kRead),
         MODE_IS);
@@ -7901,6 +7892,213 @@ TEST_F(TxnParticipantAndTxnRouterTest, CannotEagerReapSessionWithYieldedTxnRoute
     ASSERT(doesExistInCatalog(parentLsid, sessionCatalog));
     ASSERT_FALSE(doesExistInCatalog(retryableChildLsid, sessionCatalog));
     ASSERT_FALSE(doesExistInCatalog(retryableChildLsidReapable, sessionCatalog));
+}
+
+TEST_F(TxnParticipantTest, CanAddPreciseCheckpointFieldsForRecovery) {
+    //
+    // Set up namespaces and add operations that touch them to the transaction.
+    //
+    const std::vector<NamespaceString> kNamespaces = {
+        NamespaceString::createNamespaceString_forTest("TestDB1", "TestColl1"),
+        NamespaceString::createNamespaceString_forTest("TestDB1", "TestColl2"),
+        NamespaceString::createNamespaceString_forTest("TestDB2", "TestColl1")};
+
+    std::vector<UUID> uuids;
+    uuids.reserve(kNamespaces.size());
+
+    for (const auto& nss : kNamespaces) {
+        AutoGetDb autoDb(opCtx(), nss.dbName(), MODE_X);
+        auto db = autoDb.ensureDbExists(opCtx());
+        ASSERT_TRUE(db);
+
+        WriteUnitOfWork wuow(opCtx());
+        CollectionOptions options;
+        auto collection = db->createCollection(opCtx(), nss, options);
+        wuow.commit();
+        uuids.push_back(collection->uuid());
+    }
+
+    auto sessionCheckout = checkOutSession();
+
+    auto txnParticipant = TransactionParticipant::get(opCtx());
+    ASSERT(txnParticipant.transactionIsOpen());
+
+    txnParticipant.unstashTransactionResources(opCtx(), "insert");
+    for (size_t collIndex = 0; collIndex < kNamespaces.size(); ++collIndex) {
+        auto operation = repl::DurableOplogEntry::makeInsertOperation(
+            kNamespaces[collIndex], uuids[collIndex], BSON("_id" << 0), BSON("_id" << 0));
+        txnParticipant.addTransactionOperation(opCtx(), operation);
+
+        // Add twice to verify we don't double count.
+        txnParticipant.addTransactionOperation(opCtx(), operation);
+    }
+    auto [timestamp, namespaces] = txnParticipant.prepareTransaction(opCtx(), {});
+
+    //
+    // Verify the correct fields are added.
+    //
+
+    SessionTxnRecord sessionTxnRecord;
+    txnParticipant.addPreparedTransactionPreciseCheckpointRecoveryFields(sessionTxnRecord);
+
+    auto addedAffectedNamespaces = sessionTxnRecord.getAffectedNamespaces();
+    ASSERT(addedAffectedNamespaces);
+    std::sort(addedAffectedNamespaces->begin(), addedAffectedNamespaces->end());
+    ASSERT_EQ(*addedAffectedNamespaces, kNamespaces);
+
+    std::vector<NamespaceString> namespacesVec;
+    std::move(namespaces.begin(), namespaces.end(), std::back_inserter(namespacesVec));
+    std::sort(namespacesVec.begin(), namespacesVec.end());
+    ASSERT_EQ(addedAffectedNamespaces, namespacesVec);
+}
+
+TEST_F(TxnParticipantTest, CanAddPreciseCheckpointFieldsForRecoveryNoNamespaces) {
+    //
+    // Prepare a transaction that touches no namespaces.
+    //
+    auto sessionCheckout = checkOutSession();
+
+    auto txnParticipant = TransactionParticipant::get(opCtx());
+    ASSERT(txnParticipant.transactionIsOpen());
+
+    txnParticipant.unstashTransactionResources(opCtx(), "insert");
+    auto [timestamp, namespaces] = txnParticipant.prepareTransaction(opCtx(), {});
+
+    //
+    // Verify the correct fields are added.
+    //
+
+    SessionTxnRecord sessionTxnRecord;
+    txnParticipant.addPreparedTransactionPreciseCheckpointRecoveryFields(sessionTxnRecord);
+
+    auto addedAffectedNamespaces = sessionTxnRecord.getAffectedNamespaces();
+    ASSERT(addedAffectedNamespaces);
+    ASSERT_EQ(addedAffectedNamespaces->size(), 0);
+    ASSERT_EQ(namespaces.size(), 0);
+}
+
+TEST_F(TxnParticipantTest, CanRecoverPreparedTxnFromSessionTxnRecord) {
+    //
+    // Generate a config.transactions entry for a prepared transaction and snapshot its initial
+    // TransactionParticipant state.
+    //
+
+    std::unique_ptr<SessionTxnRecordForPrepareRecovery> validatedTxnRecord;
+    struct TransactionParticipantStateSnapshot {
+        TxnNumberAndRetryCounter txnNumberAndRetryCounter{-1};
+        repl::OpTime lastWriteOpTime;
+        repl::OpTime prepareOpTime;
+    } expectedState;
+
+    runFunctionFromDifferentOpCtx([&validatedTxnRecord,
+                                   &expectedState,
+                                   sessionId = _sessionId,
+                                   txnNumber = _txnNumber](OperationContext* opCtx) {
+        const std::vector<NamespaceString> kNamespaces = {
+            NamespaceString::createNamespaceString_forTest("TestDB1", "TestColl1"),
+            NamespaceString::createNamespaceString_forTest("TestDB1", "TestColl2"),
+            NamespaceString::createNamespaceString_forTest("TestDB2", "TestColl1")};
+
+        std::vector<UUID> uuids;
+        for (const auto& nss : kNamespaces) {
+            AutoGetDb autoDb(opCtx, nss.dbName(), MODE_X);
+            auto db = autoDb.ensureDbExists(opCtx);
+            ASSERT_TRUE(db);
+
+            WriteUnitOfWork wuow(opCtx);
+            CollectionOptions options;
+            auto collection = db->createCollection(opCtx, nss, options);
+            wuow.commit();
+            uuids.push_back(collection->uuid());
+        }
+
+        opCtx->setLogicalSessionId(sessionId);
+        opCtx->setTxnNumber(txnNumber);
+        opCtx->setInMultiDocumentTransaction();
+
+        auto mongoDSessionCatalog = MongoDSessionCatalog::get(opCtx);
+        auto opCtxSession = mongoDSessionCatalog->checkOutSession(opCtx);
+        auto txnParticipant = TransactionParticipant::get(opCtx);
+        txnParticipant.beginOrContinue(opCtx,
+                                       {*opCtx->getTxnNumber()},
+                                       false /* autocommit */,
+                                       TransactionParticipant::TransactionActions::kStart);
+
+        txnParticipant.unstashTransactionResources(opCtx, "insert");
+        for (size_t collIndex = 0; collIndex < kNamespaces.size(); ++collIndex) {
+            auto operation = repl::DurableOplogEntry::makeInsertOperation(
+                kNamespaces[collIndex], uuids[collIndex], BSON("_id" << 0), BSON("_id" << 0));
+            txnParticipant.addTransactionOperation(opCtx, operation);
+        }
+        auto [timestamp, namespaces] = txnParticipant.prepareTransaction(opCtx, {});
+
+        SessionTxnRecord txnRecord;
+        txnRecord.setState(DurableTxnStateEnum::kPrepared);
+        txnRecord.setSessionId(*opCtx->getLogicalSessionId());
+        txnRecord.setTxnNum(txnParticipant.getActiveTxnNumberAndRetryCounter().getTxnNumber());
+        txnRecord.setLastWriteOpTime(txnParticipant.getLastWriteOpTime());
+        txnRecord.setLastWriteDate(Date_t::now());
+        txnParticipant.addPreparedTransactionPreciseCheckpointRecoveryFields(txnRecord);
+        validatedTxnRecord =
+            std::make_unique<SessionTxnRecordForPrepareRecovery>(std::move(txnRecord));
+
+        expectedState.txnNumberAndRetryCounter = txnParticipant.getActiveTxnNumberAndRetryCounter();
+        expectedState.lastWriteOpTime = txnParticipant.getLastWriteOpTime();
+        expectedState.prepareOpTime = txnParticipant.getPrepareOpTime();
+    });
+
+    // Reset the transaction participant catalog to simulate a process restart.
+    SessionCatalog::get(opCtx()->getServiceContext())->reset_forTest();
+
+    // Simulate running as a standby.
+    repl::UnreplicatedWritesBlock uwb(opCtx());
+
+    //
+    // Run through the flow to reconstruct a prepared transaction after a restart with precise
+    // checkpoints then verify its state was correctly restored.
+    //
+
+    auto mongoDSessionCatalog = MongoDSessionCatalog::get(opCtx());
+    auto sessionCheckout = mongoDSessionCatalog->checkOutSessionWithoutRefresh(opCtx());
+    auto txnParticipant = TransactionParticipant::get(opCtx());
+
+    // NOTE: In a real use case, we would reclaim the prepared transaction here from the storage
+    // engine.
+    txnParticipant.unstashTransactionResources(opCtx(), "prepareTransaction");
+
+    for (const auto& ns : validatedTxnRecord->getAffectedNamespaces()) {
+        (void)acquireCollection(opCtx(),
+                                CollectionAcquisitionRequest(ns,
+                                                             PlacementConcern::kPretendUnsharded,
+                                                             repl::ReadConcernArgs::get(opCtx()),
+                                                             AcquisitionPrerequisites::kWrite),
+                                MODE_IX);
+    }
+
+    txnParticipant.restorePreparedTxnFromPreciseCheckpoint(opCtx(), std::move(*validatedTxnRecord));
+
+    // Verify the participant is in the state we expect.
+    ASSERT_EQ(txnParticipant.getActiveTxnNumberAndRetryCounter(),
+              expectedState.txnNumberAndRetryCounter);
+    ASSERT_EQ(txnParticipant.getLastWriteOpTime(), expectedState.lastWriteOpTime);
+    ASSERT_EQ(txnParticipant.getPrepareOpTime(), expectedState.prepareOpTime);
+    ASSERT_EQ(shard_role_details::getRecoveryUnit(opCtx())->getPrepareTimestamp(),
+              expectedState.prepareOpTime.getTimestamp());
+    ASSERT_EQ(txnParticipant.affectedNamespaces().size(), 3);
+    ASSERT_EQ(txnParticipant.getTransactionOperationsCount(), 0);
+    ASSERT(txnParticipant.getPrepareOpTimeForRecovery().isNull());
+    ASSERT(txnParticipant.reportStashedState(opCtx()).isEmpty());
+    ASSERT(txnParticipant.transactionIsPrepared());
+    ASSERT(txnParticipant.isValid());
+    ASSERT_FALSE(shard_role_details::getLocker(opCtx())->isRSTLLocked());
+    // TODO SERVER-113731: Remove this when we support retries for recovered prepared transactions.
+    ASSERT(txnParticipant.hasIncompleteHistory());
+
+    // Verify we can stash successfully.
+    txnParticipant.stashTransactionResources(opCtx());
+
+    // We should have stashed in the "secondary" style and released the locks taken above.
+    ASSERT_FALSE(txnParticipant.getTxnResourceStashLockerForTest()->isLocked());
 }
 
 }  // namespace

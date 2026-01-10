@@ -30,14 +30,15 @@
 #pragma once
 
 #include "mongo/base/status.h"
-#include "mongo/db/local_catalog/collection.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/plan_yield_policy.h"
 #include "mongo/db/query/write_ops/parsed_writes_common.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
 
 #include <memory>
 #include <type_traits>
@@ -64,7 +65,7 @@ class OperationContext;
  * A delete request is parsed to a CanonicalQuery, so this class is a thin, delete-specific
  * wrapper around canonicalization.
  */
-class ParsedDelete {
+class MONGO_MOD_PUBLIC ParsedDelete {
     ParsedDelete(const ParsedDelete&) = delete;
     ParsedDelete& operator=(const ParsedDelete&) = delete;
 
@@ -125,7 +126,7 @@ public:
      * Always guaranteed to return a valid expression context.
      */
     boost::intrusive_ptr<ExpressionContext> expCtx() {
-        invariant(_expCtx.get());
+        tassert(11052004, "Expected ExpressionContext to exist", _expCtx.get());
         return _expCtx;
     }
 

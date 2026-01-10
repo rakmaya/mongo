@@ -117,10 +117,6 @@ connection_page_delta_config_common = [
         Conversely, if the delta came to 21 bytes, reconciliation would not emit a
         delta. Deltas larger than full pages are permitted for measurement and testing
         reasons, and may be disallowed in future.''', min='1', max='1000', type='int', undoc=True),
-    Config('flatten_leaf_page_delta', 'false', r'''
-        When enabled, page read rewrites the leaf pages with deltas to a new
-        disk image if successful''',
-        type='boolean', undoc=True),
     Config('internal_page_delta', 'true', r'''
         When enabled, reconciliation may write deltas for internal pages
         instead of writing entire pages every time''',
@@ -138,6 +134,8 @@ connection_disaggregated_config_common = [
     Config('checkpoint_meta', '', r'''
         the checkpoint metadata from which to start (or restart) the node''',
         undoc=True),
+    Config('drain_threads', '8', r'''The number of threads used to drain the ingest tables on
+        step up.''', min='1', max='256', type='int', undoc=True),
     Config('last_materialized_lsn', '', r'''
         the page LSN indicating that all pages up until this LSN are available for reading''',
         type='int', undoc=True),
@@ -199,8 +197,7 @@ format_meta = common_meta + [
     Config('value_format', 'u', r'''
         the format of the data packed into value items. See @ref schema_format_types for details.
         By default, the value_format is \c 'u' and applications use a WT_ITEM structure to
-        manipulate raw byte arrays. Value items of type 't' are bitfields, and when configured
-        with record number type keys, will be stored using a fixed-length store''',
+        manipulate raw byte arrays. Value items of type 't' are bitfields.''',
         type='format', func='__wt_struct_confchk'),
 ]
 
@@ -228,6 +225,16 @@ lsm_config = [
             removed option, preserved to allow parsing old metadata''', undoc=True),
         Config('chunk_size', 'none', r'''
             removed option, preserved to allow parsing old metadata''', undoc=True),
+        Config('merge_custom', '', r'''
+            removed option, preserved to allow parsing old metadata''',
+            type='category', undoc=True, subconfig=[
+            Config('prefix', '', r'''
+                removed option, preserved to allow parsing old metadata''', undoc=True),
+            Config('start_generation', '', r'''
+                removed option, preserved to allow parsing old metadata''', undoc=True),
+            Config('suffix', '', r'''
+                removed option, preserved to allow parsing old metadata''', undoc=True),
+            ]),
         Config('merge_max', 'none', r'''
             removed option, preserved to allow parsing old metadata''', undoc=True),
         Config('merge_min', 'none', r'''
@@ -401,9 +408,7 @@ file_config = format_meta + file_runtime_config + tiered_config + file_disaggreg
         the maximum page size for leaf nodes, in bytes; the size must be a multiple of the
         allocation size, and is significant for applications wanting to maximize sequential data
         transfer from a storage device. The page maximum is the bytes of uncompressed data,
-        that is, the limit is applied before any block compression is done. For fixed-length
-        column store, the size includes only the bitmap data; pages containing timestamp
-        information can be larger, and the size is limited to 128KB rather than 512MB''',
+        that is, the limit is applied before any block compression is done.''',
         min='512B', max='512MB'),
     Config('leaf_value_max', '0', r'''
         the largest value stored in a leaf node, in bytes. If set, values larger than the
@@ -637,6 +642,10 @@ connection_runtime_config = [
                if true, background compact aggressively removes compact statistics for a file and
                decreases the max amount of time a file can be skipped for.''',
                type='boolean'),
+        Config('crash_point_colgroup', 'false', r'''
+            if true, force crash in table creation while creating colgroup metadata entry. This is
+            intended for testing purposes only.''', 
+            type='boolean'),
         Config('corruption_abort', 'true', r'''
             if true and built in diagnostic mode, dump core in the case of data corruption''',
             type='boolean'),
@@ -659,6 +668,14 @@ connection_runtime_config = [
             A page release encourages eviction of hot or large pages, which is more likely to
             succeed without a cursor keeping the page pinned.''',
             type='boolean'),
+        Config('disagg_address_cookie_upgrade', 'none', r'''
+            modify the disaggregated block manager to pretend that it is a newer version to test
+            upgrade/downgrade of address cookies.''',
+            choices=['none', 'compatible', 'incompatible'], undoc=True),
+        Config('disagg_address_cookie_optional_field', 'false', r'''
+            if true, modify the disaggregated block manager to pretend that it has an optional
+            field protected by a new flag.''',
+            type='boolean', undoc=True),
         Config('eviction', 'false', r'''
             if true, modify internal algorithms to change skew to force history store eviction
             to happen more aggressively. This includes but is not limited to not skewing newest,
@@ -738,7 +755,8 @@ connection_runtime_config = [
                 type='boolean', undoc=True),
             Config('legacy_page_visit_strategy', 'false', r'''
                 Use legacy page visit strategy for eviction. Using this option is highly discouraged
-                as it will re-introduce the bug described in WT-9121.''',
+                as it will re-introduce a bug where eviction can fail to find older cache
+                content.''',
                 type='boolean'),
             Config('app_eviction_min_cache_fill_ratio', '0', r'''
                 This setting establishes a minimum cache fill ratio that must be met before
@@ -844,8 +862,9 @@ connection_runtime_config = [
             min=1, max=100000),
         ]),
     Config('generation_drain_timeout_ms', '240000', r'''
-        the number of milliseconds to wait for a resource to drain before timing out in diagnostic
-        mode. Default will wait for 4 minutes, 0 will wait forever''',
+        the number of milliseconds to wait for a resource to drain before timing out. In the
+        diagnostic mode, it will log an error and crash the system. In the production mode, it will
+        only log an error. Default will wait for 4 minutes, 0 will wait forever''',
         min=0),
     Config('heuristic_controls', '', r'''
         control the behavior of various optimizations. This is primarily used as a mechanism for
@@ -966,7 +985,8 @@ connection_runtime_config = [
         'checkpoint_handle', 'checkpoint_slow', 'checkpoint_stop', 'commit_transaction_slow',
         'compact_slow', 'conn_close_stress_log_printf', 'evict_reposition',
         'failpoint_eviction_split', 'failpoint_history_store_delete_key_from_ts',
-        'failpoint_rec_before_wrapup', 'history_store_checkpoint_delay', 'history_store_search',
+        'failpoint_rec_before_wrapup', 'failpoint_rec_split_write',
+        'history_store_checkpoint_delay', 'history_store_search',
         'history_store_sweep_race', 'live_restore_clean_up', 'open_index_slow', 'prefetch_1',
         'prefetch_2', 'prefetch_3', 'prefix_compare', 'prepare_checkpoint_delay',
         'prepare_resolution_1', 'prepare_resolution_2', 'session_alter_slow',
@@ -995,6 +1015,7 @@ connection_runtime_config = [
             'disaggregated_storage',
             'error_returns',
             'eviction',
+            'extension',
             'fileops',
             'generation',
             'handleops',
@@ -1662,13 +1683,7 @@ methods = {
         configure the cursor for bulk-loading, a fast, initial load path (see @ref tune_bulk_load
         for more information). Bulk-load may only be used for newly created objects and
         applications should use the WT_CURSOR::insert method to insert rows. When bulk-loading,
-        rows must be loaded in sorted order. The value is usually a true/false flag; when
-        bulk-loading fixed-length column store objects, the special value \c bitmap allows
-        chunks of a memory resident bitmap to be loaded directly into a file by passing a
-        \c WT_ITEM to WT_CURSOR::set_value where the \c size field indicates the number of
-        records in the bitmap (as specified by the object's \c value_format configuration).
-        Bulk-loaded bitmap values must end on a byte boundary relative to the bit count (except
-        for the last set of values loaded)'''),
+        rows must be loaded in sorted order.'''),
     Config('checkpoint', '', r'''
         the name of a checkpoint to open. (The reserved name "WiredTigerCheckpoint" opens
         the most recent checkpoint taken for the object.) The cursor does not support data
@@ -1714,6 +1729,10 @@ methods = {
                     type='boolean', undoc=True),
                 Config('raw_key_value', 'false', r'''
                     Return the key, value as raw data.
+                    ''',
+                    type='boolean', undoc=True),
+                Config('cross_key', 'false', r'''
+                    Allow version cursos to walk across keys while calling next().
                     ''',
                     type='boolean', undoc=True),
         ]),
@@ -2065,6 +2084,11 @@ methods = {
             checkpoint, while higher values will result in crashes in the final phase of the
             checkpoint process''',
             type='int'),
+        Config('key_provider_trigger_crash_points', '0', r'''
+            non-negative number between 1 and 3 will trigger a controlled crash during the
+            key provider process. A lower value would trigger crashes in the initial phase of
+            key provider, while a higher value would result in crashes in a later phase.''',
+            type='int'),
         ]),
     Config('drop', '', r'''
         specify a list of checkpoints to drop. The list may additionally contain one of the
@@ -2161,6 +2185,8 @@ methods = {
     connection_runtime_config
 ),
 'WT_CONNECTION.set_file_system' : Method([]),
+
+'WT_CONNECTION.set_key_provider' : Method([]),
 
 'WT_CONNECTION.load_extension' : Method([
     Config('config', '', r'''

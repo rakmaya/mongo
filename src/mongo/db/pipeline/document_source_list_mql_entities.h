@@ -55,6 +55,8 @@
 
 namespace mongo {
 
+DECLARE_STAGE_PARAMS_DERIVED_DEFAULT(ListMqlEntities);
+
 /**
  * Test-only aggregation stage which describes the set of MQL entities available in this binary,
  * which may vary depending on the binary (mongod/mongos, commmunity/enterprise). For the
@@ -65,16 +67,15 @@ namespace mongo {
  */
 class DocumentSourceListMqlEntities final : public DocumentSource {
 public:
-    class LiteParsed : public LiteParsedDocumentSource {
+    class LiteParsed : public LiteParsedDocumentSourceDefault<LiteParsed> {
     public:
         static std::unique_ptr<LiteParsed> parse(const NamespaceString& nss,
                                                  const BSONElement& specElem,
                                                  const LiteParserOptions& options) {
-            return std::make_unique<LiteParsed>(specElem.fieldName());
+            return std::make_unique<LiteParsed>(specElem);
         }
 
-        LiteParsed(std::string parseTimeName)
-            : LiteParsedDocumentSource(std::move(parseTimeName)) {}
+        LiteParsed(const BSONElement& spec) : LiteParsedDocumentSourceDefault(spec) {}
 
         stdx::unordered_set<NamespaceString> getInvolvedNamespaces() const final {
             return stdx::unordered_set<NamespaceString>();
@@ -92,6 +93,10 @@ public:
 
         bool isInitialSource() const final {
             return true;
+        }
+
+        std::unique_ptr<StageParams> getStageParams() const final {
+            return std::make_unique<ListMqlEntitiesStageParams>(_originalBson);
         }
     };
 
@@ -117,8 +122,8 @@ public:
         return _type;
     }
 
-    DocumentSourceContainer::iterator doOptimizeAt(DocumentSourceContainer::iterator itr,
-                                                   DocumentSourceContainer* container) final;
+    DocumentSourceContainer::iterator optimizeAt(DocumentSourceContainer::iterator itr,
+                                                 DocumentSourceContainer* container);
     Value serialize(const SerializationOptions& opts = SerializationOptions{}) const final;
     boost::optional<DistributedPlanLogic> distributedPlanLogic() final;
     void addVariableRefs(std::set<Variables::Id>* refs) const final {}

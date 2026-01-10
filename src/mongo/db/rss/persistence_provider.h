@@ -31,6 +31,8 @@
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
+#include "mongo/util/modules.h"
+#include "mongo/util/version/releases.h"
 
 #include <string>
 #include <utility>
@@ -48,7 +50,7 @@ namespace rss {
  * expected behaviors, allowing consumers to act based on these flags, rather than needing to reason
  * about how a particular provider would behave in a given context.
  */
-class PersistenceProvider {
+class MONGO_MOD_OPEN PersistenceProvider {
 public:
     virtual ~PersistenceProvider() = default;
 
@@ -65,10 +67,22 @@ public:
 
     /**
      * Additional configuration that should be added to the WiredTiger config string for the
-     * 'wiredtiger_open' call. The 'flattenLeafPageDelta' is expected to be the corresponding
-     * WiredTigerConfig member value.
+     * 'wiredtiger_open' call.
      */
-    virtual std::string getWiredTigerConfig(int flattenLeafPageDelta) const = 0;
+    virtual std::string getWiredTigerConfig() const = 0;
+
+    /**
+     * Additional configuration that should be added to the WiredTiger config string for creating a
+     * new table. Only applies to the 'main' WiredTiger instance - excluding 'spill' WiredTiger
+     * instances.
+     */
+    virtual std::string getMainWiredTigerTableSettings() const = 0;
+
+    /**
+     * If true, the provider requires that index builds will be led by the primary node and
+     * replicated through the oplog.
+     */
+    virtual bool mustUsePrimaryDrivenIndexBuilds() const = 0;
 
     /**
      * If true, the provider expects that all catalog identifiers will be replicated and identical
@@ -120,6 +134,14 @@ public:
     virtual bool shouldForceUpdateWithFullDocument() const = 0;
 
     /**
+     * If true, the storage provider supports the reuse of cursors in express path queries. Used to
+     * disable this optimization for disaggregated storage for now.
+     *
+     * TODO SERVER-116261: re-enable the optimization for disaggregated storage.
+     */
+    virtual bool supportsCursorReuseForExpressPathQueries() const = 0;
+
+    /**
      * If true, the storage provider supports the use of local, unreplicated collections.
      */
     virtual bool supportsLocalCollections() const = 0;
@@ -143,6 +165,29 @@ public:
      * If true, the provider supports starting the oplog cap maintainer thread and oplog sampling.
      */
     virtual bool supportsOplogSampling() const = 0;
+
+    /**
+     * If true, the provider supports table verify.
+     *
+     * TODO SERVER-113061: remove this workaround.
+     */
+    virtual bool supportsTableVerify() const = 0;
+
+    /**
+     * If true, we disable transaction update coalescing on secondaries.
+     */
+    virtual bool shouldDisableTransactionUpdateCoalescing() const = 0;
+
+    /**
+     * The default feature compatibility version to be used on a new cluster. Some persistence
+     * providers depend on features only available on the latest FCV.
+     */
+    virtual multiversion::FeatureCompatibilityVersion getMinimumRequiredFCV() const = 0;
+
+    /**
+     * The default memory_page_max value to set on WT for the oplog in string format.
+     */
+    virtual const char* getWTMemoryPageMaxForOplogStrValue() const = 0;
 };
 
 }  // namespace rss

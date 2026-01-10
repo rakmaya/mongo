@@ -29,14 +29,13 @@
 
 #include "mongo/db/query/query_settings/query_settings_service.h"
 
-#include "mongo/db/cluster_parameters/cluster_server_parameter_cmds_gen.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/generic_argument_util.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
-#include "mongo/db/local_catalog/index_key_validate.h"
+#include "mongo/db/index_key_validate.h"
 #include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/pipeline/lite_parsed_pipeline.h"
+#include "mongo/db/pipeline/pipeline_factory.h"
 #include "mongo/db/query/query_settings/query_settings_backfill.h"
 #include "mongo/db/query/query_settings/query_settings_cluster_parameter_gen.h"
 #include "mongo/db/query/query_settings/query_settings_manager.h"
@@ -45,8 +44,8 @@
 #include "mongo/db/query/query_shape/distinct_cmd_shape.h"
 #include "mongo/db/query/query_shape/find_cmd_shape.h"
 #include "mongo/db/query/query_utils.h"
-#include "mongo/db/raw_data_operation.h"
-#include "mongo/db/topology/sharding_state.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
+#include "mongo/db/topology/cluster_parameters/cluster_server_parameter_cmds_gen.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/log_and_backoff.h"
@@ -268,12 +267,8 @@ RepresentativeQueryInfo createRepresentativeInfoAgg(OperationContext* opCtx,
     expCtx->addResolvedNamespaces(
         stdx::unordered_set<NamespaceString>{involvedNamespaces.begin(), involvedNamespaces.end()});
 
-    // In order to parse a change stream request, 'inRouter' needs to be set to true.
-    if (parsedPipeline.hasChangeStream()) {
-        expCtx->setInRouter(true);
-    }
-
-    auto pipeline = Pipeline::parse(aggregateCommandRequest.getPipeline(), expCtx);
+    auto pipeline = pipeline_factory::makePipeline(
+        aggregateCommandRequest.getPipeline(), expCtx, pipeline_factory::kOptionsMinimal);
 
     const auto serializationContext = aggregateCommandRequest.getSerializationContext();
     AggCmdShape aggCmdShape{aggregateCommandRequest, nss, involvedNamespaces, *pipeline, expCtx};
@@ -295,10 +290,6 @@ RepresentativeQueryInfo createRepresentativeInfoAgg(OperationContext* opCtx,
         .systemStage = getStageExemptedFromRejection(aggregateCommandRequest.getPipeline()),
         .isRawDataQuery = aggregateCommandRequest.getRawData().value_or(false),
     };
-}
-
-bool requestComesFromRouterOrSentDirectlyToShard(Client* client) {
-    return client->isInternalClient() || client->isInDirectClient();
 }
 
 void validateIndexKeyPatternStructure(const IndexHint& hint) {
@@ -563,7 +554,7 @@ public:
         }
 
         auto* opCtx = expCtx->getOperationContext();
-        if (requestComesFromRouterOrSentDirectlyToShard(opCtx->getClient()) ||
+        if (isInternalOrDirectClient(opCtx->getClient()) ||
             querySettingsFromOriginalCommand.has_value()) {
             return querySettingsFromOriginalCommand.get_value_or(QuerySettings());
         }
@@ -849,7 +840,7 @@ bool allowQuerySettingsFromClient(Client* client) {
     // - comes from router (internal client), which has already performed the query settings lookup
     // or
     // - has been created interally and is executed via DBDirectClient.
-    return requestComesFromRouterOrSentDirectlyToShard(client);
+    return isInternalOrDirectClient(client);
 }
 
 bool isDefault(const QuerySettings& settings) {

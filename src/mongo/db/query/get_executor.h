@@ -34,10 +34,6 @@
 #include "mongo/db/curop.h"
 #include "mongo/db/exec/classic/delete_stage.h"
 #include "mongo/db/exec/classic/update_stage.h"
-#include "mongo/db/exec/exec_shard_filter_policy.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/index_catalog_entry.h"
-#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/expression_context.h"
@@ -49,13 +45,15 @@
 #include "mongo/db/query/multiple_collection_accessor.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/plan_yield_policy.h"
-#include "mongo/db/query/query_planner.h"
 #include "mongo/db/query/query_planner_params.h"
+#include "mongo/db/query/write_ops/canonical_update.h"
 #include "mongo/db/query/write_ops/parsed_delete.h"
-#include "mongo/db/query/write_ops/parsed_update.h"
 #include "mongo/db/record_id.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog_entry.h"
+#include "mongo/db/shard_role/shard_role.h"
 #include "mongo/db/update/update_driver.h"
 #include "mongo/executor/task_executor_cursor.h"
+#include "mongo/util/modules.h"
 
 #include <cstddef>
 #include <memory>
@@ -93,7 +91,7 @@ boost::intrusive_ptr<ExpressionContext> makeExpressionContextForGetExecutor(
  * prefix of the pipeline might be moved into the provided 'canonicalQuery' for pushing down into
  * the find layer.
  */
-StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorFind(
+MONGO_MOD_PUBLIC StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorFind(
     OperationContext* opCtx,
     const MultipleCollectionAccessor& collections,
     std::unique_ptr<CanonicalQuery> canonicalQuery,
@@ -101,8 +99,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorFind
     size_t plannerOptions = QueryPlannerParams::DEFAULT,
     Pipeline* pipeline = nullptr,
     bool needsMerge = false,
-    boost::optional<TraversalPreference> traversalPreference = boost::none,
-    ExecShardFilterPolicy = AutomaticShardFiltering{});
+    boost::optional<TraversalPreference> traversalPreference = boost::none);
 
 StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getSearchMetadataExecutorSBE(
     OperationContext* opCtx,
@@ -191,14 +188,14 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorCoun
  *
  * If the query cannot be executed, returns a Status indicating why.
  */
-StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorDelete(
+MONGO_MOD_PUBLIC StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorDelete(
     OpDebug* opDebug,
     CollectionAcquisition coll,
     ParsedDelete* parsedDelete,
     boost::optional<ExplainOptions::Verbosity> verbosity);
 
 /**
- * Get a PlanExecutor for an update operation. 'parsedUpdate' describes the query predicate
+ * Get a PlanExecutor for an update operation. 'canonicalUpdate' describes the query predicate
  * and update modifiers. The caller must hold the appropriate MODE_X or MODE_IX locks prior
  * to calling this function, and must not release these locks until after the returned
  * PlanExecutor is deleted.
@@ -208,7 +205,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorDele
  * If the delete operation is executed in explain mode, the 'verbosity' parameter should be
  * set to the requested verbosity level, or boost::none otherwise.
  *
- * The returned PlanExecutor will used the YieldPolicy returned by parsedUpdate->yieldPolicy().
+ * The returned PlanExecutor will used the YieldPolicy returned by canonicalUpdate->yieldPolicy().
  *
  * Does not take ownership of its arguments.
  *
@@ -217,21 +214,21 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorDele
  *
  * If the query cannot be executed, returns a Status indicating why.
  */
-StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorUpdate(
+MONGO_MOD_PUBLIC StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorUpdate(
     OpDebug* opDebug,
     CollectionAcquisition coll,
-    ParsedUpdate* parsedUpdate,
+    CanonicalUpdate* canonicalUpdate,
     boost::optional<ExplainOptions::Verbosity> verbosity);
 
 /**
  * Direction of collection scan plan executor returned by makeCollectionScanPlanExecutor() below.
  */
-enum class CollectionScanDirection {
+enum class MONGO_MOD_PUBLIC CollectionScanDirection {
     kForward = 1,
     kBackward = -1,
 };
 
-std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> getCollectionScanExecutor(
+MONGO_MOD_PUBLIC std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> getCollectionScanExecutor(
     OperationContext* opCtx,
     const CollectionAcquisition& collection,
     PlanYieldPolicy::YieldPolicy yieldPolicy,

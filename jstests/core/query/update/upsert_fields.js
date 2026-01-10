@@ -1,7 +1,10 @@
 // Upsert without shard key targeted to a single shard must run in a transaction or retryable write
 // if the upsert doc does not belong on the initial shard.
-// @tags: [assumes_unsharded_collection]
-
+// @tags: [
+//   assumes_unsharded_collection,
+//   # Time-series collections have different _id properties.
+//   exclude_from_timeseries_crud_passthrough,
+// ]
 //
 // Upsert behavior tests for field extraction
 //

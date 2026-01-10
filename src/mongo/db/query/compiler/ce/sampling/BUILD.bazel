@@ -14,17 +14,14 @@ mongo_cc_library(
     srcs = [
         "sampling_test_utils.cpp",
     ],
-    hdrs = [
-        "sampling_test_utils.h",
-    ],
     deps = [
         "//src/mongo/db:write_stage_common",
         "//src/mongo/db/collection_crud",
-        "//src/mongo/db/local_catalog:catalog_control",
-        "//src/mongo/db/local_catalog:catalog_test_fixture",
         "//src/mongo/db/query:query_planner",
         "//src/mongo/db/query/compiler/ce:ce_test_utils",
         "//src/mongo/db/query/compiler/optimizer/index_bounds_builder",
+        "//src/mongo/db/shard_role/shard_catalog:catalog_control",
+        "//src/mongo/db/shard_role/shard_catalog:catalog_test_fixture",
     ],
 )
 
@@ -33,8 +30,15 @@ mongo_cc_library(
     srcs = [
         "math.cpp",
     ],
-    hdrs = [
-        "math.h",
+    deps = [
+        "//src/mongo/db/query/compiler/ce:ce_common",
+    ],
+)
+
+mongo_cc_library(
+    name = "ce_multikey_dotted_path_support",
+    srcs = [
+        "ce_multikey_dotted_path_support.cpp",
     ],
     deps = [
         "//src/mongo/db/query/compiler/ce:ce_common",
@@ -46,10 +50,6 @@ mongo_cc_library(
     srcs = [
         "sampling_estimator_impl.cpp",
     ],
-    hdrs = [
-        "sampling_estimator.h",
-        "sampling_estimator_impl.h",
-    ],
     deps = [
         ":sampling_math",
         "//src/mongo/db:query_exec",
@@ -59,9 +59,6 @@ mongo_cc_library(
 
 mongo_cc_library(
     name = "sampling_estimator_interface",
-    hdrs = [
-        "sampling_estimator.h",
-    ],
     deps = [
         "//src/mongo/db:query_expressions",
     ],
@@ -123,5 +120,16 @@ mongo_cc_benchmark(
         ":sampling_test_utils",
         "//src/mongo/db/query:query_test_service_context",
         "//src/mongo/db/query/compiler/optimizer/cost_based_ranker:cardinality_estimator",
+    ],
+)
+
+mongo_cc_unit_test(
+    name = "ce_multikey_dotted_path_support_test",
+    srcs = [
+        "ce_multikey_dotted_path_support_test.cpp",
+    ],
+    tags = ["mongo_unittest_third_group"],
+    deps = [
+        ":ce_multikey_dotted_path_support",
     ],
 )

@@ -152,16 +152,17 @@ protected:
                                          true /* allowMigrations */,
                                          chunks);
 
-        auto cm = ChunkManager(RoutingTableHistoryValueHandle(std::make_shared<RoutingTableHistory>(
-                                   std::move(routingTableHistory))),
-                               boost::none);
-        return CollectionRoutingInfoTargeter(
-            nss,
-            CollectionRoutingInfo{
-                std::move(cm),
-                DatabaseTypeValueHandle(DatabaseType{nss.dbName(),
+        CurrentChunkManager cm(RoutingTableHistoryValueHandle(
+            std::make_shared<RoutingTableHistory>(std::move(routingTableHistory))));
+        auto routingCtx = RoutingContext::createSynthetic(
+            {{nss,
+              CollectionRoutingInfo{std::move(cm),
+                                    DatabaseTypeValueHandle(
+                                        DatabaseType{nss.dbName(),
                                                      ShardId("dummyPrimaryShard"),
-                                                     DatabaseVersion(UUID::gen(), timestamp)})});
+                                                     DatabaseVersion(UUID::gen(), timestamp)})}}});
+        routingCtx->skipValidation();
+        return CollectionRoutingInfoTargeter(nss, *routingCtx);
     }
 
     int32_t getRandomInt(int32_t limit) const {
@@ -601,7 +602,10 @@ TEST_F(ReadWriteDistributionTest, WriteDistributionSampleSize) {
     ASSERT_EQ(sampleSize.getFindAndModify(), 1);
 }
 
-DEATH_TEST_F(ReadWriteDistributionTest, ReadDistributionCannotAddUpdateQuery, "invariant") {
+using ReadWriteDistributionTestDeathTest = ReadWriteDistributionTest;
+DEATH_TEST_F(ReadWriteDistributionTestDeathTest,
+             ReadDistributionCannotAddUpdateQuery,
+             "invariant") {
     auto targeter = makeCollectionRoutingInfoTargeter(chunkSplitInfoRangeSharding0);
     ReadDistributionMetricsCalculator readDistributionCalculator(targeter);
 
@@ -612,7 +616,9 @@ DEATH_TEST_F(ReadWriteDistributionTest, ReadDistributionCannotAddUpdateQuery, "i
                                         makeSampledUpdateQueryDocument({updateOp}));
 }
 
-DEATH_TEST_F(ReadWriteDistributionTest, ReadDistributionCannotAddDeleteQuery, "invariant") {
+DEATH_TEST_F(ReadWriteDistributionTestDeathTest,
+             ReadDistributionCannotAddDeleteQuery,
+             "invariant") {
     auto targeter = makeCollectionRoutingInfoTargeter(chunkSplitInfoRangeSharding0);
     ReadDistributionMetricsCalculator readDistributionCalculator(targeter);
 
@@ -622,7 +628,9 @@ DEATH_TEST_F(ReadWriteDistributionTest, ReadDistributionCannotAddDeleteQuery, "i
                                         makeSampledDeleteQueryDocument({deleteOp}));
 }
 
-DEATH_TEST_F(ReadWriteDistributionTest, ReadDistributionCannotAddFindAndModifyQuery, "invariant") {
+DEATH_TEST_F(ReadWriteDistributionTestDeathTest,
+             ReadDistributionCannotAddFindAndModifyQuery,
+             "invariant") {
     auto targeter = makeCollectionRoutingInfoTargeter(chunkSplitInfoRangeSharding0);
     ReadDistributionMetricsCalculator readDistributionCalculator(targeter);
 
@@ -634,7 +642,9 @@ DEATH_TEST_F(ReadWriteDistributionTest, ReadDistributionCannotAddFindAndModifyQu
             filter, updateMod, false /* upsert */, false /* remove */));
 }
 
-DEATH_TEST_F(ReadWriteDistributionTest, ReadDistributionCannotAddBulkWriteQuery, "invariant") {
+DEATH_TEST_F(ReadWriteDistributionTestDeathTest,
+             ReadDistributionCannotAddBulkWriteQuery,
+             "invariant") {
     auto targeter = makeCollectionRoutingInfoTargeter(chunkSplitInfoRangeSharding0);
     ReadDistributionMetricsCalculator readDistributionCalculator(targeter);
 
@@ -645,7 +655,7 @@ DEATH_TEST_F(ReadWriteDistributionTest, ReadDistributionCannotAddBulkWriteQuery,
                                         makeSampledBulkWriteUpdateQueryDocument({updateOp}));
 }
 
-DEATH_TEST_F(ReadWriteDistributionTest, WriteDistributionCannotAddFindQuery, "invariant") {
+DEATH_TEST_F(ReadWriteDistributionTestDeathTest, WriteDistributionCannotAddFindQuery, "invariant") {
     auto targeter = makeCollectionRoutingInfoTargeter(chunkSplitInfoRangeSharding0);
     WriteDistributionMetricsCalculator writeDistributionCalculator(targeter);
 
@@ -654,7 +664,9 @@ DEATH_TEST_F(ReadWriteDistributionTest, WriteDistributionCannotAddFindQuery, "in
         operationContext(), makeSampledReadQueryDocument(SampledCommandNameEnum::kFind, filter));
 }
 
-DEATH_TEST_F(ReadWriteDistributionTest, WriteDistributionCannotAddAggregateQuery, "invariant") {
+DEATH_TEST_F(ReadWriteDistributionTestDeathTest,
+             WriteDistributionCannotAddAggregateQuery,
+             "invariant") {
     auto targeter = makeCollectionRoutingInfoTargeter(chunkSplitInfoRangeSharding0);
     WriteDistributionMetricsCalculator writeDistributionCalculator(targeter);
 
@@ -664,7 +676,9 @@ DEATH_TEST_F(ReadWriteDistributionTest, WriteDistributionCannotAddAggregateQuery
         makeSampledReadQueryDocument(SampledCommandNameEnum::kAggregate, filter));
 }
 
-DEATH_TEST_F(ReadWriteDistributionTest, WriteDistributionCannotAddCountQuery, "invariant") {
+DEATH_TEST_F(ReadWriteDistributionTestDeathTest,
+             WriteDistributionCannotAddCountQuery,
+             "invariant") {
     auto targeter = makeCollectionRoutingInfoTargeter(chunkSplitInfoRangeSharding0);
     WriteDistributionMetricsCalculator writeDistributionCalculator(targeter);
 
@@ -673,7 +687,9 @@ DEATH_TEST_F(ReadWriteDistributionTest, WriteDistributionCannotAddCountQuery, "i
         operationContext(), makeSampledReadQueryDocument(SampledCommandNameEnum::kCount, filter));
 }
 
-DEATH_TEST_F(ReadWriteDistributionTest, WriteDistributionCannotAddDistinctQuery, "invariant") {
+DEATH_TEST_F(ReadWriteDistributionTestDeathTest,
+             WriteDistributionCannotAddDistinctQuery,
+             "invariant") {
     auto targeter = makeCollectionRoutingInfoTargeter(chunkSplitInfoRangeSharding0);
     WriteDistributionMetricsCalculator writeDistributionCalculator(targeter);
 
@@ -2323,7 +2339,7 @@ TEST_F(ReadWriteDistributionTest, WriteDistributionShardKeyUpdates) {
     assertWriteMetrics(writeDistributionCalculator, metrics);
 }
 
-DEATH_TEST_F(ReadWriteDistributionTest,
+DEATH_TEST_F(ReadWriteDistributionTestDeathTest,
              WriteDistributionCannotSetNumShardKeyUpdatesToNegative,
              "invariant") {
     auto targeter = makeCollectionRoutingInfoTargeter(chunkSplitInfoRangeSharding0);

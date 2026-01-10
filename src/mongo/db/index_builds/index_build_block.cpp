@@ -38,18 +38,18 @@
 #include "mongo/db/client.h"
 #include "mongo/db/collection_index_usage_tracker.h"
 #include "mongo/db/index/index_access_method.h"
+#include "mongo/db/index_key_validate.h"
 #include "mongo/db/index_names.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_catalog.h"
-#include "mongo/db/local_catalog/durable_catalog.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
-#include "mongo/db/local_catalog/index_key_validate.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/collection_index_usage_tracker_decoration.h"
 #include "mongo/db/query/collection_query_info.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/durable_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/ttl/ttl_collection_cache.h"
 #include "mongo/logv2/log.h"
@@ -90,8 +90,7 @@ void IndexBuildBlock::_completeInit(OperationContext* opCtx, Collection* collect
     // Register this index with the CollectionQueryInfo to regenerate the cache. This way, updates
     // occurring while an index is being build in the background will be aware of whether or not
     // they need to modify any indexes.
-    // TODO(SERVER-103400): Investigate usage validity of CollectionPtr::CollectionPtr_UNSAFE
-    auto desc = getEntry(opCtx, CollectionPtr::CollectionPtr_UNSAFE(collection))->descriptor();
+    auto desc = getEntry(opCtx, collection)->descriptor();
     CollectionQueryInfo::get(collection).rebuildIndexData(opCtx, collection);
     CollectionIndexUsageTrackerDecoration::write(collection).unregisterIndex(desc->indexName());
     CollectionIndexUsageTrackerDecoration::write(collection)
@@ -223,9 +222,8 @@ void IndexBuildBlock::success(OperationContext* opCtx, Collection* collection) {
     if (_indexBuildInterceptor) {
         // Skipped records are only checked when we complete an index build as primary.
         const auto replCoord = repl::ReplicationCoordinator::get(opCtx);
-        const auto skippedRecordsTracker = _indexBuildInterceptor->getSkippedRecordTracker();
-        if (skippedRecordsTracker && replCoord->canAcceptWritesFor(opCtx, collection->ns())) {
-            invariant(skippedRecordsTracker->areAllRecordsApplied(opCtx));
+        if (replCoord->canAcceptWritesFor(opCtx, collection->ns())) {
+            invariant(!_indexBuildInterceptor->hasAnySkippedRecords(opCtx));
         }
 
         // An index build should never be completed with writes remaining in the interceptor.
@@ -281,12 +279,10 @@ void IndexBuildBlock::success(OperationContext* opCtx, Collection* collection) {
 
 const IndexCatalogEntry* IndexBuildBlock::getEntry(OperationContext* opCtx,
                                                    const CollectionPtr& collection) const {
-    auto descriptor = collection->getIndexCatalog()->findIndexByName(
+    return collection->getIndexCatalog()->findIndexByName(
         opCtx,
         getIndexName(),
         IndexCatalog::InclusionPolicy::kReady | IndexCatalog::InclusionPolicy::kUnfinished);
-
-    return descriptor->getEntry();
 }
 
 IndexCatalogEntry* IndexBuildBlock::getWritableEntry(OperationContext* opCtx,
@@ -323,6 +319,10 @@ Status IndexBuildBlock::buildEmptyIndex(OperationContext* opCtx,
 
     // sanity check
     invariant(collection->isIndexReady(descriptor->indexName()));
+    // We can rebuild the path arrayness information once this index is ready.
+    if (feature_flags::gFeatureFlagPathArrayness.isEnabled()) {
+        CollectionQueryInfo::get(collection).rebuildPathArrayness(opCtx, collection);
+    }
 
     return Status::OK();
 }

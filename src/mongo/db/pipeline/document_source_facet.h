@@ -39,6 +39,7 @@
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/lite_parsed_document_source.h"
+#include "mongo/db/pipeline/lite_parsed_document_source_nested_pipelines.h"
 #include "mongo/db/pipeline/lite_parsed_pipeline.h"
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/stage_constraints.h"
@@ -49,6 +50,7 @@
 #include "mongo/db/query/stage_memory_limit_knobs/knobs.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/stdx/unordered_set.h"
+#include "mongo/util/modules.h"
 
 #include <cstddef>
 #include <memory>
@@ -99,6 +101,8 @@ private:
     std::unique_ptr<StatsProvider> _provider{nullptr};
 };
 
+DECLARE_STAGE_PARAMS_DERIVED_DEFAULT(Facet);
+
 /**
  * A $facet stage contains multiple sub-pipelines. Each input to the $facet stage will feed into
  * each of the sub-pipelines. The $facet stage is blocking, and outputs only one document,
@@ -108,9 +112,9 @@ private:
  * stage which will produce a document like the following:
  * {facetA: [<all input documents except the first one>], facetB: [<the first document>]}.
  */
-class DocumentSourceFacet final : public DocumentSource {
+class MONGO_MOD_NEEDS_REPLACEMENT DocumentSourceFacet final : public DocumentSource {
 public:
-    static constexpr StringData kStageName = "$facet"_sd;
+    MONGO_MOD_NEEDS_REPLACEMENT static constexpr StringData kStageName = "$facet"_sd;
     static constexpr StringData kTeeConsumerStageName = "$internalFacetTeeConsumer"_sd;
     struct FacetPipeline {
         FacetPipeline(std::string name, std::unique_ptr<Pipeline> pipeline)
@@ -120,15 +124,14 @@ public:
         std::unique_ptr<Pipeline> pipeline;
     };
 
-    class LiteParsed final : public LiteParsedDocumentSourceNestedPipelines {
+    class LiteParsed final : public LiteParsedDocumentSourceNestedPipelines<LiteParsed> {
     public:
         static std::unique_ptr<LiteParsed> parse(const NamespaceString& nss,
                                                  const BSONElement& spec,
                                                  const LiteParserOptions& options);
 
-        LiteParsed(std::string parseTimeName, std::vector<LiteParsedPipeline> pipelines)
-            : LiteParsedDocumentSourceNestedPipelines(
-                  std::move(parseTimeName), boost::none, std::move(pipelines)) {}
+        LiteParsed(const BSONElement& spec, std::vector<LiteParsedPipeline> pipelines)
+            : LiteParsedDocumentSourceNestedPipelines(spec, boost::none, std::move(pipelines)) {}
 
         PrivilegeVector requiredPrivileges(bool isMongos,
                                            bool bypassDocumentValidation) const final {
@@ -137,6 +140,10 @@ public:
 
         bool requiresAuthzChecks() const override {
             return false;
+        }
+
+        std::unique_ptr<StageParams> getStageParams() const override {
+            return std::make_unique<FacetStageParams>(_originalBson);
         }
     };
 
@@ -152,7 +159,7 @@ public:
     /**
      * Optimizes inner pipelines.
      */
-    boost::intrusive_ptr<DocumentSource> optimize() final;
+    boost::intrusive_ptr<DocumentSource> optimize();
 
     /**
      * Takes a union of all sub-pipelines, and adds them to 'deps'.

@@ -32,8 +32,6 @@
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/lock_manager/exception_util.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/pipeline/change_stream_helpers.h"
@@ -42,6 +40,8 @@
 #include "mongo/db/repl/oplog_entry_gen.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/lock_manager/exception_util.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/db/storage/write_unit_of_work.h"
@@ -254,14 +254,15 @@ void notifyChangeStreamsOnNamespacePlacementChanged(OperationContext* opCtx,
                                    "NamespacePlacementChangedWritesOplog");
 }
 
-void notifyChangeStreamsOnPlacementHistoryMetadataChanged(OperationContext* opCtx) {
-    Timestamp now(opCtx->fastClockSource().now());
+void notifyChangeStreamsOnPlacementHistoryMetadataChanged(
+    OperationContext* opCtx, const PlacementHistoryMetadataChanged& notification) {
     // Global changes to the metadata of placementHistory are encoded as a NamespacePlacementChanged
     // notification with an unspecified namespace.
-    NamespacePlacementChanged globalChangeNotification(NamespaceString::kEmpty, now);
+    NamespacePlacementChanged repackagedNotification(NamespaceString::kEmpty,
+                                                     notification.getCommittedAt());
     insertNotificationOplogEntries(
         opCtx,
-        {buildNamespacePlacementChangedOplogEntry(opCtx, globalChangeNotification)},
+        {buildNamespacePlacementChangedOplogEntry(opCtx, repackagedNotification)},
         "PlacementHistoryMetadataChangedWritesOplog");
 }
 
@@ -288,26 +289,10 @@ std::vector<repl::MutableOplogEntry> buildMoveChunkOplogEntries(
     bool firstCollectionChunkOnRecipient) {
     const auto nss = NamespaceStringUtil::serialize(collName, SerializationContext::stateDefault());
     std::vector<repl::MutableOplogEntry> oplogEntries;
-    {
-        repl::MutableOplogEntry oplogEntry;
-        StringData opName("moveChunk");
-
-        oplogEntry.setOpType(repl::OpTypeEnum::kNoop);
-        oplogEntry.setNss(collName);
-        oplogEntry.setUuid(collUUID);
-        oplogEntry.setTid(collName.tenantId());
-        oplogEntry.setObject(BSON("msg" << BSON(opName << nss)));
-        oplogEntry.setObject2(BSON(opName << nss << "donor" << donor << "recipient" << recipient
-                                          << "allCollectionChunksMigratedFromDonor"
-                                          << noMoreCollectionChunksOnDonor));
-        oplogEntry.setOpTime(repl::OpTime());
-        oplogEntry.setWallClockTime(opCtx->fastClockSource().now());
-
-        oplogEntries.push_back(std::move(oplogEntry));
-    }
-
     // Conditionally emit the legacy 'migrateLastChunkFromShard' and 'migrateChunkToNewShard' op
     // entry types, consumed by V1 change stream readers.
+    // 'moveChunk' oplog entry must be the last one to be emitted to ensure V2 change stream reader
+    // correctness.
     if (noMoreCollectionChunksOnDonor) {
         repl::MutableOplogEntry legacyOplogEntry;
 
@@ -342,6 +327,24 @@ std::vector<repl::MutableOplogEntry> buildMoveChunkOplogEntries(
         legacyOplogEntry.setWallClockTime(opCtx->fastClockSource().now());
 
         oplogEntries.push_back(std::move(legacyOplogEntry));
+    }
+
+    {
+        repl::MutableOplogEntry oplogEntry;
+        StringData opName("moveChunk");
+
+        oplogEntry.setOpType(repl::OpTypeEnum::kNoop);
+        oplogEntry.setNss(collName);
+        oplogEntry.setUuid(collUUID);
+        oplogEntry.setTid(collName.tenantId());
+        oplogEntry.setObject(BSON("msg" << BSON(opName << nss)));
+        oplogEntry.setObject2(BSON(opName << nss << "donor" << donor << "recipient" << recipient
+                                          << "allCollectionChunksMigratedFromDonor"
+                                          << noMoreCollectionChunksOnDonor));
+        oplogEntry.setOpTime(repl::OpTime());
+        oplogEntry.setWallClockTime(opCtx->fastClockSource().now());
+
+        oplogEntries.push_back(std::move(oplogEntry));
     }
 
     return oplogEntries;

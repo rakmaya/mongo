@@ -61,20 +61,22 @@
 
 namespace mongo {
 
+DECLARE_STAGE_PARAMS_DERIVED_DEFAULT(PlanCacheStats);
+
 class DocumentSourcePlanCacheStats final : public DocumentSource {
 public:
     static constexpr StringData kStageName = "$planCacheStats"_sd;
 
-    class LiteParsed final : public LiteParsedDocumentSource {
+    class LiteParsed final : public LiteParsedDocumentSourceDefault<LiteParsed> {
     public:
         static std::unique_ptr<LiteParsed> parse(const NamespaceString& nss,
                                                  const BSONElement& spec,
                                                  const LiteParserOptions& options) {
-            return std::make_unique<LiteParsed>(spec.fieldName(), nss);
+            return std::make_unique<LiteParsed>(spec, nss);
         }
 
-        explicit LiteParsed(std::string parseTimeName, NamespaceString nss)
-            : LiteParsedDocumentSource(std::move(parseTimeName)), _nss(std::move(nss)) {}
+        LiteParsed(const BSONElement& spec, NamespaceString nss)
+            : LiteParsedDocumentSourceDefault(spec), _nss(std::move(nss)) {}
 
         stdx::unordered_set<NamespaceString> getInvolvedNamespaces() const override {
             // There are no foreign collections.
@@ -88,6 +90,10 @@ public:
 
         bool isInitialSource() const final {
             return true;
+        }
+
+        std::unique_ptr<StageParams> getStageParams() const final {
+            return std::make_unique<PlanCacheStatsStageParams>(_originalBson);
         }
 
         ReadConcernSupportResult supportsReadConcern(repl::ReadConcernLevel level,
@@ -141,8 +147,8 @@ public:
      * Absorbs a subsequent $match, in order to avoid copying the entire contents of the plan cache
      * prior to filtering.
      */
-    DocumentSourceContainer::iterator doOptimizeAt(DocumentSourceContainer::iterator itr,
-                                                   DocumentSourceContainer* container) override;
+    DocumentSourceContainer::iterator optimizeAt(DocumentSourceContainer::iterator itr,
+                                                 DocumentSourceContainer* container);
 
     void serializeToArray(std::vector<Value>& array,
                           const SerializationOptions& opts = SerializationOptions{}) const final;

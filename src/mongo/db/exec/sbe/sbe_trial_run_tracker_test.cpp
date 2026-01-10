@@ -34,29 +34,27 @@
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/db/exec/sbe/expressions/expression.h"
 #include "mongo/db/exec/sbe/sbe_plan_stage_test.h"
 #include "mongo/db/exec/sbe/stages/co_scan.h"
+#include "mongo/db/exec/sbe/stages/fetch.h"
 #include "mongo/db/exec/sbe/stages/hash_agg.h"
 #include "mongo/db/exec/sbe/stages/limit_skip.h"
 #include "mongo/db/exec/sbe/stages/scan.h"
 #include "mongo/db/exec/sbe/stages/sort.h"
 #include "mongo/db/exec/sbe/stages/stages.h"
 #include "mongo/db/exec/sbe/stages/union.h"
+#include "mongo/db/exec/sbe/stages/unwind.h"
 #include "mongo/db/exec/sbe/values/slot.h"
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/db/exec/trial_run_tracker.h"
 #include "mongo/db/query/compiler/physical_model/query_solution/stage_types.h"
 #include "mongo/db/query/stage_builder/sbe/gen_helpers.h"
 #include "mongo/unittest/unittest.h"
-#include "mongo/util/assert_util.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/uuid.h"
 
 #include <cstddef>
-#include <cstdint>
-#include <limits>
 #include <memory>
 #include <string>
 #include <utility>
@@ -79,13 +77,12 @@ TEST_F(TrialRunTrackerTest, TrackerAttachesToStreamingStage) {
                                            generateSlotId() /* indexKeyPatternSlot */,
                                            std::vector<std::string>{"field"} /* scanFieldNames */,
                                            makeSV(generateSlotId()) /* scanFieldSlots */,
-                                           generateSlotId() /* seekRecordIdSlot */,
                                            generateSlotId() /* minRecordIdSlot */,
                                            generateSlotId() /* maxRecordIdSlot */,
                                            true /* forward */,
                                            nullptr /* yieldPolicy */,
                                            kEmptyPlanNodeId /* nodeId */,
-                                           ScanCallbacks());
+                                           nullptr /* scanOpenCallback */);
 
     auto tracker = std::make_unique<TrialRunTracker>(boost::none, boost::none);
     ON_BLOCK_EXIT([&]() { scanStage->detachFromTrialRunTracker(); });
@@ -94,7 +91,34 @@ TEST_F(TrialRunTrackerTest, TrackerAttachesToStreamingStage) {
     ASSERT_EQ(attachResult, PlanStage::TrialRunTrackingType::TrackReads);
 }
 
-TEST_F(TrialRunTrackerTest, TrackerAttachesToBlockingStage) {
+TEST_F(TrialRunTrackerTest, TrackerAttachesToFetchStage) {
+    auto collUuid = UUID::parse("00000000-0000-0000-0000-000000000000").getValue();
+    auto fetchState = std::make_shared<FetchStageState>(generateSlotId(),
+                                                        generateSlotId(),
+                                                        generateSlotId(),
+                                                        generateSlotId(),
+                                                        generateSlotId(),
+                                                        generateSlotId(),
+                                                        generateSlotId(),
+                                                        StringListSet({}),
+                                                        value::SlotVector(),
+                                                        FetchCallbacks());
+    auto fetchStage = makeS<sbe::FetchStage>(makeS<CoScanStage>(kEmptyPlanNodeId),
+                                             collUuid,
+                                             DatabaseName(),
+                                             fetchState,
+                                             nullptr,
+                                             kEmptyPlanNodeId,
+                                             true);
+
+    auto tracker = std::make_unique<TrialRunTracker>(boost::none, boost::none);
+    ON_BLOCK_EXIT([&]() { fetchStage->detachFromTrialRunTracker(); });
+
+    auto attachResult = fetchStage->attachToTrialRunTracker(tracker.get());
+    ASSERT_EQ(attachResult, PlanStage::TrialRunTrackingType::TrackReads);
+}
+
+TEST_F(TrialRunTrackerTest, TrackerDoesNotAttachToBlockingStage) {
     auto sortStage =
         makeS<SortStage>(makeS<LimitSkipStage>(makeS<CoScanStage>(kEmptyPlanNodeId),
                                                makeE<EConstant>(value::TypeTags::NumberInt64, 0),
@@ -128,13 +152,12 @@ TEST_F(TrialRunTrackerTest, TrackerAttachesToBothBlockingAndStreamingStages) {
                                            generateSlotId() /* indexKeyPatternSlot */,
                                            std::vector<std::string>{"field"} /* scanFieldNames */,
                                            makeSV(generateSlotId()) /* scanFieldSlots */,
-                                           generateSlotId() /* seekRecordIdSlot */,
                                            generateSlotId() /* minRecordIdSlot */,
                                            generateSlotId() /* maxRecordIdSlot */,
                                            true /* forward */,
                                            nullptr /* yieldPolicy */,
                                            kEmptyPlanNodeId /* nodeId */,
-                                           ScanCallbacks());
+                                           nullptr /* scanOpenCallback */);
 
     auto rootSortStage = makeS<SortStage>(std::move(scanStage),
                                           makeSV(),
@@ -167,13 +190,12 @@ TEST_F(TrialRunTrackerTest, TrialRunTrackingCanBeDisabled) {
                               generateSlotId() /* indexKeyPatternSlot */,
                               std::vector<std::string>{"field"} /* scanFieldNames */,
                               makeSV(generateSlotId()) /* scanFieldSlots */,
-                              generateSlotId() /* seekRecordIdSlot */,
                               generateSlotId() /* minRecordIdSlot */,
                               generateSlotId() /* maxRecordIdSlot */,
                               true /* forward */,
                               nullptr /* yieldPolicy */,
                               kEmptyPlanNodeId /* nodeId */,
-                              ScanCallbacks());
+                              nullptr /*scanOpenCallback*/);
 
     scanStage->disableTrialRunTracking();
     auto tracker = std::make_unique<TrialRunTracker>(boost::none, boost::none);
@@ -193,13 +215,12 @@ TEST_F(TrialRunTrackerTest, DisablingTrackingForChildDoesNotInhibitTrackingForPa
                               generateSlotId() /* indexKeyPatternSlot */,
                               std::vector<std::string>{"field"} /* scanFieldNames */,
                               makeSV(generateSlotId()) /* scanFieldSlots */,
-                              generateSlotId() /* seekRecordIdSlot */,
                               generateSlotId() /* minRecordIdSlot */,
                               generateSlotId() /* maxRecordIdSlot */,
                               true /* forward */,
                               nullptr /* yieldPolicy */,
                               kEmptyPlanNodeId /* nodeId */,
-                              ScanCallbacks());
+                              nullptr /*scanOpenCallback*/);
 
     // Disable tracking for 'scanStage'. We should still attach the tracker for 'rootSortStage'.
     scanStage->disableTrialRunTracking();

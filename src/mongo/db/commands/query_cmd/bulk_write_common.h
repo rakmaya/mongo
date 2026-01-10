@@ -34,6 +34,7 @@
 #include "mongo/db/commands/query_cmd/bulk_write_gen.h"
 #include "mongo/db/commands/query_cmd/bulk_write_parser.h"
 #include "mongo/db/stats/counters.h"
+#include "mongo/util/modules.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -70,7 +71,7 @@ int32_t getStatementId(const BulkWriteCommandRequest& req, size_t currentOpIdx);
  * From a serialized BulkWriteCommandRequest containing a single NamespaceInfoEntry,
  * extract that NamespaceInfoEntry. For bulkWrite with queryable encryption.
  */
-NamespaceInfoEntry getFLENamespaceInfoEntry(const BSONObj& bulkWrite);
+MONGO_MOD_NEEDS_REPLACEMENT NamespaceInfoEntry getFLENamespaceInfoEntry(const BSONObj& bulkWrite);
 
 
 /**
@@ -91,15 +92,6 @@ write_ops::InsertCommandRequest makeInsertCommandRequestForFLE(
  */
 write_ops::UpdateOpEntry makeUpdateOpEntryFromUpdateOp(const BulkWriteUpdateOp* op);
 
-/**
- * Helper function to build an BulkWriteUpdateOp based off the UpdateOpEntry passed in.
- */
-BulkWriteUpdateOp toBulkWriteUpdate(const write_ops::UpdateOpEntry& op);
-
-/**
- * Helper function to build an BulkWriteDeleteOp based off the DeleteOpEntry passed in.
- */
-BulkWriteDeleteOp toBulkWriteDelete(const write_ops::DeleteOpEntry& op);
 /**
  * Helper function to build an UpdateRequest based off the BulkWriteUpdateOp passed in and its
  * namespace and top-level 'let' parameter.

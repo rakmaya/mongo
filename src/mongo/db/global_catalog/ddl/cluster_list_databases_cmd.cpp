@@ -38,11 +38,11 @@
 #include "mongo/db/auth/resource_pattern.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/database_name.h"
-#include "mongo/db/global_catalog/router_role_api/cluster_commands_helpers.h"
-#include "mongo/db/local_catalog/ddl/list_databases_gen.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/router_role/cluster_commands_helpers.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/ddl/list_databases_gen.h"
 #include "mongo/db/sharding_environment/client/shard.h"
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/sharding_environment/shard_id.h"
@@ -196,11 +196,9 @@ public:
                     tenantId, sizeEntry.first, cmd.getSerializationContext());
                 const long long size = sizeEntry.second;
 
-                // Unless this is a listDatabases command on the replica set endpoint (of a
-                // single-shard cluster), skip the 'local' database since all shards have their own
+                // skip the 'local' database since all shards have their own
                 // independent 'local' database.
-                if (dbname.isLocalDB() &&
-                    (!opCtx->routedByReplicaSetEndpoint() || shardIds.size() > 1)) {
+                if (dbname.isLocalDB()) {
                     continue;
                 }
 

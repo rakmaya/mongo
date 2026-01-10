@@ -66,7 +66,8 @@ public:
                          bool isCachedPlan,
                          boost::optional<size_t> cachedPlanHash,
                          std::shared_ptr<const plan_cache_debug_info::DebugInfoSBE> debugInfo,
-                         RemoteExplainVector* remoteExplains);
+                         RemoteExplainVector* remoteExplains,
+                         bool usedJoinOpt = false);
 
     bool isMultiPlan() const final {
         return _isMultiPlan;
@@ -81,10 +82,12 @@ public:
     void getSecondarySummaryStats(const NamespaceString& secondaryColl,
                                   PlanSummaryStats* statsOut) const override;
     PlanStatsDetails getWinningPlanStats(ExplainOptions::Verbosity verbosity) const final;
+    PlanStatsDetails getWinningPlanStatsQueryPlanner(bool printBytecode) const final;
 
     static BSONObj buildExecPlanDebugInfo(const sbe::PlanStage* root,
                                           const stage_builder::PlanStageData* data,
-                                          size_t lengthCap) {
+                                          size_t lengthCap,
+                                          bool printBytecode) {
         tassert(10111200, "encountered unexpected missing sbe plan stage root", root);
         tassert(10111201, "encountered unexpected missing sbe plan stage data", data);
         BSONObjBuilder bob;
@@ -98,7 +101,9 @@ public:
             bob.append("warning", "exceeded explain BSON size cap");
             return bob.obj();
         }
-        std::string stages = sbe::DebugPrinter().print(*root);
+        // TODO can put lengthCap on debugPrintInfo as well.
+        sbe::DebugPrintInfo debugPrintInfo = {.printBytecode = printBytecode};
+        std::string stages = sbe::DebugPrinter().print(*root, debugPrintInfo);
         if (static_cast<size_t>(bob.len()) + stages.size() > lengthCap) {
             bob.append("warning", "exceeded explain BSON size cap");
             return bob.obj();
@@ -116,6 +121,7 @@ protected:
 
     const bool _isMultiPlan{false};
     const bool _isFromPlanCache{false};
+    const bool _usedJoinOpt{false};
     const boost::optional<size_t> _cachedPlanHash{boost::none};
     // Pre-computed debugging info so we don't necessarily have to collect them from QuerySolution.
     // All plans recovered from the same cached entry share the same debug info.
@@ -133,7 +139,8 @@ public:
         boost::optional<size_t> cachedPlanHash,
         std::shared_ptr<const plan_cache_debug_info::DebugInfoSBE> debugInfo,
         std::unique_ptr<PlanStage> classicRuntimePlannerStage,
-        RemoteExplainVector* remoteExplains);
+        RemoteExplainVector* remoteExplains,
+        bool usedJoinOpt = false);
 
     PlanStatsDetails getWinningPlanTrialStats() const final;
     std::vector<PlanStatsDetails> getRejectedPlansStats(

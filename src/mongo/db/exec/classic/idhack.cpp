@@ -34,9 +34,9 @@
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/document_metadata_fields.h"
 #include "mongo/db/index/index_access_method.h"
-#include "mongo/db/local_catalog/collection.h"
 #include "mongo/db/query/plan_executor_impl.h"
 #include "mongo/db/record_id.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
 #include "mongo/db/storage/index_entry_comparison.h"
 #include "mongo/db/storage/snapshot.h"
 #include "mongo/util/assert_util.h"
@@ -56,12 +56,12 @@ IDHackStage::IDHackStage(ExpressionContext* expCtx,
                          CanonicalQuery* query,
                          WorkingSet* ws,
                          CollectionAcquisition collection,
-                         const IndexDescriptor* descriptor)
-    : RequiresIndexStage(kStageType, expCtx, collection, descriptor, ws), _workingSet(ws) {
+                         const IndexCatalogEntry* entry)
+    : RequiresIndexStage(kStageType, expCtx, collection, entry, ws), _workingSet(ws) {
     auto cmpExpr = dynamic_cast<ComparisonMatchExpressionBase*>(query->getPrimaryMatchExpression());
     tassert(10269300, "Invalid match expression", cmpExpr);
     _key = cmpExpr->getData().wrap("_id");
-    _specificStats.indexName = descriptor->indexName();
+    _specificStats.indexName = indexDescriptor()->indexName();
     _addKeyMetadata = query->getFindCommandRequest().getReturnKey();
 }
 
@@ -69,11 +69,9 @@ IDHackStage::IDHackStage(ExpressionContext* expCtx,
                          const BSONObj& key,
                          WorkingSet* ws,
                          CollectionAcquisition collection,
-                         const IndexDescriptor* descriptor)
-    : RequiresIndexStage(kStageType, expCtx, collection, descriptor, ws),
-      _workingSet(ws),
-      _key(key) {
-    _specificStats.indexName = descriptor->indexName();
+                         const IndexCatalogEntry* entry)
+    : RequiresIndexStage(kStageType, expCtx, collection, entry, ws), _workingSet(ws), _key(key) {
+    _specificStats.indexName = indexDescriptor()->indexName();
 }
 
 IDHackStage::~IDHackStage() {}
@@ -97,7 +95,7 @@ PlanStage::StageState IDHackStage::doWork(WorkingSetID* out) {
                 opCtx(),
                 *shard_role_details::getRecoveryUnit(opCtx()),
                 collectionPtr(),
-                indexDescriptor()->getEntry(),
+                indexEntry(),
                 _key);
 
             // Key not found.
@@ -145,7 +143,7 @@ PlanStage::StageState IDHackStage::doWork(WorkingSetID* out) {
 PlanStage::StageState IDHackStage::advance(WorkingSetID id,
                                            WorkingSetMember* member,
                                            WorkingSetID* out) {
-    invariant(member->hasObj());
+    tassert(11051639, "Expecting working set member to store an object", member->hasObj());
 
     if (_addKeyMetadata) {
         BSONObj ownedKeyObj = member->doc.value().toBson()["_id"].wrap().getOwned();

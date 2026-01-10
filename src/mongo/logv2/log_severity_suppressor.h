@@ -40,10 +40,12 @@
 #include "mongo/platform/atomic.h"
 #include "mongo/util/clock_source.h"
 #include "mongo/util/duration.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/system_clock_source.h"
 #include "mongo/util/time_support.h"
 
 #include <functional>
+#include <limits>
 #include <mutex>
 
 #include <boost/multi_index/indexed_by.hpp>
@@ -61,7 +63,7 @@ namespace bmi = boost::multi_index;
  * `quiet` severity for key `k` until the suppression expires.
  */
 template <typename K, typename H = absl::Hash<K>, typename Eq = std::equal_to<K>>
-class KeyedSeveritySuppressor {
+class MONGO_MOD_PUBLIC KeyedSeveritySuppressor {
 public:
     using key_type = K;
     using hasher = H;
@@ -119,11 +121,11 @@ private:
     Suppressions _suppressions;
 };
 
-class SeveritySuppressor {
+class MONGO_MOD_PUBLIC SeveritySuppressor {
 public:
     SeveritySuppressor(ClockSource* cs, Milliseconds period, LogSeverity normal, LogSeverity quiet)
         : _stopWatch(cs ? cs : SystemClockSource::get()),
-          _period{period},
+          _period{durationCount<Milliseconds>(period)},
           _normal{normal},
           _quiet{quiet} {}
 
@@ -131,23 +133,30 @@ public:
         : SeveritySuppressor(nullptr, period, normal, quiet) {}
 
     LogSeverity operator()() {
-        auto elapsed = _stopWatch.elapsed();
-        auto expiresAtMillis = _expiresAtMillis.loadRelaxed();
-        if (expiresAtMillis <= durationCount<Milliseconds>(elapsed)) {
-            const auto nextExpiresAtMillis = durationCount<Milliseconds>(elapsed + _period);
-            if (_expiresAtMillis.compareAndSwap(&expiresAtMillis, nextExpiresAtMillis)) {
+        const auto elapsed = _stopWatch.elapsed();
+        const Milliseconds period{_period.loadRelaxed()};
+        auto periodStartedAtMillis{_periodStartedAtMillis.loadRelaxed()};
+        if (Milliseconds{periodStartedAtMillis} + period <= elapsed) {
+            const auto nextPeriodStartedAtMillis = durationCount<Milliseconds>(elapsed);
+            if (_periodStartedAtMillis.compareAndSwap(&periodStartedAtMillis,
+                                                      nextPeriodStartedAtMillis)) {
                 return _normal;
             }
         }
         return _quiet;
     }
 
+    void setPeriod(Milliseconds period) {
+        _period.store(durationCount<Milliseconds>(period));
+    }
+
 private:
     ClockSource::StopWatch _stopWatch;
-    const Milliseconds _period;
+    Atomic<int64_t> _period;
     const LogSeverity _normal;
     const LogSeverity _quiet;
-    Atomic<int64_t> _expiresAtMillis{0};
+    Atomic<int64_t> _periodStartedAtMillis{
+        std::numeric_limits<int64_t>::min()};  // Ensure the first severity is not suppressed
 };
 
 }  // namespace mongo::logv2

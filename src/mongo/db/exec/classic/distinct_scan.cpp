@@ -34,18 +34,17 @@
 #include <memory>
 #include <vector>
 
-#include <boost/container/small_vector.hpp>
 // IWYU pragma: no_include "boost/intrusive/detail/iterator.hpp"
 #include "mongo/db/exec/classic/plan_stage.h"
 #include "mongo/db/exec/classic/requires_index_stage.h"
 #include "mongo/db/exec/classic/working_set.h"
 #include "mongo/db/exec/classic/working_set_common.h"
 #include "mongo/db/index/index_access_method.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/query/plan_executor_impl.h"
 #include "mongo/db/record_id.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/util/assert_util.h"
 
@@ -66,7 +65,7 @@ DistinctScan::DistinctScan(ExpressionContext* expCtx,
                            WorkingSet* workingSet,
                            std::unique_ptr<ShardFiltererImpl> shardFilterer,
                            bool needsFetch)
-    : RequiresIndexStage(kStageType, expCtx, collection, params.indexDescriptor, workingSet),
+    : RequiresIndexStage(kStageType, expCtx, collection, params.indexEntry, workingSet),
       _workingSet(workingSet),
       _keyPattern(std::move(params.keyPattern)),
       _scanDirection(params.scanDirection),
@@ -77,14 +76,15 @@ DistinctScan::DistinctScan(ExpressionContext* expCtx,
       _needsFetch(needsFetch) {
     _specificStats.keyPattern = _keyPattern;
     _specificStats.indexName = params.name;
-    _specificStats.indexVersion = static_cast<int>(params.indexDescriptor->version());
+    _specificStats.indexVersion = static_cast<int>(indexDescriptor()->version());
     _specificStats.isMultiKey = params.isMultiKey;
     _specificStats.multiKeyPaths = params.multikeyPaths;
-    _specificStats.isUnique = params.indexDescriptor->unique();
-    _specificStats.isSparse = params.indexDescriptor->isSparse();
-    _specificStats.isPartial = params.indexDescriptor->isPartial();
+    _specificStats.isUnique = indexDescriptor()->unique();
+    _specificStats.isSetSparseByUser = indexDescriptor()->isSetSparseByUser();
+    _specificStats.isPartial = indexDescriptor()->isPartial();
     _specificStats.direction = _scanDirection;
-    _specificStats.collation = params.indexDescriptor->infoObj()
+    _specificStats.collation = indexDescriptor()
+                                   ->infoObj()
                                    .getObjectField(IndexDescriptor::kCollationFieldName)
                                    .getOwned();
     _specificStats.isShardFiltering = _shardFilterer != nullptr;

@@ -5,6 +5,7 @@ package(default_visibility = ["//visibility:public"])
 exports_files([
     "document_source_extension_test.cpp",
     "document_source_extension_optimizable_test.cpp",
+    "document_source_extension_expandable_test.cpp",
 ])
 
 exports_files(
@@ -13,38 +14,42 @@ exports_files(
     ]),
 )
 
+# Note that this is a standalone library such that it doesn't need to have any server dependencies like the rest of the extension_host target does.
 mongo_cc_library(
-    name = "extension_host",
+    name = "extension_operation_metrics_registry",
     srcs = [
-        "document_source_extension.cpp",
-        "document_source_extension_optimizable.cpp",
-        "extension_stage.cpp",
-        "host_portal.cpp",
+        "operation_metrics_registry.cpp",
     ],
     hdrs = [
-        "document_source_extension.h",
-        "document_source_extension_optimizable.h",
-        "extension_stage.h",
-        "host_portal.h",
+        "operation_metrics_registry.h",
     ],
     deps = [
         "//src/mongo:base",
-        "//src/mongo/db/extension/host/aggregation_stage",
-        "//src/mongo/db/extension/host_connector:extensions_host_connector",
-        "//src/mongo/db/extension/host_connector:host_services_adapter",
         "//src/mongo/db/extension/shared/handle/aggregation_stage",
-        "//src/mongo/db/pipeline",
     ],
 )
 
 mongo_cc_library(
-    name = "host_services",
-    srcs = ["host_services.cpp"],
-    hdrs = ["host_services.h"],
+    name = "extension_host",
+    srcs = [
+        "document_source_extension.cpp",
+        "document_source_extension_expandable.cpp",
+        "document_source_extension_optimizable.cpp",
+        "extension_stage.cpp",
+        "extension_vector_search_server_status.cpp",
+    ],
     deps = [
+        ":extension_operation_metrics_registry",
         "//src/mongo:base",
-        # Needed for the IDL generated code.
-        "//src/mongo/db/extension/public:extensions_api_public",
+        "//src/mongo/db:commands",
+        "//src/mongo/db/commands/server_status:server_status_core",
+        "//src/mongo/db/extension/host/aggregation_stage",
+        "//src/mongo/db/extension/host_connector/adapter:host_adapters",
+        "//src/mongo/db/extension/host_connector/adapter:host_services_adapter",
+        "//src/mongo/db/extension/host_connector/handle:host_handles",
+        "//src/mongo/db/extension/shared/handle/aggregation_stage",
+        "//src/mongo/db/pipeline",
+        "//src/mongo/db/pipeline:desugarer",
     ],
 )
 
@@ -55,14 +60,9 @@ mongo_cc_library(
         "load_stub_parsers.cpp",
         "//src/mongo/db/pipeline:document_source_list_extensions.cpp",
     ],
-    hdrs = [
-        "load_extension.h",
-        "load_stub_parsers.h",
-    ],
     deps = [
         ":extension_host",
         "//src/mongo:base",
-        "//src/mongo:core_headers_library",
         "//src/mongo/db/query:query_knobs",
         "//src/third_party/yaml-cpp:yaml",
     ],
@@ -72,6 +72,7 @@ mongo_cc_unit_test(
     name = "extensions_api_test",
     srcs = [
         "load_extension_test.cpp",
+        "load_native_vector_search_test.cpp",
     ],
     # Data lists the targets that must be built to generate extension shared libraries, which are
     # loaded in the unit tests.
@@ -85,20 +86,25 @@ mongo_cc_unit_test(
         "//src/mongo/db/extension/test_examples:host_version_fails_bad_extension",
         "//src/mongo/db/extension/test_examples:host_version_succeeds_mongo_extension",
         "//src/mongo/db/extension/test_examples:initialize_version_fails_bad_extension",
+        "//src/mongo/db/extension/test_examples:limit_mongo_extension",
         "//src/mongo/db/extension/test_examples:load_highest_compatible_version_mongo_extension",
         "//src/mongo/db/extension/test_examples:load_two_stages_mongo_extension",
         "//src/mongo/db/extension/test_examples:major_version_max_int_bad_extension",
         "//src/mongo/db/extension/test_examples:major_version_too_high_bad_extension",
         "//src/mongo/db/extension/test_examples:major_version_too_low_bad_extension",
+        "//src/mongo/db/extension/test_examples:match_topN_mongo_extension",
         "//src/mongo/db/extension/test_examples:minor_version_too_high_bad_extension",
+        "//src/mongo/db/extension/test_examples:native_vector_search_mongo_extension",
         "//src/mongo/db/extension/test_examples:no_compatible_version_bad_extension",
         "//src/mongo/db/extension/test_examples:no_symbol_bad_extension",
         "//src/mongo/db/extension/test_examples:null_initialize_function_bad_extension",
         "//src/mongo/db/extension/test_examples:null_mongo_extension_bad_extension",
         "//src/mongo/db/extension/test_examples:null_stage_descriptor_bad_extension",
         "//src/mongo/db/extension/test_examples:parse_options_mongo_extension",
+        "//src/mongo/db/extension/test_examples:read_n_documents_mongo_extension",
         "//src/mongo/db/extension/test_examples:sharded_execution_serialization_mongo_extension",
         "//src/mongo/db/extension/test_examples:test_options_mongo_extension",
+        "//src/mongo/db/extension/test_examples:toaster_mongo_extension",
     ],
     tags = ["mongo_unittest_seventh_group"],
     target_compatible_with = select({
@@ -111,7 +117,6 @@ mongo_cc_unit_test(
     deps = [
         ":extension_loader",
         "//src/mongo/db/pipeline:aggregation_context_fixture",
-        "//src/mongo/idl:server_parameter_test_controller",
         "//src/mongo/unittest",
     ],
 )

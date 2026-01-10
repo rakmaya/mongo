@@ -29,44 +29,19 @@
 
 #pragma once
 
-#include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/db/index_builds/multi_index_block.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/database.h"
-#include "mongo/db/local_catalog/db_raii.h"
-#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
-#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/unittest/unittest.h"
-
-#include <memory>
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/database.h"
+#include "mongo/db/shard_role/shard_catalog/db_raii.h"
+#include "mongo/db/shard_role/shard_role.h"
+#include "mongo/util/modules.h"
 
 #include <boost/optional/optional.hpp>
 
-namespace mongo {
-namespace dbtests {
-
-/**
- * Creates an index if it does not already exist.
- */
-Status createIndex(OperationContext* opCtx,
-                   StringData ns,
-                   const BSONObj& keys,
-                   bool unique = false);
-
-/**
- * Creates an index from a BSON spec, if it does not already exist.
- */
-Status createIndexFromSpec(OperationContext* opCtx, StringData ns, const BSONObj& spec);
-
-Status initializeMultiIndexBlock(OperationContext* opCtx,
-                                 CollectionWriter& collection,
-                                 MultiIndexBlock& indexer,
-                                 const BSONObj& spec,
-                                 MultiIndexBlock::OnInitFn onInit = MultiIndexBlock::kNoopOnInitFn);
+MONGO_MOD_PUBLIC;
+namespace mongo::dbtests {
 
 /**
  * Combines AutoGetDb and AutoStatsTracker. If the requested 'ns' exists, the constructed
@@ -96,5 +71,4 @@ private:
     boost::optional<AutoStatsTracker> _tracker;
 };
 
-}  // namespace dbtests
-}  // namespace mongo
+}  // namespace mongo::dbtests

@@ -32,6 +32,7 @@
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
 
 #include <algorithm>
 #include <atomic>
@@ -45,7 +46,8 @@
 
 #include <fmt/format.h>
 
-namespace mongo {
+
+namespace MONGO_MOD_PUB mongo {
 
 /**
  * Generic histogram that supports data collection into intervals based on user-specified partitions
@@ -60,7 +62,7 @@ namespace mongo {
 template <typename T,
           typename Cmp = std::less<T>,
           typename Counter = std::atomic_int64_t>  // NOLINT
-class Histogram {
+class MONGO_MOD_UNFORTUNATELY_OPEN Histogram {
     struct AtEnd {};
 
 public:
@@ -78,11 +80,15 @@ public:
         }
     }
 
-    void increment(const T& data) {
+    void incrementN(const T& data, int64_t count) {
         auto i = std::upper_bound(_partitions.begin(), _partitions.end(), data, _comparator) -
             _partitions.begin();
 
-        ++_counts[i];
+        _counts[i] += count;
+    }
+
+    void increment(const T& data) {
+        incrementN(data, /*count=*/1);
     }
 
     const std::vector<T>& getPartitions() const {
@@ -91,7 +97,8 @@ public:
 
     std::vector<int64_t> getCounts() const {
         std::vector<int64_t> r(_counts.size());
-        std::transform(_counts.begin(), _counts.end(), r.begin(), [](auto&& x) { return x; });
+        std::transform(
+            _counts.begin(), _counts.end(), r.begin(), [](auto&& x) -> int64_t { return x; });
         return r;
     }
 
@@ -191,4 +198,4 @@ void appendHistogram(BSONObjBuilder& bob, const Histogram<Ts...>& hist, const St
     histBob.append("totalCount", totalCount);
 }
 
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUB mongo

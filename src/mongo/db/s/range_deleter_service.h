@@ -32,12 +32,14 @@
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/global_catalog/type_chunk.h"
-#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/replica_set_aware_service.h"
+#include "mongo/db/s/range_deletion_recovery_tracker.h"
 #include "mongo/db/s/range_deletion_task_tracker.h"
+#include "mongo/db/s/ready_range_deletions_processor.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/lock_manager/d_concurrency.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
 #include "mongo/db/sharding_environment/sharding_runtime_d_params_gen.h"
 #include "mongo/executor/network_interface_factory.h"
 #include "mongo/executor/network_interface_thread_pool.h"
@@ -50,6 +52,7 @@
 #include "mongo/util/future.h"
 #include "mongo/util/future_impl.h"
 #include "mongo/util/future_util.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/uuid.h"
 
 #include <memory>
@@ -65,7 +68,8 @@
 
 namespace mongo {
 
-class RangeDeleterService : public ReplicaSetAwareServiceShardSvr<RangeDeleterService> {
+class MONGO_MOD_NEEDS_REPLACEMENT RangeDeleterService
+    : public ReplicaSetAwareServiceShardSvr<RangeDeleterService> {
 public:
     RangeDeleterService() = default;
 
@@ -74,74 +78,8 @@ public:
     static RangeDeleterService* get(OperationContext* opCtx);
 
 private:
-    /*
-     * Class enclosing a thread continuously processing "ready" range deletions, meaning tasks
-     * that are allowed to be processed (already drained ongoing queries and already waited for
-     * `orphanCleanupDelaySecs`).
-     */
-    class ReadyRangeDeletionsProcessor {
-    public:
-        ReadyRangeDeletionsProcessor(OperationContext* opCtx,
-                                     std::shared_ptr<executor::TaskExecutor> executor);
-        ~ReadyRangeDeletionsProcessor();
-
-        /*
-         * Interrupt ongoing range deletions
-         */
-        void shutdown();
-
-        /*
-         * Schedule a range deletion at the end of the queue
-         */
-        void emplaceRangeDeletion(const RangeDeletionTask& rdt);
-
-    private:
-        /*
-         * Return true if this processor have been shutted down
-         */
-        bool _stopRequested() const;
-
-        /*
-         * Remove a range deletion from the head of the queue. Supposed to be called only once a
-         * range deletion successfully finishes.
-         */
-        void _completedRangeDeletion();
-
-        /*
-         * Code executed by the internal thread
-         */
-        void _runRangeDeletions();
-
-        ServiceContext* const _service;
-
-        mutable stdx::mutex _mutex;
-
-        enum State { kRunning, kStopped };
-        State _state{kRunning};
-
-        /*
-         * Condition variable notified when:
-         * - The component has been initialized (the operation context has been instantiated)
-         * - The instance is shutting down (the operation context has been marked killed)
-         * - A new range deletion is scheduled (the queue size has increased by one)
-         */
-        stdx::condition_variable _condVar;
-
-        /* Queue containing scheduled range deletions */
-        std::queue<RangeDeletionTask> _queue;
-
-        /* Pointer to the (one and only) operation context used by the thread */
-        ServiceContext::UniqueOperationContext _threadOpCtxHolder;
-
-        /* Thread consuming the range deletions queue */
-        stdx::thread _thread;
-
-        /*
-         * An executor that is managed (startup & shutdown) by the RangeDeleterService. An example
-         * use of this is to schedule a retry of task that errored at a later time.
-         */
-        std::shared_ptr<executor::TaskExecutor> _executor;
-    };
+    RangeDeletionRecoveryTracker _recoveryState;
+    std::unique_ptr<RangeDeletionRecoveryTracker::ActiveTerm> _activeTerm;
 
     // Keeping track of per-collection registered range deletion tasks.
     RangeDeletionTaskTracker _rangeDeletionTasks;
@@ -152,9 +90,11 @@ private:
     enum State { kReadyForInitialization, kInitializing, kUp, kDown };
 
     State _state{kDown};
+    // Promise which is fulfilled once initialization for the current term has completed.
+    boost::optional<SharedPromise<void>> _termInitializationPromise;
+    // Promise which is fulfilled when the state changes to kUp.
+    boost::optional<SharedPromise<void>> _serviceUpPromise;
 
-    // Future markes as ready when the state changes to "up"
-    SharedSemiFuture<void> _stepUpCompletedFuture;
     // Operation context used for initialization
     ServiceContext::UniqueOperationContext _initOpCtxHolder;
 
@@ -176,13 +116,18 @@ private:
     stdx::mutex _mutex_DO_NOT_USE_DIRECTLY;
 
 public:
+    void registerRecoveryJob(long long term);
+    void notifyRecoveryJobComplete(long long term);
+
+    enum class TaskPending { kNotPending, kPending };
+
     /*
      * Register a task on the range deleter service.
      * Returns a future that will be marked ready once the range deletion will be completed.
      *
      * In case of trying to register an already existing task, the original future will be returned.
      *
-     * A task can be registered only if the service is up (except for tasks resubmitted on step-up).
+     * A task can be registered only if the service has been initialized for this term.
      *
      * When a task is registered as `pending`, it can be unblocked by calling again the same method
      * with `pending=false`.
@@ -190,8 +135,7 @@ public:
     SharedSemiFuture<void> registerTask(
         const RangeDeletionTask& rdt,
         SemiFuture<void>&& waitForActiveQueriesToComplete = SemiFuture<void>::makeReady(),
-        bool fromResubmitOnStepUp = false,
-        bool pending = false);
+        TaskPending pending = TaskPending::kNotPending);
 
     /*
      * Deregister a task from the range deleter service and fulfill its completion promise. Returns
@@ -210,8 +154,8 @@ public:
      * NB: in case an overlapping range deletion task is registered AFTER invoking this method,
      * it will not be taken into account. Handling this scenario is responsibility of the caller.
      * */
-    SharedSemiFuture<void> getOverlappingRangeDeletionsFuture(const UUID& collectionUUID,
-                                                              const ChunkRange& range);
+    MONGO_MOD_NEEDS_REPLACEMENT SharedSemiFuture<void> getOverlappingRangeDeletionsFuture(
+        const UUID& collectionUUID, const ChunkRange& range);
 
     /**
      * Checks if the range deleter service is disabled.
@@ -222,6 +166,7 @@ public:
     void onStartup(OperationContext* opCtx) override;
     void onSetCurrentConfig(OperationContext* opCtx) override {}
     void onRollbackBegin() override {}
+    void onStepUpBegin(OperationContext* opCtx, long long term) override;
     void onStepUpComplete(OperationContext* opCtx, long long term) override;
     void onStepDown() override;
     void onShutdown() override;
@@ -238,23 +183,27 @@ public:
     /*
      * Returns the total number of range deletion tasks registered on the service.
      */
-    long long totalNumOfRegisteredTasks();
+    MONGO_MOD_NEEDS_REPLACEMENT long long totalNumOfRegisteredTasks();
 
-    /* Returns a shared semi-future marked as ready once the service is initialized */
-    SharedSemiFuture<void> getRangeDeleterServiceInitializationFuture() {
-        return _stepUpCompletedFuture;
-    }
+    /* Returns a future which is fulfilled when the service is initialized for the current term. */
+    SemiFuture<void> getTermInitializationFuture();
+
+    /* Returns a future which is fulfilled when the service has reached the kUp state and is
+     * actively processing ready tasks. */
+    SemiFuture<void> getServiceUpFuture();
 
     std::unique_ptr<ReadyRangeDeletionsProcessor> _readyRangeDeletionsProcessorPtr;
 
 private:
+    SemiFuture<void> _getTermInitializationFuture(WithLock);
+
     /* Join all threads and executor and reset the in memory state of the service
      * Used for onStartUpBegin and on onShutdown
      */
     void _joinAndResetState();
 
-    /* Asynchronously register range deletions on the service. To be called on on step-up */
-    void _recoverRangeDeletionsOnStepUp(OperationContext* opCtx);
+    /* Asynchronously register range deletions on the service. To be called on on step-up. */
+    void _launchRangeDeletionRecoveryTask(OperationContext* opCtx, long long term);
 
     /* Called by shutdown/stepdown hooks to interrupt the service */
     void _stopService();
@@ -263,7 +212,6 @@ private:
     void onConsistentDataAvailable(OperationContext* opCtx,
                                    bool isMajority,
                                    bool isRollback) final {}
-    void onStepUpBegin(OperationContext* opCtx, long long term) final {};
     void onBecomeArbiter() final {}
 };
 
@@ -279,7 +227,7 @@ public:
 
 private:
     const Lock::ResourceLock _resourceLock;
-    static inline const Lock::ResourceMutex _mutex{"ScopedRangeDeleterLock"};
+    static inline const ResourceMutex _mutex{"ScopedRangeDeleterLock"};
 };
 
 }  // namespace mongo

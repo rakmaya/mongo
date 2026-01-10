@@ -42,9 +42,10 @@
 #include "mongo/db/global_catalog/type_shard.h"
 #include "mongo/db/keypattern.h"
 #include "mongo/db/keys_collection_document_gen.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/read_write_concern_defaults_cache_lookup_mock.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
 #include "mongo/db/sharding_environment/client/shard.h"
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/sharding_environment/shard_id.h"
@@ -57,6 +58,7 @@
 #include "mongo/idl/idl_parser.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/uuid.h"
 
 #include <memory>
@@ -253,6 +255,9 @@ private:
 
     // Allows for processing tasks through the NetworkInterfaceMock/ThreadPoolMock subsystem.
     std::unique_ptr<executor::NetworkTestEnv> _addShardNetworkTestEnv;
+
+    // Allows for commands to not specify a default read/write concern.
+    ReadWriteConcernDefaultsLookupMock _lookupMock;
 };
 
 }  // namespace mongo

@@ -42,6 +42,8 @@
 #include "mongo/rpc/message.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/util/modules.h"
+#include "mongo/util/observable_mutex.h"
+#include "mongo/util/observable_mutex_registry.h"
 #include "mongo/util/string_map.h"
 
 #include <cstdint>
@@ -57,6 +59,8 @@ namespace mongo {
 class MONGO_MOD_PUB ServiceLatencyTracker {
 public:
     static ServiceLatencyTracker& getDecoration(Service* service);
+
+    ServiceLatencyTracker();
 
     /**
      * Increments the cumulative histograms only if the operation came from a user.
@@ -132,6 +136,10 @@ public:
 
     typedef StringMap<CollectionData> UsageMap;
 
+    Top() {
+        ObservableMutexRegistry::get().add("Top::_lockUsage", _lockUsage);
+    }
+
     static Top& getDecoration(OperationContext* opCtx);
 
     void record(OperationContext* opCtx,
@@ -185,7 +193,7 @@ public:
 
 private:
     // _lockUsage should always be acquired before using _usage.
-    stdx::mutex _lockUsage;
+    ObservableMutex<stdx::mutex> _lockUsage;
     UsageMap _usage;
 };
 

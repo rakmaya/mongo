@@ -31,15 +31,16 @@
 
 #include "mongo/bson/bsonobj.h"
 #include "mongo/client/read_preference.h"
-#include "mongo/db/global_catalog/router_role_api/router_role.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/router_role/router_role.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/sharding_environment/client/shard.h"
 #include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/s/async_requests_sender.h"
 #include "mongo/s/query/exec/async_results_merger_params_gen.h"
+#include "mongo/util/modules.h"
 
 #include <memory>
 #include <set>
@@ -76,8 +77,10 @@ namespace mongo {
  *
  * @param designatedHostsMap: A map of hosts to be targeted for particular shards, overriding
  *                            the read preference setting.
+ *
+ * TODO SERVER-111290 Remove external dependencies on this method.
  */
-std::vector<RemoteCursor> establishCursors(
+MONGO_MOD_NEEDS_REPLACEMENT std::vector<RemoteCursor> establishCursors(
     OperationContext* opCtx,
     std::shared_ptr<executor::TaskExecutor> executor,
     const NamespaceString& nss,
@@ -87,7 +90,7 @@ std::vector<RemoteCursor> establishCursors(
     RoutingContext* routingCtx = nullptr,
     Shard::RetryPolicy retryPolicy = Shard::RetryPolicy::kIdempotent,
     std::vector<OperationKey> providedOpKeys = {},
-    AsyncRequestsSender::ShardHostMap designatedHostsMap = {});
+    const AsyncRequestsSender::ShardHostMap& designatedHostsMap = {});
 
 /**
  * Establishes cursors on every host in the remote shards by issuing requests in parallel with the
@@ -124,6 +127,6 @@ void killRemoteCursor(OperationContext* opCtx,
 /**
  * Appends the given operation key to the given request.
  */
-void appendOpKey(const OperationKey& opKey, BSONObjBuilder* cmdBuilder);
+MONGO_MOD_NEEDS_REPLACEMENT void appendOpKey(const OperationKey& opKey, BSONObjBuilder* cmdBuilder);
 
 }  // namespace mongo

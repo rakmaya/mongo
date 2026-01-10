@@ -314,6 +314,11 @@ function verifyCommitOpEntriesOnShards(expectedOpEntryTemplates, shards, orderSt
             // - Skip the handling of 'fromMigrate' (which will be delegated to the callers of this
             // method);
             let {ui, ts, t, v, wall, versionContext, fromMigrate, ...strippedOpEntry} = opEntry;
+            if (opEntry.o.recordIdsReplicated) {
+                // 'recordIdsReplicated' is feature specific - instead of special casing when
+                // enabled, remove field.
+                delete strippedOpEntry.o.recordIdsReplicated;
+            }
             if (opEntry.o.create || opEntry.o.createIndexes) {
                 // Also strip out the 'o2' field, containing references to the ident values for the
                 // created collection & index.
@@ -1139,7 +1144,7 @@ function testReshardCollection() {
 
     // Timestamps in the config.placementHistory doc and the op entries produceed by the shard
     // match the expected ordering.
-    assert(timestampCmp(reshardCommitOpEntry.ts, finalCollPlacementInfo.timestamp) <= 0);
+    assert(timestampCmp(reshardCommitOpEntry.ts, finalCollPlacementInfo.timestamp) < 0);
     assert(timestampCmp(finalCollPlacementInfo.timestamp, collPlacementChangeEntry.ts) <= 0);
 }
 

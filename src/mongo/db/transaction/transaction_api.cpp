@@ -41,14 +41,15 @@
 #include "mongo/db/commands/txn_cmds_gen.h"
 #include "mongo/db/error_labels.h"
 #include "mongo/db/generic_argument_util.h"
-#include "mongo/db/local_catalog/shard_role_catalog/operation_sharding_state.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/write_ops/write_ops_gen.h"
+#include "mongo/db/read_write_concern_defaults.h"
 #include "mongo/db/read_write_concern_provenance_base_gen.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/session/internal_session_pool.h"
 #include "mongo/db/session/logical_session_id_helpers.h"
 #include "mongo/db/session/session_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/operation_sharding_state.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/db/transaction_validation.h"
 #include "mongo/db/write_concern_options.h"
@@ -620,7 +621,12 @@ void Transaction::_primeTransaction(OperationContext* opCtx) {
 
         // Extract non-session options. Strip provenance so it can be correctly inferred for the
         // generated commands as if it came from an external client.
-        _readConcern = repl::ReadConcernArgs::get(opCtx).toBSONInner().removeField(
+        // We replace empty read concern with the implicit default read concern to avoid ambiguity
+        // when the user has a cluster wide default set.
+        const auto& readConcernArgs = repl::ReadConcernArgs::get(opCtx).isEmpty()
+            ? ReadWriteConcernDefaults::get(opCtx).getImplicitDefaultReadConcern()
+            : repl::ReadConcernArgs::get(opCtx);
+        _readConcern = readConcernArgs.toBSONInner().removeField(
             ReadWriteConcernProvenanceBase::kSourceFieldName);
         _writeConcern = opCtx->getWriteConcern().toBSON().removeField(
             ReadWriteConcernProvenanceBase::kSourceFieldName);

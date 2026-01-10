@@ -29,16 +29,9 @@
 
 #include "mongo/db/change_stream_pre_images_truncate_manager.h"
 
-#include "mongo/bson/bsonobj.h"
-#include "mongo/bson/oid.h"
-#include "mongo/bson/timestamp.h"
 #include "mongo/db/change_stream_options_manager.h"
 #include "mongo/db/change_stream_pre_images_collection_manager.h"
-#include "mongo/db/collection_crud/collection_write_path.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/catalog_test_fixture.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
+#include "mongo/db/dbhelpers.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer_impl.h"
 #include "mongo/db/op_observer/op_observer_registry.h"
@@ -46,6 +39,10 @@
 #include "mongo/db/pipeline/change_stream_preimage_gen.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/repl/oplog.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_test_fixture.h"
+#include "mongo/db/shard_role/shard_role.h"
 #include "mongo/db/storage/collection_truncate_markers.h"
 #include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/logv2/log.h"
@@ -81,7 +78,7 @@ protected:
         return acquireCollection(
             opCtx,
             CollectionAcquisitionRequest(std::move(nssOrUUID),
-                                         PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                         PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
                                          repl::ReadConcernArgs::get(opCtx),
                                          AcquisitionPrerequisites::kRead),
             MODE_IS);
@@ -103,22 +100,18 @@ protected:
         WriteUnitOfWork wuow(opCtx);
         auto opTimes = repl::getNextOpTimes(opCtx, numPreImages);
 
-        std::vector<InsertStatement> preImageInsertStatements;
+        std::vector<BSONObj> preImageDocs;
         for (const auto& opTime : opTimes) {
             ChangeStreamPreImageId preImageId(nsUUID, opTime.getTimestamp(), 0);
             const auto operationTime = Date_t() + Seconds(opTime.getSecs());
             ChangeStreamPreImage preImage(std::move(preImageId),
                                           operationTime,
                                           BSON("padding" << std::string(docPaddingBytes, 'a')));
-            preImageInsertStatements.push_back(InsertStatement{preImage.toBSON()});
-        }
+            preImageDocs.push_back(preImage.toBSON());
+        };
 
         auto& changeStreamPreImagesCollection = *preImagesCollectionRaii;
-        ASSERT_OK(collection_internal::insertDocuments(opCtx,
-                                                       changeStreamPreImagesCollection,
-                                                       preImageInsertStatements.begin(),
-                                                       preImageInsertStatements.end(),
-                                                       nullptr));
+        ASSERT_OK(Helpers::insert(opCtx, changeStreamPreImagesCollection, preImageDocs));
         wuow.commit();
     }
 

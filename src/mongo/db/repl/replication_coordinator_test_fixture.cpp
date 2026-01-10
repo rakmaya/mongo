@@ -33,10 +33,8 @@
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/admission/execution_admission_context.h"
+#include "mongo/db/admission/execution_control/execution_admission_context.h"
 #include "mongo/db/client.h"
-#include "mongo/db/local_catalog/collection_options.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/read_write_concern_defaults.h"
 #include "mongo/db/repl/hello/hello_response.h"
@@ -53,6 +51,8 @@
 #include "mongo/db/repl/storage_interface_mock.h"
 #include "mongo/db/repl/topology_coordinator.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/shard_catalog/collection_options.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/storage_engine.h"
 #include "mongo/executor/network_connection_hook.h"
 #include "mongo/executor/network_interface_mock.h"
@@ -201,6 +201,7 @@ void ReplCoordTest::init() {
     _net = dynamic_cast<NetworkInterfaceMock*>(
         dynamic_cast<executor::ThreadPoolTaskExecutor*>(_replExec)->getNetworkInterface().get());
     invariant(_net != nullptr);
+    service->notifyStorageStartupRecoveryComplete();
 }
 
 void ReplCoordTest::init(const ReplSettings& settings) {

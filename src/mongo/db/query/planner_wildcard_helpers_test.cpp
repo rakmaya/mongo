@@ -45,6 +45,7 @@
 #include "mongo/db/query/compiler/physical_model/query_solution/query_solution.h"
 #include "mongo/db/query/planner_wildcard_helpers.h"
 #include "mongo/db/query/wildcard_test_utils.h"
+#include "mongo/unittest/death_test.h"
 #include "mongo/unittest/unittest.h"
 
 
@@ -151,7 +152,8 @@ TEST(PlannerWildcardHelpersTest, FinalizeBasicPatternInCompoundWildcardIndexScan
     ASSERT_EQ(expectedMks, expandedIndex.multikeyPaths);
 
     // Create an 'IndexScanNode' with the expanded 'IndexEntry' for testing finalization.
-    IndexScanNode idxScan{expandedIndex};
+    auto testNss = NamespaceString::createNamespaceString_forTest("testdb.coll");
+    IndexScanNode idxScan{testNss, expandedIndex};
 
     std::vector<interval_evaluation_tree::Builder> ietBuilders;
     ietBuilders.resize(3);
@@ -180,7 +182,8 @@ TEST(PlannerWildcardHelpersTest, AddSubpathBoundsIfBoundsOverlapWithObjects) {
     const auto& expandedIndex = expandedIndexes[0];
 
     // Create an 'IndexScanNode' with the expanded 'IndexEntry' for testing finalization.
-    IndexScanNode idxScan{expandedIndex};
+    auto testNss = NamespaceString::createNamespaceString_forTest("testdb.coll");
+    IndexScanNode idxScan{testNss, expandedIndex};
 
     std::vector<interval_evaluation_tree::Builder> ietBuilders;
     ietBuilders.resize(2);
@@ -228,4 +231,19 @@ TEST(PlannerWildcardHelpersTest, Expand_CompoundWildcardIndex_NumericComponents)
     ASSERT_FALSE(expandedIndexes.front().multikey);
     ASSERT_EQ(expectedMks, expandedIndexes.front().multikeyPaths);
 }
+
+DEATH_TEST(PlannerWildcardHelpersTestDeathTest, InvalidIndexExpansion, "11390001") {
+    WildcardIndexEntryMock wildcardIndex{BSON("a" << 1 << "$**" << 1), BSON("_id" << 0), {}};
+    std::set<std::string> fields{"a"};
+    std::vector<IndexEntry> expandedIndexes{};
+    expandWildcardIndexEntry(*wildcardIndex.indexEntry, fields, &expandedIndexes);
+}
+
+DEATH_TEST(PlannerWildcardHelpersTestDeathTest, AnotherInvalidIndexExpansion, "11390001") {
+    WildcardIndexEntryMock wildcardIndex{BSON("$**" << 1 << "a" << 1), BSON("_id" << 0), {}};
+    std::set<std::string> fields{"a"};
+    std::vector<IndexEntry> expandedIndexes{};
+    expandWildcardIndexEntry(*wildcardIndex.indexEntry, fields, &expandedIndexes);
+}
+
 }  // namespace mongo::wildcard_planning

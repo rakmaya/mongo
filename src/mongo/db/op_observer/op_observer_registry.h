@@ -33,8 +33,6 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/database_name.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_options.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/operation_context.h"
@@ -44,6 +42,8 @@
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/logical_session_id_gen.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_options.h"
 #include "mongo/db/transaction/transaction_operations.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/modules.h"
@@ -194,6 +194,16 @@ public:
         for (auto& o : _observers) {
             o->onAbortIndexBuild(
                 opCtx, nss, collUUID, indexBuildUUID, indexes, cause, fromMigrate, isTimeseries);
+        }
+    }
+
+    void onSetMultikeyMetadata(OperationContext* opCtx,
+                               const NamespaceString& nss,
+                               const std::string& idxName,
+                               const BSONObj& multikeyPaths) override {
+        ReservedTimes times{opCtx};
+        for (auto& o : _observers) {
+            o->onSetMultikeyMetadata(opCtx, nss, idxName, multikeyPaths);
         }
     }
 
@@ -512,15 +522,12 @@ public:
                                              &opStateAccumulator);
     }
 
-    void onPreparedTransactionCommit(
-        OperationContext* opCtx,
-        OplogSlot commitOplogEntryOpTime,
-        Timestamp commitTimestamp,
-        const std::vector<repl::ReplOperation>& statements) noexcept override {
+    void onPreparedTransactionCommit(OperationContext* opCtx,
+                                     OplogSlot commitOplogEntryOpTime,
+                                     Timestamp commitTimestamp) noexcept override {
         ReservedTimes times{opCtx};
         for (auto& o : _observers)
-            o->onPreparedTransactionCommit(
-                opCtx, commitOplogEntryOpTime, commitTimestamp, statements);
+            o->onPreparedTransactionCommit(opCtx, commitOplogEntryOpTime, commitTimestamp);
     }
 
     void preTransactionPrepare(
@@ -643,6 +650,15 @@ public:
             observer->onTruncateRange(
                 opCtx, coll, minRecordId, maxRecordId, bytesDeleted, docsDeleted, opTime);
         }
+    }
+
+    void onUpgradeDowngradeViewlessTimeseries(OperationContext* opCtx,
+                                              const NamespaceString& nss,
+                                              const UUID& uuid,
+                                              bool skipViewCreation = false) override {
+        ReservedTimes times{opCtx};
+        for (auto& o : _observers)
+            o->onUpgradeDowngradeViewlessTimeseries(opCtx, nss, uuid, skipViewCreation);
     }
 
 private:

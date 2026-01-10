@@ -38,19 +38,17 @@
 #include "mongo/db/timeseries/bucket_catalog/tracking_contexts.h"
 #include "mongo/util/future.h"
 #include "mongo/util/future_impl.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/string_map.h"
 
 #include <cstddef>
 #include <cstdint>
 
 #include <boost/container/small_vector.hpp>
-#include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
 
+MONGO_MOD_PUBLIC;
 namespace mongo::timeseries::bucket_catalog {
-
-struct Bucket;
-
 using UserBatchIndex = size_t;
 
 struct Sizes {

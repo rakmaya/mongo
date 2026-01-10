@@ -15,11 +15,6 @@ mongo_cc_library(
         "collation_index_key.cpp",
         "collator_interface.cpp",
     ],
-    hdrs = [
-        "collation_index_key.h",
-        "collation_spec.h",
-        "collator_interface.h",
-    ],
     deps = [
         "//src/mongo/db:server_base",
     ],
@@ -30,12 +25,9 @@ mongo_cc_library(
     srcs = [
         "collator_interface_mock.cpp",
     ],
-    hdrs = [
-        "collator_interface_mock.h",
-    ],
     deps = [
         ":collator_interface",
-        "//src/mongo/db:server_base",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/db:server_base",
     ],
 )
 
@@ -44,11 +36,8 @@ mongo_cc_library(
     srcs = [
         "collator_factory_interface.cpp",
     ],
-    hdrs = [
-        "collator_factory_interface.h",
-    ],
     deps = [
-        ":collator_interface",  # TODO(SERVER-93876): Remove.
+        ":collator_interface",
         "//src/mongo/db:service_context",
     ],
 )
@@ -58,11 +47,8 @@ mongo_cc_library(
     srcs = [
         "collator_factory_mock.cpp",
     ],
-    hdrs = [
-        "collator_factory_mock.h",
-    ],
     deps = [
-        ":collator_factory_interface",  # TODO(SERVER-93876): Remove.
+        ":collator_factory_interface",
         ":collator_interface_mock",
     ],
 )
@@ -73,16 +59,12 @@ mongo_cc_library(
         "collator_factory_icu.cpp",
         "collator_interface_icu.cpp",
     ],
-    hdrs = [
-        "collator_factory_icu.h",
-        "collator_interface_icu.h",
-    ],
     deps = [
         ":collator_factory_interface",
-        "//src/mongo:base",  # TODO(SERVER-93876): Remove.
-        "//src/mongo/bson/util:bson_extract",  # TODO(SERVER-93876): Remove.
-        "//src/mongo/db:server_base",  # TODO(SERVER-93876): Remove.
-        "//src/mongo/util:icu_init",  # TODO(SERVER-93876): Remove.
+        "//src/mongo:base",
+        "//src/mongo/bson/util:bson_extract",
+        "//src/mongo/db:server_base",
+        "//src/mongo/util:icu_init",
         "//src/third_party/icu4c-57.1/source:icu_i18n",
     ],
 )
@@ -108,7 +90,6 @@ mongo_cc_unit_test(
         "collator_interface_icu_test.cpp",
         "collator_interface_mock_test.cpp",
     ],
-    private_hdrs = ["//src/mongo/bson:bsonobj_comparator.h"],
     tags = ["mongo_unittest_fourth_group"],
     deps = [
         ":collator_factory_mock",
@@ -116,7 +97,7 @@ mongo_cc_unit_test(
         ":collator_interface",
         ":collator_interface_mock",
         "//src/mongo:base",
-        "//src/mongo/db/local_catalog/lock_manager",
+        "//src/mongo/db/shard_role/lock_manager",
         "//src/mongo/db/storage/key_string",
     ],
 )

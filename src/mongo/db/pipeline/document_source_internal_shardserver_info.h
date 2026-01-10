@@ -60,22 +60,23 @@
 
 namespace mongo {
 
+DECLARE_STAGE_PARAMS_DERIVED_DEFAULT(InternalShardServerInfo);
+
 /**
  * An internal stage available for testing. Gets the host and shard name for every shard server in
  * the cluster.
  */
 class DocumentSourceInternalShardServerInfo final : public DocumentSource {
 public:
-    class LiteParsed : public LiteParsedDocumentSource {
+    class LiteParsed : public LiteParsedDocumentSourceDefault<LiteParsed> {
     public:
         static std::unique_ptr<LiteParsed> parse(const NamespaceString& nss,
                                                  const BSONElement& spec,
                                                  const LiteParserOptions& options) {
-            return std::make_unique<LiteParsed>(spec.fieldName());
+            return std::make_unique<LiteParsed>(spec);
         }
 
-        LiteParsed(std::string parseTimeName)
-            : LiteParsedDocumentSource(std::move(parseTimeName)) {}
+        LiteParsed(const BSONElement& spec) : LiteParsedDocumentSourceDefault(spec) {}
 
         stdx::unordered_set<NamespaceString> getInvolvedNamespaces() const final {
             return stdx::unordered_set<NamespaceString>();
@@ -85,6 +86,10 @@ public:
                                            bool bypassDocumentValidation) const final {
             return {Privilege(ResourcePattern::forClusterResource(boost::none),
                               ActionSet{ActionType::internal})};
+        }
+
+        std::unique_ptr<StageParams> getStageParams() const final {
+            return std::make_unique<InternalShardServerInfoStageParams>(_originalBson);
         }
     };
 

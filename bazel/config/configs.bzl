@@ -49,7 +49,7 @@ mongo_toolchain_version = rule(
 # linker
 # ==========
 
-linker_values = ["auto", "gold", "lld", "mold"]
+linker_values = ["auto", "lld", "mold"]
 
 linker_provider = provider(
     doc = "Specify the type of linker to use.",
@@ -403,20 +403,6 @@ simple_build_id_provider = provider(
 
 simple_build_id = rule(
     implementation = lambda ctx: simple_build_id_provider(enabled = ctx.build_setting_value),
-    build_setting = config.bool(flag = True),
-)
-
-# =========
-# detect_odr_violations
-# =========
-
-detect_odr_violations_provider = provider(
-    doc = """Have the linker try to detect ODR violations, if supported""",
-    fields = ["enabled"],
-)
-
-detect_odr_violations = rule(
-    implementation = lambda ctx: detect_odr_violations_provider(enabled = ctx.build_setting_value),
     build_setting = config.bool(flag = True),
 )
 
@@ -829,5 +815,31 @@ evg_provider = provider(
 
 evg = rule(
     implementation = lambda ctx: evg_provider(enabled = ctx.build_setting_value),
+    build_setting = config.bool(flag = True),
+)
+
+# =========
+# coverage
+# =========
+coverage_provider = provider(
+    doc = "Set to flag that this is a coverage build (this should only be set by bazelrc)",
+    fields = ["enabled"],
+)
+
+coverage = rule(
+    implementation = lambda ctx: coverage_provider(enabled = ctx.build_setting_value),
+    build_setting = config.bool(flag = True),
+)
+
+# =========
+# extensions_signature_verification_secure
+# =========
+extensions_signature_verification_secure_provider = provider(
+    doc = "Builds the server in a secure-only mode for verifying extension signatures (no test keys or bypass allowed)",
+    fields = ["enabled"],
+)
+
+extensions_signature_verification_secure = rule(
+    implementation = lambda ctx: extensions_signature_verification_secure_provider(enabled = ctx.build_setting_value),
     build_setting = config.bool(flag = True),
 )

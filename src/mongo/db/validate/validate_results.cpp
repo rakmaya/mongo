@@ -30,9 +30,9 @@
 #include "mongo/db/validate/validate_results.h"
 
 #include "mongo/base/string_data.h"
-#include "mongo/bson/bson_utf8.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/db/validate/bson_utf8.h"
 #include "mongo/db/validate/validate_options.h"
 #include "mongo/util/namespace_string_util.h"
 
@@ -226,6 +226,7 @@ void ValidateResults::appendToResultObj(BSONObjBuilder* resultObj,
         BSONObjBuilder bob(indexDetails.subobjStart(indexName));
         bob.appendBool("valid", ivr.isValid());
         bob.append("spec", ivr.getSpec());
+        bob.appendBool("isMultikey", ivr.isMultikey());
 
         if (!ivr.getWarnings().empty()) {
             buildFixedSizedArray(bob, "warnings", ivr.getWarnings(), maxSizePerEntry);

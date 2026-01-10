@@ -208,14 +208,16 @@ DocumentSourceContainer::iterator ReplaceRootTransformation::doOptimizeAt(
     return std::next(itr);
 }
 
-REGISTER_DOCUMENT_SOURCE(replaceRoot,
-                         LiteParsedDocumentSourceDefault::parse,
-                         DocumentSourceReplaceRoot::createFromBson,
-                         AllowedWithApiStrict::kAlways);
-REGISTER_DOCUMENT_SOURCE(replaceWith,
-                         LiteParsedDocumentSourceDefault::parse,
-                         DocumentSourceReplaceRoot::createFromBson,
-                         AllowedWithApiStrict::kAlways);
+REGISTER_LITE_PARSED_DOCUMENT_SOURCE(replaceRoot,
+                                     ReplaceRootLiteParsed::parse,
+                                     AllowedWithApiStrict::kAlways);
+REGISTER_LITE_PARSED_DOCUMENT_SOURCE(replaceWith,
+                                     ReplaceRootLiteParsed::parse,
+                                     AllowedWithApiStrict::kAlways);
+
+REGISTER_DOCUMENT_SOURCE_WITH_STAGE_PARAMS_DEFAULT(replaceRoot,
+                                                   DocumentSourceReplaceRoot,
+                                                   ReplaceRootStageParams);
 
 intrusive_ptr<DocumentSource> DocumentSourceReplaceRoot::createFromBson(
     BSONElement elem, const intrusive_ptr<ExpressionContext>& expCtx) {

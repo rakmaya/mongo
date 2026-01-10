@@ -163,8 +163,7 @@ StatusWith<std::string> WiredTigerIndex::generateCreateString(const std::string&
     str::stream ss;
 
     // Separate out a prefix and suffix in the default string. User configuration will override
-    // values in the prefix, but not values in the suffix.  Page sizes are chosen so that index
-    // keys (up to 1024 bytes) will not overflow.
+    // values in the prefix, but not values in the suffix.
     ss << "type=file,internal_page_max=16k,leaf_page_max=16k,";
     ss << "checksum=on,";
     if (wiredTigerGlobalOptions.useIndexPrefixCompression) {
@@ -223,15 +222,14 @@ StatusWith<std::string> WiredTigerIndex::generateCreateString(const std::string&
 Status WiredTigerIndex::create(WiredTigerRecoveryUnit& ru,
                                const std::string& uri,
                                const std::string& config) {
-    // Don't use the session from the recovery unit: create should not be used in a transaction
-    WiredTigerSession session(ru.getConnection());
+    auto& session = *ru.getSessionNoTxn();
     LOGV2_DEBUG(
         51780, 1, "create uri: {uri} config: {config}", "uri"_attr = uri, "config"_attr = config);
     return wtRCToStatus(session.create(uri.c_str(), config.c_str()), session);
 }
 
 Status WiredTigerIndex::Drop(WiredTigerRecoveryUnit& ru, const std::string& uri) {
-    WiredTigerSession session(ru.getConnection());
+    auto& session = *ru.getSessionNoTxn();
     return wtRCToStatus(session.drop(uri.c_str(), nullptr), session);
 }
 
@@ -445,7 +443,8 @@ void WiredTigerIndex::printIndexEntryMetadata(OperationContext* opCtx,
     WT_CURSOR* cursor =
         session.getNewCursor(std::string{_container.uri()}, "debug=(dump_version=(enabled=true))");
 
-    setKey(cursor, keyString.getKeyAndRecordIdView());
+    const auto keyView = keyString.getKeyAndRecordIdView();
+    setKey(cursor, keyView);
 
     int ret = cursor->search(cursor);
     while (ret != WT_NOTFOUND) {
@@ -470,10 +469,15 @@ void WiredTigerIndex::printIndexEntryMetadata(OperationContext* opCtx,
                                         &value),
                       cursor->session);
 
+        BufReader br(value.data, value.size);
+        const auto typeBits = key_string::TypeBits::fromBuffer(getKeyStringVersion(), &br);
+
         LOGV2(6601200,
               "WiredTiger index entry metadata",
               "keyString"_attr = keyString,
-              "indexKey"_attr = key_string::toBson(keyString, _ordering),
+              "indexKey"_attr = key_string::toBson(keyView, _ordering, typeBits),
+              "typeBitsValue"_attr =
+                  hexblob::encode(static_cast<const char*>(value.data), value.size),
               "startTxnId"_attr = startTxnId,
               "startTs"_attr = Timestamp(startTs),
               "startDurableTs"_attr = Timestamp(startDurableTs),

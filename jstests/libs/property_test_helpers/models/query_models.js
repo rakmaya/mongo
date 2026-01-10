@@ -15,6 +15,7 @@ import {
 } from "jstests/libs/property_test_helpers/models/basic_models.js";
 import {collationArb} from "jstests/libs/property_test_helpers/models/collation_models.js";
 import {groupArb} from "jstests/libs/property_test_helpers/models/group_models.js";
+import {getEqLookupUnwindArb} from "jstests/libs/property_test_helpers/models/lookup_models.js";
 import {getMatchArb} from "jstests/libs/property_test_helpers/models/match_models.js";
 import {oneof} from "jstests/libs/property_test_helpers/models/model_utils.js";
 import {fc} from "jstests/third_party/fast_check/fc-3.1.0.js";
@@ -87,8 +88,9 @@ export const skipArb = fc.record({$skip: fc.integer({min: 1, max: 5})});
  *       when a deterministic bag is required.
  * The output is in order from simplest agg stages to most complex, for minimization.
  */
-function getAllowedStages(allowOrs, deterministicBag, allowCollation) {
+function getAllowedStages(allowOrs, deterministicBag, isTS) {
     let allowedStages = [];
+    const isTimeseriesCollection = TestData.isTimeseriesTestSuite || isTS;
     if (deterministicBag) {
         allowedStages = [
             simpleProjectArb,
@@ -97,7 +99,6 @@ function getAllowedStages(allowOrs, deterministicBag, allowCollation) {
             computedProjectArb,
             addFieldsVarArb,
             getSortArb(),
-            groupArb,
         ];
     } else {
         // If we don't require a deterministic bag, we can allow $skip and $limit anywhere.
@@ -110,8 +111,10 @@ function getAllowedStages(allowOrs, deterministicBag, allowCollation) {
             computedProjectArb,
             addFieldsVarArb,
             getSortArb(),
-            groupArb,
         ];
+    }
+    if (!isTimeseriesCollection) {
+        allowedStages.push(groupArb);
     }
     return allowedStages;
 }
@@ -119,10 +122,20 @@ function getAllowedStages(allowOrs, deterministicBag, allowCollation) {
 /*
  * The pipeline arb generates a pipeline of stages.
  */
-export function getAggPipelineArb({allowOrs = true, deterministicBag = true, allowedStages = []} = {}) {
-    const stages = allowedStages.length == 0 ? getAllowedStages(allowOrs, deterministicBag) : allowedStages;
+export function getAggPipelineArb({allowOrs = true, deterministicBag = true, allowedStages = [], isTS = false} = {}) {
+    // TODO SERVER-83072 remove 'isTS' once $group timeseries array bug is fixed.
+    const stages = allowedStages.length == 0 ? getAllowedStages(allowOrs, deterministicBag, isTS) : allowedStages;
     // Length 6 seems long enough to cover interactions between stages.
     return fc.array(oneof(...stages), {minLength: 1, maxLength: 6});
+}
+
+export function getSbePushdownEligibleAggPipelineArb(
+    foreignCollName,
+    {allowOrs = true, deterministicBag = true, allowedStages = [], isTS = false} = {},
+) {
+    const stages = [groupArb, getEqLookupUnwindArb(foreignCollName), getMatchArb()];
+    // eqLookupUnwind returns a javascript array; flatten that here.
+    return fc.array(oneof(...stages), {minLength: 1, maxLength: 6}).map((item) => item.flat());
 }
 
 /*
@@ -136,10 +149,11 @@ export function getQueryAndOptionsModel({
     deterministicBag = true,
     allowCollation = false,
     allowedStages = [],
+    isTS = false,
 } = {}) {
+    const noCollation = fc.constant({});
     return fc.record({
-        "pipeline": getAggPipelineArb({allowOrs, deterministicBag, allowedStages}),
-        // TODO SERVER-111679: Make 'collation' optional if 'allowCollation' is true.
-        "options": allowCollation ? fc.record({"collation": collationArb}) : fc.constant({}),
+        "pipeline": getAggPipelineArb({allowOrs, deterministicBag, allowedStages, isTS}),
+        "options": allowCollation ? oneof(noCollation, fc.record({"collation": collationArb})) : noCollation,
     });
 }

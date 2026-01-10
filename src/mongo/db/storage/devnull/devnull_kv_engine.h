@@ -43,6 +43,7 @@
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/sorted_data_interface.h"
 #include "mongo/db/storage/storage_engine.h"
+#include "mongo/util/modules.h"
 
 #include <cstdint>
 #include <deque>
@@ -53,6 +54,8 @@
 
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
+
+MONGO_MOD_PUBLIC;
 
 namespace mongo {
 
@@ -69,6 +72,7 @@ public:
     std::unique_ptr<RecoveryUnit> newRecoveryUnit() override;
 
     Status createRecordStore(const rss::PersistenceProvider&,
+                             RecoveryUnit& ru,
                              const NamespaceString& nss,
                              StringData ident,
                              const RecordStore::Options& options) override {
@@ -246,7 +250,7 @@ public:
     }
 
     // This sets the results of the backup cursor for unit tests.
-    void setBackupBlocks_forTest(std::deque<KVBackupBlock> newBackupBlocks) {
+    MONGO_MOD_PUBLIC void setBackupBlocks_forTest(std::deque<KVBackupBlock> newBackupBlocks) {
         _mockBackupBlocks = std::move(newBackupBlocks);
     }
 

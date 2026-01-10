@@ -34,8 +34,8 @@
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/local_catalog/virtual_collection_options.h"
 #include "mongo/db/record_id.h"
+#include "mongo/db/shard_role/shard_catalog/virtual_collection_options.h"
 #include "mongo/db/storage/damage_vector.h"
 #include "mongo/db/storage/key_format.h"
 #include "mongo/db/storage/record_data.h"
@@ -102,6 +102,10 @@ public:
         return 0LL;
     }
 
+    void setSize(long long numRecords, long long dataSize) final {
+        // Do nothing.
+    }
+
     int64_t storageSize(RecoveryUnit&, BSONObjBuilder*, int) const final {
         return 0LL;
     }
@@ -163,7 +167,8 @@ public:
                                              const RecordId& loc,
                                              const RecordData& oldRec,
                                              const char* damageSource,
-                                             const DamageVector& damages) final {
+                                             const DamageVector& damages,
+                                             const SeekableRecordCursor* cursor) final {
         unimplementedTasserted();
         return {ErrorCodes::Error::UnknownError, "Unknown error"};
     }

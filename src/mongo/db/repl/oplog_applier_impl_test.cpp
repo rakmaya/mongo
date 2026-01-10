@@ -50,14 +50,6 @@
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/index/index_constants.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_options.h"
-#include "mongo/db/local_catalog/database_holder.h"
-#include "mongo/db/local_catalog/document_validation.h"
-#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/multi_key_path_tracker.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer.h"
@@ -90,6 +82,14 @@
 #include "mongo/db/session/logical_session_id_helpers.h"
 #include "mongo/db/session/session_catalog_mongod.h"
 #include "mongo/db/session/session_txn_record_gen.h"
+#include "mongo/db/shard_role/lock_manager/d_concurrency.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_options.h"
+#include "mongo/db/shard_role/shard_catalog/database_holder.h"
+#include "mongo/db/shard_role/shard_catalog/document_validation.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/storage/kv/kv_engine.h"
 #include "mongo/db/storage/write_unit_of_work.h"
@@ -137,7 +137,7 @@ CollectionAcquisition acquireCollForRead(OperationContext* opCtx, const Namespac
     return acquireCollection(
         opCtx,
         CollectionAcquisitionRequest(nss,
-                                     PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                     PlacementConcern(boost::none, ShardVersion::UNTRACKED()),
                                      repl::ReadConcernArgs::get(opCtx),
                                      AcquisitionPrerequisites::kRead),
         MODE_IS);
@@ -148,12 +148,12 @@ class SetSteadyStateConstraints : public T {
 protected:
     void setUp() override {
         T::setUp();
-        _constraintsEnabled = oplogApplicationEnforcesSteadyStateConstraints;
-        oplogApplicationEnforcesSteadyStateConstraints = enable;
+        _constraintsEnabled = oplogApplicationEnforcesSteadyStateConstraints.load();
+        oplogApplicationEnforcesSteadyStateConstraints.store(enable);
     }
 
     void tearDown() override {
-        oplogApplicationEnforcesSteadyStateConstraints = _constraintsEnabled;
+        oplogApplicationEnforcesSteadyStateConstraints.store(_constraintsEnabled);
         T::tearDown();
     }
 
@@ -870,7 +870,7 @@ TEST_F(OplogApplierImplTest, applyOplogEntryToInvalidateChangeStreamPreImages) {
         auto sideCollection = acquireCollection(
             _opCtx.get(),
             CollectionAcquisitionRequest(NamespaceString::kConfigImagesNamespace,
-                                         PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                         PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
                                          repl::ReadConcernArgs::get(_opCtx.get()),
                                          AcquisitionPrerequisites::kRead),
             MODE_IS);
@@ -898,7 +898,7 @@ TEST_F(OplogApplierImplTest, applyOplogEntryToInvalidateChangeStreamPreImages) {
     auto sideCollection = acquireCollection(
         _opCtx.get(),
         CollectionAcquisitionRequest(NamespaceString::kConfigImagesNamespace,
-                                     PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                     PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
                                      repl::ReadConcernArgs::get(_opCtx.get()),
                                      AcquisitionPrerequisites::kRead),
         MODE_IS);
@@ -939,7 +939,7 @@ TEST_F(OplogApplierImplTest, applyOplogEntryToInvalidateNonModPreImages) {
         auto sideCollection = acquireCollection(
             _opCtx.get(),
             CollectionAcquisitionRequest(NamespaceString::kConfigImagesNamespace,
-                                         PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                         PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
                                          repl::ReadConcernArgs::get(_opCtx.get()),
                                          AcquisitionPrerequisites::kRead),
             MODE_IS);
@@ -974,7 +974,7 @@ TEST_F(OplogApplierImplTest, applyOplogEntryToInvalidateNonModPreImages) {
     auto sideCollection = acquireCollection(
         _opCtx.get(),
         CollectionAcquisitionRequest(NamespaceString::kConfigImagesNamespace,
-                                     PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                     PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
                                      repl::ReadConcernArgs::get(_opCtx.get()),
                                      AcquisitionPrerequisites::kRead),
         MODE_IS);
@@ -1019,7 +1019,7 @@ TEST_F(OplogApplierImplTest, ImageCollectionInvalidationInInitialSyncHandlesConf
         auto sideCollection = acquireCollection(
             _opCtx.get(),
             CollectionAcquisitionRequest(NamespaceString::kConfigImagesNamespace,
-                                         PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                         PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
                                          repl::ReadConcernArgs::get(_opCtx.get()),
                                          AcquisitionPrerequisites::kRead),
             MODE_IS);
@@ -1050,7 +1050,7 @@ TEST_F(OplogApplierImplTest, ImageCollectionInvalidationInInitialSyncHandlesConf
         auto sideCollection = acquireCollection(
             _opCtx.get(),
             CollectionAcquisitionRequest(NamespaceString::kConfigImagesNamespace,
-                                         PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                         PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
                                          repl::ReadConcernArgs::get(_opCtx.get()),
                                          AcquisitionPrerequisites::kRead),
             MODE_IS);
@@ -1083,7 +1083,7 @@ TEST_F(OplogApplierImplTest, ImageCollectionInvalidationInInitialSyncHandlesConf
     auto sideCollection = acquireCollection(
         _opCtx.get(),
         CollectionAcquisitionRequest(NamespaceString::kConfigImagesNamespace,
-                                     PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                     PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
                                      repl::ReadConcernArgs::get(_opCtx.get()),
                                      AcquisitionPrerequisites::kRead),
         MODE_IS);
@@ -1211,7 +1211,10 @@ Status TrackOpsAppliedApplier::applyOplogBatchPerWorker(
     return Status::OK();
 }
 
-DEATH_TEST_F(OplogApplierImplTest, MultiApplyAbortsWhenNoOperationsAreGiven, "!ops.empty()") {
+using OplogApplierImplTestDeathTest = OplogApplierImplTest;
+DEATH_TEST_F(OplogApplierImplTestDeathTest,
+             MultiApplyAbortsWhenNoOperationsAreGiven,
+             "!ops.empty()") {
     auto workerPool = makeReplWorkerPool();
     NoopOplogApplierObserver observer;
     TrackOpsAppliedApplier oplogApplier(
@@ -1224,6 +1227,80 @@ DEATH_TEST_F(OplogApplierImplTest, MultiApplyAbortsWhenNoOperationsAreGiven, "!o
         repl::OplogApplier::Options(repl::OplogApplication::Mode::kSecondary, false),
         workerPool.get());
     oplogApplier.applyOplogBatch(_opCtx.get(), {}).getStatus().ignore();
+}
+
+DEATH_TEST_F(OplogApplierImplTestDeathTest, ApplyOpsRidOnNonRridCollectionGrouped, "11454702") {
+    auto nss = NamespaceString::createNamespaceString_forTest(
+        "test.ApplyOpsRidOnNonRridCollectionGrouped");
+    createCollection(_opCtx.get(), nss, {});
+
+    auto op1 = makeInsertDocumentOplogEntry({Timestamp(Seconds(1), 1), 1LL}, nss, BSON("_id" << 1));
+
+    MutableOplogEntry op2Mutable;
+    op2Mutable.setOpType(OpTypeEnum::kInsert);
+    op2Mutable.setNss(nss);
+    op2Mutable.setObject(BSON("_id" << 2));
+    op2Mutable.setObject2(BSON("_id" << 2));
+    op2Mutable.setOpTime({Timestamp(Seconds(1), 2), 1LL});
+    op2Mutable.setRecordId(RecordId(2));
+    op2Mutable.setWallClockTime(Date_t::now());
+    auto op2 = OplogEntry(op2Mutable.toBSON());
+
+    std::vector<ApplierOperation> ops = {ApplierOperation{&op1}, ApplierOperation{&op2}};
+    OplogEntryOrGroupedInserts groupedInserts(ops.begin(), ops.end());
+
+    (void)_applyOplogEntryOrGroupedInsertsWrapper(
+        _opCtx.get(), groupedInserts, OplogApplication::Mode::kApplyOpsCmd);
+}
+
+DEATH_TEST_F(OplogApplierImplTestDeathTest, SteadyStateRidOnNonRridCollectionGrouped, "11454703") {
+    auto nss = NamespaceString::createNamespaceString_forTest(
+        "test.SteadyStateRidOnNonRridCollectionGrouped");
+    createCollection(_opCtx.get(), nss, {});
+
+    auto op1 = makeInsertDocumentOplogEntry({Timestamp(Seconds(1), 1), 1LL}, nss, BSON("_id" << 1));
+
+    MutableOplogEntry op2Mutable;
+    op2Mutable.setOpType(OpTypeEnum::kInsert);
+    op2Mutable.setNss(nss);
+    op2Mutable.setObject(BSON("_id" << 2));
+    op2Mutable.setObject2(BSON("_id" << 2));
+    op2Mutable.setOpTime({Timestamp(Seconds(1), 2), 1LL});
+    op2Mutable.setRecordId(RecordId(2));
+    op2Mutable.setWallClockTime(Date_t::now());
+    auto op2 = OplogEntry(op2Mutable.toBSON());
+
+    std::vector<ApplierOperation> ops = {ApplierOperation{&op1}, ApplierOperation{&op2}};
+    OplogEntryOrGroupedInserts groupedInserts(ops.begin(), ops.end());
+
+    (void)_applyOplogEntryOrGroupedInsertsWrapper(
+        _opCtx.get(), groupedInserts, OplogApplication::Mode::kSecondary);
+}
+
+DEATH_TEST_F(OplogApplierImplTestDeathTest, SteadyStateNoRidOnRridCollectionGrouped, "11454703") {
+    auto nss = NamespaceString::createNamespaceString_forTest(
+        "test.SteadyStateNoRidOnRridCollectionGrouped");
+    CollectionOptions options;
+    options.recordIdsReplicated = true;
+    createCollection(_opCtx.get(), nss, options);
+
+    MutableOplogEntry op1Mutable;
+    op1Mutable.setOpType(OpTypeEnum::kInsert);
+    op1Mutable.setNss(nss);
+    op1Mutable.setObject(BSON("_id" << 1));
+    op1Mutable.setObject2(BSON("_id" << 1));
+    op1Mutable.setOpTime({Timestamp(Seconds(1), 1), 1LL});
+    op1Mutable.setRecordId(RecordId(1));
+    op1Mutable.setWallClockTime(Date_t::now());
+    auto op1 = OplogEntry(op1Mutable.toBSON());
+
+    auto op2 = makeInsertDocumentOplogEntry({Timestamp(Seconds(1), 2), 1LL}, nss, BSON("_id" << 2));
+
+    std::vector<ApplierOperation> ops = {ApplierOperation{&op1}, ApplierOperation{&op2}};
+    OplogEntryOrGroupedInserts groupedInserts(ops.begin(), ops.end());
+
+    (void)_applyOplogEntryOrGroupedInsertsWrapper(
+        _opCtx.get(), groupedInserts, OplogApplication::Mode::kSecondary);
 }
 
 bool _testOplogEntryIsForCappedCollection(OperationContext* opCtx,
@@ -1352,6 +1429,110 @@ TEST_F(OplogApplierImplTest,
                   secondDerivedOp.getObject()["txnNum"].numberInt());
     ASSERT_EQUALS(NamespaceString::kSessionTransactionsTableNamespace, secondDerivedOp.getNss());
     ASSERT_EQUALS(secondInsertOpTime.getTimestamp(),
+                  secondDerivedOp.getObject()["lastWriteOpTime"]["ts"].timestamp());
+}
+
+TEST_F(OplogApplierImplTest, TxnTableUpdatesGetCoalescedForRetryableWritesWithSameTxnNumber) {
+    const NamespaceString& nss = NamespaceString::createNamespaceString_forTest("test", "foo");
+    const auto sessionId = makeLogicalSessionIdForTest();
+    std::vector<OplogEntry> insertOps;
+    insertOps.push_back(
+        makeInsertDocumentOplogEntryWithSessionInfoAndStmtIds({Timestamp(Seconds(1), 2), 1LL},
+                                                              nss,
+                                                              kUuid,
+                                                              BSON("_id" << 0),
+                                                              sessionId,
+                                                              1,
+                                                              {StmtId(0)},
+                                                              OpTime()));
+    insertOps.push_back(
+        makeInsertDocumentOplogEntryWithSessionInfoAndStmtIds({Timestamp(Seconds(5), 2), 1LL},
+                                                              nss,
+                                                              kUuid,
+                                                              BSON("_id" << 1),
+                                                              sessionId,
+                                                              1,
+                                                              {StmtId(1)},
+                                                              insertOps[0].getOpTime()));
+    auto workerPool = makeReplWorkerPool();
+    NoopOplogApplierObserver observer;
+    OplogApplierImpl oplogApplier(
+        nullptr,  // executor
+        nullptr,  // oplogBuffer
+        &observer,
+        ReplicationCoordinator::get(_opCtx.get()),
+        getConsistencyMarkers(),
+        getStorageInterface(),
+        repl::OplogApplier::Options(repl::OplogApplication::Mode::kSecondary, false),
+        workerPool.get());
+    std::vector<std::vector<ApplierOperation>> writerVectors(
+        workerPool->getStats().options.maxThreads);
+    std::vector<std::vector<OplogEntry>> derivedOps;
+    oplogApplier.fillWriterVectors_forTest(_opCtx.get(), &insertOps, &writerVectors, &derivedOps);
+
+    // We expect exactly one derived op: a coalesced entry representing the last write.
+    ASSERT_EQUALS(1, derivedOps.size());
+    ASSERT_EQUALS(1, derivedOps[0].size());
+    const auto firstDerivedOp = derivedOps[0][0];
+    ASSERT_EQUALS(*insertOps[1].getTxnNumber(), firstDerivedOp.getObject()["txnNum"].numberInt());
+    ASSERT_EQUALS(NamespaceString::kSessionTransactionsTableNamespace, firstDerivedOp.getNss());
+    ASSERT_EQUALS(insertOps[1].getTimestamp(),
+                  firstDerivedOp.getObject()["lastWriteOpTime"]["ts"].timestamp());
+}
+
+TEST_F(OplogApplierImplTest,
+       TxnTableUpdatesDoNotGetCoalescedForRetryableWritesWithDisableTransactionUpdateCoalescing) {
+    RAIIServerParameterControllerForTest ff("featureFlagDisableTransactionUpdateCoalescing", true);
+    const NamespaceString& nss = NamespaceString::createNamespaceString_forTest("test", "foo");
+    const auto sessionId = makeLogicalSessionIdForTest();
+    std::vector<OplogEntry> insertOps;
+    insertOps.push_back(
+        makeInsertDocumentOplogEntryWithSessionInfoAndStmtIds({Timestamp(Seconds(1), 2), 1LL},
+                                                              nss,
+                                                              kUuid,
+                                                              BSON("_id" << 0),
+                                                              sessionId,
+                                                              1,
+                                                              {StmtId(0)},
+                                                              OpTime()));
+    insertOps.push_back(
+        makeInsertDocumentOplogEntryWithSessionInfoAndStmtIds({Timestamp(Seconds(5), 2), 1LL},
+                                                              nss,
+                                                              kUuid,
+                                                              BSON("_id" << 1),
+                                                              sessionId,
+                                                              1,
+                                                              {StmtId(1)},
+                                                              insertOps[0].getOpTime()));
+    auto workerPool = makeReplWorkerPool();
+    NoopOplogApplierObserver observer;
+    OplogApplierImpl oplogApplier(
+        nullptr,  // executor
+        nullptr,  // oplogBuffer
+        &observer,
+        ReplicationCoordinator::get(_opCtx.get()),
+        getConsistencyMarkers(),
+        getStorageInterface(),
+        repl::OplogApplier::Options(repl::OplogApplication::Mode::kSecondary, false),
+        workerPool.get());
+    std::vector<std::vector<ApplierOperation>> writerVectors(
+        workerPool->getStats().options.maxThreads);
+    std::vector<std::vector<OplogEntry>> derivedOps;
+    oplogApplier.fillWriterVectors_forTest(_opCtx.get(), &insertOps, &writerVectors, &derivedOps);
+
+    // We expect a total of two derived operations, one corresponding to each applied op.
+    ASSERT_EQUALS(2, derivedOps.size());
+    ASSERT_EQUALS(1, derivedOps[0].size());
+    ASSERT_EQUALS(1, derivedOps[1].size());
+    const auto firstDerivedOp = derivedOps[0][0];
+    ASSERT_EQUALS(insertOps[0].getTimestamp(),
+                  firstDerivedOp.getObject()["lastWriteOpTime"]["ts"].timestamp());
+    ASSERT_EQUALS(NamespaceString::kSessionTransactionsTableNamespace, firstDerivedOp.getNss());
+    ASSERT_EQUALS(*insertOps[0].getTxnNumber(), firstDerivedOp.getObject()["txnNum"].numberInt());
+    const auto secondDerivedOp = derivedOps[1][0];
+    ASSERT_EQUALS(*insertOps[1].getTxnNumber(), secondDerivedOp.getObject()["txnNum"].numberInt());
+    ASSERT_EQUALS(NamespaceString::kSessionTransactionsTableNamespace, secondDerivedOp.getNss());
+    ASSERT_EQUALS(insertOps[1].getTimestamp(),
                   secondDerivedOp.getObject()["lastWriteOpTime"]["ts"].timestamp());
 }
 
@@ -2027,15 +2208,42 @@ TEST_F(OplogApplierImplTest, ApplyApplyOpsContainerOperations) {
     auto k = BSONBinData("K", 1, BinDataGeneral);
     auto v = BSONBinData("V", 1, BinDataGeneral);
 
-    BSONArray innerOps = BSON_ARRAY(BSON("op" << "ci"
-                                              << "ns" << nss.ns_forTest() << "container" << ident
-                                              << "o" << BSON("k" << k << "v" << v))
-                                    << BSON("op" << "cd"
-                                                 << "ns" << nss.ns_forTest() << "container" << ident
-                                                 << "o" << BSON("k" << k)));
+    const auto entryOpTime = nextOpTime();
+    ASSERT(!entryOpTime.isNull());
 
+    const BSONObj containerInsertOp =
+        BSON("op" << "ci"
+                  << "ns" << nss.ns_forTest() << "container" << ident << "o"
+                  << BSON("k" << k << "v" << v) << "ts" << entryOpTime.getTimestamp());
+    const BSONObj containerDeleteOp =
+        BSON("op" << "cd"
+                  << "ns" << nss.ns_forTest() << "container" << ident << "o" << BSON("k" << k)
+                  << "ts" << entryOpTime.getTimestamp());
+
+    BSONArray innerOps = BSON_ARRAY(containerInsertOp << containerDeleteOp);
+
+    /**
+     * o: {
+     *   applyOps: [
+     *     {
+     *       op: "ci",
+     *       ns: "<db>.<coll>",
+     *       container: "<ident>",
+     *       o: {k: <BinData>, v: <BinData>},
+     *       ts: <entryOpTime>
+     *     },
+     *     {
+     *       op: "cd",
+     *       ns: "<db>.<coll>",
+     *       container: "<ident>",
+     *       o: {k: <BinData>},
+     *       ts: <entryOpTime>
+     *     }
+     *   ]
+     * }
+     */
     BSONObj applyOpsCmd = BSON("applyOps" << innerOps);
-    auto entry = makeCommandOplogEntry(nextOpTime(), nss, applyOpsCmd, boost::none, boost::none);
+    auto entry = makeCommandOplogEntry(entryOpTime, nss, applyOpsCmd, boost::none, boost::none);
 
     ASSERT_OK(_applyOplogEntryOrGroupedInsertsWrapper(
         _opCtx.get(), ApplierOperation{&entry}, OplogApplication::Mode::kSecondary));
@@ -2142,17 +2350,17 @@ protected:
         _opObserver->onInsertsFn =
             [&](OperationContext*, const NamespaceString& nss, const std::vector<BSONObj>& docs) {
                 stdx::lock_guard<stdx::mutex> lock(_insertMutex);
-                if (nss.isOplog()) {
-                    _insertedOplogDocs.insert(_insertedOplogDocs.end(), docs.begin(), docs.end());
-                } else if (nss == _nss1 || nss == _nss2 ||
-                           nss == NamespaceString::kSessionTransactionsTableNamespace) {
+                if (nss == _nss1 || nss == _nss2 ||
+                    nss == NamespaceString::kSessionTransactionsTableNamespace) {
                     // Storing the inserted documents in a sorted data structure to make checking
                     // for valid results easier. The inserts will be performed by different threads
                     // and there's no guarantee of the order.
                     _insertedDocs[nss].insert(docs.begin(), docs.end());
-                } else
+                } else if (!nss.isOplog()) {  // Allow insertion of documents into the oplog via
+                                              // insertDocument for some tests in this file
                     FAIL("Unexpected insert")
                         << " into " << nss.toStringForErrorMsg() << " first doc: " << docs.front();
+                }
             };
 
         _workerPool = makeReplWorkerPool();
@@ -2177,10 +2385,6 @@ protected:
                             expectedState);
     }
 
-    std::vector<BSONObj>& oplogDocs() {
-        return _insertedOplogDocs;
-    }
-
 protected:
     NamespaceString _nss1;
     NamespaceString _nss2;
@@ -2191,7 +2395,6 @@ protected:
     boost::optional<OplogEntry> _insertOp1, _insertOp2;
     boost::optional<OplogEntry> _commitOp;
     std::map<NamespaceString, SimpleBSONObjSet> _insertedDocs;
-    std::vector<BSONObj> _insertedOplogDocs;
     std::unique_ptr<ThreadPool> _workerPool;
 
 private:
@@ -2215,8 +2418,8 @@ TEST_F(MultiOplogEntryOplogApplierImplTest, MultiApplyUnpreparedTransactionSepar
     // because they are part of a pending transaction.
     const auto expectedStartOpTime = _insertOp1->getOpTime();
     ASSERT_OK(oplogApplier.applyOplogBatch(_opCtx.get(), {*_insertOp1}));
-    ASSERT_EQ(1U, oplogDocs().size());
-    ASSERT_BSONOBJ_EQ(oplogDocs().back(), _insertOp1->getEntry().toBSON());
+    ASSERT_EQ(1U, getOplogSize());
+    ASSERT_BSONOBJ_EQ(getLastOplogDoc(), _insertOp1->getEntry().toBSON());
     ASSERT_TRUE(_insertedDocs[_nss1].empty());
     ASSERT_TRUE(_insertedDocs[_nss2].empty());
     checkTxnTable(_lsid,
@@ -2230,8 +2433,8 @@ TEST_F(MultiOplogEntryOplogApplierImplTest, MultiApplyUnpreparedTransactionSepar
     // being put in the oplog, but with no effect because the operation is part of a pending
     // transaction.
     ASSERT_OK(oplogApplier.applyOplogBatch(_opCtx.get(), {*_insertOp2}));
-    ASSERT_EQ(2U, oplogDocs().size());
-    ASSERT_BSONOBJ_EQ(oplogDocs().back(), _insertOp2->getEntry().toBSON());
+    ASSERT_EQ(2U, getOplogSize());
+    ASSERT_BSONOBJ_EQ(getLastOplogDoc(), _insertOp2->getEntry().toBSON());
     ASSERT_TRUE(_insertedDocs[_nss1].empty());
     ASSERT_TRUE(_insertedDocs[_nss2].empty());
     // The transaction table should not have been updated for partialTxn operations that are not the
@@ -2246,10 +2449,10 @@ TEST_F(MultiOplogEntryOplogApplierImplTest, MultiApplyUnpreparedTransactionSepar
     // Apply a batch with only the commit.  This should result in the commit being put in the
     // oplog, and the two previous entries being applied.
     ASSERT_OK(oplogApplier.applyOplogBatch(_opCtx.get(), {*_commitOp}));
-    ASSERT_EQ(3U, oplogDocs().size());
+    ASSERT_EQ(3U, getOplogSize());
     ASSERT_EQ(1U, _insertedDocs[_nss1].size());
     ASSERT_EQ(2U, _insertedDocs[_nss2].size());
-    ASSERT_BSONOBJ_EQ(oplogDocs().back(), _commitOp->getEntry().toBSON());
+    ASSERT_BSONOBJ_EQ(getLastOplogDoc(), _commitOp->getEntry().toBSON());
     checkTxnTable(_lsid,
                   _txnNum,
                   _commitOp->getOpTime(),
@@ -2275,7 +2478,7 @@ TEST_F(MultiOplogEntryOplogApplierImplTest, MultiApplyUnpreparedTransactionAllAt
     // Apply both inserts and the commit in a single batch.  We expect no oplog entries to
     // be inserted (because we've set skipWritesToOplog), and both entries to be committed.
     ASSERT_OK(oplogApplier.applyOplogBatch(_opCtx.get(), {*_insertOp1, *_insertOp2, *_commitOp}));
-    ASSERT_EQ(0U, oplogDocs().size());
+    ASSERT_EQ(0U, getOplogSize());
     ASSERT_EQ(1U, _insertedDocs[_nss1].size());
     ASSERT_EQ(2U, _insertedDocs[_nss2].size());
     checkTxnTable(_lsid,
@@ -2333,7 +2536,7 @@ TEST_F(MultiOplogEntryOplogApplierImplTest, MultiApplyUnpreparedTransactionTwoBa
     // but the entry should not be applied as it is part of a pending transaction.
     const auto expectedStartOpTime = insertOps[0].getOpTime();
     ASSERT_OK(oplogApplier.applyOplogBatch(_opCtx.get(), {insertOps[0]}));
-    ASSERT_EQ(1U, oplogDocs().size());
+    ASSERT_EQ(1U, getOplogSize());
     ASSERT_EQ(0U, _insertedDocs[_nss1].size());
     ASSERT_EQ(0U, _insertedDocs[_nss2].size());
     checkTxnTable(_lsid,
@@ -2347,7 +2550,7 @@ TEST_F(MultiOplogEntryOplogApplierImplTest, MultiApplyUnpreparedTransactionTwoBa
     // oplog, and all the entries including the first should be applied.
     ASSERT_OK(oplogApplier.applyOplogBatch(_opCtx.get(),
                                            {insertOps[1], insertOps[2], insertOps[3], commitOp}));
-    ASSERT_EQ(5U, oplogDocs().size());
+    ASSERT_EQ(5U, getOplogSize());
     ASSERT_EQ(3U, _insertedDocs[_nss1].size());
     ASSERT_EQ(1U, _insertedDocs[_nss2].size());
     checkTxnTable(_lsid,
@@ -2459,7 +2662,7 @@ TEST_F(MultiOplogEntryOplogApplierImplTest, MultiApplyTwoTransactionsOneBatch) {
     ASSERT_OK(oplogApplier.applyOplogBatch(
         _opCtx.get(),
         {insertOps1[0], insertOps1[1], commitOp1, insertOps2[0], insertOps2[1], commitOp2}));
-    ASSERT_EQ(6U, oplogDocs().size());
+    ASSERT_EQ(6U, getOplogSize());
     ASSERT_EQ(4, replOpCounters.getInsert()->load() - insertsBefore);
     ASSERT_EQ(4U, _insertedDocs[_nss1].size());
     checkTxnTable(_lsid,
@@ -2530,7 +2733,7 @@ TEST_F(MultiOplogEntryOplogApplierImplTest, MultiApplyNontransactionalRetryableW
     // written and the operations being applied.
     const auto expectedStartOpTime = boost::none;  // Retryable writes don't have a startOpTime
     ASSERT_OK(oplogApplier.applyOplogBatch(_opCtx.get(), {applyOpsOp}));
-    ASSERT_EQ(1U, oplogDocs().size());
+    ASSERT_EQ(1U, getOplogSize());
     ASSERT_EQ(1U, _insertedDocs[_nss1].size());
     ASSERT_EQ(1U, _insertedDocs[_nss2].size());
     checkTxnTable(_lsid,
@@ -2543,7 +2746,7 @@ TEST_F(MultiOplogEntryOplogApplierImplTest, MultiApplyNontransactionalRetryableW
     // Insert the insert entry in its own batch.  This should result in the insert entry being
     // written and the operations being applied.
     ASSERT_OK(oplogApplier.applyOplogBatch(_opCtx.get(), {singleInsertOp}));
-    ASSERT_EQ(2U, oplogDocs().size());
+    ASSERT_EQ(2U, getOplogSize());
     ASSERT_EQ(2U, _insertedDocs[_nss1].size());
     ASSERT_EQ(1U, _insertedDocs[_nss2].size());
     checkTxnTable(_lsid,
@@ -2603,7 +2806,7 @@ TEST_F(MultiOplogEntryOplogApplierImplTest, MultiApplyNontransactionalRetryableW
     // and the operations being applied.
     const auto expectedStartOpTime = boost::none;  // Retryable writes don't have a startOpTime
     ASSERT_OK(oplogApplier.applyOplogBatch(_opCtx.get(), {insertOps[0]}));
-    ASSERT_EQ(1U, oplogDocs().size());
+    ASSERT_EQ(1U, getOplogSize());
     ASSERT_EQ(1U, _insertedDocs[_nss1].size());
     ASSERT_EQ(1U, _insertedDocs[_nss2].size());
     checkTxnTable(_lsid,
@@ -2616,7 +2819,7 @@ TEST_F(MultiOplogEntryOplogApplierImplTest, MultiApplyNontransactionalRetryableW
     // Insert the second entry in its own batch.  This should result in the oplog entry being
     // written and the operations being applied.
     ASSERT_OK(oplogApplier.applyOplogBatch(_opCtx.get(), {insertOps[1]}));
-    ASSERT_EQ(2U, oplogDocs().size());
+    ASSERT_EQ(2U, getOplogSize());
     ASSERT_EQ(2U, _insertedDocs[_nss1].size());
     ASSERT_EQ(2U, _insertedDocs[_nss2].size());
     checkTxnTable(_lsid,
@@ -2629,7 +2832,7 @@ TEST_F(MultiOplogEntryOplogApplierImplTest, MultiApplyNontransactionalRetryableW
     // Insert the last entry. This should result in the oplog entry being
     // written and the operations being applied.
     ASSERT_OK(oplogApplier.applyOplogBatch(_opCtx.get(), {insertOps[2]}));
-    ASSERT_EQ(3U, oplogDocs().size());
+    ASSERT_EQ(3U, getOplogSize());
     ASSERT_EQ(3U, _insertedDocs[_nss1].size());
     ASSERT_EQ(3U, _insertedDocs[_nss2].size());
     checkTxnTable(_lsid,
@@ -2674,10 +2877,8 @@ protected:
                 const BSONObj&,
                 const boost::optional<CreateCollCatalogIdentifier>&) {
                 stdx::lock_guard<stdx::mutex> lock(_mutex);
-                if (collNss.isOplog()) {
-                    _oplogDocs.insert(_oplogDocs.end(), BSON("create" << collNss.coll()));
-                } else if (collNss == _nss ||
-                           collNss == NamespaceString::kSessionTransactionsTableNamespace) {
+                if (collNss == _nss ||
+                    collNss == NamespaceString::kSessionTransactionsTableNamespace) {
                     // Storing the documents in a sorted data structure to make checking for valid
                     // results easier. The inserts will be performed by different threads and
                     // there's no guarantee of the order.
@@ -2686,31 +2887,26 @@ protected:
                     FAIL("Unexpected create") << " on " << collNss.toStringForErrorMsg();
             };
 
-        _opObserver->onInsertsFn = [&](OperationContext*,
-                                       const NamespaceString& nss,
-                                       const std::vector<BSONObj>& docs) {
-            stdx::lock_guard<stdx::mutex> lock(_mutex);
-            if (nss.isOplog()) {
-                _oplogDocs.insert(_oplogDocs.end(), docs.begin(), docs.end());
-            } else if (nss == _nss || nss == NamespaceString::kSessionTransactionsTableNamespace) {
-                // Storing the inserted documents in a sorted data structure to make checking
-                // for valid results easier. The inserts will be performed by different threads
-                // and there's no guarantee of the order.
-                (_docs[nss]).insert(_docs[nss].end(), docs.begin(), docs.end());
-            } else
-                FAIL("Unexpected insert")
-                    << " into " << nss.toStringForErrorMsg() << " first doc: " << docs.front();
-        };
+        _opObserver->onInsertsFn =
+            [&](OperationContext*, const NamespaceString& nss, const std::vector<BSONObj>& docs) {
+                stdx::lock_guard<stdx::mutex> lock(_mutex);
+                if (nss == _nss || nss == NamespaceString::kSessionTransactionsTableNamespace) {
+                    // Storing the inserted documents in a sorted data structure to make checking
+                    // for valid results easier. The inserts will be performed by different threads
+                    // and there's no guarantee of the order.
+                    (_docs[nss]).insert(_docs[nss].end(), docs.begin(), docs.end());
+                } else if (!nss.isOplog()) {  // Allow insertion of documents into the oplog via
+                                              // insertDocument for some tests in this file
+                    FAIL("Unexpected insert")
+                        << " into " << nss.toStringForErrorMsg() << " first doc: " << docs.front();
+                }
+            };
 
         _workerPool = makeReplWorkerPool();
     }
 
     void tearDown() override {
         OplogApplierImplTest::tearDown();
-    }
-
-    std::vector<BSONObj>& oplogDocs() {
-        return _oplogDocs;
     }
 
 protected:
@@ -2722,7 +2918,6 @@ protected:
     TxnNumber _txnNum;
     boost::optional<OplogEntry> _commitOp;
     std::map<NamespaceString, std::vector<BSONObj>> _docs;
-    std::vector<BSONObj> _oplogDocs;
     std::unique_ptr<ThreadPool> _workerPool;
 
 private:
@@ -2733,8 +2928,8 @@ TEST_F(MultiOplogEntryOplogApplierImplTestMultitenant,
        MultiApplyUnpreparedTransactionTwoBatchesFeatureFlagOn) {
     setServerParameter("multitenancySupport", true);
     setServerParameter("featureFlagRequireTenantID", true);
-    // Tests an unprepared transaction with ops both in the batch with the commit and prior
-    // batches. Populate transaction with 2 linked entries - a create collection and an insert.
+    // Tests an unprepared transaction with ops both in the batch with the commit and prior batches.
+    // Populate transaction with 2 linked entries - a create collection and an insert.
     std::vector<OplogEntry> ops;
     ops.push_back(makeCommandOplogEntryWithSessionInfoAndStmtIds(
         {Timestamp(Seconds(1), 1), 1LL},
@@ -2783,13 +2978,13 @@ TEST_F(MultiOplogEntryOplogApplierImplTestMultitenant,
     // Insert the first entry in its own batch.  This should result in the oplog entry being written
     // but the entry should not be applied as it is part of a pending transaction.
     ASSERT_OK(oplogApplier.applyOplogBatch(_opCtx.get(), {ops[0]}));
-    ASSERT_EQ(1U, oplogDocs().size());
+    ASSERT_EQ(1U, getOplogSize());
     ASSERT_EQ(0U, _docs[_nss].size());
 
     // Insert the rest of the entries, including the commit.  These entries should be added to the
     // oplog, and all the entries including the first should be applied.
     ASSERT_OK(oplogApplier.applyOplogBatch(_opCtx.get(), {ops[1], commitOp}));
-    ASSERT_EQ(3U, oplogDocs().size());
+    ASSERT_EQ(3U, getOplogSize());
     ASSERT_EQ(2U, _docs[_nss].size());
 
     // Check that we applied the expected documents
@@ -2802,8 +2997,8 @@ TEST_F(MultiOplogEntryOplogApplierImplTestMultitenant,
        MultiApplyUnpreparedTransactionTwoBatchesFeatureFlagOff) {
     setServerParameter("multitenancySupport", true);
     setServerParameter("featureFlagRequireTenantID", false);
-    // Tests an unprepared transaction with ops both in the batch with the commit and prior
-    // batches. Populate transaction with 2 linked entries - a create collection and an insert.
+    // Tests an unprepared transaction with ops both in the batch with the commit and prior batches.
+    // Populate transaction with 2 linked entries - a create collection and an insert.
     std::vector<OplogEntry> ops;
     ops.push_back(makeCommandOplogEntryWithSessionInfoAndStmtIds(
         {Timestamp(Seconds(1), 1), 1LL},
@@ -2852,13 +3047,13 @@ TEST_F(MultiOplogEntryOplogApplierImplTestMultitenant,
     // Insert the first entry in its own batch.  This should result in the oplog entry being written
     // but the entry should not be applied as it is part of a pending transaction.
     ASSERT_OK(oplogApplier.applyOplogBatch(_opCtx.get(), {ops[0]}));
-    ASSERT_EQ(1U, oplogDocs().size());
+    ASSERT_EQ(1U, getOplogSize());
     ASSERT_EQ(0U, _docs[_nss].size());
 
     // Insert the rest of the entries, including the commit.  These entries should be added to the
     // oplog, and all the entries including the first should be applied.
     ASSERT_OK(oplogApplier.applyOplogBatch(_opCtx.get(), {ops[1], commitOp}));
-    ASSERT_EQ(3U, oplogDocs().size());
+    ASSERT_EQ(3U, getOplogSize());
     ASSERT_EQ(2U, _docs[_nss].size());
 
     // Check that we applied the expected documents
@@ -2949,15 +3144,15 @@ TEST_F(MultiOplogEntryPreparedTransactionTest, MultiApplyPreparedTransactionStea
         repl::OplogApplier::Options(repl::OplogApplication::Mode::kSecondary, false),
         _workerPool.get());
 
-    // Apply a batch with the insert operations.  This should result in the oplog entries
-    // being put in the oplog and updating the transaction table, but not actually being applied
-    // because they are part of a pending transaction.
+    // Apply a batch with the insert operations.  This should result in the oplog entries being put
+    // in the oplog and updating the transaction table, but not actually being applied because they
+    // are part of a pending transaction.
     getStorageInterface()->oplogDiskLocRegister(_opCtx.get(), _insertOp2->getTimestamp(), true);
     const auto expectedStartOpTime = _insertOp1->getOpTime();
     ASSERT_OK(oplogApplier.applyOplogBatch(_opCtx.get(), {*_insertOp1, *_insertOp2}));
-    ASSERT_EQ(2U, oplogDocs().size());
-    ASSERT_BSONOBJ_EQ(_insertOp1->getEntry().toBSON(), oplogDocs()[0]);
-    ASSERT_BSONOBJ_EQ(_insertOp2->getEntry().toBSON(), oplogDocs()[1]);
+    ASSERT_EQ(2U, getOplogSize());
+    ASSERT_BSONOBJ_EQ(_insertOp1->getEntry().toBSON(), getFirstOplogDoc());
+    ASSERT_BSONOBJ_EQ(_insertOp2->getEntry().toBSON(), getLastOplogDoc());
     ASSERT_TRUE(_insertedDocs[_nss1].empty());
     ASSERT_TRUE(_insertedDocs[_nss2].empty());
     checkTxnTable(_lsid,
@@ -2973,8 +3168,8 @@ TEST_F(MultiOplogEntryPreparedTransactionTest, MultiApplyPreparedTransactionStea
     getStorageInterface()->oplogDiskLocRegister(
         _opCtx.get(), _prepareWithPrevOp->getTimestamp(), true);
     ASSERT_OK(oplogApplier.applyOplogBatch(_opCtx.get(), {*_prepareWithPrevOp}));
-    ASSERT_EQ(3U, oplogDocs().size());
-    ASSERT_BSONOBJ_EQ(_prepareWithPrevOp->getEntry().toBSON(), oplogDocs().back());
+    ASSERT_EQ(3U, getOplogSize());
+    ASSERT_BSONOBJ_EQ(_prepareWithPrevOp->getEntry().toBSON(), getLastOplogDoc());
     ASSERT_EQ(1U, _insertedDocs[_nss1].size());
     ASSERT_EQ(2U, _insertedDocs[_nss2].size());
     checkTxnTable(_lsid,
@@ -2984,12 +3179,12 @@ TEST_F(MultiOplogEntryPreparedTransactionTest, MultiApplyPreparedTransactionStea
                   expectedStartOpTime,
                   DurableTxnStateEnum::kPrepared);
 
-    // Apply a batch with only the commit.  This should result in the commit being put in the
-    // oplog, and the three previous entries being committed.
+    // Apply a batch with only the commit.  This should result in the commit being put in the oplog,
+    // and the three previous entries being committed.
     getStorageInterface()->oplogDiskLocRegister(
         _opCtx.get(), _commitPrepareWithPrevOp->getTimestamp(), true);
     ASSERT_OK(oplogApplier.applyOplogBatch(_opCtx.get(), {*_commitPrepareWithPrevOp}));
-    ASSERT_BSONOBJ_EQ(_commitPrepareWithPrevOp->getEntry().toBSON(), oplogDocs().back());
+    ASSERT_BSONOBJ_EQ(_commitPrepareWithPrevOp->getEntry().toBSON(), getLastOplogDoc());
     ASSERT_EQ(1U, _insertedDocs[_nss1].size());
     ASSERT_EQ(2U, _insertedDocs[_nss2].size());
     checkTxnTable(_lsid,
@@ -3012,9 +3207,9 @@ TEST_F(MultiOplogEntryPreparedTransactionTest, MultiApplyAbortPreparedTransactio
         repl::OplogApplier::Options(repl::OplogApplication::Mode::kSecondary, false),
         _workerPool.get());
 
-    // Apply a batch with the insert operations.  This should result in the oplog entries
-    // being put in the oplog and updating the transaction table, but not actually being applied
-    // because they are part of a pending transaction.
+    // Apply a batch with the insert operations.  This should result in the oplog entries being put
+    // in the oplog and updating the transaction table, but not actually being applied because they
+    // are part of a pending transaction.
     getStorageInterface()->oplogDiskLocRegister(_opCtx.get(), _insertOp1->getTimestamp(), true);
     const auto expectedStartOpTime = _insertOp1->getOpTime();
     ASSERT_OK(oplogApplier.applyOplogBatch(_opCtx.get(), {*_insertOp1, *_insertOp2}));
@@ -3043,7 +3238,7 @@ TEST_F(MultiOplogEntryPreparedTransactionTest, MultiApplyAbortPreparedTransactio
     getStorageInterface()->oplogDiskLocRegister(
         _opCtx.get(), _abortPrepareWithPrevOp->getTimestamp(), true);
     ASSERT_OK(oplogApplier.applyOplogBatch(_opCtx.get(), {*_abortPrepareWithPrevOp}));
-    ASSERT_BSONOBJ_EQ(_abortPrepareWithPrevOp->getEntry().toBSON(), oplogDocs().back());
+    ASSERT_BSONOBJ_EQ(_abortPrepareWithPrevOp->getEntry().toBSON(), getLastOplogDoc());
     ASSERT_EQ(1U, _insertedDocs[_nss1].size());
     ASSERT_EQ(2U, _insertedDocs[_nss2].size());
     checkTxnTable(_lsid,
@@ -3065,15 +3260,15 @@ TEST_F(MultiOplogEntryPreparedTransactionTest, MultiApplyPreparedTransactionInit
         getStorageInterface(),
         repl::OplogApplier::Options(repl::OplogApplication::Mode::kInitialSync),
         _workerPool.get());
-    // Apply a batch with the insert operations.  This should result in the oplog entries
-    // being put in the oplog and updating the transaction table, but not actually being applied
-    // because they are part of a pending transaction.
+    // Apply a batch with the insert operations.  This should result in the oplog entries being put
+    // in the oplog and updating the transaction table, but not actually being applied because they
+    // are part of a pending transaction.
     getStorageInterface()->oplogDiskLocRegister(_opCtx.get(), _insertOp1->getTimestamp(), true);
     const auto expectedStartOpTime = _insertOp1->getOpTime();
     ASSERT_OK(oplogApplier.applyOplogBatch(_opCtx.get(), {*_insertOp1, *_insertOp2}));
-    ASSERT_EQ(2U, oplogDocs().size());
-    ASSERT_BSONOBJ_EQ(_insertOp1->getEntry().toBSON(), oplogDocs()[0]);
-    ASSERT_BSONOBJ_EQ(_insertOp2->getEntry().toBSON(), oplogDocs()[1]);
+    ASSERT_EQ(2U, getOplogSize());
+    ASSERT_BSONOBJ_EQ(_insertOp1->getEntry().toBSON(), getFirstOplogDoc());
+    ASSERT_BSONOBJ_EQ(_insertOp2->getEntry().toBSON(), getLastOplogDoc());
     ASSERT_TRUE(_insertedDocs[_nss1].empty());
     ASSERT_TRUE(_insertedDocs[_nss2].empty());
     checkTxnTable(_lsid,
@@ -3088,8 +3283,8 @@ TEST_F(MultiOplogEntryPreparedTransactionTest, MultiApplyPreparedTransactionInit
     getStorageInterface()->oplogDiskLocRegister(
         _opCtx.get(), _prepareWithPrevOp->getTimestamp(), true);
     ASSERT_OK(oplogApplier.applyOplogBatch(_opCtx.get(), {*_prepareWithPrevOp}));
-    ASSERT_EQ(3U, oplogDocs().size());
-    ASSERT_BSONOBJ_EQ(_prepareWithPrevOp->getEntry().toBSON(), oplogDocs().back());
+    ASSERT_EQ(3U, getOplogSize());
+    ASSERT_BSONOBJ_EQ(_prepareWithPrevOp->getEntry().toBSON(), getLastOplogDoc());
     ASSERT_TRUE(_insertedDocs[_nss1].empty());
     ASSERT_TRUE(_insertedDocs[_nss2].empty());
     checkTxnTable(_lsid,
@@ -3099,12 +3294,12 @@ TEST_F(MultiOplogEntryPreparedTransactionTest, MultiApplyPreparedTransactionInit
                   expectedStartOpTime,
                   DurableTxnStateEnum::kPrepared);
 
-    // Apply a batch with only the commit.  This should result in the commit being put in the
-    // oplog, and the three previous entries being applied.
+    // Apply a batch with only the commit.  This should result in the commit being put in the oplog,
+    // and the three previous entries being applied.
     getStorageInterface()->oplogDiskLocRegister(
         _opCtx.get(), _commitPrepareWithPrevOp->getTimestamp(), true);
     ASSERT_OK(oplogApplier.applyOplogBatch(_opCtx.get(), {*_commitPrepareWithPrevOp}));
-    ASSERT_BSONOBJ_EQ(_commitPrepareWithPrevOp->getEntry().toBSON(), oplogDocs().back());
+    ASSERT_BSONOBJ_EQ(_commitPrepareWithPrevOp->getEntry().toBSON(), getLastOplogDoc());
     ASSERT_EQ(1U, _insertedDocs[_nss1].size());
     ASSERT_EQ(2U, _insertedDocs[_nss2].size());
     checkTxnTable(_lsid,
@@ -3126,8 +3321,7 @@ TEST_F(MultiOplogEntryPreparedTransactionTest, MultiApplyPreparedTransactionReco
             entry.getOpTime().getTerm()));
     }
     // Ignore docs inserted into oplog in setup.
-    oplogDocs().clear();
-
+    auto sizeBeforeApplies = getOplogSize();
     NoopOplogApplierObserver observer;
     OplogApplierImpl oplogApplier(
         nullptr,  // executor
@@ -3144,7 +3338,7 @@ TEST_F(MultiOplogEntryPreparedTransactionTest, MultiApplyPreparedTransactionReco
     getStorageInterface()->oplogDiskLocRegister(_opCtx.get(), _insertOp1->getTimestamp(), true);
     const auto expectedStartOpTime = _insertOp1->getOpTime();
     ASSERT_OK(oplogApplier.applyOplogBatch(_opCtx.get(), {*_insertOp1, *_insertOp2}));
-    ASSERT_TRUE(oplogDocs().empty());
+    ASSERT_EQ(sizeBeforeApplies, getOplogSize());
     ASSERT_TRUE(_insertedDocs[_nss1].empty());
     ASSERT_TRUE(_insertedDocs[_nss2].empty());
     checkTxnTable(_lsid,
@@ -3159,7 +3353,7 @@ TEST_F(MultiOplogEntryPreparedTransactionTest, MultiApplyPreparedTransactionReco
     getStorageInterface()->oplogDiskLocRegister(
         _opCtx.get(), _prepareWithPrevOp->getTimestamp(), true);
     ASSERT_OK(oplogApplier.applyOplogBatch(_opCtx.get(), {*_prepareWithPrevOp}));
-    ASSERT_TRUE(oplogDocs().empty());
+    ASSERT_EQ(sizeBeforeApplies, getOplogSize());
     ASSERT_TRUE(_insertedDocs[_nss1].empty());
     ASSERT_TRUE(_insertedDocs[_nss2].empty());
     checkTxnTable(_lsid,
@@ -3174,7 +3368,7 @@ TEST_F(MultiOplogEntryPreparedTransactionTest, MultiApplyPreparedTransactionReco
     getStorageInterface()->oplogDiskLocRegister(
         _opCtx.get(), _commitPrepareWithPrevOp->getTimestamp(), true);
     ASSERT_OK(oplogApplier.applyOplogBatch(_opCtx.get(), {*_commitPrepareWithPrevOp}));
-    ASSERT_TRUE(oplogDocs().empty());
+    ASSERT_EQ(sizeBeforeApplies, getOplogSize());
     ASSERT_EQ(1U, _insertedDocs[_nss1].size());
     ASSERT_EQ(2U, _insertedDocs[_nss2].size());
     checkTxnTable(_lsid,
@@ -3203,8 +3397,8 @@ TEST_F(MultiOplogEntryPreparedTransactionTest, MultiApplySingleApplyOpsPreparedT
     getStorageInterface()->oplogDiskLocRegister(
         _opCtx.get(), _singlePrepareApplyOp->getTimestamp(), true);
     ASSERT_OK(oplogApplier.applyOplogBatch(_opCtx.get(), {*_singlePrepareApplyOp}));
-    ASSERT_EQ(1U, oplogDocs().size());
-    ASSERT_BSONOBJ_EQ(_singlePrepareApplyOp->getEntry().toBSON(), oplogDocs().back());
+    ASSERT_EQ(1U, getOplogSize());
+    ASSERT_BSONOBJ_EQ(_singlePrepareApplyOp->getEntry().toBSON(), getLastOplogDoc());
     ASSERT_EQ(1U, _insertedDocs[_nss1].size());
     checkTxnTable(_lsid,
                   _txnNum,
@@ -3213,12 +3407,12 @@ TEST_F(MultiOplogEntryPreparedTransactionTest, MultiApplySingleApplyOpsPreparedT
                   expectedStartOpTime,
                   DurableTxnStateEnum::kPrepared);
 
-    // Apply a batch with only the commit.  This should result in the commit being put in the
-    // oplog, and prepared insert being committed.
+    // Apply a batch with only the commit.  This should result in the commit being put in
+    // the oplog, and prepared insert being committed.
     getStorageInterface()->oplogDiskLocRegister(
         _opCtx.get(), _commitSinglePrepareApplyOp->getTimestamp(), true);
     ASSERT_OK(oplogApplier.applyOplogBatch(_opCtx.get(), {*_commitSinglePrepareApplyOp}));
-    ASSERT_BSONOBJ_EQ(_commitSinglePrepareApplyOp->getEntry().toBSON(), oplogDocs().back());
+    ASSERT_BSONOBJ_EQ(_commitSinglePrepareApplyOp->getEntry().toBSON(), getLastOplogDoc());
     ASSERT_EQ(1U, _insertedDocs[_nss1].size());
     ASSERT_TRUE(_insertedDocs[_nss2].empty());
     checkTxnTable(_lsid,
@@ -3256,8 +3450,8 @@ TEST_F(MultiOplogEntryPreparedTransactionTest, MultiApplyEmptyApplyOpsPreparedTr
     getStorageInterface()->oplogDiskLocRegister(
         _opCtx.get(), emptyPrepareApplyOp.getTimestamp(), true);
     ASSERT_OK(oplogApplier.applyOplogBatch(_opCtx.get(), {emptyPrepareApplyOp}));
-    ASSERT_EQ(1U, oplogDocs().size());
-    ASSERT_BSONOBJ_EQ(emptyPrepareApplyOp.getEntry().toBSON(), oplogDocs().back());
+    ASSERT_EQ(1U, getOplogSize());
+    ASSERT_BSONOBJ_EQ(emptyPrepareApplyOp.getEntry().toBSON(), getLastOplogDoc());
     ASSERT_TRUE(_insertedDocs[_nss1].empty());
     checkTxnTable(_lsid,
                   _txnNum,
@@ -3266,12 +3460,12 @@ TEST_F(MultiOplogEntryPreparedTransactionTest, MultiApplyEmptyApplyOpsPreparedTr
                   expectedStartOpTime,
                   DurableTxnStateEnum::kPrepared);
 
-    // Apply a batch with only the commit.  This should result in the commit being put in the
-    // oplog, and prepared insert being committed.
+    // Apply a batch with only the commit.  This should result in the commit being put in the oplog,
+    // and prepared insert being committed.
     getStorageInterface()->oplogDiskLocRegister(
         _opCtx.get(), _commitSinglePrepareApplyOp->getTimestamp(), true);
     ASSERT_OK(oplogApplier.applyOplogBatch(_opCtx.get(), {*_commitSinglePrepareApplyOp}));
-    ASSERT_BSONOBJ_EQ(_commitSinglePrepareApplyOp->getEntry().toBSON(), oplogDocs().back());
+    ASSERT_BSONOBJ_EQ(_commitSinglePrepareApplyOp->getEntry().toBSON(), getLastOplogDoc());
     ASSERT_TRUE(_insertedDocs[_nss1].empty());
     ASSERT_TRUE(_insertedDocs[_nss2].empty());
     checkTxnTable(_lsid,
@@ -3312,7 +3506,7 @@ TEST_F(MultiOplogEntryPreparedTransactionTest, MultiApplyAbortSingleApplyOpsPrep
     getStorageInterface()->oplogDiskLocRegister(
         _opCtx.get(), _abortSinglePrepareApplyOp->getTimestamp(), true);
     ASSERT_OK(oplogApplier.applyOplogBatch(_opCtx.get(), {*_abortSinglePrepareApplyOp}));
-    ASSERT_BSONOBJ_EQ(_abortSinglePrepareApplyOp->getEntry().toBSON(), oplogDocs().back());
+    ASSERT_BSONOBJ_EQ(_abortSinglePrepareApplyOp->getEntry().toBSON(), getLastOplogDoc());
     ASSERT_EQ(1U, _insertedDocs[_nss1].size());
     ASSERT_TRUE(_insertedDocs[_nss2].empty());
     checkTxnTable(_lsid,
@@ -3343,8 +3537,8 @@ TEST_F(MultiOplogEntryPreparedTransactionTest,
     getStorageInterface()->oplogDiskLocRegister(
         _opCtx.get(), _singlePrepareApplyOp->getTimestamp(), true);
     ASSERT_OK(oplogApplier.applyOplogBatch(_opCtx.get(), {*_singlePrepareApplyOp}));
-    ASSERT_EQ(1U, oplogDocs().size());
-    ASSERT_BSONOBJ_EQ(_singlePrepareApplyOp->getEntry().toBSON(), oplogDocs().back());
+    ASSERT_EQ(1U, getOplogSize());
+    ASSERT_BSONOBJ_EQ(_singlePrepareApplyOp->getEntry().toBSON(), getLastOplogDoc());
     ASSERT_TRUE(_insertedDocs[_nss1].empty());
     ASSERT_TRUE(_insertedDocs[_nss2].empty());
     checkTxnTable(_lsid,
@@ -3354,12 +3548,12 @@ TEST_F(MultiOplogEntryPreparedTransactionTest,
                   expectedStartOpTime,
                   DurableTxnStateEnum::kPrepared);
 
-    // Apply a batch with only the commit.  This should result in the commit being put in the
-    // oplog, and the previous entry being applied.
+    // Apply a batch with only the commit.  This should result in the commit being put in the oplog,
+    // and the previous entry being applied.
     getStorageInterface()->oplogDiskLocRegister(
         _opCtx.get(), _commitSinglePrepareApplyOp->getTimestamp(), true);
     ASSERT_OK(oplogApplier.applyOplogBatch(_opCtx.get(), {*_commitSinglePrepareApplyOp}));
-    ASSERT_BSONOBJ_EQ(_commitSinglePrepareApplyOp->getEntry().toBSON(), oplogDocs().back());
+    ASSERT_BSONOBJ_EQ(_commitSinglePrepareApplyOp->getEntry().toBSON(), getLastOplogDoc());
     ASSERT_EQ(1U, _insertedDocs[_nss1].size());
     ASSERT_TRUE(_insertedDocs[_nss2].empty());
     checkTxnTable(_lsid,
@@ -3381,7 +3575,7 @@ TEST_F(MultiOplogEntryPreparedTransactionTest,
             entry.getOpTime().getTerm()));
     }
     // Ignore docs inserted into oplog in setup.
-    oplogDocs().clear();
+    auto sizeBeforeApplies = getOplogSize();
 
     NoopOplogApplierObserver observer;
     OplogApplierImpl oplogApplier(
@@ -3401,7 +3595,7 @@ TEST_F(MultiOplogEntryPreparedTransactionTest,
     getStorageInterface()->oplogDiskLocRegister(
         _opCtx.get(), _singlePrepareApplyOp->getTimestamp(), true);
     ASSERT_OK(oplogApplier.applyOplogBatch(_opCtx.get(), {*_singlePrepareApplyOp}));
-    ASSERT_TRUE(oplogDocs().empty());
+    ASSERT_EQ(sizeBeforeApplies, getOplogSize());
     ASSERT_TRUE(_insertedDocs[_nss1].empty());
     ASSERT_TRUE(_insertedDocs[_nss2].empty());
     checkTxnTable(_lsid,
@@ -3416,7 +3610,7 @@ TEST_F(MultiOplogEntryPreparedTransactionTest,
     getStorageInterface()->oplogDiskLocRegister(
         _opCtx.get(), _commitSinglePrepareApplyOp->getTimestamp(), true);
     ASSERT_OK(oplogApplier.applyOplogBatch(_opCtx.get(), {*_commitSinglePrepareApplyOp}));
-    ASSERT_TRUE(oplogDocs().empty());
+    ASSERT_EQ(sizeBeforeApplies, getOplogSize());
     ASSERT_EQ(1U, _insertedDocs[_nss1].size());
     ASSERT_TRUE(_insertedDocs[_nss2].empty());
     checkTxnTable(_lsid,
@@ -3497,9 +3691,9 @@ protected:
             auto nss = coll->ns();
             if (nss == _nss1 || nss == _nss2 ||
                 nss == NamespaceString::kSessionTransactionsTableNamespace) {
-                // Storing the deleted documents in a sorted data structure to make checking
-                // for valid results easier. The delete will be performed by different threads
-                // and there's no guarantee of the order.
+                // Storing the deleted documents in a sorted data structure to make checking for
+                // valid results easier. The delete will be performed by different threads and
+                // there's no guarantee of the order.
                 _deletedDocs[nss]++;
             } else
                 FAIL("Unexpected delete") << " from " << nss.toStringForErrorMsg();
@@ -3537,7 +3731,7 @@ TEST_F(MultiPreparedTransactionsInOneBatchTest, CommitAndAbortMultiPreparedTrans
     ASSERT_OK(oplogApplier.applyOplogBatch(
         _opCtx.get(),
         {*_prepareWithInsertsOp, *_nonTxnInsertOp1, *_nonTxnInsertOp2, *_prepareWithDeletesOp}));
-    ASSERT_EQ(4U, oplogDocs().size());
+    ASSERT_EQ(4U, getOplogSize());
     ASSERT_EQ(4U, _insertedDocs[_nss1].size());
     ASSERT_EQ(2, _deletedDocs[_nss1]);
     checkTxnTable(_lsid1,
@@ -3558,8 +3752,8 @@ TEST_F(MultiPreparedTransactionsInOneBatchTest, CommitAndAbortMultiPreparedTrans
         _opCtx.get(), _commitPrepareWithInsertsOp->getTimestamp(), true);
     ASSERT_OK(oplogApplier.applyOplogBatch(_opCtx.get(), {*_commitPrepareWithInsertsOp}));
 
-    ASSERT_BSONOBJ_EQ(_commitPrepareWithInsertsOp->getEntry().toBSON(), oplogDocs().back());
-    ASSERT_EQ(5U, oplogDocs().size());
+    ASSERT_BSONOBJ_EQ(_commitPrepareWithInsertsOp->getEntry().toBSON(), getLastOplogDoc());
+    ASSERT_EQ(5U, getOplogSize());
     ASSERT_EQ(4U, _insertedDocs[_nss1].size());
     ASSERT_EQ(2, _deletedDocs[_nss1]);
     checkTxnTable(_lsid1,
@@ -3580,8 +3774,8 @@ TEST_F(MultiPreparedTransactionsInOneBatchTest, CommitAndAbortMultiPreparedTrans
         _opCtx.get(), _abortPrepareWithDeletesOp->getTimestamp(), true);
     ASSERT_OK(oplogApplier.applyOplogBatch(_opCtx.get(), {*_abortPrepareWithDeletesOp}));
 
-    ASSERT_BSONOBJ_EQ(_abortPrepareWithDeletesOp->getEntry().toBSON(), oplogDocs().back());
-    ASSERT_EQ(6U, oplogDocs().size());
+    ASSERT_BSONOBJ_EQ(_abortPrepareWithDeletesOp->getEntry().toBSON(), getLastOplogDoc());
+    ASSERT_EQ(6U, getOplogSize());
     ASSERT_EQ(4U, _insertedDocs[_nss1].size());
     ASSERT_EQ(2, _deletedDocs[_nss1]);
     checkTxnTable(_lsid1,
@@ -3721,10 +3915,14 @@ TEST_F(OplogApplierImplTest, OplogApplicationThreadFuncFailsWhenCollectionCreati
     TestApplyOplogGroupApplier oplogApplier(
         nullptr, nullptr, OplogApplier::Options(OplogApplication::Mode::kSecondary, false));
     std::vector<ApplierOperation> ops = {ApplierOperation{&op}};
+    unittest::LogCaptureGuard logs;
     const bool dataIsConsistent = true;
     ASSERT_EQUALS(
         ErrorCodes::InvalidOptions,
         oplogApplier.applyOplogBatchPerWorker(_opCtx.get(), &ops, nullptr, dataIsConsistent));
+    ASSERT_EQUALS(1,
+                  logs.countBSONContainingSubset(BSON(
+                      "attr" << BSON("opTime" << BSON("ts" << Timestamp(1, 0) << "t" << 1LL)))));
 }
 
 TEST_F(OplogApplierImplTest,
@@ -3777,7 +3975,11 @@ TEST_F(
     NamespaceString nss = makeNamespace("local");
     // Delete operation without _id in 'o' field.
     auto op = makeDeleteDocumentOplogEntry({Timestamp(Seconds(1), 0), 1LL}, nss, {});
+    unittest::LogCaptureGuard logs;
     ASSERT_EQUALS(ErrorCodes::NoSuchKey, runOpSteadyState(op));
+    ASSERT_EQUALS(1,
+                  logs.countBSONContainingSubset(BSON(
+                      "attr" << BSON("opTime" << BSON("ts" << Timestamp(1, 0) << "t" << 1LL)))));
 }
 
 TEST_F(OplogApplierImplTest,
@@ -3792,7 +3994,11 @@ TEST_F(OplogApplierImplTest,
         };
     createCollectionWithUuid(_opCtx.get(), nss);
     auto op = makeInsertDocumentOplogEntry({Timestamp(Seconds(1), 0), 1LL}, nss, BSON("_id" << 0));
+    unittest::LogCaptureGuard logs;
     ASSERT_EQUALS(ErrorCodes::OperationFailed, runOpSteadyState(op));
+    ASSERT_EQUALS(1,
+                  logs.countBSONContainingSubset(BSON(
+                      "attr" << BSON("opTime" << BSON("ts" << Timestamp(1, 0) << "t" << 1LL)))));
     ASSERT(onInsertsCalled);
 }
 
@@ -4551,7 +4757,8 @@ TEST_F(IdempotencyTest, CollModIndexNotFound) {
     testOpsAreIdempotent(ops);
 }
 
-DEATH_TEST_F(IdempotencyTest, CannotCreateIndexForApplyOpsOnPrimary, "invariant") {
+using IdempotencyTestDeathTest = IdempotencyTest;
+DEATH_TEST_F(IdempotencyTestDeathTest, CannotCreateIndexForApplyOpsOnPrimary, "invariant") {
     ASSERT_OK(runOpInitialSync(createCollection(kUuid)));
     auto indexOp = buildIndex(fromjson("{x: 'text'}"), BSONObj(), kUuid);
     ASSERT_OK(ReplicationCoordinator::get(_opCtx.get())->setFollowerMode(MemberState::RS_PRIMARY));
@@ -4684,10 +4891,10 @@ public:
     void setUp() override {
         OplogApplierImplTest::setUp();
 
-        // This fixture sets up some replication, but notably omits installing an
-        // OpObserverImpl. This state causes collection creation to timestamp catalog writes, but
-        // secondary index creation does not. We use an UnreplicatedWritesBlock to avoid
-        // timestamping any of the catalog setup.
+        // This fixture sets up some replication, but notably omits installing an OpObserverImpl.
+        // This state causes collection creation to timestamp catalog writes, but secondary index
+        // creation does not. We use an UnreplicatedWritesBlock to avoid timestamping any of the
+        // catalog setup.
         repl::UnreplicatedWritesBlock noRep(_opCtx.get());
 
         auto mongoDSessionCatalog = MongoDSessionCatalog::get(_opCtx.get());
@@ -4857,7 +5064,6 @@ TEST_F(OplogApplierImplTxnTableTest, WriteWithTxnMixedWithDirectWriteToTxnTable)
         getStorageInterface(),
         repl::OplogApplier::Options(repl::OplogApplication::Mode::kSecondary, false),
         workerPool.get());
-
 
     ASSERT_OK(oplogApplier.applyOplogBatch(_opCtx.get(), {insertOp, deleteOp}));
 
@@ -6180,8 +6386,8 @@ TEST_F(PreparedTxnSplitTest, MultiplePrepareTxnsInSameBatch) {
     }
 
     // Test that applying a commitTransaction or abortTransaction entry in the next batch will
-    // correctly split the entry and add them into those writer vectors that previously got
-    // assigned the prepare entry.
+    // correctly split the entry and add them into those writer vectors that previously got assigned
+    // the prepare entry.
     std::vector<OplogEntry> commitOps;
     commitOps.push_back(makeCommitOplogEntry(
         {Timestamp(3, 1), 1}, Timestamp(2, 1), _lsid1, _txnNum1, prepareOps[0].getOpTime()));

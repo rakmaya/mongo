@@ -33,6 +33,7 @@
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/process_interface/mongo_process_interface.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
 
 namespace mongo {
 
@@ -42,7 +43,7 @@ namespace mongo {
  * placeholder MongoProcessInterface is required by an interface but will not be called. To
  * guarantee the latter, method implementations in this class are marked MONGO_UNREACHABLE.
  */
-class StubMongoProcessInterface : public MongoProcessInterface {
+class MONGO_MOD_OPEN StubMongoProcessInterface : public MongoProcessInterface {
 public:
     StubMongoProcessInterface() : MongoProcessInterface(nullptr) {}
     using MongoProcessInterface::MongoProcessInterface;
@@ -95,19 +96,19 @@ public:
 
     void updateClientOperationTime(OperationContext* opCtx) const override {}
 
-    Status insert(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                  const NamespaceString& ns,
-                  std::unique_ptr<write_ops::InsertCommandRequest> insertCommand,
-                  const WriteConcernOptions& wc,
-                  boost::optional<OID>) override {
+    InsertResult insert(const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                        const NamespaceString& ns,
+                        std::unique_ptr<write_ops::InsertCommandRequest> insertCommand,
+                        const WriteConcernOptions& wc,
+                        boost::optional<OID>) override {
         MONGO_UNREACHABLE;
     }
 
-    Status insertTimeseries(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                            const NamespaceString& ns,
-                            std::unique_ptr<write_ops::InsertCommandRequest> insertCommand,
-                            const WriteConcernOptions& wc,
-                            boost::optional<OID> targetEpoch) override {
+    InsertResult insertTimeseries(const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                                  const NamespaceString& ns,
+                                  std::unique_ptr<write_ops::InsertCommandRequest> insertCommand,
+                                  const WriteConcernOptions& wc,
+                                  boost::optional<OID> targetEpoch) override {
         MONGO_UNREACHABLE;
     }
 
@@ -239,9 +240,7 @@ public:
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
         std::unique_ptr<Pipeline> pipeline,
         bool attachCursorAfterOptimizing,
-        std::function<void(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                           Pipeline* pipeline,
-                           CollectionMetadata collData)> finalizePipeline = nullptr,
+        std::function<void(Pipeline* pipeline)> optimizePipeline = nullptr,
         ShardTargetingPolicy shardTargetingPolicy = ShardTargetingPolicy::kAllowed,
         boost::optional<BSONObj> readConcern = boost::none,
         bool shouldUseCollectionDefaultCollator = false) override {
@@ -266,16 +265,24 @@ public:
         MONGO_UNREACHABLE;
     }
 
-    BSONObj preparePipelineAndExplain(std::unique_ptr<Pipeline> pipeline,
-                                      ExplainOptions::Verbosity verbosity) override {
+    BSONObj finalizePipelineAndExplain(
+        std::unique_ptr<Pipeline> pipeline,
+        ExplainOptions::Verbosity verbosity,
+        std::function<void(Pipeline* pipeline)> optimizePipeline = nullptr) override {
+        MONGO_UNREACHABLE;
+    }
+
+    std::unique_ptr<Pipeline> attachCursorSourceToPipelineForLocalReadWithCatalog(
+        std::unique_ptr<Pipeline> pipeline,
+        const MultipleCollectionAccessor& collections,
+        const boost::intrusive_ptr<CatalogResourceHandle>& catalogResourceHandle) override {
         MONGO_UNREACHABLE;
     }
 
     std::unique_ptr<Pipeline> attachCursorSourceToPipelineForLocalRead(
         std::unique_ptr<Pipeline> pipeline,
         boost::optional<const AggregateCommandRequest&> aggRequest = boost::none,
-        bool shouldUseCollectionDefaultCollator = false,
-        ExecShardFilterPolicy shardFilterPolicy = AutomaticShardFiltering{}) override {
+        bool shouldUseCollectionDefaultCollator = false) override {
         MONGO_UNREACHABLE;
     }
 
@@ -283,12 +290,9 @@ public:
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
         std::unique_ptr<Pipeline> pipeline,
         bool attachCursorAfterOptimizing,
-        std::function<void(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                           Pipeline* pipeline,
-                           CollectionMetadata collData)> finalizePipeline = nullptr,
+        std::function<void(Pipeline* pipeline)> optimizePipeline = nullptr,
         bool shouldUseCollectionDefaultCollator = false,
-        boost::optional<const AggregateCommandRequest&> aggRequest = boost::none,
-        ExecShardFilterPolicy shardFilterPolicy = AutomaticShardFiltering{}) override {
+        boost::optional<const AggregateCommandRequest&> aggRequest = boost::none) override {
         MONGO_UNREACHABLE;
     }
 
@@ -402,16 +406,16 @@ public:
         return {*fieldPaths, targetCollectionPlacementVersion, SupportingUniqueIndex::Full};
     }
 
-    std::unique_ptr<ScopedExpectUnshardedCollection> expectUnshardedCollectionInScope(
+    std::unique_ptr<ScopedExpectUntrackedCollection> expectUntrackedCollectionInScope(
         OperationContext* opCtx,
         const NamespaceString& nss,
         const boost::optional<DatabaseVersion>& dbVersion) override {
-        class ScopedExpectUnshardedCollectionNoop : public ScopedExpectUnshardedCollection {
+        class ScopedExpectUntrackedCollectionNoop : public ScopedExpectUntrackedCollection {
         public:
-            ScopedExpectUnshardedCollectionNoop() = default;
+            ScopedExpectUntrackedCollectionNoop() = default;
         };
 
-        return std::make_unique<ScopedExpectUnshardedCollectionNoop>();
+        return std::make_unique<ScopedExpectUntrackedCollectionNoop>();
     }
 
     std::unique_ptr<SpillTable> createSpillTable(

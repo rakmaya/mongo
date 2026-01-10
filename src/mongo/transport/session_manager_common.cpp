@@ -37,8 +37,11 @@
 
 #include "mongo/db/auth/restriction_environment.h"
 #include "mongo/db/multitenancy_gen.h"
+#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/logv2/log.h"
+#include "mongo/otel/metrics/metric_unit.h"
+#include "mongo/otel/metrics/metrics_service.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/mutex.h"
@@ -55,6 +58,8 @@
 namespace mongo::transport {
 namespace {
 
+MONGO_FAIL_POINT_DEFINE(rejectNewNonPriorityConnections);
+
 thread_local decltype(ServerGlobalParams::maxIncomingConnsOverride)::Snapshot
     maxIncomingConnsOverride;
 
@@ -65,7 +70,8 @@ struct ClientSummary {
           remote(c->session()->remote()),
           sourceClient(c->session()->getSourceRemoteEndpoint()),
           id(c->session()->id()),
-          isLoadBalanced(c->session()->isConnectedToLoadBalancerPort()) {}
+          isLoadBalanced(c->session()->isConnectedToLoadBalancerPort()),
+          isMaintenance(c->session()->isConnectedToMaintenancePort()) {}
 
     friend logv2::DynamicAttributes logAttrs(const ClientSummary& m) {
         logv2::DynamicAttributes attrs;
@@ -73,6 +79,9 @@ struct ClientSummary {
         attrs.add("isLoadBalanced", m.isLoadBalanced);
         if (m.isLoadBalanced) {
             attrs.add("sourceClient", m.sourceClient);
+        }
+        if (gFeatureFlagDedicatedPortForMaintenanceOperations.isEnabled()) {
+            attrs.add("isMaintenance", m.isMaintenance);
         }
         attrs.add("uuid", m.uuid);
         attrs.add("connectionId", m.id);
@@ -85,6 +94,7 @@ struct ClientSummary {
     HostAndPort sourceClient;
     SessionId id;
     bool isLoadBalanced;
+    bool isMaintenance;
 };
 
 bool quiet() {
@@ -260,7 +270,12 @@ SessionManagerCommon::SessionManagerCommon(
     : _svcCtx(svcCtx),
       _maxOpenSessions(getSupportedMax()),
       _sessions(std::make_unique<Sessions>()),
-      _observers(std::move(observers)) {}
+      _observers(std::move(observers)) {
+    _connectionsProcessedCounter = otel::metrics::MetricsService::get(_svcCtx).createInt64Counter(
+        otel::metrics::MetricNames::kConnectionsProcessed,
+        "Total number of ingress connections processed (accepted or rejected)",
+        otel::metrics::MetricUnit::kConnections);
+}
 
 SessionManagerCommon::~SessionManagerCommon() = default;
 
@@ -268,9 +283,11 @@ void SessionManagerCommon::startSession(std::shared_ptr<Session> session) {
     invariant(session);
     IngressHandshakeMetrics::get(*session).onSessionStarted(_svcCtx->getTickSource());
 
+    _connectionsProcessedCounter->add(1);
+
     serverGlobalParams.maxIncomingConnsOverride.refreshSnapshot(maxIncomingConnsOverride);
-    const bool isPrivilegedSession =
-        maxIncomingConnsOverride && session->isExemptedByCIDRList(*maxIncomingConnsOverride);
+    const bool isPrivilegedSession = session->isConnectedToMaintenancePort() ||
+        (maxIncomingConnsOverride && session->isExemptedByCIDRList(*maxIncomingConnsOverride));
     const bool verbose = !quiet();
 
     auto service = _svcCtx->getService();
@@ -281,7 +298,9 @@ void SessionManagerCommon::startSession(std::shared_ptr<Session> session) {
     std::shared_ptr<transport::SessionWorkflow> workflow;
     {
         auto sync = _sessions->sync();
-        if (sync.size() >= _maxOpenSessions && !isPrivilegedSession) {
+        if ((sync.size() >= _maxOpenSessions ||
+             MONGO_unlikely(rejectNewNonPriorityConnections.shouldFail())) &&
+            !isPrivilegedSession) {
             _sessions->incrementRejected();
             if (verbose) {
                 ClientSummary cs(client);

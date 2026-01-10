@@ -27,13 +27,11 @@
  *    it in the license file.
  */
 
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/client/read_preference.h"
@@ -41,12 +39,12 @@
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/database_name.h"
-#include "mongo/db/global_catalog/router_role_api/cluster_commands_helpers.h"
-#include "mongo/db/global_catalog/router_role_api/router_role.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/pipeline/legacy_runtime_constants_gen.h"
+#include "mongo/db/router_role/cluster_commands_helpers.h"
+#include "mongo/db/router_role/router_role.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/ddl/create_indexes_gen.h"
 #include "mongo/db/sharding_environment/client/shard.h"
 #include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/db/timeseries/timeseries_commands_conversion_helper.h"
@@ -58,11 +56,7 @@
 
 #include <vector>
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
-
 
 namespace mongo {
 namespace {
@@ -105,9 +99,9 @@ public:
              BSONObjBuilder& output) override {
         const NamespaceString nss(parseNs(dbName, providedCmdObj));
 
-        sharding::router::CollectionRouter router{opCtx->getServiceContext(), nss};
+        sharding::router::CollectionRouter router(opCtx, nss);
         return router.routeWithRoutingContext(
-            opCtx, getName(), [&](OperationContext* opCtx, RoutingContext& unusedRoutingCtx) {
+            getName(), [&](OperationContext* opCtx, RoutingContext& unusedRoutingCtx) {
                 // The CollectionRouter is not capable of implicitly translate the namespace
                 // to a timeseries buckets collection, which is required in this command.
                 // Hence, we'll use the CollectionRouter to handle StaleConfig errors but

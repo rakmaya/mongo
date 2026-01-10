@@ -32,9 +32,6 @@
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobj.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/db_raii.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/profile_settings.h"
@@ -43,6 +40,9 @@
 #include "mongo/db/query/plan_yield_policy.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/server_options.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/db_raii.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/net/socket_utils.h"
 #include "mongo/util/str.h"
@@ -72,7 +72,7 @@ OplogIteratorLocal::OplogIteratorLocal(OperationContext* opCtx)
     : _oplogRead(acquireCollectionMaybeLockFree(
           opCtx,
           CollectionAcquisitionRequest(NamespaceString::kRsOplogNamespace,
-                                       PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                       PlacementConcern(boost::none, ShardVersion::UNTRACKED()),
                                        repl::ReadConcernArgs::get(opCtx),
                                        AcquisitionPrerequisites::kRead))),
       _tracker(opCtx,

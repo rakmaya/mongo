@@ -35,20 +35,16 @@
 #include <iterator>
 #include <limits>
 #include <numeric>
-#include <ostream>
 #include <string>
 #include <tuple>
 #include <utility>
 
-#include <boost/smart_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <fmt/format.h>
 #include <fmt/printf.h>  // IWYU pragma: keep
 // IWYU pragma: no_include "format.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
@@ -70,11 +66,8 @@
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/collation/collator_interface_mock.h"
 #include "mongo/db/query/compiler/physical_model/query_solution/query_solution.h"
-#include "mongo/db/query/shard_filterer_factory_interface.h"
-#include "mongo/db/query/stage_builder/sbe/builder.h"
 #include "mongo/db/query/stage_builder/sbe/gen_accumulator.h"
 #include "mongo/db/query/stage_builder/sbe/tests/sbe_builder_test_fixture.h"
-#include "mongo/db/storage/key_string/key_string.h"
 #include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/logv2/log.h"
 #include "mongo/platform/decimal128.h"
@@ -99,7 +92,7 @@ protected:
         auto docSrcGrp = DocumentSourceGroup::createFromBson(specElement, expCtx);
         // $group may end up being incompatible with SBE after optimize(). We call 'optimize()' to
         // reveal such cases.
-        docSrcGrp->optimize();
+        checked_cast<DocumentSourceGroup*>(docSrcGrp.get())->optimize();
 
         return docSrcGrp;
     }
@@ -305,7 +298,8 @@ protected:
             } catch (const DBException& e) {
                 // The accumulator or the _id expression is unsupported in SBE, so we expect that
                 // the sbeCompatible flag should be false.
-                ASSERT(e.code() == 5754701 || e.code() == 8679702) << "group spec: " << groupSpec;
+                ASSERT(e.code() == 5754701 || e.code() == 8679702 || e.code() == 8751302)
+                    << "group spec: " << groupSpec;
                 sbeGroupCompatible = false;
                 break;
             }
@@ -2329,7 +2323,7 @@ public:
                  _expCtx,
                  false /* needsMerge */,
                  false /* allowDiskUse */,
-                 _expCtx->getIfrContext()} {}
+                 *_expCtx->getIfrContext()} {}
 
     AccumulationStatement makeAccumulationStatement(StringData accumName) {
         return makeAccumulationStatement(BSON("unused" << BSON(accumName << "unused")));
@@ -2550,7 +2544,7 @@ public:
             bsonElt = sbe::bson::advance(bsonElt, fieldName.size());
         }
 
-        return _aggAccessor.copyOrMoveValue();
+        return _aggAccessor.copyOrMoveValue().releaseToRaw();
     }
 
     /**
@@ -3138,8 +3132,7 @@ TEST_F(SbeStageBuilderGroupAggCombinerTest, CombinePartialAggsDoubleDoubleSumLar
 
     // Feed the result back into the input accessor. We finalize the resulting aggregate in order
     // to make sure that the resulting sum is mathematically correct.
-    auto [resTag, resVal] = _aggAccessor.copyOrMoveValue();
-    _inputAccessor.reset(true, resTag, resVal);
+    _inputAccessor.reset(_aggAccessor.copyOrMoveValue());
     auto finalizeExpr =
         sbe::makeFunction("doubleDoubleSumFinalize", sbe::makeVariable(_inputSlotId.getId()));
     auto finalizeCode = compileExpression(*finalizeExpr);
@@ -3197,8 +3190,7 @@ TEST_F(SbeStageBuilderGroupAggCombinerTest, CombinePartialAggsStdDevPop) {
     aggregateAndAssertResults(inputTag, inputVal, expectedTag, expectedVal, compiledExpr.get());
 
     // Feed the result back into the input accessor.
-    auto [resTag, resVal] = _aggAccessor.copyOrMoveValue();
-    _inputAccessor.reset(true, resTag, resVal);
+    _inputAccessor.reset(_aggAccessor.copyOrMoveValue());
     auto finalizeExpr =
         sbe::makeFunction("stdDevPopFinalize", sbe::makeVariable(_inputSlotId.getId()));
     auto finalizeCode = compileExpression(*finalizeExpr);
@@ -3223,8 +3215,7 @@ TEST_F(SbeStageBuilderGroupAggCombinerTest, CombinePartialAggsStdDevSamp) {
     aggregateAndAssertResults(inputTag, inputVal, expectedTag, expectedVal, compiledExpr.get());
 
     // Feed the result back into the input accessor.
-    auto [resTag, resVal] = _aggAccessor.copyOrMoveValue();
-    _inputAccessor.reset(true, resTag, resVal);
+    _inputAccessor.reset(_aggAccessor.copyOrMoveValue());
     auto finalizeExpr =
         sbe::makeFunction("stdDevSampFinalize", sbe::makeVariable(_inputSlotId.getId()));
     auto finalizeCode = compileExpression(*finalizeExpr);

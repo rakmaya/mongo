@@ -55,24 +55,14 @@ public:
     std::unique_ptr<sdk::LogicalAggStage> bind() const override {
         MONGO_UNIMPLEMENTED;
     }
+
+    std::unique_ptr<sdk::AggStageAstNode> clone() const override {
+        MONGO_UNIMPLEMENTED;
+    }
+
     static inline std::unique_ptr<sdk::AggStageAstNode> make() {
         return std::make_unique<NoOpExtensionAstNode>();
     }
-};
-
-class HostAstNodeVTableTest : public unittest::Test {
-public:
-    // This special handle class is only used within this fixture so that we can unit test the
-    // assertVTableConstraints functionality of the handle.
-    class TestHostAstNodeVTableHandle : public AggStageAstNodeHandle {
-    public:
-        TestHostAstNodeVTableHandle(absl::Nonnull<::MongoExtensionAggStageAstNode*> astNode)
-            : AggStageAstNodeHandle(astNode) {};
-
-        void assertVTableConstraints(const VTable_t& vtable) {
-            _assertVTableConstraints(vtable);
-        }
-    };
 };
 
 TEST(HostAstNodeTest, GetSpec) {
@@ -81,22 +71,24 @@ TEST(HostAstNodeTest, GetSpec) {
     // Get BSON spec directly, build a LiteParsed that holds the spec.
     auto astNode = host::AggStageAstNode{
         std::make_unique<mongo::DocumentSourceInternalSearchIdLookUp::LiteParsed>(
-            "$_internalSearchIdLookup", spec.getOwned())};
+            spec.firstElement(), spec.getOwned())};
     ASSERT_TRUE(astNode.getIdLookupSpec().binaryEqual(spec));
 
     // Get BSON spec through handle.
     auto noOpAstNode = new host::HostAggStageAstNode(NoOpHostAstNode::make(
         std::make_unique<mongo::DocumentSourceInternalSearchIdLookUp::LiteParsed>(
-            "$_internalSearchIdLookup", spec.getOwned())));
+            spec.firstElement(), spec.getOwned())));
     auto handle = AggStageAstNodeHandle{noOpAstNode};
     ASSERT_TRUE(
         static_cast<host::HostAggStageAstNode*>(handle.get())->getIdLookupSpec().binaryEqual(spec));
 }
 
 TEST(HostAstNodeTest, IsHostAllocated) {
+    auto spec = BSON("$_internalSearchIdLookup" << BSONObj());
+
     auto noOpAstNode = new host::HostAggStageAstNode(NoOpHostAstNode::make(
         std::make_unique<mongo::DocumentSourceInternalSearchIdLookUp::LiteParsed>(
-            "$_internalSearchIdLookup", BSONObj())));
+            spec.firstElement(), spec)));
     auto handle = AggStageAstNodeHandle{noOpAstNode};
 
     ASSERT_TRUE(host::HostAggStageAstNode::isHostAllocated(*handle.get()));
@@ -109,33 +101,138 @@ TEST(HostAstNodeTest, IsNotHostAllocated) {
     ASSERT_FALSE(host::HostAggStageAstNode::isHostAllocated(*handle.get()));
 }
 
-DEATH_TEST_F(HostAstNodeVTableTest, InvalidAstNodeVTableFailsGetName, "11217601") {
+DEATH_TEST(HostAstNodeVTableTestDeathTest, InvalidAstNodeVTableFailsGetName, "11217601") {
     auto noOpAstNode = std::make_unique<host::HostAggStageAstNode>(NoOpHostAstNode::make({}));
-    auto handle = TestHostAstNodeVTableHandle{noOpAstNode.release()};
+    auto handle = AggStageAstNodeHandle{noOpAstNode.release()};
 
-    auto vtable = handle.vtable();
+    auto vtable = handle->vtable();
     vtable.get_name = nullptr;
-    handle.assertVTableConstraints(vtable);
+    AggStageAstNodeAPI::assertVTableConstraints(vtable);
 }
 
-DEATH_TEST_F(HostAstNodeVTableTest, InvalidAstNodeVTableFailsBind, "11113700") {
+DEATH_TEST(HostAstNodeVTableTestDeathTest, InvalidAstNodeVTableFailsGetProperties, "11347800") {
+    auto noOpAstNode = std::make_unique<host::HostAggStageAstNode>(NoOpHostAstNode::make({}));
+    auto handle = AggStageAstNodeHandle{noOpAstNode.release()};
+
+    auto vtable = handle->vtable();
+    vtable.get_properties = nullptr;
+    AggStageAstNodeAPI::assertVTableConstraints(vtable);
+}
+
+DEATH_TEST(HostAstNodeVTableTestDeathTest, InvalidAstNodeVTableFailsBind, "11113700") {
+    auto spec = BSON("$_internalSearchIdLookup" << BSONObj());
+
     auto noOpAstNode = new host::HostAggStageAstNode(NoOpHostAstNode::make(
         std::make_unique<mongo::DocumentSourceInternalSearchIdLookUp::LiteParsed>(
-            "$_internalSearchIdLookup", BSONObj())));
-    auto handle = TestHostAstNodeVTableHandle{noOpAstNode};
+            spec.firstElement(), spec)));
+    auto handle = AggStageAstNodeHandle{noOpAstNode};
 
-    auto vtable = handle.vtable();
+    auto vtable = handle->vtable();
     vtable.bind = nullptr;
-    handle.assertVTableConstraints(vtable);
+    AggStageAstNodeAPI::assertVTableConstraints(vtable);
 }
 
+DEATH_TEST(HostAstNodeTestDeathTest, HostGetPropertiesUnimplemented, "11347801") {
+    auto noOpAstNode = new host::HostAggStageAstNode(NoOpHostAstNode::make({}));
+    auto handle = AggStageAstNodeHandle{noOpAstNode};
 
-DEATH_TEST(HostAstNodeTest, HostBindUnimplemented, "11133600") {
+    ::MongoExtensionByteBuf** buf = nullptr;
+    handle->vtable().get_properties(noOpAstNode, buf);
+}
+
+DEATH_TEST(HostAstNodeTestDeathTest, HostBindUnimplemented, "11133600") {
     auto noOpAstNode = new host::HostAggStageAstNode(NoOpHostAstNode::make({}));
     auto handle = AggStageAstNodeHandle{noOpAstNode};
 
     ::MongoExtensionLogicalAggStage** bind = nullptr;
-    handle.vtable().bind(noOpAstNode, bind);
+    handle->vtable().bind(noOpAstNode, bind);
+}
+
+TEST(HostAstNodeCloneTest, CloneHostAllocatedAstNodePreservesSpec) {
+    auto spec = BSON("$_internalSearchIdLookup" << BSONObj());
+
+    auto astNode = new host::HostAggStageAstNode(NoOpHostAstNode::make(
+        std::make_unique<mongo::DocumentSourceInternalSearchIdLookUp::LiteParsed>(
+            spec.firstElement(), spec.getOwned())));
+    auto handle = AggStageAstNodeHandle{astNode};
+
+    // Clone the AST node.
+    auto clonedHandle = handle->clone();
+
+    // Verify the clone has the same spec and name.
+    ASSERT_TRUE(host::HostAggStageAstNode::isHostAllocated(*clonedHandle.get()));
+    ASSERT_TRUE(static_cast<host::HostAggStageAstNode*>(clonedHandle.get())
+                    ->getIdLookupSpec()
+                    .binaryEqual(spec));
+    ASSERT_EQ(handle->getName(), clonedHandle->getName());
+}
+
+TEST(HostAstNodeCloneTest, CloneHostAllocatedAstNodeIsIndependent) {
+    auto spec = BSON("$_internalSearchIdLookup" << BSONObj());
+
+    auto astNode = new host::HostAggStageAstNode(NoOpHostAstNode::make(
+        std::make_unique<mongo::DocumentSourceInternalSearchIdLookUp::LiteParsed>(
+            spec.firstElement(), spec.getOwned())));
+    auto handle = AggStageAstNodeHandle{astNode};
+
+    // Clone the AST node.
+    auto clonedHandle = handle->clone();
+
+    // Verify they are different objects (different pointers).
+    ASSERT_NE(handle.get(), clonedHandle.get());
+
+    // Both should be valid handles.
+    ASSERT_TRUE(handle.isValid());
+    ASSERT_TRUE(clonedHandle.isValid());
+}
+
+TEST(HostAstNodeCloneTest, ClonedAstNodeSurvivesOriginalDestruction) {
+    auto spec = BSON("$_internalSearchIdLookup" << BSONObj());
+    AggStageAstNodeHandle clonedHandle{nullptr};
+
+    {
+        auto astNode = new host::HostAggStageAstNode(NoOpHostAstNode::make(
+            std::make_unique<mongo::DocumentSourceInternalSearchIdLookUp::LiteParsed>(
+                spec.firstElement(), spec.getOwned())));
+        auto handle = AggStageAstNodeHandle{astNode};
+
+        // Clone before original goes out of scope.
+        clonedHandle = handle->clone();
+    }
+
+    // Cloned handle should still be valid and contain the correct spec.
+    ASSERT_TRUE(clonedHandle.isValid());
+    ASSERT_TRUE(host::HostAggStageAstNode::isHostAllocated(*clonedHandle.get()));
+    ASSERT_TRUE(static_cast<host::HostAggStageAstNode*>(clonedHandle.get())
+                    ->getIdLookupSpec()
+                    .binaryEqual(spec));
+}
+
+TEST(HostAstNodeCloneTest, MultipleCloneAreIndependent) {
+    auto spec = BSON("$_internalSearchIdLookup" << BSONObj());
+
+    auto astNode = new host::HostAggStageAstNode(NoOpHostAstNode::make(
+        std::make_unique<mongo::DocumentSourceInternalSearchIdLookUp::LiteParsed>(
+            spec.firstElement(), spec.getOwned())));
+    auto handle = AggStageAstNodeHandle{astNode};
+
+    // Create multiple clones.
+    auto clone1 = handle->clone();
+    auto clone2 = handle->clone();
+    auto clone3 = clone1->clone();
+
+    // All four should be different objects.
+    ASSERT_NE(handle.get(), clone1.get());
+    ASSERT_NE(handle.get(), clone2.get());
+    ASSERT_NE(handle.get(), clone3.get());
+    ASSERT_NE(clone1.get(), clone2.get());
+    ASSERT_NE(clone1.get(), clone3.get());
+    ASSERT_NE(clone2.get(), clone3.get());
+
+    // All should have same name.
+    ASSERT_EQ(handle->getName(), clone1->getName());
+    ASSERT_EQ(handle->getName(), clone2->getName());
+    ASSERT_EQ(handle->getName(), clone3->getName());
 }
 
 }  // namespace

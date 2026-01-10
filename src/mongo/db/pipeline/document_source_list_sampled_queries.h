@@ -78,20 +78,22 @@ struct ListSampledQueriesSharedState {
     std::unique_ptr<exec::agg::Pipeline> execPipeline;
 };
 
+DECLARE_STAGE_PARAMS_DERIVED_DEFAULT(ListSampledQueries);
+
 class DocumentSourceListSampledQueries final : public DocumentSource {
 public:
     static constexpr StringData kStageName = "$listSampledQueries"_sd;
 
-    class LiteParsed final : public LiteParsedDocumentSource {
+    class LiteParsed final : public LiteParsedDocumentSourceDefault<LiteParsed> {
     public:
         static std::unique_ptr<LiteParsed> parse(const NamespaceString& nss,
                                                  const BSONElement& specElem,
                                                  const LiteParserOptions& options);
 
-        explicit LiteParsed(std::string parseTimeName,
-                            NamespaceString nss,
-                            DocumentSourceListSampledQueriesSpec spec)
-            : LiteParsedDocumentSource(std::move(parseTimeName)),
+        LiteParsed(const BSONElement& specElem,
+                   NamespaceString nss,
+                   DocumentSourceListSampledQueriesSpec spec)
+            : LiteParsedDocumentSourceDefault(specElem),
               _nss(std::move(nss)),
               _privileges({Privilege(ResourcePattern::forClusterResource(_nss.tenantId()),
                                      ActionType::listSampledQueries)}) {}
@@ -107,6 +109,10 @@ public:
 
         bool isInitialSource() const final {
             return true;
+        }
+
+        std::unique_ptr<StageParams> getStageParams() const final {
+            return std::make_unique<ListSampledQueriesStageParams>(_originalBson);
         }
 
         void assertSupportsMultiDocumentTransaction() const override {

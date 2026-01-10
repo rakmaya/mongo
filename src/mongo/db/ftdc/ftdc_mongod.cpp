@@ -45,6 +45,7 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/replication_coordinator.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/sharding_environment/sharding_feature_flags_gen.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/db/topology/cluster_role.h"
@@ -89,6 +90,12 @@ public:
 
     void collect(OperationContext* opCtx, BSONObjBuilder& builder) override {
         std::vector<std::string> namespaces = gDiagnosticDataCollectionStatsNamespaces.get();
+
+        auto ru = shard_role_details::getRecoveryUnit(opCtx);
+        if (ru) {
+            // Prevent FTDC from getting blocked on cache eviction.
+            ru->optOutOfCacheEviction();
+        }
 
         for (const auto& nsStr : namespaces) {
 

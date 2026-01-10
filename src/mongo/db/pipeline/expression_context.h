@@ -43,11 +43,13 @@
 #include "mongo/db/pipeline/document_source_change_stream_gen.h"
 #include "mongo/db/pipeline/javascript_execution.h"
 #include "mongo/db/pipeline/legacy_runtime_constants_gen.h"
+#include "mongo/db/pipeline/lite_parsed_document_source.h"
 #include "mongo/db/pipeline/process_interface/mongo_process_interface.h"
 #include "mongo/db/pipeline/resume_token.h"
 #include "mongo/db/pipeline/variables.h"
 #include "mongo/db/query/collation/collation_spec.h"
 #include "mongo/db/query/collation/collator_interface.h"
+#include "mongo/db/query/compiler/metadata/path_arrayness.h"
 #include "mongo/db/query/datetime/date_time_support.h"
 #include "mongo/db/query/explain_options.h"
 #include "mongo/db/query/query_feature_flags_gen.h"
@@ -61,6 +63,7 @@
 #include "mongo/scripting/engine.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/intrusive_counter.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/serialization_context.h"
 #include "mongo/util/str.h"
 #include "mongo/util/uuid.h"
@@ -110,7 +113,7 @@ enum class MergeType {
 
 std::ostream& operator<<(std::ostream& os, SbeCompatibility sbeCompat);
 
-struct ResolvedNamespace {
+struct MONGO_MOD_PUBLIC ResolvedNamespace {
     ResolvedNamespace() = default;
     ResolvedNamespace(NamespaceString ns,
                       std::vector<BSONObj> pipeline,
@@ -127,11 +130,12 @@ struct ResolvedNamespace {
     // LiteParsedPipeline object when it's already being stored here.
 };
 
-using ResolvedNamespaceMap = absl::flat_hash_map<NamespaceString, ResolvedNamespace>;
+using ResolvedNamespaceMap MONGO_MOD_PUBLIC =
+    absl::flat_hash_map<NamespaceString, ResolvedNamespace>;
 
-enum class ExpressionContextCollationMatchesDefault { kYes, kNo };
+enum class MONGO_MOD_PUBLIC ExpressionContextCollationMatchesDefault { kYes, kNo };
 
-class ExpressionContext : public RefCountable {
+class MONGO_MOD_PUBLIC ExpressionContext : public RefCountable {
 public:
     /**
      * An RAII type that will temporarily change the ExpressionContext's collator. Resets the
@@ -526,11 +530,7 @@ public:
         return _params.vCtx;
     }
 
-    IncrementalFeatureRolloutContext& getIfrContext() {
-        return _params.ifrContext;
-    }
-
-    const IncrementalFeatureRolloutContext& getIfrContext() const {
+    std::shared_ptr<IncrementalFeatureRolloutContext> getIfrContext() const {
         return _params.ifrContext;
     }
 
@@ -706,14 +706,6 @@ public:
         _params.isParsingViewDefinition = isParsingViewDefinition;
     }
 
-    bool getIsParsingPipelineUpdate() const {
-        return _params.isParsingPipelineUpdate;
-    }
-
-    void setIsParsingPipelineUpdate(bool isParsingPipelineUpdate) {
-        _params.isParsingPipelineUpdate = isParsingPipelineUpdate;
-    }
-
     bool getIsParsingCollectionValidator() const {
         return _params.isParsingCollectionValidator;
     }
@@ -764,7 +756,8 @@ public:
 
     // Should only be used to test parsing with the flag. Otherwise, this flag should only be set
     // when creating a new ExpressionContext.
-    bool setAllowGenericForeignDbLookup_forTest(bool allowGenericForeignDbLookup) {
+    MONGO_MOD_NEEDS_REPLACEMENT bool setAllowGenericForeignDbLookup_forTest(
+        bool allowGenericForeignDbLookup) {
         return _params.allowGenericForeignDbLookup = allowGenericForeignDbLookup;
     }
 
@@ -880,7 +873,7 @@ public:
         _params.tailableMode = tailableMode;
     }
 
-    const boost::optional<std::pair<NamespaceString, std::vector<BSONObj>>>& getView() const {
+    const boost::optional<ViewInfo>& getView() const {
         return _params.view;
     }
 
@@ -889,7 +882,7 @@ public:
             VersionContext::getDecoration(getOperationContext()));
     }
 
-    void setView(boost::optional<std::pair<NamespaceString, std::vector<BSONObj>>> view) {
+    void setView(boost::optional<ViewInfo> view) {
         _params.view = std::move(view);
     }
 
@@ -1016,6 +1009,27 @@ public:
         return _featureFlagMqlJsEngineGap.get(VersionContext::getDecoration(getOperationContext()));
     }
 
+    const PathArrayness& getMainCollPathArrayness() const {
+        // mainCollPathArrayness will be unset in cases where we do not do a collection acquisition,
+        // e.g. if running on a 'mongos'. In this case, we return an empty instance of
+        // 'PathArrayness' that denotes all paths as arrays.
+        if (!_params.mainCollPathArrayness) {
+            return PathArrayness::emptyPathArrayness();
+        }
+        return *_params.mainCollPathArrayness;
+    }
+
+    const PathArrayness& getSecondaryCollPathArrayness(const NamespaceString& nss) const {
+        auto it = _params.secondaryCollsPathArrayness.find(nss);
+        // If we do not find a PathArrayness mapped to the secondary namespace we return a
+        // conservative guarantee. This could happen if running on a 'mongos'.
+        if (it == _params.secondaryCollsPathArrayness.end()) {
+            return PathArrayness::emptyPathArrayness();
+        }
+        tassert(11344300, "PathArrayness should not be a nullptr", it->second);
+        return *it->second;
+    }
+
 protected:
     struct ExpressionContextParams {
         OperationContext* opCtx = nullptr;
@@ -1024,13 +1038,15 @@ protected:
         // for different flags. For most operations, this is expected to be initialized by acquiring
         // an FCV snapshot during initialization. There are some cases where a VersionContext is
         // already present on the OperationContext, but this is limited to distributed DDL
-        // operations until SPM-4227. It is also possible that the FCV has not yet been established
-        // (for example at startup), in which case VersionContext will be uninitialized (see
-        // VersionContext::isInitialized()).
+        // operations until SPM-4227.
         // TODO SERVER-111234 We should probably swap this out for an FCVSnapshot until we implement
         // SPM-4227.
         VersionContext vCtx;
-        IncrementalFeatureRolloutContext ifrContext;
+        // Shared by the root ExpressionContext for an aggregation and any child ExpressionContexts
+        // that are created, for example, as part of sub-pipeline execution. A default value is set
+        // in the ExpressionContext constructor for code paths that don't go through run_aggregate
+        // or cluster_aggregate.
+        std::shared_ptr<IncrementalFeatureRolloutContext> ifrContext = nullptr;
         std::unique_ptr<CollatorInterface> collator = nullptr;
         // An interface for accessing information or performing operations that have different
         // implementations on mongod and mongos, or that only make sense on one of the two.
@@ -1052,10 +1068,11 @@ protected:
         boost::optional<LegacyRuntimeConstants> runtimeConstants = boost::none;
         boost::optional<BSONObj> letParameters = boost::none;
 
-        // The *view's* namespace with the view's effective pipeline. Note that this is different
-        // than ResolvedNamespace as that holds the *underlying collections's* namespace with the
-        // view's effective pipeline.
-        boost::optional<std::pair<NamespaceString, std::vector<BSONObj>>> view = boost::none;
+        // The *view's* namespace with the view's unresolved nss, view's resolved (underlying
+        // collection) nss, and the a vector of LiteParsedDocumentSources.
+        // TODO SERVER-115590: Remove view information from the expression context.
+        boost::optional<ViewInfo> view = boost::none;
+
         // Defaults to empty to prevent external sorting in mongos.
         boost::filesystem::path tmpDir;
         // Tracks whether the collator to use for the aggregation matches the default collation of
@@ -1119,8 +1136,6 @@ protected:
         bool inUnionWith = false;
         // True if this ExpressionContext is used to parse a view definition pipeline.
         bool isParsingViewDefinition = false;
-        // True if this ExpressionContext is being used to parse an update pipeline.
-        bool isParsingPipelineUpdate = false;
         // True if this ExpressionContext is used to parse a collection validator expression.
         bool isParsingCollectionValidator = false;
         // These fields can be used in a context when API version validations were not enforced
@@ -1159,6 +1174,12 @@ protected:
 
         // Indicates that the query is replanned after being rate-limited.
         bool wasRateLimited = false;
+
+        // The PathArrayness information for the main collection. This may remain unset if a
+        // collection acquisition is not possible, e.g. when running on mongos.
+        std::shared_ptr<const PathArrayness> mainCollPathArrayness = nullptr;
+        stdx::unordered_map<NamespaceString, std::shared_ptr<const PathArrayness>>
+            secondaryCollsPathArrayness;
     };
 
     ExpressionContextParams _params;
@@ -1194,12 +1215,27 @@ protected:
     private:
         // Performs the heavy work of checking whether an interrupt has occurred. For performance
         // reasons, this should only be called every now and then.
-        void checkForInterruptSlow();
+        MONGO_COMPILER_ALWAYS_INLINE void checkForInterruptSlow() {
+            _tick = kInterruptCheckPeriod;
 
-        static constexpr int kInterruptCheckPeriod = 128;
+            OperationContext* opCtx = _expressionContext->getOperationContext();
+            invariant(opCtx);
+
+            opCtx->checkForInterrupt();
+            if (--_verySlowTick == 0) {
+                checkForInterruptVerySlow();
+            }
+        }
+
+        // Performs the work around checking for interrupt that can't be inlined.
+        void checkForInterruptVerySlow();
+
+        static constexpr int32_t kInterruptCheckPeriod = 128;
+        static constexpr int32_t kVerySlowInterruptCheckPeriod = 8;  // Runs every 1024 ticks
 
         ExpressionContext* _expressionContext;
-        int _tick = kInterruptCheckPeriod;
+        int32_t _tick = kInterruptCheckPeriod;
+        int32_t _verySlowTick = kVerySlowInterruptCheckPeriod;
     };
 
 

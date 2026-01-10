@@ -29,10 +29,14 @@
 
 #pragma once
 
+#include "mongo/util/modules.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <type_traits>
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 /**

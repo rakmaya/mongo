@@ -39,8 +39,9 @@
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/pipeline_factory.h"
 #include "mongo/db/query/stage_memory_limit_knobs/knobs.h"
+#include "mongo/db/shard_role/shard_catalog/raw_data_operation.h"
 #include "mongo/db/stats/counters.h"
-#include "mongo/db/views/resolved_view.h"
+#include "mongo/db/views/resolved_view.h"  // IWYU pragma: keep
 #include "mongo/logv2/log.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
@@ -291,7 +292,7 @@ void GraphLookUpStage::performSearch() {
         // sharded, throw a custom exception.
         if (auto staleInfo = ex.extraInfo<StaleConfigInfo>(); staleInfo &&
             staleInfo->getVersionWanted() &&
-            staleInfo->getVersionWanted() != ShardVersion::UNSHARDED()) {
+            staleInfo->getVersionWanted() != ShardVersion::UNTRACKED()) {
             uassert(3904801,
                     "Cannot run $graphLookup with a sharded foreign collection in a transaction",
                     foreignShardedGraphLookupAllowed());
@@ -319,14 +320,14 @@ void GraphLookUpStage::spillDuringVisitedUnwinding() {
 
 void GraphLookUpStage::doBreadthFirstSearch() {
     while (!_queue.empty()) {
-        std::unique_ptr<MongoProcessInterface::ScopedExpectUnshardedCollection>
-            expectUnshardedCollectionInScope;
+        std::unique_ptr<MongoProcessInterface::ScopedExpectUntrackedCollection>
+            expectUntrackedCollectionInScope;
 
         const auto allowForeignSharded = foreignShardedGraphLookupAllowed();
         if (!allowForeignSharded && !_fromExpCtx->getInRouter()) {
             // Enforce that the foreign collection must be unsharded for $graphLookup.
-            expectUnshardedCollectionInScope =
-                _fromExpCtx->getMongoProcessInterface()->expectUnshardedCollectionInScope(
+            expectUntrackedCollectionInScope =
+                _fromExpCtx->getMongoProcessInterface()->expectUntrackedCollectionInScope(
                     _fromExpCtx->getOperationContext(),
                     _fromExpCtx->getNamespaceString(),
                     boost::none);
@@ -547,35 +548,14 @@ std::unique_ptr<mongo::Pipeline> GraphLookUpStage::makePipeline(BSONObj match,
     // to the '_fromExpCtx' by copying them from the parent query ExpressionContext.
     _fromExpCtx->setQuerySettingsIfNotPresent(pExpCtx->getQuerySettings());
 
-    std::unique_ptr<mongo::Pipeline> pipeline = mongo::Pipeline::parse(_fromPipeline, _fromExpCtx);
-    _fromExpCtx->initializeReferencedSystemVariables();
-
-    const auto& finalizePipeline = [](const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                                      mongo::Pipeline* pipeline,
-                                      MongoProcessInterface::CollectionMetadata collData) {
-        tassert(10313400, "Expected pipeline to finalize", pipeline);
-        visit(OverloadedVisitor{
-                  [&](std::monostate) {},
-                  [&](std::reference_wrapper<const CollectionOrViewAcquisition> collOrView) {
-                      pipeline->validateWithCollectionMetadata(collOrView);
-                      pipeline->performPreOptimizationRewrites(expCtx, collOrView);
-                  },
-                  [&](std::reference_wrapper<const CollectionRoutingInfo> cri) {
-                      if (cri.get().hasRoutingTable()) {
-                          pipeline->validateWithCollectionMetadata(cri);
-                          pipeline->performPreOptimizationRewrites(expCtx, cri);
-                      }
-                  }},
-              collData);
-        pipeline_optimization::optimizePipeline(*pipeline);
-        pipeline->validateCommon(true /* alreadyOptimized */);
-    };
+    std::unique_ptr<mongo::Pipeline> pipeline = mongo::pipeline_factory::makePipeline(
+        _fromPipeline, _fromExpCtx, pipeline_factory::kOptionsMinimal);
     try {
         return pExpCtx->getMongoProcessInterface()->finalizeAndMaybePreparePipelineForExecution(
             _fromExpCtx,
             std::move(pipeline),
             true /* attachCursorAfterOptimizing */,
-            finalizePipeline,
+            pipeline_optimization::optimizeAndValidatePipeline,
             shardTargetingPolicy);
     } catch (const ExceptionFor<ErrorCodes::CommandOnShardedViewNotSupportedOnMongod>& e) {
         // This exception returns the information we need to resolve a sharded view. Update
@@ -584,9 +564,13 @@ std::unique_ptr<mongo::Pipeline> GraphLookUpStage::makePipeline(BSONObj match,
         pipeline_factory::MakePipelineOptions opts;
         opts.optimize = false;
         opts.attachCursorSource = false;
+        const std::vector<BSONObj>& resolvedPipe =
+            (e->timeseries() && isRawDataOperation(pExpCtx->getOperationContext()))
+            ? std::vector<BSONObj>{}
+            : e->getPipeline();
         pipeline = pipeline_factory::makePipelineFromViewDefinition(
             _fromExpCtx,
-            ResolvedNamespace{e->getNamespace(), e->getPipeline()},
+            ResolvedNamespace{e->getNamespace(), resolvedPipe},
             _fromPipeline,
             opts,
             _params.from);
@@ -597,7 +581,7 @@ std::unique_ptr<mongo::Pipeline> GraphLookUpStage::makePipeline(BSONObj match,
 
         // Update the expression context with any new namespaces the resolved pipeline has
         // introduced.
-        LiteParsedPipeline liteParsedPipeline(e->getNamespace(), e->getPipeline());
+        LiteParsedPipeline liteParsedPipeline(e->getNamespace(), resolvedPipe);
         _fromExpCtx = makeCopyFromExpressionContext(_fromExpCtx, e->getNamespace());
         _fromExpCtx->addResolvedNamespaces(liteParsedPipeline.getInvolvedNamespaces());
 
@@ -611,14 +595,14 @@ std::unique_ptr<mongo::Pipeline> GraphLookUpStage::makePipeline(BSONObj match,
                     "new_pipe"_attr = mongo::Pipeline::serializePipelineForLogging(_fromPipeline));
 
         // We can now safely optimize and reattempt attaching the cursor source.
-        pipeline = mongo::Pipeline::parse(_fromPipeline, _fromExpCtx);
-        _fromExpCtx->initializeReferencedSystemVariables();
+        pipeline = mongo::pipeline_factory::makePipeline(
+            _fromPipeline, _fromExpCtx, pipeline_factory::kOptionsMinimal);
 
         return pExpCtx->getMongoProcessInterface()->finalizeAndMaybePreparePipelineForExecution(
             _fromExpCtx,
             std::move(pipeline),
             true /* attachCursorAfterOptimizing */,
-            finalizePipeline,
+            pipeline_optimization::optimizeAndValidatePipeline,
             shardTargetingPolicy);
     }
 }

@@ -30,19 +30,20 @@
 #pragma once
 
 #include "mongo/bson/bsonobj.h"
-#include "mongo/db/local_catalog/collection.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/op_observer/op_observer_noop.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/optime.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/uuid.h"
 
 #include <cstdint>
 #include <vector>
 
-namespace mongo {
+namespace MONGO_MOD_PUBLIC mongo {
 
 /**
  * OpObserver for time-series collections. Notify the Bucket Catalog of events so it can update its
@@ -54,7 +55,6 @@ class TimeSeriesOpObserver final : public OpObserverNoop {
 
 public:
     TimeSeriesOpObserver() = default;
-    ~TimeSeriesOpObserver() override = default;
 
     NamespaceFilters getNamespaceFilters() const final {
         return {NamespaceFilter::kAll, NamespaceFilter::kAll};
@@ -91,4 +91,4 @@ public:
     void onReplicationRollback(OperationContext* opCtx, const RollbackObserverInfo& rbInfo) final;
 };
 
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUBLIC mongo

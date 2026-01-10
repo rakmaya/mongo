@@ -32,7 +32,6 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/global_catalog/type_chunk.h"
 #include "mongo/db/keypattern.h"
-#include "mongo/db/local_catalog/shard_role_catalog/collection_metadata.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/persistent_task_store.h"
@@ -43,10 +42,12 @@
 #include "mongo/db/s/migration_session_id.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/logical_session_id_gen.h"
+#include "mongo/db/shard_role/shard_catalog/collection_metadata.h"
 #include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/executor/thread_pool_task_executor.h"
 #include "mongo/util/future.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/uuid.h"
 
 #include <cstddef>
@@ -145,7 +146,7 @@ void advanceTransactionOnRecipient(OperationContext* opCtx,
  * Submits an asynchronous task to scan config.migrationCoordinators and drive each unfinished
  * migration coordination to completion.
  */
-void resumeMigrationCoordinationsOnStepUp(OperationContext* opCtx);
+MONGO_MOD_PUBLIC void resumeMigrationCoordinationsOnStepUp(OperationContext* opCtx, long long term);
 
 /**
  * Instructs the recipient shard to release its critical section.
@@ -173,7 +174,7 @@ void deleteMigrationRecipientRecoveryDocument(OperationContext* opCtx, const UUI
  * If there was any ongoing receiveChunk that requires recovery (i.e that has reached the
  * critical section stage), restores the MigrationDestinationManager state.
  */
-void resumeMigrationRecipientsOnStepUp(OperationContext* opCtx);
+MONGO_MOD_PUBLIC void resumeMigrationRecipientsOnStepUp(OperationContext* opCtx);
 
 /**
  * Recovers all unfinished migrations pending recovery.
@@ -192,7 +193,7 @@ SemiFuture<void> asyncRecoverMigrationUntilSuccessOrStepDown(OperationContext* o
  * within the context of a FCV downgrade.
  * TODO SERVER-103838 Remove this method and its invocations once 9.0 becomes LTS.
  */
-void drainMigrationsOnFcvDowngrade(OperationContext* opCtx);
+MONGO_MOD_PUBLIC void drainMigrationsOnFcvDowngrade(OperationContext* opCtx);
 
 }  // namespace migrationutil
 }  // namespace mongo

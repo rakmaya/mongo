@@ -48,6 +48,7 @@
 #include "mongo/idl/idl_parser.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/str.h"
 
 #include <memory>
@@ -61,6 +62,8 @@
 
 namespace mongo {
 
+DECLARE_STAGE_PARAMS_DERIVED_DEFAULT(CollStats);
+
 /**
  * Provides a document source interface to retrieve collection-level statistics for a given
  * collection.
@@ -69,7 +72,7 @@ class DocumentSourceCollStats : public DocumentSource {
 public:
     static constexpr StringData kStageName = "$collStats"_sd;
 
-    class LiteParsed final : public LiteParsedDocumentSource {
+    class LiteParsed final : public LiteParsedDocumentSourceDefault<LiteParsed> {
     public:
         static std::unique_ptr<LiteParsed> parse(const NamespaceString& nss,
                                                  const BSONElement& specElem,
@@ -79,13 +82,13 @@ public:
                     specElem.type() == BSONType::object);
             auto spec = DocumentSourceCollStatsSpec::parse(specElem.embeddedObject(),
                                                            IDLParserContext(kStageName));
-            return std::make_unique<LiteParsed>(specElem.fieldName(), nss, std::move(spec));
+            return std::make_unique<LiteParsed>(specElem, nss, std::move(spec));
         }
 
-        explicit LiteParsed(std::string parseTimeName,
-                            NamespaceString nss,
-                            DocumentSourceCollStatsSpec spec)
-            : LiteParsedDocumentSource(std::move(parseTimeName)),
+        LiteParsed(const BSONElement& specElem,
+                   NamespaceString nss,
+                   DocumentSourceCollStatsSpec spec)
+            : LiteParsedDocumentSourceDefault(specElem),
               _nss(std::move(nss)),
               _spec(std::move(spec)) {}
 
@@ -99,6 +102,10 @@ public:
         }
 
         void assertPermittedInAPIVersion(const APIParameters&) const override;
+
+        std::unique_ptr<StageParams> getStageParams() const final {
+            return std::make_unique<CollStatsStageParams>(_originalBson);
+        }
 
         stdx::unordered_set<NamespaceString> getInvolvedNamespaces() const final {
             return stdx::unordered_set<NamespaceString>();

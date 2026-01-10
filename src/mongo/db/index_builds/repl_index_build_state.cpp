@@ -33,25 +33,20 @@
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/db/client.h"
-#include "mongo/db/feature_flag.h"
-#include "mongo/db/local_catalog/collection_catalog.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/repl/member_state.h"
 #include "mongo/db/repl/repl_settings.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/collection_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/recovery_unit.h"
-#include "mongo/db/storage/storage_parameters_gen.h"
+#include "mongo/db/storage/storage_options.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
@@ -59,6 +54,8 @@
 namespace mongo {
 
 namespace {
+
+using index_build_internal::IndexBuildState;
 
 /**
  * Parses index specs to generate list of index names for ReplIndexBuildState initialization.
@@ -211,12 +208,14 @@ ReplIndexBuildState::ReplIndexBuildState(const UUID& indexBuildUUID,
                                          const UUID& collUUID,
                                          const DatabaseName& dbName,
                                          std::vector<IndexBuildInfo> indexes,
-                                         IndexBuildProtocol protocol)
+                                         IndexBuildProtocol protocol,
+                                         Date_t startTime)
     : buildUUID(indexBuildUUID),
       collectionUUID(collUUID),
       dbName(dbName),
       protocol(protocol),
-      _indexes(std::move(indexes)) {
+      _indexes(std::move(indexes)),
+      _metrics(IndexBuildMetrics{.startTime = startTime}) {
     _waitForNextAction = std::make_unique<SharedPromise<IndexBuildAction>>();
     if (protocol == IndexBuildProtocol::kTwoPhase)
         commitQuorumLock.emplace(indexBuildUUID.toString());
@@ -735,6 +734,21 @@ void ReplIndexBuildState::appendBuildInfo(BSONObjBuilder* builder) const {
     builder->append("resumable", !_lastOpTimeBeforeInterceptors.isNull());
 
     _indexBuildState.appendBuildInfo(builder);
+}
+
+IndexBuildMetrics ReplIndexBuildState::getIndexBuildMetrics() const {
+    stdx::lock_guard lk(_mutex);
+    return _metrics;
+}
+
+void ReplIndexBuildState::setVotedToCommitTime(const Date_t& time) {
+    stdx::lock_guard lk(_mutex);
+    _metrics.voteCommitTime = time;
+}
+
+void ReplIndexBuildState::setReceivedCommitIndexBuildEntryTime(const Date_t& time) {
+    stdx::lock_guard lk(_mutex);
+    _metrics.commitIndexOplogEntryTime = time;
 }
 
 void ReplIndexBuildState::setMultikey(std::vector<boost::optional<MultikeyPaths>> multikey) {

@@ -30,21 +30,54 @@
 #include "mongo/db/query/compiler/optimizer/join/executor.h"
 
 #include "mongo/base/status_with.h"
+#include "mongo/db/index/wildcard_access_method.h"
+#include "mongo/db/pipeline/document_source.h"
+#include "mongo/db/pipeline/document_source_lookup.h"
 #include "mongo/db/query/compiler/optimizer/join/agg_join_model.h"
+#include "mongo/db/query/compiler/optimizer/join/cardinality_estimator.h"
+#include "mongo/db/query/compiler/optimizer/join/join_reordering_context.h"
 #include "mongo/db/query/compiler/optimizer/join/reorder_joins.h"
 #include "mongo/db/query/compiler/optimizer/join/single_table_access.h"
 #include "mongo/db/query/plan_executor_factory.h"
+#include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/query_planner_params.h"
 #include "mongo/db/query/stage_builder/sbe/builder.h"
 #include "mongo/db/query/stage_builder/stage_builder_util.h"
+#include "mongo/util/assert_util.h"
+
+#include <algorithm>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 namespace mongo::join_ordering {
 namespace {
+PlanTreeShape getPlanTreeShape(JoinPlanTreeShapeEnum shape) {
+    switch (shape) {
+        case JoinPlanTreeShapeEnum::kLeftDeep:
+            return PlanTreeShape::LEFT_DEEP;
+        case JoinPlanTreeShapeEnum::kRightDeep:
+            return PlanTreeShape::RIGHT_DEEP;
+        case JoinPlanTreeShapeEnum::kZigZag:
+            return PlanTreeShape::ZIG_ZAG;
+        default:
+            MONGO_UNREACHABLE_TASSERT(11336914);
+    }
+}
+
+bool anySecondaryNamespacesDontExist(const MultipleCollectionAccessor& mca) {
+    auto colls = mca.getSecondaryCollectionAcquisitions();
+    return std::any_of(
+        colls.begin(), colls.end(), [](auto&& it) { return !it.second.collectionExists(); });
+}
+
 bool isAggEligibleForJoinReordering(const MultipleCollectionAccessor& mca,
                                     const Pipeline& pipeline) {
     if (!pipeline.getContext()->getQueryKnobConfiguration().isJoinOrderingEnabled()) {
+        return false;
+    }
+
+    if (!mca.hasMainCollection()) {
+        // We can't determine if the base collection is sharded.
         return false;
     }
 
@@ -53,14 +86,60 @@ bool isAggEligibleForJoinReordering(const MultipleCollectionAccessor& mca,
         return false;
     }
 
-    if (mca.isAnySecondaryNamespaceAViewOrNotFullyLocal()) {
+    if (mca.isAnySecondaryNamespaceAViewOrNotFullyLocal() || anySecondaryNamespacesDontExist(mca)) {
         // TODO SERVER-112239: Enable support for views, as the above check will prevent views from
         // being used for join ordering.
         return false;
     }
 
+    // Fallback on cross-DB lookups.
+    auto& mainDb = mca.getMainCollection()->ns().dbName();
+    bool foundCrossDbLookup = false;
+    mca.forEach([&mainDb, &foundCrossDbLookup](const CollectionPtr& collPtr) {
+        if (collPtr->ns().dbName() != mainDb) {
+            foundCrossDbLookup = true;
+        }
+    });
+    if (foundCrossDbLookup) {
+        return false;
+    }
+
     return AggJoinModel::pipelineEligibleForJoinReordering(pipeline);
 }
+
+bool indexIsValidForINLJ(const std::shared_ptr<const IndexCatalogEntry>& ice) {
+    auto desc = ice->descriptor();
+    return !desc->isHashedIdIndex() && !desc->hidden() && !desc->isPartial() &&
+        !desc->isSetSparseByUser() && desc->collation().isEmpty() &&
+        !dynamic_cast<WildcardAccessMethod*>(ice->accessMethod());
+}
+
+/**
+ * Pre-process indexes to filter out those ineligible for conversion to INLJ, and output a map of
+ * collection namespaces to indexes available.
+ */
+AvailableIndexes extractINLJEligibleIndexes(const QuerySolutionMap& solns,
+                                            const MultipleCollectionAccessor& mca) {
+    AvailableIndexes perCollIdxs;
+    for (const auto& [cq, _] : solns) {
+        const auto& ns = cq->nss();
+        if (perCollIdxs.contains(ns)) {
+            // We've already pre-processed this collection's indexes.
+            continue;
+        }
+
+        const auto& indexCatalog = *mca.lookupCollection(ns)->getIndexCatalog();
+        std::vector<std::shared_ptr<const IndexCatalogEntry>> entries;
+        for (auto&& ice : indexCatalog.getEntriesShared(IndexCatalog::InclusionPolicy::kReady)) {
+            if (indexIsValidForINLJ(ice)) {
+                entries.emplace_back(ice);
+            }
+        }
+        perCollIdxs.emplace(ns, std::move(entries));
+    }
+    return perCollIdxs;
+}
+
 }  // namespace
 
 /**
@@ -79,7 +158,13 @@ StatusWith<JoinReorderedExecutorResult> getJoinReorderedExecutor(
     }
 
     // Try to build JoinGraph.
-    auto swModel = AggJoinModel::constructJoinModel(pipeline);
+    const auto& config = pipeline.getContext()->getQueryKnobConfiguration();
+    AggModelBuildParams buildParams{
+        .joinGraphBuildParams =
+            JoinGraphBuildParams(config.getMaxNodesInJoinGraph(), config.getMaxEdgesInJoinGraph()),
+        .maxNumberNodesConsideredForImplicitEdges =
+            config.getMaxNumberNodesConsideredForImplicitEdges()};
+    auto swModel = AggJoinModel::constructJoinModel(pipeline, buildParams);
     if (!swModel.isOK()) {
         // We failed to apply join-reordering, so we take the regular path.
         const auto status = swModel.getStatus();
@@ -87,39 +172,85 @@ StatusWith<JoinReorderedExecutorResult> getJoinReorderedExecutor(
         return status;
     }
 
+    // TODO SERVER-111798: Support cycles in the join graph.
+    if (swModel.getValue().graph.numEdges() >= swModel.getValue().graph.numNodes()) {
+        return Status(ErrorCodes::QueryFeatureNotAllowed,
+                      "Join reordering does not support cycles");
+    }
+
+    // Validate we have all the collection acquisitions we need here.
+    bool missingAcquisitions = std::any_of(swModel.getValue().prefix->getSources().begin(),
+                                           swModel.getValue().prefix->getSources().end(),
+                                           [&](const auto& stage) {
+                                               auto* lookup =
+                                                   dynamic_cast<DocumentSourceLookUp*>(stage.get());
+                                               if (!lookup) {
+                                                   return false;
+                                               }
+                                               return !mca.knowsNamespace(lookup->getFromNs());
+                                           });
+    if (missingAcquisitions) {
+        return Status(
+            ErrorCodes::QueryFeatureNotAllowed,
+            "Pipeline ineligible for join-reordering due to missing foreign namespace acquisition");
+    }
+
     LOGV2_DEBUG(11083902,
                 5,
                 "Join model was successfully constructed, reordering joins",
-                "graph"_attr = swModel.getValue().toString(/*pretty*/ true));
+                "graph"_attr = swModel.getValue().toBSON());
     auto model = std::move(swModel.getValue());
 
     // Select access plans for each table in the join.
     auto yieldPolicy = PlanYieldPolicy::YieldPolicy::YIELD_AUTO;
-    optimizer::SamplingEstimatorMap samplingEstimators =
-        optimizer::makeSamplingEstimators(mca, model.graph, yieldPolicy);
-    auto swAccessPlans =
-        optimizer::singleTableAccessPlans(opCtx, mca, model.graph, samplingEstimators);
+    SamplingEstimatorMap samplingEstimators = makeSamplingEstimators(mca, model.graph, yieldPolicy);
+    auto swAccessPlans = singleTableAccessPlans(opCtx, mca, model.graph, samplingEstimators);
     if (!swAccessPlans.isOK()) {
         return swAccessPlans.getStatus();
     }
 
-    // Construct random-order join graph.
-    auto& accessPlans = swAccessPlans.getValue();
-    auto qsn = constructSolutionWithRandomOrder(
-        std::move(accessPlans.solns),
-        model.graph,
-        model.resolvedPaths,
-        expCtx->getQueryKnobConfiguration().getRandomJoinOrderSeed());
+    auto& solns = swAccessPlans.getValue().solns;
+    const auto qkc = expCtx->getQueryKnobConfiguration();
+
+    // Pre-process indexes per collection to facilitate INLJ enumeration.
+    auto indexesPerColl = extractINLJEligibleIndexes(solns, mca);
+    JoinReorderingContext ctx{
+        .joinGraph = model.graph,
+        .resolvedPaths = model.resolvedPaths,
+        .cbrCqQsns = std::move(solns),
+        .perCollIdxs = std::move(indexesPerColl),
+    };
+
+    ReorderedJoinSolution reordered;
+    switch (qkc.getJoinReorderMode()) {
+        case JoinReorderModeEnum::kBottomUp: {
+            // Optimize join order using bottom-up Sellinger-style algorithm.
+            auto estimator =
+                std::make_unique<JoinCardinalityEstimator>(JoinCardinalityEstimator::make(
+                    ctx, swAccessPlans.getValue().estimate, samplingEstimators));
+            reordered = constructSolutionBottomUp(ctx,
+                                                  std::move(estimator),
+                                                  getPlanTreeShape(qkc.getJoinPlanTreeShape()),
+                                                  qkc.getEnableJoinEnumerationHJOrderPruning());
+            break;
+        }
+        case JoinReorderModeEnum::kRandom:
+            // Randomly reorder joins.
+            reordered = constructSolutionWithRandomOrder(
+                ctx, qkc.getRandomJoinOrderSeed(), qkc.getRandomJoinReorderDefaultToHashJoin());
+            break;
+        default:
+            MONGO_UNREACHABLE_TASSERT(11336911);
+    }
 
     // Lower to SBE.
-    // TODO SERVER-111581: permit the use of a different base collection for this query.
     // TODO SERVER-112232: Identify SBE suffixes that are eligible for pushdown & push them to the
     // SBE executor.
-    auto& baseCQ = *model.graph.getNode(0).accessPath;
+    auto& baseCQ = *model.graph.accessPathAt(reordered.baseNode);
     auto baseNss = baseCQ.nss();
     auto sbeYieldPolicy = PlanYieldPolicySBE::make(opCtx, yieldPolicy, mca, baseNss);
-    auto planStagesAndData =
-        stage_builder::buildSlotBasedExecutableTree(opCtx, mca, baseCQ, *qsn, sbeYieldPolicy.get());
+    auto planStagesAndData = stage_builder::buildSlotBasedExecutableTree(
+        opCtx, mca, baseCQ, *reordered.soln, sbeYieldPolicy.get());
     stage_builder::prepareSlotBasedExecutableTree(opCtx,
                                                   planStagesAndData.first.get(),
                                                   &planStagesAndData.second,
@@ -128,10 +259,13 @@ StatusWith<JoinReorderedExecutorResult> getJoinReorderedExecutor(
                                                   sbeYieldPolicy.get(),
                                                   false /*preparingFromCache*/,
                                                   nullptr /*remoteCursors*/);
+    sbe::DebugPrintInfo debugPrintInfo{};
     LOGV2_DEBUG(11083905,
                 5,
                 "SBE plan for join-reordered query",
-                "sbePlan"_attr = sbe::DebugPrinter{}.print(planStagesAndData.first->debugPrint()));
+                "sbePlan"_attr =
+                    sbe::DebugPrinter{}.print(planStagesAndData.first->debugPrint(debugPrintInfo)),
+                "sbePlanStageData"_attr = planStagesAndData.second.debugString());
 
     // If there is a pipeline suffix, then that suffix will execute inside a PlanExecutorPipeline,
     // which expects to received owned BSON objects from the inner PlanExecutor.
@@ -141,17 +275,17 @@ StatusWith<JoinReorderedExecutorResult> getJoinReorderedExecutor(
     }
 
     // We actually have several canonical queries, so we don't try to pass one in.
-    auto exec =
-        uassertStatusOKWithLocation(plan_executor_factory::make(opCtx,
-                                                                nullptr /* cq */,
-                                                                std::move(qsn),
-                                                                std::move(planStagesAndData),
-                                                                mca,
-                                                                plannerOptions,
-                                                                mca.getMainCollection()->ns(),
-                                                                std::move(sbeYieldPolicy),
-                                                                false /* isFromPlanCache */,
-                                                                false /* cachedPlanHash */));
+    auto exec = uassertStatusOK(plan_executor_factory::make(opCtx,
+                                                            nullptr /* cq */,
+                                                            std::move(reordered.soln),
+                                                            std::move(planStagesAndData),
+                                                            mca,
+                                                            plannerOptions,
+                                                            mca.getMainCollection()->ns(),
+                                                            std::move(sbeYieldPolicy),
+                                                            false /* isFromPlanCache */,
+                                                            false /* cachedPlanHash */,
+                                                            true /*usedJoinOpt*/));
 
     return JoinReorderedExecutorResult{.executor = std::move(exec), .model = std::move(model)};
 }

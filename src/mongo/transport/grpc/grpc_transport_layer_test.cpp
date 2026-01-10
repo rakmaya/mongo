@@ -31,6 +31,7 @@
 #include "mongo/db/server_options.h"
 #include "mongo/logv2/log.h"
 #include "mongo/transport/grpc/client_cache.h"
+#include "mongo/transport/grpc/grpc_feature_flag_gen.h"
 #include "mongo/transport/grpc/grpc_session.h"
 #include "mongo/transport/grpc/grpc_session_manager.h"
 #include "mongo/transport/grpc/grpc_transport_layer_impl.h"
@@ -43,6 +44,7 @@
 #include "mongo/transport/test_fixtures.h"
 #include "mongo/transport/transport_layer.h"
 #include "mongo/transport/transport_layer_manager_impl.h"
+#include "mongo/unittest/death_test.h"
 #include "mongo/unittest/log_test.h"
 #include "mongo/unittest/thread_assertion_monitor.h"
 #include "mongo/unittest/unittest.h"
@@ -278,6 +280,18 @@ TEST_F(GRPCTransportLayerTest, setupIngressWithoutTLSShouldFail) {
     ASSERT_EQ(ErrorCodes::InvalidOptions, tl->setup());
 }
 
+using GRPCTransportLayerTestDeathTest = GRPCTransportLayerTest;
+DEATH_TEST_F(GRPCTransportLayerTestDeathTest,
+             setupWithPortConflictShouldFail,
+             "Port collision, ports must be unique.") {
+    serverGlobalParams.port = 20017;
+    serverGlobalParams.grpcPort = 20017;
+
+    feature_flags::gFeatureFlagGRPC.setForServerParameter(true);
+
+    std::ignore = TransportLayerManagerImpl::make(getServiceContext(), true);
+}
+
 
 TEST_F(GRPCTransportLayerTest, RunCommand) {
     runCommandThroughServiceEntryPoint("x");
@@ -438,7 +452,9 @@ TEST_F(IdleChannelPrunerTest, StopsWithTransportLayer) {
 TEST_F(GRPCTransportLayerTest, ConnectAndListen) {
     unittest::threadAssertionMonitoredTest([&](unittest::ThreadAssertionMonitor& monitor) {
         auto options = CommandServiceTestFixtures::makeTLOptions();
-        options.bindIpList = {"localhost", "127.0.0.1", "::1"};
+        // TODO(SERVER-115428): Restore IPv6 Loopback testing for ingress gRPC
+        // options.bindIpList = {"localhost", "127.0.0.1", "::1"};
+        options.bindIpList = {"localhost", "127.0.0.1"};
         options.useUnixDomainSockets = true;
 
         runWithTL(

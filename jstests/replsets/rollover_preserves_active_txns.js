@@ -49,8 +49,17 @@ function doTest(commitOrAbort) {
     const txnEntry = primary.getDB("config").transactions.findOne();
     assert.lte(txnEntry.startOpTime.ts, prepareTimestamp, tojson(txnEntry));
 
+    const isMultiversion =
+        Boolean(jsTest.options().useRandomBinVersionsWithinReplicaSet) || Boolean(TestData.multiversionBinVersion);
+    if (isMultiversion) {
+        delete txnEntry.affectedNamespaces;
+    }
+
     assert.soonNoExcept(() => {
         const secondaryTxnEntry = secondary.getDB("config").transactions.findOne();
+        if (isMultiversion) {
+            delete secondaryTxnEntry.affectedNamespaces;
+        }
         assert.eq(secondaryTxnEntry, txnEntry, tojson(secondaryTxnEntry));
         return true;
     });

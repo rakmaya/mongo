@@ -37,9 +37,11 @@
 #include "mongo/db/auth/validated_tenancy_scope_factory.h"
 #include "mongo/db/basic_types.h"
 #include "mongo/db/client.h"
-#include "mongo/db/raw_data_operation.h"
-#include "mongo/db/user_write_block/write_block_bypass.h"
+#include "mongo/db/shard_role/shard_catalog/raw_data_operation.h"
+#include "mongo/db/topology/user_write_block/write_block_bypass.h"
 #include "mongo/idl/idl_parser.h"
+#include "mongo/otel/telemetry_context_holder.h"
+#include "mongo/otel/traces/telemetry_context_serialization.h"
 #include "mongo/rpc/metadata/audit_client_attrs.h"
 #include "mongo/rpc/metadata/audit_metadata.h"
 #include "mongo/rpc/metadata/audit_user_attrs.h"
@@ -72,7 +74,7 @@ ForwardableOperationMetadata::ForwardableOperationMetadata(OperationContext* opC
     }
 
     // TODO SERVER-99655: update once gSnapshotFCVInDDLCoordinators is enabled on the lastLTS
-    if (auto& vCtx = VersionContext::getDecoration(opCtx); vCtx.isInitialized()) {
+    if (auto& vCtx = VersionContext::getDecoration(opCtx); vCtx.hasOperationFCV()) {
         setVersionContext(VersionContext::getDecoration(opCtx));
     }
 
@@ -86,6 +88,11 @@ ForwardableOperationMetadata::ForwardableOperationMetadata(OperationContext* opC
     setMayBypassWriteBlocking(WriteBlockBypass::get(opCtx).isWriteBlockBypassEnabled());
 
     setRawData(isRawDataOperation(opCtx));
+
+    if (auto telemetryCtx =
+            otel::TelemetryContextHolder::getDecoration(opCtx).getTelemetryContext()) {
+        setTelemetryContext(otel::traces::TelemetryContextSerializer::toBSON(telemetryCtx));
+    }
 }
 
 void ForwardableOperationMetadata::setOn(OperationContext* opCtx) const {
@@ -119,6 +126,15 @@ void ForwardableOperationMetadata::setOn(OperationContext* opCtx) const {
         validatedTenancyScope = auth::ValidatedTenancyScopeFactory::parse(client, *originalToken);
     }
     auth::ValidatedTenancyScope::set(opCtx, validatedTenancyScope);
+
+    if (auto telemetryCtx = getTelemetryContext()) {
+        auto deserializedTelemetryCtx =
+            otel::traces::TelemetryContextSerializer::fromBSON(*telemetryCtx);
+        if (deserializedTelemetryCtx) {
+            auto& telemetryCtxHolder = otel::TelemetryContextHolder::getDecoration(opCtx);
+            telemetryCtxHolder.setTelemetryContext(deserializedTelemetryCtx);
+        }
+    }
 }
 
 }  // namespace mongo

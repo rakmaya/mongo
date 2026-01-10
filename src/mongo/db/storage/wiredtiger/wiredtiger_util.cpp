@@ -560,6 +560,8 @@ logv2::LogComponent getWTLogComponent(const BSONObj& obj) {
         case WT_VERB_COMPACT:
         case WT_VERB_COMPACT_PROGRESS:
             return logv2::LogComponent::kWiredTigerCompact;
+        case WT_VERB_DISAGGREGATED_STORAGE:
+            return logv2::LogComponent::kWiredTigerDisaggregatedStorage;
         case WT_VERB_EVICTION:
             return logv2::LogComponent::kWiredTigerEviction;
         case WT_VERB_FILEOPS:
@@ -824,7 +826,6 @@ int WiredTigerUtil::verifyTable(WiredTigerSession& session,
 
     const char* verifyConfig =
         configurationOverride.has_value() ? configurationOverride->c_str() : nullptr;
-    // Do the verify. Weird parens prevent treating "verify" as a macro.
     return verifySession.verify(uri.c_str(), verifyConfig);
 }
 
@@ -1005,7 +1006,11 @@ std::unique_ptr<WiredTigerSession> WiredTigerUtil::getStatisticsSession(
 
     // Obtain a session that can be used during shut down, potentially before the storage engine
     // itself shuts down.
-    return std::make_unique<WiredTigerSession>(&engine.getConnection(), handler, permit);
+    auto session = std::make_unique<WiredTigerSession>(&engine.getConnection(), handler, permit);
+    // Configure the session to avoid being coopted into cache eviction. We never want to block stat
+    // fetching on workload issues.
+    session->modifyConfiguration("cache_max_wait_ms=1", "cache_max_wait_ms=0");
+    return session;
 }
 
 bool WiredTigerUtil::collectConnectionStatistics(WiredTigerKVEngineBase& engine,
@@ -1022,10 +1027,12 @@ bool WiredTigerUtil::collectConnectionStatistics(WiredTigerKVEngineBase& engine,
     // Filter out irrelevant statistic fields.
     std::vector<std::string> categoriesToIgnore = {"LSM"};
 
+    std::stringstream ss;
+    ss << "statistics=(" << wiredTigerGlobalOptions.statisticsSetting << ")";
     Status status = WiredTigerUtil::exportTableToBSON(
         *session,
         "statistics:",
-        "statistics=(fast)",
+        ss.str(),
         bob,
         fieldsToInclude.empty() ? categoriesToIgnore : fieldsToInclude,
         fieldsToInclude.empty() ? FilterBehavior::kExcludeCategories
@@ -1054,8 +1061,10 @@ bool WiredTigerUtil::historyStoreStatistics(WiredTigerKVEngine& engine, BSONObjB
 
     const auto historyStorageStatUri = "statistics:file:WiredTigerHS.wt";
 
-    Status status = WiredTigerUtil::exportTableToBSON(
-        *session, historyStorageStatUri, "statistics=(fast)", bob);
+    std::stringstream ss;
+    ss << "statistics=(" << wiredTigerGlobalOptions.statisticsSetting << ")";
+    Status status =
+        WiredTigerUtil::exportTableToBSON(*session, historyStorageStatUri, ss.str(), bob);
     if (!status.isOK()) {
         bob.append("error", "unable to retrieve statistics");
         bob.append("code", static_cast<int>(status.code()));
@@ -1298,6 +1307,7 @@ std::string WiredTigerUtil::generateWTVerboseConfiguration() {
         {logv2::LogComponent::kWiredTigerBackup, "backup"},
         {logv2::LogComponent::kWiredTigerCheckpoint, "checkpoint"},
         {logv2::LogComponent::kWiredTigerCompact, "compact"},
+        {logv2::LogComponent::kWiredTigerDisaggregatedStorage, "disaggregated_storage"},
         {logv2::LogComponent::kWiredTigerEviction, "eviction"},
         {logv2::LogComponent::kWiredTigerFileOps, "fileops"},
         {logv2::LogComponent::kWiredTigerHS, "history_store"},
@@ -1416,6 +1426,10 @@ Status WiredTigerUtil::canRunAutoCompact(bool isEphemeral) {
 uint64_t WiredTigerUtil::genTableId() {
     static AtomicWord<unsigned long long> nextTableId(WiredTigerUtil::kLastTableId);
     return nextTableId.fetchAndAdd(1);
+}
+
+std::string WiredTigerUtil::concatConfigs(const std::string& configA, const std::string& configB) {
+    return str::stream() << configA << "," << configB;
 }
 
 boost::optional<bool> WiredTigerConfigParser::isTableLoggingEnabled() const {

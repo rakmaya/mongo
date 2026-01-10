@@ -126,6 +126,8 @@ const allCommands = {
     _shardsvrMovePrimaryExitCriticalSection: {skip: isAnInternalCommand},
     _shardsvrMoveRange: {skip: isAnInternalCommand},
     _shardsvrNotifyShardingEvent: {skip: isAnInternalCommand},
+    _shardsvrRecreateRangeDeletionTasks: {skip: isAnInternalCommand},
+    _shardsvrRecreateRangeDeletionTasksParticipant: {skip: isAnInternalCommand},
     _shardsvrRenameCollection: {skip: isAnInternalCommand},
     _shardsvrRenameCollectionParticipant: {skip: isAnInternalCommand},
     _shardsvrRenameCollectionParticipantUnblock: {skip: isAnInternalCommand},
@@ -140,6 +142,7 @@ const allCommands = {
     _shardsvrReshardCollection: {skip: isAnInternalCommand},
     _shardsvrReshardingOperationTime: {skip: isAnInternalCommand},
     _shardsvrReshardRecipientClone: {skip: isAnInternalCommand},
+    _shardsvrReshardRecipientCriticalSectionStarted: {skip: isAnInternalCommand},
     _shardsvrRefineCollectionShardKey: {skip: isAnInternalCommand},
     _shardsvrSetAllowMigrations: {skip: isAnInternalCommand},
     _shardsvrSetClusterParameter: {skip: isAnInternalCommand},
@@ -172,6 +175,10 @@ const allCommands = {
         skip: requiresParallelShell,
     },
     abortReshardCollection: {
+        // Skipping command because it requires testing through a parallel shell.
+        skip: requiresParallelShell,
+    },
+    abortRewriteCollection: {
         // Skipping command because it requires testing through a parallel shell.
         skip: requiresParallelShell,
     },
@@ -609,6 +616,7 @@ const allCommands = {
         skip: requiresMongoS,
     },
     endSessions: {skip: "tested in startSession"},
+    eseRotateActiveKEK: {skip: "requires additional setup"},
     explain: {
         setUp: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({create: collName}));
@@ -692,6 +700,7 @@ const allCommands = {
         command: {getDiagnosticData: 1},
         shouldFail: false,
     },
+    getESERotateActiveKEKStatus: {skip: "requires additional setup"},
     getLog: {
         isAdminCommand: true,
         command: {getLog: "global"},
@@ -984,6 +993,7 @@ const allCommands = {
     recipientForgetMigration: {skip: isAnInternalCommand},
     recipientSyncData: {skip: isAnInternalCommand},
     recipientVoteImportedFiles: {skip: isAnInternalCommand},
+    recreateRangeDeletionTasks: {skip: requiresMongoS},
     refineCollectionShardKey: {skip: requiresMongoS},
     refreshLogicalSessionCacheNow: {
         command: {refreshLogicalSessionCacheNow: 1},
@@ -1043,6 +1053,7 @@ const allCommands = {
     },
     resetPlacementHistory: {skip: requiresMongoS},
     reshardCollection: {skip: requiresMongoS},
+    rewriteCollection: {skip: requiresMongoS},
     revokePrivilegesFromRole: {
         setUp: function (mongoS, withDirectConnections) {
             assert.commandWorked(withDirectConnections.getDB(dbName).runCommand({create: collName}));

@@ -32,14 +32,11 @@
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/client.h"
 #include "mongo/db/exec/classic/filter.h"
 #include "mongo/db/exec/classic/working_set.h"
 #include "mongo/db/exec/collection_scan_common.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/plan_executor_impl.h"
@@ -47,6 +44,8 @@
 #include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/repl/oplog_entry_gen.h"
 #include "mongo/db/repl/optime.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/record_data.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/logv2/log.h"
@@ -109,9 +108,11 @@ CollectionScan::CollectionScan(ExpressionContext* expCtx,
                 "used",
                 !params.resumeScanPoint);
         if (collPtr->ns().isOplog()) {
-            invariant(params.direction == CollectionScanParams::FORWARD);
+            tassert(11051659,
+                    "Expecting forward Oplog scan direction",
+                    params.direction == CollectionScanParams::FORWARD);
         } else {
-            invariant(collPtr->isClustered());
+            tassert(11051658, "Expecting clustered collection", collPtr->isClustered());
         }
     }
 
@@ -228,7 +229,7 @@ void CollectionScan::initCursor(OperationContext* opCtx,
                                 const CollectionPtr& collPtr,
                                 bool forward) {
     if (_params.assertTsHasNotFallenOff) {
-        invariant(forward);
+        tassert(11051657, "Expect forward scan if scanning the oplog", forward);
         _cursor =
             initCursorAndAssertTsHasNotFallenOff(opCtx, collPtr, *_params.assertTsHasNotFallenOff);
 
@@ -284,7 +285,7 @@ PlanStage::StageState CollectionScan::doWork(WorkingSetID* out) {
                 }
 
                 if (!_lastSeenId.isNull()) {
-                    invariant(_params.tailable);
+                    tassert(11051656, "Expecting tailable scan", _params.tailable);
                     // Seek to where we were last time. If it no longer exists, mark us as dead
                     // since we want to signal an error rather than silently dropping data from the
                     // stream.
@@ -302,8 +303,10 @@ PlanStage::StageState CollectionScan::doWork(WorkingSetID* out) {
                 }
 
                 if (_params.resumeScanPoint) {
-                    invariant(!_params.tailable);
-                    invariant(_lastSeenId.isNull());
+                    tassert(11051655, "Expecting non-tailable scan", !_params.tailable);
+                    tassert(11051654,
+                            "Expecting nothing to be returned from the cursor yet",
+                            _lastSeenId.isNull());
                     // Seek to where we are trying to resume the scan from. Signal a KeyNotFound
                     // error if the recordId is null.
                     //

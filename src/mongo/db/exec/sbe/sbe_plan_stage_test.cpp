@@ -33,15 +33,10 @@
 
 #include "mongo/db/exec/sbe/sbe_plan_stage_test.h"
 
+#include "mongo/db/exec/sbe/stages/project.h"
 #include "mongo/db/exec/sbe/stages/virtual_scan.h"
-#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/logv2/log.h"
 #include "mongo/unittest/unittest.h"
-
-#include <cstddef>
-#include <ostream>
 
 #include <boost/optional/optional.hpp>
 
@@ -65,12 +60,20 @@ void PlanStageTestFixture::assertValuesEqual(value::TypeTags lhsTag,
 }
 
 std::pair<value::SlotId, std::unique_ptr<PlanStage>> PlanStageTestFixture::generateVirtualScan(
-    value::TypeTags arrTag, value::Value arrVal, PlanNodeId planNodeId) {
-    // The value passed in must be an array.
+    value::TypeTags arrTag,
+    value::Value arrVal,
+    PlanNodeId planNodeId /*= kEmptyPlanNodeId*/,
+    bool owned /*=true*/) {
     invariant(sbe::value::isArray(arrTag));
 
     auto outputSlot = _slotIdGenerator->generate();
-    auto virtualScan = sbe::makeS<sbe::VirtualScanStage>(planNodeId, outputSlot, arrTag, arrVal);
+    auto virtualScan = sbe::makeS<sbe::VirtualScanStage>(planNodeId,
+                                                         outputSlot,
+                                                         arrTag,
+                                                         arrVal,
+                                                         nullptr /*yieldPolicy*/,
+                                                         true /*participateInTrialRunTracking*/,
+                                                         owned /*owned*/);
 
     // Return the VirtualScanStage and its output slot.
     return {outputSlot, std::move(virtualScan)};
@@ -165,8 +168,7 @@ std::pair<value::TypeTags, value::Value> PlanStageTestFixture::getAllResults(
     // into the array.
     size_t i = 0;
     for (auto st = stage->getNext(); st == PlanState::ADVANCED; st = stage->getNext(), ++i) {
-        auto [tag, val] = accessor->getCopyOfValue();
-        resultsView->push_back(tag, val);
+        resultsView->push_back(accessor->getCopyOfValue());
 
         // Test out saveState() and restoreState() for 50% of the documents (the first document,
         // the third document, the fifth document, and so on).
@@ -179,6 +181,11 @@ std::pair<value::TypeTags, value::Value> PlanStageTestFixture::getAllResults(
 
     guard.reset();
     return {resultsTag, resultsVal};
+}
+
+void PlanStageTestFixture::exhaustStage(PlanStage* stage, value::SlotAccessor* accessor) {
+    for (auto st = stage->getNext(); st == PlanState::ADVANCED; st = stage->getNext()) {
+    }
 }
 
 std::pair<value::TypeTags, value::Value> PlanStageTestFixture::getAllResultsMulti(
@@ -197,8 +204,7 @@ std::pair<value::TypeTags, value::Value> PlanStageTestFixture::getAllResultsMult
         value::ValueGuard guard{arrTag, arrVal};
         auto arrView = value::getArrayView(arrVal);
         for (size_t i = 0; i < accessors.size(); ++i) {
-            auto [tag, val] = accessors[i]->getCopyOfValue();
-            arrView->push_back(tag, val);
+            arrView->push_back(accessors[i]->getCopyOfValue());
         }
         guard.reset();
         resultsView->push_back(arrTag, arrVal);

@@ -40,18 +40,6 @@
 #include "mongo/db/global_settings.h"
 #include "mongo/db/index_builds/index_builds_coordinator.h"
 #include "mongo/db/index_builds/index_builds_coordinator_mongod.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_catalog_helper.h"
-#include "mongo/db/local_catalog/collection_impl.h"
-#include "mongo/db/local_catalog/collection_options.h"
-#include "mongo/db/local_catalog/create_collection.h"
-#include "mongo/db/local_catalog/database_holder.h"
-#include "mongo/db/local_catalog/database_holder_impl.h"
-#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_state.h"
-#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_state_factory_shard.h"
-#include "mongo/db/local_catalog/shard_role_catalog/database_sharding_state_factory_shard.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/op_observer/op_observer_impl.h"
@@ -70,6 +58,7 @@
 #include "mongo/db/repl/oplog_writer_impl.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/repl_settings.h"
+#include "mongo/db/repl/repl_writer_thread_pool_server_parameters_gen.h"
 #include "mongo/db/repl/replication_consistency_markers_mock.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
@@ -80,6 +69,18 @@
 #include "mongo/db/service_entry_point_shard_role.h"
 #include "mongo/db/session/session_catalog.h"
 #include "mongo/db/session/session_catalog_mongod.h"
+#include "mongo/db/shard_role/lock_manager/d_concurrency.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_catalog_helper.h"
+#include "mongo/db/shard_role/shard_catalog/collection_impl.h"
+#include "mongo/db/shard_role/shard_catalog/collection_options.h"
+#include "mongo/db/shard_role/shard_catalog/collection_sharding_state.h"
+#include "mongo/db/shard_role/shard_catalog/collection_sharding_state_factory_shard.h"
+#include "mongo/db/shard_role/shard_catalog/create_collection.h"
+#include "mongo/db/shard_role/shard_catalog/database_holder.h"
+#include "mongo/db/shard_role/shard_catalog/database_holder_impl.h"
+#include "mongo/db/shard_role/shard_catalog/database_sharding_state_factory_shard.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/topology/sharding_state.h"
@@ -178,9 +179,7 @@ public:
             _svcCtx, std::unique_ptr<repl::ReplicationCoordinator>(_replCoord));
 
         catalog::startUpStorageEngineAndCollectionCatalog(
-            _svcCtx,
-            &cc(),
-            StorageEngineInitFlags::kAllowNoLockFile | StorageEngineInitFlags::kSkipMetadataFile);
+            _svcCtx, &cc(), StorageEngineInitFlags::kSkipMetadataFile);
 
         DatabaseHolder::set(_svcCtx, std::make_unique<DatabaseHolderImpl>());
         repl::StorageInterface::set(_svcCtx, std::make_unique<repl::StorageInterfaceImpl>());
@@ -216,7 +215,6 @@ public:
             _replCoord,
             _storageInterface,
             &_consistencyMarkers,
-            &repl::noopOplogWriterObserver,
             repl::OplogWriter::Options(false /* skipWritesToOplogColl */));
 
         _svcCtx->notifyStorageStartupRecoveryComplete();
@@ -265,8 +263,7 @@ public:
         catalog::startUpStorageEngineAndCollectionCatalog(
             _svcCtx,
             &cc(),
-            StorageEngineInitFlags::kAllowNoLockFile | StorageEngineInitFlags::kSkipMetadataFile |
-                StorageEngineInitFlags::kForRestart);
+            StorageEngineInitFlags::kSkipMetadataFile | StorageEngineInitFlags::kForRestart);
     }
 
     ServiceContext* getSvcCtx() {

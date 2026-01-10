@@ -42,9 +42,6 @@
 #include "mongo/db/client.h"
 #include "mongo/db/commands/server_status/server_status_metric.h"
 #include "mongo/db/dbhelpers.h"
-#include "mongo/db/local_catalog/lock_manager/exception_util.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/repl/data_replicator_external_state_impl.h"
 #include "mongo/db/repl/member_state.h"
@@ -60,6 +57,9 @@
 #include "mongo/db/repl/sync_source_selector.h"
 #include "mongo/db/replication_state_transition_lock_guard.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/lock_manager/exception_util.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/shutdown_in_progress_quiesce_info.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/storage_engine.h"
@@ -515,8 +515,10 @@ void BackgroundSync::_produce() {
                 return this->_enqueueDocuments(a1, a2, a3);
             },
             onOplogFetcherShutdownCallbackFn,
-            OplogFetcher::Config(
-                lastOpTimeFetched, source, _replCoord->getConfig(), bgSyncOplogFetcherBatchSize));
+            OplogFetcher::Config(lastOpTimeFetched,
+                                 source,
+                                 _replCoord->getConfig(),
+                                 bgSyncOplogFetcherBatchSize.load()));
         stdx::lock_guard<stdx::mutex> lock(_mutex);
         if (_state != ProducerState::Running) {
             return;
@@ -556,12 +558,15 @@ void BackgroundSync::_produce() {
     }
 
     Milliseconds denylistDuration(60000);
+    if (!fetcherReturnStatus.isOK()) {
+        LOGV2_WARNING(21120,
+                      "Oplog fetcher returned error",
+                      "error"_attr = redact(fetcherReturnStatus),
+                      "code"_attr = fetcherReturnStatus.code());
+    }
     if (fetcherReturnStatus.code() == ErrorCodes::OplogOutOfOrder) {
         // This is bad because it means that our source
         // has not returned oplog entries in ascending ts order, and they need to be.
-
-        LOGV2_WARNING(
-            21120, "Oplog fetcher returned error", "error"_attr = redact(fetcherReturnStatus));
         // Do not denylist the server here, it will be denylisted when we try to reuse it,
         // if it can't return a matching oplog start from the last fetch oplog ts field.
         return;
@@ -582,14 +587,16 @@ void BackgroundSync::_produce() {
             "Oplog fetcher discovered we are too stale to sync from sync source. Denylisting "
             "sync source",
             "syncSource"_attr = source,
-            "denylistDuration"_attr = denylistDuration);
+            "denylistDuration"_attr = denylistDuration,
+            "errorCode"_attr = fetcherReturnStatus.code());
         _replCoord->denylistSyncSource(source, Date_t::now() + denylistDuration);
     } else if (fetcherReturnStatus == ErrorCodes::InvalidBSON) {
         LOGV2_WARNING(
             5579701,
             "Oplog fetcher got invalid BSON while querying oplog. Denylisting sync source",
             "syncSource"_attr = source,
-            "denylistDuration"_attr = denylistDuration);
+            "denylistDuration"_attr = denylistDuration,
+            "errorCode"_attr = fetcherReturnStatus.code());
         _replCoord->denylistSyncSource(source, Date_t::now() + denylistDuration);
     } else if (fetcherReturnStatus.code() == ErrorCodes::ShutdownInProgress) {
         if (auto quiesceInfo = fetcherReturnStatus.extraInfo<ShutdownInProgressQuiesceInfo>()) {
@@ -655,7 +662,7 @@ Status BackgroundSync::_enqueueDocuments(OplogFetcher::Documents::const_iterator
     }
 
     // Check some things periodically (whenever we run out of items in the current cursor batch).
-    if (!oplogFetcherUsesExhaust && info.networkDocumentBytes > 0 &&
+    if (!oplogFetcherUsesExhaust.load() && info.networkDocumentBytes > 0 &&
         info.networkDocumentBytes < kSmallBatchLimitBytes) {
         // On a very low latency network, if we don't wait a little, we'll be
         // getting ops to write almost one at a time.  This will both be expensive

@@ -29,6 +29,7 @@ global:
     cpp_namespace: "mongo"
     cpp_includes:
         - "mongo/util/uuid.h"
+    mod_visibility: public
 
 imports:
     - "mongo/db/basic_types.idl"
@@ -97,6 +98,7 @@ structs:
                 optional: true
             fileName:
                 description: "The name of the file that sorted data is written to"
+                cpp_name: storageIdentifier
                 type: string
                 optional: true
             numKeys:

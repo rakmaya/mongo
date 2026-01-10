@@ -48,24 +48,25 @@
 #include "mongo/db/database_name.h"
 #include "mongo/db/feature_flag.h"
 #include "mongo/db/fle_crud.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/clustered_collection_options_gen.h"
-#include "mongo/db/local_catalog/collection_catalog.h"
-#include "mongo/db/local_catalog/create_collection.h"
-#include "mongo/db/local_catalog/ddl/create_gen.h"
-#include "mongo/db/local_catalog/ddl/drop_gen.h"
-#include "mongo/db/local_catalog/ddl/replica_set_ddl_tracker.h"
-#include "mongo/db/local_catalog/drop_collection.h"
-#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/rename_collection.h"
-#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/server_parameter.h"
 #include "mongo/db/server_parameter_with_storage.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/ddl/create_gen.h"
+#include "mongo/db/shard_role/ddl/drop_gen.h"
+#include "mongo/db/shard_role/ddl/replica_set_ddl_tracker.h"
+#include "mongo/db/shard_role/lock_manager/d_concurrency.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/clustered_collection_options_gen.h"
+#include "mongo/db/shard_role/shard_catalog/collection_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/create_collection.h"
+#include "mongo/db/shard_role/shard_catalog/drop_collection.h"
+#include "mongo/db/shard_role/shard_catalog/operation_sharding_state.h"
+#include "mongo/db/shard_role/shard_catalog/rename_collection.h"
+#include "mongo/db/shard_role/shard_role.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/db/topology/sharding_state.h"
 #include "mongo/logv2/log.h"
@@ -89,6 +90,11 @@ namespace mongo {
 namespace {
 
 void createQEClusteredStateCollection(OperationContext* opCtx, const NamespaceString& nss) {
+    // Create QE state collection locally. This local collection creation is safe here because we
+    // instantiate a ScopedReplicaSetDDL object prior to this call. This object registers this DDL
+    // operation with the DDL tracker, ensuring proper metadata synchronization when the replica set
+    // gets promoted to a shard server.
+    OperationShardingState::ScopedAllowImplicitCollectionCreate_UNSAFE allowCreate(opCtx, nss);
     CreateCommand createCmd(nss);
     mongo::ClusteredIndexSpec clusterIdxSpec(BSON("_id" << 1), true);
     CreateCollectionRequest request;

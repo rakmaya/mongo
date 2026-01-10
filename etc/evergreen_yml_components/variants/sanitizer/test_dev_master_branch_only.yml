@@ -33,24 +33,6 @@ variables:
     #   variant: rhel8-debug-aubsan-compile
 
   # THIS HAS COPIES IN:
-  # - etc/evergreen_yml_components/variants/sanitizer/test_dev_master_branch_only.yml
-  # - etc/evergreen_yml_components/variants/sanitizer/test_dev.yml
-  # ANY MODIFICATIONS HERE SHOULD ALSO BE MADE IN THOSE FILES
-  - &linux_debug_aubsan_compile_variant_dependency
-    depends_on:
-      - name: archive_dist_test
-        variant: &linux_debug_aubsan_compile_variant_name linux-debug-aubsan-compile-required
-      - name: archive_jstestshell
-        variant: *linux_debug_aubsan_compile_variant_name
-      - name: version_gen
-        variant: generate-tasks-for-version
-        # This is added because of EVG-18211.
-        # Without this we are adding extra dependencies on evergreen and it is causing strain
-        omit_generated_tasks: true
-    # - name: generate_buildid_to_debug_symbols_mapping
-    #   variant: rhel8-debug-aubsan-compile
-
-  # THIS HAS COPIES IN:
   # - etc/evergreen_yml_components/variants/rhel/test_dev_master_branch_only.yml
   # - etc/evergreen_yml_components/variants/rhel/test_dev_master_and_lts_branches_only.yml
   # - etc/evergreen_yml_components/variants/rhel/test_dev.yml
@@ -190,7 +172,7 @@ buildvariants:
   ###########################################
 
   - name: &enterprise-rhel-8-64-bit-dynamic-debug-mode enterprise-rhel-8-64-bit-dynamic-debug-mode
-    display_name: "Shared Library Enterprise RHEL 8 Debug Mode"
+    display_name: "Enterprise RHEL 8 Debug Mode"
     tags: ["forbid_tasks_tagged_with_experimental"]
     cron: "0 2 * * 0" # From the ${project_weekly_cron} parameter
     run_on:
@@ -200,12 +182,13 @@ buildvariants:
       <<: *enterprise-rhel-8-64-bit-dynamic-expansions
       compile_variant: *enterprise-rhel-8-64-bit-dynamic-debug-mode
       test_flags: >-
-        --mongodSetParameters="{internalQueryEnableAggressiveSpillsInGroup: true}"
+        --mongodSetParameters="{internalQueryEnableAggressiveSpillsInGroup: true, fassertOnLockTimeoutForStepUpDown: 180}"
         --excludeWithAnyTags=incompatible_slow_machine
       bazel_compile_flags: >-
         --define=MONGO_DISTMOD=rhel88
-        --linkstatic=False
         --use_glibcxx_debug=True
+        --dtlto=False
+        --pgo_profile_use=False
         --dbg=True
         --allocator=system
       exec_timeout_secs: 32400 # 9 hour timeout
@@ -285,7 +268,7 @@ buildvariants:
       test_flags: >-
         --excludeWithAnyTags=incompatible_with_windows_tls
         --modules=none
-        --mongodSetParameters="{internalQueryEnableAggressiveSpillsInGroup: true}"
+        --mongodSetParameters="{internalQueryEnableAggressiveSpillsInGroup: true, fassertOnLockTimeoutForStepUpDown: 180}"
       compile_variant: *windows-debug-suggested
     tasks:
       - name: compile_test_serial_TG
@@ -328,7 +311,7 @@ buildvariants:
       resmoke_jobs_max: 1
       test_flags: >-
         --excludeWithAnyTags=incompatible_with_windows_tls
-        --mongodSetParameters="{internalQueryEnableAggressiveSpillsInGroup: true}"
+        --mongodSetParameters="{internalQueryEnableAggressiveSpillsInGroup: true, fassertOnLockTimeoutForStepUpDown: 180}"
     tasks:
       # This variant tests that unoptimized, DEBUG mongos and mongod binaries can run on Windows.
       # It has a minimal amount of tasks because unoptimized builds are slow, which causes
@@ -354,7 +337,7 @@ buildvariants:
       test_flags: >-
         --excludeWithAnyTags=incompatible_with_macos
         --modules=none
-        --mongodSetParameters="{internalQueryEnableAggressiveSpillsInGroup: true}"
+        --mongodSetParameters="{internalQueryEnableAggressiveSpillsInGroup: true, fassertOnLockTimeoutForStepUpDown: 180}"
       resmoke_jobs_max: 6
       bazel_compile_flags: >-
         --dbg=True
@@ -381,7 +364,7 @@ buildvariants:
     expansions:
       compile_variant: *enterprise-macos
       test_flags: >-
-        --mongodSetParameters="{internalQueryEnableAggressiveSpillsInGroup: true}"
+        --mongodSetParameters="{internalQueryEnableAggressiveSpillsInGroup: true, fassertOnLockTimeoutForStepUpDown: 180}"
         --excludeWithAnyTags=incompatible_with_macos,requires_gcm
       bazel_compile_flags: >-
         --dbg=True
@@ -391,7 +374,7 @@ buildvariants:
       - name: compile_test_serial_TG
       - name: run_unit_tests_8_way_split_TG
       - name: audit
-      - name: auth_audit_gen
+      - name: auth_audit
       - name: fle
       - name: fle2
       - name: .jscore .common !.decimal !.sharding
@@ -405,7 +388,7 @@ buildvariants:
 
   - name: &rhel8-debug-ubsan-all-feature-flags rhel8-debug-ubsan-all-feature-flags
     display_name: "* Shared Library UBSAN Enterprise RHEL 8 DEBUG (all feature flags)"
-    tags: ["suggested"]
+    tags: ["suggested", "emergency_release"]
     cron: "0 2 * * *" # From the ${project_nightly_cron} parameter.
     run_on:
       - rhel8.8-large
@@ -433,7 +416,7 @@ buildvariants:
       test_flags: >-
         --excludeWithAnyTags=requires_increased_memlock_limits,all_feature_flags_incompatible
         --runAllFeatureFlagTests
-        --mongodSetParameters="{internalQueryEnableAggressiveSpillsInGroup: true}"
+        --mongodSetParameters="{internalQueryEnableAggressiveSpillsInGroup: true, fassertOnLockTimeoutForStepUpDown: 180}"
       multiversion_platform: rhel8
       multiversion_edition: enterprise
       resmoke_jobs_factor: 0.3 # Avoid starting too many mongod's under UBSAN build.
@@ -459,7 +442,7 @@ buildvariants:
       test_flags: >-
         --excludeWithAnyTags=requires_increased_memlock_limits,all_feature_flags_incompatible
         --runAllFeatureFlagTests --disableUnreleasedIFRFlags
-        --mongodSetParameters="{internalQueryEnableAggressiveSpillsInGroup: true}"
+        --mongodSetParameters="{internalQueryEnableAggressiveSpillsInGroup: true, fassertOnLockTimeoutForStepUpDown: 180}"
       multiversion_platform: rhel8
       multiversion_edition: enterprise
       resmoke_jobs_factor: 0.3 # Avoid starting too many mongod's under UBSAN build.
@@ -479,7 +462,12 @@ buildvariants:
   - <<: *rhel8_debug_aubsan_compile_variant_dependency
     name: rhel8-debug-aubsan-all-feature-flags
     display_name: "* Shared Library {A,UB}SAN Enterprise RHEL 8 DEBUG (all feature flags)"
-    tags: ["suggested", "forbid_tasks_tagged_with_experimental"]
+    tags:
+      [
+        "suggested",
+        "forbid_tasks_tagged_with_experimental",
+        "emergency_release",
+      ]
     cron: "0 2 1-31/2 * *" # For cost reasons, we run this variant every other day
     run_on:
       - rhel8.8-large
@@ -493,7 +481,7 @@ buildvariants:
       test_flags: >-
         --runAllFeatureFlagTests
         --excludeWithAnyTags=incompatible_aubsan
-        --mongodSetParameters="{internalQueryEnableAggressiveSpillsInGroup: true}"
+        --mongodSetParameters="{internalQueryEnableAggressiveSpillsInGroup: true, fassertOnLockTimeoutForStepUpDown: 180}"
         --mongosSetParameters="{maxRoundsWithoutProgressParameter: 20}"
         --mongosSetParameters="{findShardsOnConfigTimeoutMS: 30000}"
     tasks: &rhel8-debug-aubsan-task-list
@@ -528,7 +516,7 @@ buildvariants:
       test_flags: >-
         --runAllFeatureFlagTests
         --excludeWithAnyTags=incompatible_aubsan
-        --mongodSetParameters="{internalQueryEnableAggressiveSpillsInGroup: true}"
+        --mongodSetParameters="{internalQueryEnableAggressiveSpillsInGroup: true, fassertOnLockTimeoutForStepUpDown: 180}"
         --mongosSetParameters="{findShardsOnConfigTimeoutMS: 30000}"
     tasks:
       - name: .multiversion_fuzzer
@@ -553,7 +541,7 @@ buildvariants:
       test_flags: >-
         --runAllFeatureFlagTests --disableUnreleasedIFRFlags
         --excludeWithAnyTags=incompatible_aubsan
-        --mongodSetParameters="{internalQueryEnableAggressiveSpillsInGroup: true}"
+        --mongodSetParameters="{internalQueryEnableAggressiveSpillsInGroup: true, fassertOnLockTimeoutForStepUpDown: 180}"
         --mongosSetParameters="{maxRoundsWithoutProgressParameter: 20}"
         --mongosSetParameters="{findShardsOnConfigTimeoutMS: 30000}"
     tasks: *rhel8-debug-aubsan-task-list
@@ -574,7 +562,7 @@ buildvariants:
       test_flags: >-
         --benchmarkRepetitions=1
         --excludeWithAnyTags=incompatible_aubsan
-        --mongodSetParameters="{internalQueryEnableAggressiveSpillsInGroup: true}"
+        --mongodSetParameters="{internalQueryEnableAggressiveSpillsInGroup: true, fassertOnLockTimeoutForStepUpDown: 180}"
         --mongosSetParameters="{findShardsOnConfigTimeoutMS: 30000}"
       compile_variant: *rhel8-debug-aubsan-benchmarks
     tasks:
@@ -586,7 +574,12 @@ buildvariants:
   - <<: *enterprise-rhel8-debug-tsan-compile-dependency
     name: enterprise-rhel8-debug-tsan-all-feature-flags
     display_name: "* TSAN Enterprise RHEL 8 DEBUG (all feature flags)"
-    tags: ["suggested", "forbid_tasks_tagged_with_experimental"]
+    tags:
+      [
+        "suggested",
+        "forbid_tasks_tagged_with_experimental",
+        "emergency_release",
+      ]
     cron: "0 2 1-31/2 * *" # For cost reasons, we run this variant every other day.
     run_on:
       - rhel8.8-large
@@ -597,7 +590,7 @@ buildvariants:
       # fcv_upgrade_downgrade tests, when concurrent FCV upgrade/downgrades can keep batch write
       # operations from making progress on slow sanitizer variants.
       test_flags: >-
-        --mongodSetParameters="{internalQueryEnableAggressiveSpillsInGroup: true, receiveChunkWaitForRangeDeleterTimeoutMS: 180000}"
+        --mongodSetParameters="{internalQueryEnableAggressiveSpillsInGroup: true, fassertOnLockTimeoutForStepUpDown: 180, receiveChunkWaitForRangeDeleterTimeoutMS: 180000}"
         --mongosSetParameters="{maxRoundsWithoutProgressParameter: 20}"
         --excludeWithAnyTags=tsan_incompatible
         --runAllFeatureFlagTests
@@ -645,38 +638,11 @@ buildvariants:
       # fcv_upgrade_downgrade tests, when concurrent FCV upgrade/downgrades can keep batch write
       # operations from making progress on slow sanitizer variants.
       test_flags: >-
-        --mongodSetParameters="{internalQueryEnableAggressiveSpillsInGroup: true, receiveChunkWaitForRangeDeleterTimeoutMS: 180000}"
+        --mongodSetParameters="{internalQueryEnableAggressiveSpillsInGroup: true, fassertOnLockTimeoutForStepUpDown: 180, receiveChunkWaitForRangeDeleterTimeoutMS: 180000}"
         --mongosSetParameters="{maxRoundsWithoutProgressParameter: 20}"
         --excludeWithAnyTags=tsan_incompatible
         --runAllFeatureFlagTests --disableUnreleasedIFRFlags
     tasks: *enterprise-rhel8-debug-tsan-task-list
-
-  - name: &enterprise-rhel8-unoptimized-64-bit enterprise-rhel8-unoptimized-64-bit
-    display_name: "~ Enterprise RHEL 8 DEBUG (Unoptimized)"
-    tags: ["bazel_check"]
-    cron: "0 2 * * *" # From the ${project_nightly_cron} parameter.
-    expansions:
-      bazel_compile_flags: >-
-        --define=MONGO_DISTMOD=rhel88
-        --dbg=True
-        --opt=off
-        --detect_odr_violations=True
-        --linker=gold
-        --linkstatic=False
-      compile_variant: *enterprise-rhel8-unoptimized-64-bit
-    tasks:
-      - name: compile_test_parallel_core_stream_TG
-        distros:
-          - rhel8.8-large
-      - name: run_unit_tests_TG
-        distros:
-          - rhel8.8-large
-      - name: compile_test_parallel_dbtest_stream_TG
-        distros:
-          - rhel8.8-large
-      - name: generate_buildid_to_debug_symbols_mapping
-        distros:
-          - rhel8.8-large
 
   - name: &linux-debug-aubsan-compile-grpc linux-debug-aubsan-compile-grpc
     display_name: "~ Linux x86 Shared Library {A,UB}SAN Enterprise Compile with Ingress GRPC"

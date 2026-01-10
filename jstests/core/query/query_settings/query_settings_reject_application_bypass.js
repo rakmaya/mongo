@@ -12,12 +12,22 @@
 //   simulate_mongoq_incompatible,
 //   # This test relies on aggregations returning specific batch-sized responses.
 //   assumes_no_implicit_cursor_exhaustion,
+//   # TODO(SERVER-113800): Enable setClusterParameters with replicaset started with --shardsvr
+//   transitioning_replicaset_incompatible,
+//   # Ignore because the rewrite of the query for TS leads to other stages preceding
+//   # $planCacheStats, which is not allowed.
+//   exclude_from_timeseries_crud_passthrough,
 // ]
 //
 
 import {assertDropAndRecreateCollection} from "jstests/libs/collection_drop_recreate.js";
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {QuerySettingsUtils} from "jstests/libs/query/query_settings_utils.js";
+
+// This test makes assertions about sessions on a particular node, which are not compatible with
+// random mongos dispatching.
+// pinToSingleMongos due to $listLocalSessions.
+TestData.pinToSingleMongos = true;
 
 // Creating the collection.
 const coll = assertDropAndRecreateCollection(db, jsTestName());

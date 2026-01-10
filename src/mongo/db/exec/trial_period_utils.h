@@ -32,6 +32,7 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/repl/oplog.h"
+#include "mongo/util/modules.h"
 
 #include <cstddef>
 
@@ -40,6 +41,15 @@ class Collection;
 class CollectionPtr;
 
 namespace trial_period {
+
+struct TrialPhaseConfig {
+    // How many works to give each plan during the trial period.
+    size_t maxNumWorksPerPlan;
+    // How many results per plan are we targeting to retrieve during the trial period.
+    // If a plan returns this many results, we can stop the trial period early.
+    size_t targetNumResults;
+};
+
 /**
  * Returns the number of times that we are willing to work a plan during a trial period.
  *

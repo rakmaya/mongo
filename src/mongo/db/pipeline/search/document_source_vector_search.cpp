@@ -30,18 +30,18 @@
 #include "mongo/db/pipeline/search/document_source_vector_search.h"
 
 #include "mongo/base/string_data.h"
-#include "mongo/db/local_catalog/shard_role_catalog/operation_sharding_state.h"
-#include "mongo/db/pipeline/document_source_internal_shard_filter.h"
 #include "mongo/db/pipeline/document_source_sort.h"
 #include "mongo/db/pipeline/search/document_source_internal_search_id_lookup.h"
 #include "mongo/db/pipeline/search/lite_parsed_search.h"
 #include "mongo/db/pipeline/search/search_helper.h"
 #include "mongo/db/pipeline/search/vector_search_helper.h"
 #include "mongo/db/pipeline/skip_and_limit.h"
+#include "mongo/db/pipeline/stage_params_to_document_source_registry.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/db/query/search/mongot_cursor.h"
 #include "mongo/db/query/search/search_index_view_validation.h"
 #include "mongo/db/query/search/search_task_executors.h"
+#include "mongo/db/shard_role/shard_catalog/operation_sharding_state.h"
 #include "mongo/db/views/resolved_view.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
@@ -50,11 +50,18 @@ namespace mongo {
 
 using boost::intrusive_ptr;
 
-REGISTER_DOCUMENT_SOURCE_WITH_FEATURE_FLAG(vectorSearch,
-                                           LiteParsedSearchStage::parse,
-                                           DocumentSourceVectorSearch::createFromBson,
-                                           AllowedWithApiStrict::kNeverInVersion1,
-                                           &feature_flags::gFeatureFlagVectorSearchPublicPreview);
+// Register the legacy parser as a fallback. This parser will be used when
+// featureFlagVectorSearchExtension is disabled or when the vector search extension has not been
+// loaded.
+REGISTER_LITE_PARSED_DOCUMENT_SOURCE_FALLBACK(vectorSearch,
+                                              VectorSearchLiteParsed::parse,
+                                              AllowedWithApiStrict::kNeverInVersion1,
+                                              &feature_flags::gFeatureFlagVectorSearchExtension);
+
+REGISTER_DOCUMENT_SOURCE_WITH_STAGE_PARAMS_DEFAULT(vectorSearch,
+                                                   DocumentSourceVectorSearch,
+                                                   VectorSearchStageParams);
+
 ALLOCATE_DOCUMENT_SOURCE_ID(vectorSearch, DocumentSourceVectorSearch::id)
 
 DocumentSourceVectorSearch::DocumentSourceVectorSearch(
@@ -232,7 +239,7 @@ DocumentSourceVectorSearch::_attemptSortAfterVectorSearchOptimization(
     return {itr, false};
 }
 
-DocumentSourceContainer::iterator DocumentSourceVectorSearch::doOptimizeAt(
+DocumentSourceContainer::iterator DocumentSourceVectorSearch::optimizeAt(
     DocumentSourceContainer::iterator itr, DocumentSourceContainer* container) {
     // Attempt to remove a $sort on metadata after this $vectorSearch stage.
     {

@@ -29,7 +29,8 @@
 
 #include "mongo/db/extension/sdk/host_services.h"
 
-#include "mongo/db/extension/host_connector/host_services_adapter.h"
+#include "mongo/db/extension/host_connector/adapter/host_services_adapter.h"
+#include "mongo/db/pipeline/search/document_source_internal_search_id_lookup.h"
 #include "mongo/unittest/death_test.h"
 #include "mongo/unittest/unittest.h"
 
@@ -41,75 +42,143 @@ namespace {
 class HostServicesTest : public unittest::Test {
 public:
     void setUp() override {
-        sdk::HostServicesHandle::setHostServices(host_connector::HostServicesAdapter::get());
+        sdk::HostServicesAPI::setHostServices(&host_connector::HostServicesAdapter::get());
     }
 };
 
 /**
- * Tests that the ExtensionLog created by HostServicesHandle::createExtensionLogMessage can be
- * round-tripped through MongoExtensionByteView serialization and deserialization.
+ * Tests that the MongoExtensionLogMessage created by HostServicesHandle::createLogMessageStruct
+ * has the correct fields populated.
  */
-TEST_F(HostServicesTest, ExtensionLogIDLRoundTrip) {
+TEST_F(HostServicesTest, CreateLogMessageStructEmptyAttrs) {
     std::string logMessage = "Test log message";
     std::int32_t logCode = 12345;
-    MongoExtensionLogSeverityEnum logSeverity = MongoExtensionLogSeverityEnum::kInfo;
+    ::MongoExtensionLogSeverity logSeverity = ::MongoExtensionLogSeverity::kInfo;
 
-    BSONObj structuredLog =
-        sdk::HostServicesHandle::createExtensionLogMessage(logMessage, logCode, logSeverity);
-    ::MongoExtensionByteView byteView = objAsByteView(structuredLog);
+    auto structuredLogGuard =
+        sdk::LoggerAPI::createLogMessageStruct(logMessage, logCode, logSeverity, {});
+    auto structuredLog = *structuredLogGuard.get();
+    ASSERT_EQUALS(structuredLog.code, static_cast<uint32_t>(logCode));
+    ASSERT_EQUALS(structuredLog.type, ::MongoExtensionLogType::kLog);
+    ASSERT_EQUALS(structuredLog.severityOrLevel.severity, logSeverity);
+    ASSERT_EQUALS(structuredLog.attributes.size, 0);
+    ASSERT_EQUALS(structuredLog.attributes.elements, nullptr);
 
-    ASSERT(byteView.data != nullptr);
-    ASSERT(byteView.len > 0);
-
-    auto bsonObj = bsonObjFromByteView(byteView);
-    auto log = MongoExtensionLog::parse(bsonObj);
-
-    ASSERT_EQUALS(log.getMessage(), logMessage);
-    ASSERT_EQUALS(log.getCode(), logCode);
-    ASSERT_EQUALS(log.getSeverity(), logSeverity);
+    auto messageView = byteViewAsStringView(structuredLog.message);
+    ASSERT_EQUALS(std::string(messageView), logMessage);
 }
 
-TEST_F(HostServicesTest, ExtensionDebugLogIDLRoundTrip) {
+TEST_F(HostServicesTest, CreateLogMessageStructWithAttrs) {
+    std::string logMessage = "Test log message";
+    std::int32_t logCode = 12345;
+    ::MongoExtensionLogSeverity logSeverity = ::MongoExtensionLogSeverity::kInfo;
+
+    std::vector<sdk::ExtensionLogAttribute> attrs = {{"hi", "finley"}};
+
+    auto structuredLogGuard =
+        sdk::LoggerAPI::createLogMessageStruct(logMessage, logCode, logSeverity, attrs);
+    auto structuredLog = *structuredLogGuard.get();
+    ASSERT_EQUALS(structuredLog.code, static_cast<uint32_t>(logCode));
+    ASSERT_EQUALS(structuredLog.type, ::MongoExtensionLogType::kLog);
+    ASSERT_EQUALS(structuredLog.severityOrLevel.severity, logSeverity);
+    ASSERT_EQUALS(structuredLog.attributes.size, 1);
+    ASSERT_EQUALS(std::string(byteViewAsStringView(structuredLog.attributes.elements[0].name)),
+                  "hi");
+    ASSERT_EQUALS(std::string(byteViewAsStringView(structuredLog.attributes.elements[0].value)),
+                  "finley");
+
+    auto messageView = byteViewAsStringView(structuredLog.message);
+    ASSERT_EQUALS(std::string(messageView), logMessage);
+}
+
+/**
+ * Tests that the MongoExtensionLogMessage created by
+ * HostServicesHandle::createDebugLogMessageStruct has the correct fields populated.
+ */
+TEST_F(HostServicesTest, CreateDebugLogMessageStructWithAttrs) {
     std::string logMessage = "Test debug log message";
     std::int32_t logCode = 12345;
     std::int32_t logLevel = 1;
 
-    BSONObj structuredDebugLog =
-        sdk::HostServicesHandle::createExtensionDebugLogMessage(logMessage, logCode, logLevel);
-    ::MongoExtensionByteView byteView = objAsByteView(structuredDebugLog);
+    std::vector<sdk::ExtensionLogAttribute> attrs = {{"hi", "mongodb"}};
 
-    ASSERT(byteView.data != nullptr);
-    ASSERT(byteView.len > 0);
+    auto structuredDebugLogGuard =
+        sdk::LoggerAPI::createDebugLogMessageStruct(logMessage, logCode, logLevel, attrs);
+    auto structuredDebugLog = *structuredDebugLogGuard.get();
 
-    auto bsonObj = bsonObjFromByteView(byteView);
-    auto debugLog = MongoExtensionDebugLog::parse(bsonObj);
+    ASSERT_EQUALS(structuredDebugLog.code, static_cast<uint32_t>(logCode));
+    ASSERT_EQUALS(structuredDebugLog.type, ::MongoExtensionLogType::kDebug);
+    ASSERT_EQUALS(structuredDebugLog.severityOrLevel.level, logLevel);
+    ASSERT_EQUALS(structuredDebugLog.attributes.size, 1);
+    ASSERT_EQUALS(std::string(byteViewAsStringView(structuredDebugLog.attributes.elements[0].name)),
+                  "hi");
+    ASSERT_EQUALS(
+        std::string(byteViewAsStringView(structuredDebugLog.attributes.elements[0].value)),
+        "mongodb");
 
-    ASSERT_EQUALS(debugLog.getMessage(), logMessage);
-    ASSERT_EQUALS(debugLog.getCode(), logCode);
-    ASSERT_EQUALS(debugLog.getLevel(), logLevel);
+    auto messageView = byteViewAsStringView(structuredDebugLog.message);
+    ASSERT_EQUALS(std::string(messageView), logMessage);
 }
 
-TEST_F(HostServicesTest, uasserted) {
+TEST_F(HostServicesTest, CreateDebugLogMessageStructEmptyAttrs) {
+    std::string logMessage = "Test debug log message";
+    std::int32_t logCode = 12345;
+    std::int32_t logLevel = 1;
+
+    auto structuredDebugLogGuard =
+        sdk::LoggerAPI::createDebugLogMessageStruct(logMessage, logCode, logLevel, {});
+    auto structuredDebugLog = *structuredDebugLogGuard.get();
+
+    ASSERT_EQUALS(structuredDebugLog.code, static_cast<uint32_t>(logCode));
+    ASSERT_EQUALS(structuredDebugLog.type, ::MongoExtensionLogType::kDebug);
+    ASSERT_EQUALS(structuredDebugLog.severityOrLevel.level, logLevel);
+
+    auto messageView = byteViewAsStringView(structuredDebugLog.message);
+    ASSERT_EQUALS(std::string(messageView), logMessage);
+}
+
+TEST_F(HostServicesTest, userAsserted) {
     auto errmsg = "an error";
     int errorCode = 11111;
     BSONObj errInfo = BSON("message" << errmsg << "errorCode" << errorCode);
     ::MongoExtensionByteView errInfoByteView = objAsByteView(errInfo);
 
-    StatusHandle status(sdk::HostServicesHandle::getHostServices()->userAsserted(errInfoByteView));
+    StatusHandle status(sdk::HostServicesAPI::getInstance()->userAsserted(errInfoByteView));
 
-    ASSERT_EQ(status.getCode(), errorCode);
+    ASSERT_EQ(status->getCode(), errorCode);
     // Reason is not populated on the status for re-throwable exceptions.
-    ASSERT_EQ(status.getReason(), "");
+    ASSERT_EQ(status->getReason(), "");
 }
 
-DEATH_TEST_REGEX_F(HostServicesTest, tasserted, "22222") {
+using HostServicesTestDeathTest = HostServicesTest;
+DEATH_TEST_REGEX_F(HostServicesTestDeathTest, tripwireAsserted, "22222") {
     auto errmsg = "fatal error";
     int errorCode = 22222;
     BSONObj errInfo = BSON("message" << errmsg << "errorCode" << errorCode);
     ::MongoExtensionByteView errInfoByteView = objAsByteView(errInfo);
 
     [[maybe_unused]] auto status =
-        sdk::HostServicesHandle::getHostServices()->tripwireAsserted(errInfoByteView);
+        sdk::HostServicesAPI::getInstance()->tripwireAsserted(errInfoByteView);
 }
+
+TEST_F(HostServicesTest, CreateIdLookup_ValidSpecReturnsHostNode) {
+    auto bsonSpec = BSON("$_internalSearchIdLookup" << BSONObj());
+    auto hostAstNode = extension::sdk::HostServicesAPI::getInstance()->createIdLookup(bsonSpec);
+    ASSERT_TRUE(hostAstNode->getName() ==
+                std::string(DocumentSourceInternalSearchIdLookUp::kStageName));
+}
+
+TEST_F(HostServicesTest, CreateIdLookup_InvalidSpecFails) {
+    auto bsonSpec = BSON("$match" << BSONObj());
+    ASSERT_THROWS_CODE(extension::sdk::HostServicesAPI::getInstance()->createIdLookup(bsonSpec),
+                       DBException,
+                       11134200);
+
+    bsonSpec = BSON("$_internalSearchIdLookup" << 5);
+    ASSERT_THROWS_CODE(extension::sdk::HostServicesAPI::getInstance()->createIdLookup(bsonSpec),
+                       DBException,
+                       11134200);
+}
+
 }  // namespace
 }  // namespace mongo::extension

@@ -1553,6 +1553,7 @@ def _bind_server_parameter(ctxt, param):
     ast_param.redact = param.redact
     ast_param.test_only = param.test_only
     ast_param.deprecated_name = param.deprecated_name
+    ast_param.mod_visibility = param.mod_visibility
 
     # The omit_in_ftdc flag can only be enabled for cluster parameters.
     if param.omit_in_ftdc is not None and param.set_at != ["cluster"]:
@@ -1656,8 +1657,14 @@ def _bind_feature_flag_cpp_vartype(ctxt, param, feature_flag_phase):
             ctxt.add_illegally_fcv_gated_feature_flag(param)
             return None
 
-        if param.fcv_context_unaware:
-            return "::mongo::LegacyContextUnawareFCVGatedFeatureFlag"
+        if param.check_against_fcv == "legacy_fcv_snapshot_only":
+            return "::mongo::LegacyFCVSnapshotOnlyFCVGatedFeatureFlag"
+        elif param.check_against_fcv == "operation_fcv_only":
+            return "::mongo::OperationFCVOnlyFCVGatedFeatureFlag"
+        assert param.check_against_fcv in (
+            "operation_fcv_or_fcv_snapshot",
+            None,
+        ), f"Invalid check_against_fcv value for {param.name}"
         return "::mongo::FCVGatedFeatureFlag"
     elif feature_flag_phase == ast.FeatureFlagRolloutPhase.NOT_FOR_INCREMENTAL_ROLLOUT:
         # Non-FCV gated, non IFR flag.
@@ -1673,6 +1680,7 @@ def _bind_feature_flags(ctxt, param):
     ast_param = ast.ServerParameter(param.file_name, param.line, param.column)
     ast_param.name = param.name
     ast_param.description = param.description
+    ast_param.mod_visibility = param.mod_visibility
 
     # Choose the feature flag phase.
     ast_param.feature_flag_phase = _bind_feature_flag_phase(ctxt, param)
@@ -1725,7 +1733,7 @@ def _bind_feature_flags(ctxt, param):
             for option_name in (
                 "version",
                 "enable_on_transitional_fcv_UNSAFE",
-                "fcv_context_unaware",
+                "check_against_fcv",
             ):
                 if getattr(param, option_name):
                     ctxt.add_feature_flag_fcv_gated_false_has_unsupported_option(param, option_name)
@@ -1823,6 +1831,7 @@ def _bind_config_option(ctxt, globals_spec, option):
     node.arg_vartype = option.arg_vartype
     node.cpp_vartype = option.cpp_vartype
     node.cpp_varname = option.cpp_varname
+    node.mod_visibility = option.mod_visibility
     node.condition = _bind_condition(option.condition, condition_for="config")
 
     node.requires = option.requires

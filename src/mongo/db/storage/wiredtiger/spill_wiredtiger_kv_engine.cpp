@@ -130,7 +130,7 @@ std::unique_ptr<RecordStore> SpillWiredTigerKVEngine::getTemporaryRecordStore(Re
 
 std::unique_ptr<RecordStore> SpillWiredTigerKVEngine::makeTemporaryRecordStore(
     RecoveryUnit& ru, StringData ident, KeyFormat keyFormat) {
-    WiredTigerSession session(_connection.get());
+    auto& session = *WiredTigerRecoveryUnit::get(ru).getSessionNoTxn();
 
     WiredTigerRecordStore::WiredTigerTableConfig wtTableConfig;
     wtTableConfig.keyFormat = keyFormat;
@@ -178,7 +178,7 @@ bool SpillWiredTigerKVEngine::hasIdent(RecoveryUnit& ru, StringData ident) const
 }
 
 int64_t SpillWiredTigerKVEngine::getIdentSize(RecoveryUnit& ru, StringData ident) {
-    WiredTigerSession session{_connection.get()};
+    auto& session = *WiredTigerRecoveryUnit::get(ru).getSessionNoTxn();
     return WiredTigerUtil::getIdentSize(session, WiredTigerUtil::buildTableUri(ident));
 }
 
@@ -246,6 +246,7 @@ WiredTigerKVEngineBase::WiredTigerConfig getSpillWiredTigerConfigFromStartupOpti
     wtConfig.evictionUpdatesTriggerMB =
         gSpillWiredTigerEvictionUpdatesTriggerPercentage * wtConfig.cacheSizeMB / 100;
     wtConfig.statisticsLogWaitSecs = wiredTigerGlobalOptions.statisticsLogDelaySecs;
+    wtConfig.statisticsSetting = wiredTigerGlobalOptions.statisticsSetting;
     wtConfig.inMemory = false;
     wtConfig.logEnabled = false;
     wtConfig.prefetchEnabled = false;

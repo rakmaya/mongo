@@ -34,14 +34,14 @@
 #include "mongo/bson/bsonobj_comparator_interface.h"
 #include "mongo/bson/ordering.h"
 #include "mongo/db/index/multikey_paths.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/record_id.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
 #include "mongo/db/storage/key_string/key_string.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/shared_buffer_fragment.h"
 
 #include <cstddef>
-#include <memory>
 #include <set>
 #include <vector>
 
@@ -50,6 +50,7 @@
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
 
+MONGO_MOD_PUBLIC;
 namespace mongo {
 
 class CollatorInterface;
@@ -66,7 +67,7 @@ public:
      */
     BtreeKeyGenerator(std::vector<const char*> fieldNames,
                       std::vector<BSONElement> fixed,
-                      bool isSparse,
+                      bool isSetSparseByUser,
                       key_string::Version keyStringVersion,
                       Ordering ordering);
 
@@ -256,7 +257,7 @@ private:
     const key_string::Version _keyStringVersion;
 
     const bool _isIdIndex;
-    const bool _isSparse;
+    const bool _isSetSparseByUser;
     // True if any of the indexed paths contains a positional path component. This prohibits the key
     // generator from using the non-multikey fast path.
     bool _pathsContainPositionalComponent{false};

@@ -1393,7 +1393,10 @@ ExpressionDateDiff::ExpressionDateDiff(ExpressionContext* const expCtx,
 boost::intrusive_ptr<Expression> ExpressionDateDiff::parse(ExpressionContext* const expCtx,
                                                            BSONElement expr,
                                                            const VariablesParseState& vps) {
-    invariant(expr.fieldNameStringData() == "$dateDiff");
+    tassert(11282956,
+            str::stream() << "Expecting to parse $dateDiff field, got "
+                          << expr.fieldNameStringData(),
+            expr.fieldNameStringData() == "$dateDiff");
     uassert(5166301,
             "$dateDiff only supports an object as its argument",
             expr.type() == BSONType::object);
@@ -2625,7 +2628,9 @@ intrusive_ptr<Expression> ExpressionNary::optimize() {
 
     // An operator cannot be left-associative and commutative, because left-associative
     // operators need to preserve their order-of-operations.
-    invariant(!(getAssociativity() == Associativity::kLeft && isCommutative()));
+    tassert(11282955,
+            "Nary expression cannot be left-associative and commutative at the same time",
+            !(getAssociativity() == Associativity::kLeft && isCommutative()));
 
     // If the expression is associative, we can collapse all the consecutive constant operands
     // into one by applying the expression to those consecutive constant operands. If the
@@ -2841,14 +2846,11 @@ intrusive_ptr<Expression> ExpressionReduce::parse(ExpressionContext* const expCt
                 expCtx->getVersionContext(),
                 serverGlobalParams.featureCompatibility.acquireFCVSnapshot());
 
-    // vpsSub is used only to parse 'in', which must have access to $$this and $$value.
-    VariablesParseState vpsSub(vps);
-    auto thisVar = vpsSub.defineVariable("this");
-    auto valueVar = vpsSub.defineVariable("value");
-
     BSONElement inputElem;
     BSONElement initialElem;
     BSONElement inElem;
+    BSONElement asElem;
+    BSONElement valueAsElem;
     BSONElement arrayIndexAsElem;
 
     for (auto&& elem : expr.Obj()) {
@@ -2859,6 +2861,18 @@ intrusive_ptr<Expression> ExpressionReduce::parse(ExpressionContext* const expCt
             initialElem = elem;
         } else if (field == "in") {
             inElem = elem;
+        } else if (isExposeArrayIndexEnabled && field == "as") {
+            assertLanguageFeatureIsAllowed(expCtx->getOperationContext(),
+                                           "as argument of $reduce operator",
+                                           AllowedWithApiStrict::kNeverInVersion1,
+                                           AllowedWithClientType::kAny);
+            asElem = elem;
+        } else if (isExposeArrayIndexEnabled && field == "valueAs") {
+            assertLanguageFeatureIsAllowed(expCtx->getOperationContext(),
+                                           "valueAs argument of $reduce operator",
+                                           AllowedWithApiStrict::kNeverInVersion1,
+                                           AllowedWithClientType::kAny);
+            valueAsElem = elem;
         } else if (isExposeArrayIndexEnabled && field == "arrayIndexAs") {
             assertLanguageFeatureIsAllowed(expCtx->getOperationContext(),
                                            "arrayIndexAs argument of $reduce operator",
@@ -2873,16 +2887,57 @@ intrusive_ptr<Expression> ExpressionReduce::parse(ExpressionContext* const expCt
     uassert(40078, "$reduce requires 'initialValue' to be specified", initialElem);
     uassert(40079, "$reduce requires 'in' to be specified", inElem);
 
-    // Parse "arrayIndexAs". If "arrayIndexAs" is not specified, then write to "IDX" by default.
+    // "vpsSub" gets our variables, "vps" doesn't.
+    VariablesParseState vpsSub(vps);
+
+    auto parseVariableDefinition = [&vpsSub](const BSONElement& elem, StringData defaultName) {
+        boost::optional<std::string> name;
+        if (elem) {
+            name = elem.str();
+            variableValidation::validateNameForUserWrite(*name);
+        }
+        Variables::Id id = vpsSub.defineVariable(!name ? defaultName : *name);
+        return std::make_pair(name, id);
+    };
+
+    // Parse "as". If is not specified, use "this" by default.
+    boost::optional<std::string> thisName;
+    Variables::Id thisId;
+    if (isExposeArrayIndexEnabled) {
+        std::tie(thisName, thisId) = parseVariableDefinition(asElem, "this");
+    } else {
+        // Keep previous behavior if feature flag is disabled.
+        thisId = vpsSub.defineVariable("this");
+    }
+
+    // Parse "valueAs". If is not specified, use "value" by default.
+    boost::optional<std::string> valueName;
+    Variables::Id valueId;
+    if (isExposeArrayIndexEnabled) {
+        std::tie(valueName, valueId) = parseVariableDefinition(valueAsElem, "value");
+    } else {
+        // Keep previous behavior if feature flag is disabled.
+        valueId = vpsSub.defineVariable("value");
+    }
+
+    // Parse "arrayIndexAs". If is not specified, use "IDX" by default.
     boost::optional<std::string> idxName;
     boost::optional<Variables::Id> idxId;
     if (isExposeArrayIndexEnabled) {
-        if (arrayIndexAsElem) {
-            idxName = arrayIndexAsElem.str();
-            variableValidation::validateNameForUserWrite(*idxName);
-        }
-        idxId = vpsSub.defineVariable(!idxName ? "IDX" : *idxName);
+        std::tie(idxName, idxId) = parseVariableDefinition(arrayIndexAsElem, "IDX");
     }
+
+    // Validate uniqueness of the user-defined variables.
+    boost::optional<std::string> repeatedName;
+    if (thisName && (thisName == valueName || thisName == idxName)) {
+        repeatedName = *thisName;
+    } else if (valueName && (valueName == idxName)) {
+        repeatedName = *valueName;
+    }
+
+    uassert(9298401,
+            str::stream() << "Cannot define variables with the same name " << *repeatedName,
+            !repeatedName.has_value());
 
     return make_intrusive<ExpressionReduce>(expCtx,
                                             parseOperand(expCtx, inputElem, vps),
@@ -2890,8 +2945,10 @@ intrusive_ptr<Expression> ExpressionReduce::parse(ExpressionContext* const expCt
                                             parseOperand(expCtx, inElem, vpsSub),
                                             std::move(idxName),
                                             idxId,
-                                            thisVar,
-                                            valueVar);
+                                            std::move(thisName),
+                                            thisId,
+                                            std::move(valueName),
+                                            valueId);
 }
 
 Value ExpressionReduce::evaluate(const Document& root, Variables* variables) const {
@@ -2906,13 +2963,15 @@ intrusive_ptr<Expression> ExpressionReduce::optimize() {
 }
 
 Value ExpressionReduce::serialize(const SerializationOptions& options) const {
-    return Value(
-        Document{{"$reduce",
-                  Document{{"input", _children[_kInput]->serialize(options)},
-                           {"initialValue", _children[_kInitial]->serialize(options)},
-                           {"arrayIndexAs",
-                            _idxName ? Value(options.serializeIdentifier(*_idxName)) : Value()},
-                           {"in", _children[_kIn]->serialize(options)}}}});
+    return Value(Document{
+        {"$reduce",
+         Document{
+             {"input", _children[_kInput]->serialize(options)},
+             {"initialValue", _children[_kInitial]->serialize(options)},
+             {"as", _thisName ? Value(options.serializeIdentifier(*_thisName)) : Value()},
+             {"valueAs", _valueName ? Value(options.serializeIdentifier(*_valueName)) : Value()},
+             {"arrayIndexAs", _idxName ? Value(options.serializeIdentifier(*_idxName)) : Value()},
+             {"in", _children[_kIn]->serialize(options)}}}});
 }
 
 /* ------------------------ ExpressionReplaceBase ------------------------ */
@@ -3083,6 +3142,262 @@ intrusive_ptr<Expression> ExpressionSortArray::optimize() {
 }
 
 Value ExpressionSortArray::serialize(const SerializationOptions& options) const {
+    return Value(Document{{kName,
+                           Document{{"input", _children[_kInput]->serialize(options)},
+                                    {"sortBy", _sortBy.getOriginalElement()}}}});
+}
+
+/* ----------------------- ExpressionTopN ------------------------ */
+
+intrusive_ptr<Expression> ExpressionTopN::parse(ExpressionContext* const expCtx,
+                                                BSONElement expr,
+                                                const VariablesParseState& vps) {
+    uassert(721218,
+            str::stream() << "$topN requires an object as an argument, found: "
+                          << typeName(expr.type()),
+            expr.type() == BSONType::object);
+
+    boost::intrusive_ptr<Expression> n;
+    boost::intrusive_ptr<Expression> input;
+    boost::optional<PatternValueCmp> sortBy;
+    for (auto&& elem : expr.Obj()) {
+        auto field = elem.fieldNameStringData();
+
+        if (field == "n") {
+            n = parseOperand(expCtx, elem, vps);
+        } else if (field == "input") {
+            input = parseOperand(expCtx, elem, vps);
+        } else if (field == "sortBy") {
+            sortBy = PatternValueCmp(createSortSpecObject(elem), elem, expCtx->getCollator());
+        } else {
+            uasserted(721219, str::stream() << "$topN found an unknown argument: " << field);
+        }
+    }
+
+    uassert(7212110, "$topN requires 'n' to be specified", n);
+    uassert(7212111, "$topN requires 'input' to be specified", input);
+
+    // If sortBy is not specified, default to ascending sort on the whole value
+    if (!sortBy) {
+        BSONObj defaultSortSpec = BSON("" << 1);
+        sortBy =
+            PatternValueCmp(defaultSortSpec, defaultSortSpec.firstElement(), expCtx->getCollator());
+    }
+
+    return new ExpressionTopN(expCtx, std::move(n), std::move(input), *sortBy);
+}
+
+Value ExpressionTopN::evaluate(const Document& root, Variables* variables) const {
+    return exec::expression::evaluate(*this, root, variables);
+}
+
+REGISTER_EXPRESSION_WITH_FEATURE_FLAG(topN,
+                                      ExpressionTopN::parse,
+                                      AllowedWithApiStrict::kNeverInVersion1,
+                                      AllowedWithClientType::kAny,
+                                      &feature_flags::gFeatureFlagTopNBottomNExpressions);
+
+const char* ExpressionTopN::getOpName() const {
+    return kName.data();
+}
+
+intrusive_ptr<Expression> ExpressionTopN::optimize() {
+    _children[_kN] = _children[_kN]->optimize();
+    _children[_kInput] = _children[_kInput]->optimize();
+    return this;
+}
+
+Value ExpressionTopN::serialize(const SerializationOptions& options) const {
+    return Value(Document{{kName,
+                           Document{{"n", _children[_kN]->serialize(options)},
+                                    {"input", _children[_kInput]->serialize(options)},
+                                    {"sortBy", _sortBy.getOriginalElement()}}}});
+}
+
+/* ----------------------- ExpressionTop ------------------------ */
+
+intrusive_ptr<Expression> ExpressionTop::parse(ExpressionContext* const expCtx,
+                                               BSONElement expr,
+                                               const VariablesParseState& vps) {
+    uassert(7212113,
+            str::stream() << "$top requires an object as an argument, found: "
+                          << typeName(expr.type()),
+            expr.type() == BSONType::object);
+
+    boost::intrusive_ptr<Expression> input;
+    boost::optional<PatternValueCmp> sortBy;
+    for (auto&& elem : expr.Obj()) {
+        auto field = elem.fieldNameStringData();
+
+        if (field == "input") {
+            input = parseOperand(expCtx, elem, vps);
+        } else if (field == "sortBy") {
+            sortBy = PatternValueCmp(createSortSpecObject(elem), elem, expCtx->getCollator());
+        } else {
+            uasserted(7212114, str::stream() << "$top found an unknown argument: " << field);
+        }
+    }
+
+    uassert(7212115, "$top requires 'input' to be specified", input);
+
+    // If sortBy is not specified, default to ascending sort on the whole value
+    if (!sortBy) {
+        BSONObj defaultSortSpec = BSON("" << 1);
+        sortBy =
+            PatternValueCmp(defaultSortSpec, defaultSortSpec.firstElement(), expCtx->getCollator());
+    }
+
+    return new ExpressionTop(expCtx, std::move(input), *sortBy);
+}
+
+Value ExpressionTop::evaluate(const Document& root, Variables* variables) const {
+    return exec::expression::evaluate(*this, root, variables);
+}
+
+REGISTER_EXPRESSION_WITH_FEATURE_FLAG(top,
+                                      ExpressionTop::parse,
+                                      AllowedWithApiStrict::kNeverInVersion1,
+                                      AllowedWithClientType::kAny,
+                                      &feature_flags::gFeatureFlagTopNBottomNExpressions);
+
+const char* ExpressionTop::getOpName() const {
+    return kName.data();
+}
+
+intrusive_ptr<Expression> ExpressionTop::optimize() {
+    _children[_kInput] = _children[_kInput]->optimize();
+    return this;
+}
+
+Value ExpressionTop::serialize(const SerializationOptions& options) const {
+    return Value(Document{{kName,
+                           Document{{"input", _children[_kInput]->serialize(options)},
+                                    {"sortBy", _sortBy.getOriginalElement()}}}});
+}
+
+/* ----------------------- ExpressionBottomN ------------------------ */
+
+intrusive_ptr<Expression> ExpressionBottomN::parse(ExpressionContext* const expCtx,
+                                                   BSONElement expr,
+                                                   const VariablesParseState& vps) {
+    uassert(7212117,
+            str::stream() << "$bottomN requires an object as an argument, found: "
+                          << typeName(expr.type()),
+            expr.type() == BSONType::object);
+
+    boost::intrusive_ptr<Expression> n;
+    boost::intrusive_ptr<Expression> input;
+    boost::optional<PatternValueCmp> sortBy;
+    for (auto&& elem : expr.Obj()) {
+        auto field = elem.fieldNameStringData();
+
+        if (field == "n") {
+            n = parseOperand(expCtx, elem, vps);
+        } else if (field == "input") {
+            input = parseOperand(expCtx, elem, vps);
+        } else if (field == "sortBy") {
+            sortBy = PatternValueCmp(createSortSpecObject(elem), elem, expCtx->getCollator());
+        } else {
+            uasserted(7212118, str::stream() << "$bottomN found an unknown argument: " << field);
+        }
+    }
+
+    uassert(7212119, "$bottomN requires 'n' to be specified", n);
+    uassert(7212120, "$bottomN requires 'input' to be specified", input);
+
+    // If sortBy is not specified, default to ascending sort on the whole value
+    if (!sortBy) {
+        BSONObj defaultSortSpec = BSON("" << 1);
+        sortBy =
+            PatternValueCmp(defaultSortSpec, defaultSortSpec.firstElement(), expCtx->getCollator());
+    }
+
+    return new ExpressionBottomN(expCtx, std::move(n), std::move(input), *sortBy);
+}
+
+Value ExpressionBottomN::evaluate(const Document& root, Variables* variables) const {
+    return exec::expression::evaluate(*this, root, variables);
+}
+
+REGISTER_EXPRESSION_WITH_FEATURE_FLAG(bottomN,
+                                      ExpressionBottomN::parse,
+                                      AllowedWithApiStrict::kNeverInVersion1,
+                                      AllowedWithClientType::kAny,
+                                      &feature_flags::gFeatureFlagTopNBottomNExpressions);
+
+const char* ExpressionBottomN::getOpName() const {
+    return kName.data();
+}
+
+intrusive_ptr<Expression> ExpressionBottomN::optimize() {
+    _children[_kN] = _children[_kN]->optimize();
+    _children[_kInput] = _children[_kInput]->optimize();
+    return this;
+}
+
+Value ExpressionBottomN::serialize(const SerializationOptions& options) const {
+    return Value(Document{{kName,
+                           Document{{"n", _children[_kN]->serialize(options)},
+                                    {"input", _children[_kInput]->serialize(options)},
+                                    {"sortBy", _sortBy.getOriginalElement()}}}});
+}
+
+/* ----------------------- ExpressionBottom ------------------------ */
+
+intrusive_ptr<Expression> ExpressionBottom::parse(ExpressionContext* const expCtx,
+                                                  BSONElement expr,
+                                                  const VariablesParseState& vps) {
+    uassert(7212122,
+            str::stream() << "$bottom requires an object as an argument, found: "
+                          << typeName(expr.type()),
+            expr.type() == BSONType::object);
+
+    boost::intrusive_ptr<Expression> input;
+    boost::optional<PatternValueCmp> sortBy;
+    for (auto&& elem : expr.Obj()) {
+        auto field = elem.fieldNameStringData();
+
+        if (field == "input") {
+            input = parseOperand(expCtx, elem, vps);
+        } else if (field == "sortBy") {
+            sortBy = PatternValueCmp(createSortSpecObject(elem), elem, expCtx->getCollator());
+        } else {
+            uasserted(7212123, str::stream() << "$bottom found an unknown argument: " << field);
+        }
+    }
+
+    uassert(7212124, "$bottom requires 'input' to be specified", input);
+
+    // If sortBy is not specified, default to ascending sort on the whole value
+    if (!sortBy) {
+        BSONObj defaultSortSpec = BSON("" << 1);
+        sortBy =
+            PatternValueCmp(defaultSortSpec, defaultSortSpec.firstElement(), expCtx->getCollator());
+    }
+
+    return new ExpressionBottom(expCtx, std::move(input), *sortBy);
+}
+
+Value ExpressionBottom::evaluate(const Document& root, Variables* variables) const {
+    return exec::expression::evaluate(*this, root, variables);
+}
+
+REGISTER_EXPRESSION_WITH_FEATURE_FLAG(bottom,
+                                      ExpressionBottom::parse,
+                                      AllowedWithApiStrict::kNeverInVersion1,
+                                      AllowedWithClientType::kAny,
+                                      &feature_flags::gFeatureFlagTopNBottomNExpressions);
+
+const char* ExpressionBottom::getOpName() const {
+    return kName.data();
+}
+
+intrusive_ptr<Expression> ExpressionBottom::optimize() {
+    _children[_kInput] = _children[_kInput]->optimize();
+    return this;
+}
+
+Value ExpressionBottom::serialize(const SerializationOptions& options) const {
     return Value(Document{{kName,
                            Document{{"input", _children[_kInput]->serialize(options)},
                                     {"sortBy", _sortBy.getOriginalElement()}}}});
@@ -5085,7 +5400,303 @@ Value ExpressionCreateObjectId::serialize(const SerializationOptions& options) c
     return Value(DOC(getOpName() << Document()));
 }
 
-/* --------------------------------- Parenthesis --------------------------------------------- */
+/* -------------------------- ExpressionSerializeEJSON ------------------------------ */
+REGISTER_EXPRESSION_WITH_FEATURE_FLAG(serializeEJSON,
+                                      ExpressionSerializeEJSON::parse,
+                                      AllowedWithApiStrict::kAlways,
+                                      AllowedWithClientType::kAny,
+                                      &feature_flags::gFeatureFlagMqlJsEngineGap);
+
+ExpressionSerializeEJSON::ExpressionSerializeEJSON(ExpressionContext* const expCtx,
+                                                   boost::intrusive_ptr<Expression> input,
+                                                   boost::intrusive_ptr<Expression> relaxed,
+                                                   boost::intrusive_ptr<Expression> onError)
+    : Expression(expCtx,
+                 {
+                     std::move(input),
+                     std::move(relaxed),
+                     std::move(onError),
+                 }) {
+    expCtx->setSbeCompatibility(SbeCompatibility::notCompatible);
+}
+
+intrusive_ptr<Expression> ExpressionSerializeEJSON::parse(ExpressionContext* const expCtx,
+                                                          BSONElement expr,
+                                                          const VariablesParseState& vps) {
+
+    uassert(ErrorCodes::FailedToParse,
+            str::stream() << "$serializeEJSON expects an object of named arguments but found: "
+                          << typeName(expr.type()),
+            expr.type() == BSONType::object);
+
+    boost::intrusive_ptr<Expression> input;
+    boost::intrusive_ptr<Expression> relaxed;
+    boost::intrusive_ptr<Expression> onError;
+
+    for (auto&& elem : expr.embeddedObject()) {
+        const auto field = elem.fieldNameStringData();
+        if (field == _kInput) {
+            input = parseOperand(expCtx, elem, vps);
+        } else if (field == _kRelaxed) {
+            relaxed = parseOperand(expCtx, elem, vps);
+        } else if (field == _kOnError) {
+            onError = parseOperand(expCtx, elem, vps);
+        } else {
+            uasserted(ErrorCodes::FailedToParse,
+                      str::stream() << "$serializeEJSON found an unknown argument: "
+                                    << elem.fieldNameStringData());
+        }
+    }
+
+    uassert(ErrorCodes::FailedToParse, "Missing 'input' parameter to $serializeEJSON", input);
+    return new ExpressionSerializeEJSON(
+        expCtx, std::move(input), std::move(relaxed), std::move(onError));
+}
+
+const char* ExpressionSerializeEJSON::getOpName() const {
+    return "$serializeEJSON";
+}
+
+Value ExpressionSerializeEJSON::evaluate(const Document& root, Variables* variables) const {
+    return exec::expression::evaluate(*this, root, variables);
+}
+
+intrusive_ptr<Expression> ExpressionSerializeEJSON::optimize() {
+    for (auto& child : _children) {
+        if (child) {
+            child = child->optimize();
+        }
+    }
+    return this;
+}
+
+Value ExpressionSerializeEJSON::serialize(const SerializationOptions& options) const {
+    return Value(Document{{
+        getOpName(),
+        Document{{_kInput, getInput().serialize(options)},
+                 {_kRelaxed, getRelaxed() ? getRelaxed()->serialize(options) : Value()},
+                 {_kOnError, getOnError() ? getOnError()->serialize(options) : Value()}},
+    }});
+}
+
+boost::intrusive_ptr<Expression> ExpressionSerializeEJSON::clone() const {
+    return make_intrusive<ExpressionSerializeEJSON>(getExpressionContext(),
+                                                    cloneChild(_kInputIdx),
+                                                    cloneChild(_kRelaxedIdx),
+                                                    cloneChild(_kOnErrorIdx));
+}
+
+const Expression& ExpressionSerializeEJSON::getInput() const {
+    return *_children[_kInputIdx];
+}
+
+const Expression* ExpressionSerializeEJSON::getRelaxed() const {
+    return _children[_kRelaxedIdx].get();
+}
+
+const Expression* ExpressionSerializeEJSON::getOnError() const {
+    return _children[_kOnErrorIdx].get();
+}
+
+/* -------------------------- ExpressionDeserializeEJSON ------------------------------ */
+REGISTER_EXPRESSION_WITH_FEATURE_FLAG(deserializeEJSON,
+                                      ExpressionDeserializeEJSON::parse,
+                                      AllowedWithApiStrict::kAlways,
+                                      AllowedWithClientType::kAny,
+                                      &feature_flags::gFeatureFlagMqlJsEngineGap);
+
+ExpressionDeserializeEJSON::ExpressionDeserializeEJSON(ExpressionContext* const expCtx,
+                                                       boost::intrusive_ptr<Expression> input,
+                                                       boost::intrusive_ptr<Expression> onError)
+    : Expression(expCtx,
+                 {
+                     std::move(input),
+                     std::move(onError),
+                 }) {
+    expCtx->setSbeCompatibility(SbeCompatibility::notCompatible);
+}
+
+intrusive_ptr<Expression> ExpressionDeserializeEJSON::parse(ExpressionContext* const expCtx,
+                                                            BSONElement expr,
+                                                            const VariablesParseState& vps) {
+
+    uassert(ErrorCodes::FailedToParse,
+            str::stream() << "$deserializeEJSON expects an object of named arguments but found: "
+                          << typeName(expr.type()),
+            expr.type() == BSONType::object);
+
+    boost::intrusive_ptr<Expression> input;
+    boost::intrusive_ptr<Expression> onError;
+
+    for (auto&& elem : expr.embeddedObject()) {
+        const auto field = elem.fieldNameStringData();
+        if (field == _kInput) {
+            input = parseOperand(expCtx, elem, vps);
+        } else if (field == _kOnError) {
+            onError = parseOperand(expCtx, elem, vps);
+        } else {
+            uasserted(ErrorCodes::FailedToParse,
+                      str::stream() << "$deserializeEJSON found an unknown argument: "
+                                    << elem.fieldNameStringData());
+        }
+    }
+
+    uassert(ErrorCodes::FailedToParse, "Missing 'input' parameter to $deserializeEJSON", input);
+    return new ExpressionDeserializeEJSON(expCtx, std::move(input), std::move(onError));
+}
+
+const char* ExpressionDeserializeEJSON::getOpName() const {
+    return "$deserializeEJSON";
+}
+
+Value ExpressionDeserializeEJSON::evaluate(const Document& root, Variables* variables) const {
+    return exec::expression::evaluate(*this, root, variables);
+}
+
+intrusive_ptr<Expression> ExpressionDeserializeEJSON::optimize() {
+    for (auto& child : _children) {
+        if (child) {
+            child = child->optimize();
+        }
+    }
+    return this;
+}
+
+Value ExpressionDeserializeEJSON::serialize(const SerializationOptions& options) const {
+    return Value(Document{{
+        getOpName(),
+        Document{{_kInput, getInput().serialize(options)},
+                 {_kOnError, getOnError() ? getOnError()->serialize(options) : Value()}},
+    }});
+}
+
+boost::intrusive_ptr<Expression> ExpressionDeserializeEJSON::clone() const {
+    return make_intrusive<ExpressionDeserializeEJSON>(
+        getExpressionContext(), cloneChild(_kInputIdx), cloneChild(_kOnErrorIdx));
+}
+
+const Expression& ExpressionDeserializeEJSON::getInput() const {
+    return *_children[_kInputIdx];
+}
+
+const Expression* ExpressionDeserializeEJSON::getOnError() const {
+    return _children[_kOnErrorIdx].get();
+}
+
+namespace {
+
+intrusive_ptr<Expression> parseHash(ExpressionContext* const expCtx,
+                                    BSONElement expr,
+                                    const VariablesParseState& vps,
+                                    const StringData opName) {
+    uassert(ErrorCodes::FailedToParse,
+            str::stream() << opName << " expects an object of named arguments but found: "
+                          << typeName(expr.type()),
+            expr.type() == BSONType::object);
+
+    boost::intrusive_ptr<Expression> input;
+    boost::intrusive_ptr<Expression> algorithm;
+
+    for (auto&& elem : expr.embeddedObject()) {
+        const auto field = elem.fieldNameStringData();
+        if (field == ExpressionHash::kInput) {
+            input = Expression::parseOperand(expCtx, elem, vps);
+        } else if (field == ExpressionHash::kAlgorithm) {
+            algorithm = Expression::parseOperand(expCtx, elem, vps);
+        } else {
+            uasserted(ErrorCodes::FailedToParse,
+                      str::stream() << opName << " found an unknown argument: "
+                                    << elem.fieldNameStringData());
+        }
+    }
+
+    uassert(ErrorCodes::FailedToParse,
+            str::stream() << "Missing 'input' parameter to " << opName,
+            input);
+    uassert(ErrorCodes::FailedToParse,
+            str::stream() << "Missing 'algorithm' parameter to " << opName,
+            algorithm);
+
+    return new ExpressionHash(expCtx, std::move(input), std::move(algorithm));
+}
+
+}  // namespace
+
+/* --------------------------------- ExpressionHash --------------------------------------------- */
+REGISTER_EXPRESSION_WITH_FEATURE_FLAG(hash,
+                                      ExpressionHash::parse,
+                                      AllowedWithApiStrict::kAlways,
+                                      AllowedWithClientType::kAny,
+                                      &feature_flags::gFeatureFlagMqlJsEngineGap);
+
+ExpressionHash::ExpressionHash(ExpressionContext* const expCtx,
+                               boost::intrusive_ptr<Expression> input,
+                               boost::intrusive_ptr<Expression> algorithm)
+    : Expression(expCtx, {std::move(input), std::move(algorithm)}) {
+    expCtx->setSbeCompatibility(SbeCompatibility::notCompatible);
+}
+
+intrusive_ptr<Expression> ExpressionHash::parse(ExpressionContext* const expCtx,
+                                                BSONElement expr,
+                                                const VariablesParseState& vps) {
+    return parseHash(expCtx, expr, vps, "$hash"_sd);
+}
+
+const char* ExpressionHash::getOpName() const {
+    return "$hash";
+}
+
+Value ExpressionHash::evaluate(const Document& root, Variables* variables) const {
+    return exec::expression::evaluate(*this, root, variables);
+}
+
+intrusive_ptr<Expression> ExpressionHash::optimize() {
+    _children[_kInputIdx] = _children[_kInputIdx]->optimize();
+    _children[_kAlgorithmIdx] = _children[_kAlgorithmIdx]->optimize();
+    return this;
+}
+
+Value ExpressionHash::serialize(const SerializationOptions& options) const {
+    return Value(Document{{
+        getOpName(),
+        Document{{kInput, getInput().serialize(options)},
+                 {kAlgorithm, getAlgorithm().serialize(options)}},
+    }});
+}
+
+boost::intrusive_ptr<Expression> ExpressionHash::clone() const {
+    return make_intrusive<ExpressionHash>(
+        getExpressionContext(), cloneChild(_kInputIdx), cloneChild(_kAlgorithmIdx));
+}
+
+const Expression& ExpressionHash::getInput() const {
+    return *_children[_kInputIdx];
+}
+
+const Expression& ExpressionHash::getAlgorithm() const {
+    return *_children[_kAlgorithmIdx];
+}
+
+/* -------------------------------- ExpressionHexHash ------------------------------------------- */
+namespace {
+
+intrusive_ptr<Expression> parseHexHash(ExpressionContext* const expCtx,
+                                       BSONElement expr,
+                                       const VariablesParseState& vps) {
+    auto hashExpr = parseHash(expCtx, expr, vps, "$hexHash"_sd);
+    return ExpressionConvert::create(expCtx, hashExpr, BSONType::string, BinDataFormat::kHex);
+}
+
+}  // namespace
+
+REGISTER_EXPRESSION_WITH_FEATURE_FLAG(hexHash,
+                                      parseHexHash,
+                                      AllowedWithApiStrict::kAlways,
+                                      AllowedWithClientType::kAny,
+                                      &feature_flags::gFeatureFlagMqlJsEngineGap);
+
+/* --------------------------------- Parenthesis ---------------------------------------------
+ */
 
 REGISTER_STABLE_EXPRESSION(expr, parseParenthesisExprObj);
 static intrusive_ptr<Expression> parseParenthesisExprObj(ExpressionContext* const expCtx,

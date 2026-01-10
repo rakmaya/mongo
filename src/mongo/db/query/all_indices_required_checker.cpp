@@ -30,10 +30,10 @@
 #include "mongo/db/query/all_indices_required_checker.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/db/local_catalog/index_catalog.h"
-#include "mongo/db/local_catalog/index_catalog_entry.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog_entry.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
 
@@ -51,7 +51,8 @@ AllIndicesRequiredChecker::AllIndicesRequiredChecker(
 
 void AllIndicesRequiredChecker::saveIndicesForCollection(const CollectionPtr& collection) {
     if (collection) {
-        auto allEntriesShared = collection->getIndexCatalog()->getAllReadyEntriesShared();
+        auto allEntriesShared =
+            collection->getIndexCatalog()->getEntriesShared(IndexCatalog::InclusionPolicy::kReady);
         auto& indexMap = _identEntries[collection->uuid()];
         for (auto&& index : allEntriesShared) {
             indexMap[index->descriptor()->indexName()] = index->getIdent();
@@ -61,10 +62,13 @@ void AllIndicesRequiredChecker::saveIndicesForCollection(const CollectionPtr& co
 
 void AllIndicesRequiredChecker::checkIndicesForCollection(OperationContext* opCtx,
                                                           const CollectionPtr& collection) const {
-    invariant(collection);
+    tassert(11321000, "collection must not be null", collection);
 
     auto it = _identEntries.find(collection->uuid());
-    invariant(it != _identEntries.end());
+    tassert(11321001,
+            fmt::format("cannot find index idents for collection uuid {}",
+                        collection->uuid().toString()),
+            it != _identEntries.end());
 
     for (const auto& [name, ident] : it->second) {
         // Structured bindings cannot be captured by closures (the uassert below).

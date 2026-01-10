@@ -31,6 +31,7 @@
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/json.h"
+#include "mongo/db/index/wildcard_key_generator.h"
 #include "mongo/db/index_names.h"
 #include "mongo/db/matcher/expression_geo.h"
 #include "mongo/db/query/compiler/metadata/index_entry.h"
@@ -54,7 +55,7 @@ namespace {
 /**
  * Make a minimal IndexEntry from just a key pattern. A dummy name will be added.
  */
-IndexEntry buildSimpleIndexEntry(const BSONObj& kp) {
+IndexEntry buildSimpleIndexEntry(const BSONObj& kp, WildcardProjection* wcProjection = nullptr) {
     return {kp,
             IndexNames::nameToType(IndexNames::findPluginName(kp)),
             IndexConfig::kLatestIndexVersion,
@@ -64,10 +65,56 @@ IndexEntry buildSimpleIndexEntry(const BSONObj& kp) {
             false,
             false,
             CoreIndexInfo::Identifier("test_foo"),
-            nullptr,
             {},
-            nullptr,
-            nullptr};
+            wcProjection};
+}
+
+TEST(QueryPlannerAnalysis, CanUseIndexForRightSideOfLookupOnlyInClassic) {
+    std::string foreignField = "b";
+    std::vector<IndexEntry> indexList;
+    BSONObj keyPattern = BSON("$**" << 1);
+
+    auto wcProjection = WildcardKeyGenerator::createProjectionExecutor(keyPattern, BSONObj());
+    auto compatibleWcIndex = buildSimpleIndexEntry(keyPattern, &wcProjection);
+
+    auto wcProjectionExclude =
+        WildcardKeyGenerator::createProjectionExecutor(keyPattern, BSON("b" << 0));
+    auto incompatibleWcIndex = buildSimpleIndexEntry(keyPattern, &wcProjectionExclude);
+
+    auto sbeIndex = buildSimpleIndexEntry(BSON("b" << 1));
+
+    // There are no indexes.
+    ASSERT_FALSE(QueryPlannerAnalysis::canUseIndexForRightSideOfLookupOnlyInClassic(foreignField,
+                                                                                    indexList));
+    // A single index that is wildcard index that can be used only in classic.
+    indexList.push_back(compatibleWcIndex);
+    ASSERT_TRUE(QueryPlannerAnalysis::canUseIndexForRightSideOfLookupOnlyInClassic(foreignField,
+                                                                                   indexList));
+
+    // A single index that is a  wildcard index that excludes the foreignField, thus it is not
+    // eligible for the query.
+    indexList.clear();
+    indexList.push_back(incompatibleWcIndex);
+    ASSERT_FALSE(QueryPlannerAnalysis::canUseIndexForRightSideOfLookupOnlyInClassic(foreignField,
+                                                                                    indexList));
+
+    // A second index that can be used in SBE.
+    indexList.push_back(sbeIndex);
+    ASSERT_FALSE(QueryPlannerAnalysis::canUseIndexForRightSideOfLookupOnlyInClassic(foreignField,
+                                                                                    indexList));
+
+    // A wildcard index that can be used in classic and a second index that can be used in SBE.
+    indexList.clear();
+    indexList.push_back(compatibleWcIndex);
+    indexList.push_back(sbeIndex);
+    ASSERT_FALSE(QueryPlannerAnalysis::canUseIndexForRightSideOfLookupOnlyInClassic(foreignField,
+                                                                                    indexList));
+
+    // A single index that can be used in SBE.
+    indexList.clear();
+    indexList.push_back(sbeIndex);
+    ASSERT_FALSE(QueryPlannerAnalysis::canUseIndexForRightSideOfLookupOnlyInClassic(foreignField,
+                                                                                    indexList));
 }
 
 TEST(QueryPlannerAnalysis, GetSortPatternBasic) {
@@ -142,7 +189,9 @@ TEST(QueryPlannerAnalysis, GetSortPatternSpecialIndexTypes) {
 // Test the generation of sort orders provided by an index scan done by
 // IndexScanNode::computeProperties().
 TEST(QueryPlannerAnalysis, IxscanSortOrdersBasic) {
-    IndexScanNode ixscan(buildSimpleIndexEntry(fromjson("{a: 1, b: 1, c: 1, d: 1, e: 1}")));
+    auto testNss = NamespaceString::createNamespaceString_forTest("testdb.coll");
+    IndexScanNode ixscan(testNss,
+                         buildSimpleIndexEntry(fromjson("{a: 1, b: 1, c: 1, d: 1, e: 1}")));
 
     // Bounds are {a: [[1,1]], b: [[2,2]], c: [[3,3]], d: [[1,5]], e:[[1,1],[2,2]]},
     // all inclusive.
@@ -212,7 +261,8 @@ TEST(QueryPlannerAnalysis, GeoSkipValidation) {
 
     QueryPlannerParams params{QueryPlannerParams::ArgsForTest{}};
 
-    std::unique_ptr<FetchNode> fetchNodePtr = std::make_unique<FetchNode>();
+    auto testNss = NamespaceString::createNamespaceString_forTest("testdb.coll");
+    std::unique_ptr<FetchNode> fetchNodePtr = std::make_unique<FetchNode>(testNss);
     std::unique_ptr<GeoMatchExpression> exprPtr =
         std::make_unique<GeoMatchExpression>("geometry.field"_sd, nullptr, BSONObj());
 
@@ -362,7 +412,8 @@ TEST_F(QueryPlannerTest, ExprOnFetchDoesNotIncludeImpreciseFilter) {
 }
 
 TEST(QueryPlannerAnalysis, TurnIndexScanIntoCount) {
-    auto node = std::make_unique<IndexScanNode>(buildSimpleIndexEntry(BSON("a" << 1)));
+    auto testNss = NamespaceString::createNamespaceString_forTest("testdb.coll");
+    auto node = std::make_unique<IndexScanNode>(testNss, buildSimpleIndexEntry(BSON("a" << 1)));
 
     OrderedIntervalList a{"a"};
     a.intervals.push_back(IndexBoundsBuilder::makeRangeInterval(
@@ -375,26 +426,28 @@ TEST(QueryPlannerAnalysis, TurnIndexScanIntoCount) {
 }
 
 TEST(QueryPlannerAnalysis, TurnIndexScanAndFetchIntoCount) {
-    auto node = std::make_unique<IndexScanNode>(buildSimpleIndexEntry(BSON("a" << 1)));
+    auto testNss = NamespaceString::createNamespaceString_forTest("testdb.coll");
+    auto node = std::make_unique<IndexScanNode>(testNss, buildSimpleIndexEntry(BSON("a" << 1)));
     OrderedIntervalList a{"a"};
     a.intervals.push_back(IndexBoundsBuilder::makeRangeInterval(
         BSON("" << 1 << "" << 10), BoundInclusion::kIncludeBothStartAndEndKeys));
     node->bounds.fields.push_back(a);
 
     QuerySolution qs;
-    qs.setRoot(std::make_unique<FetchNode>(std::move(node)));
+    qs.setRoot(std::make_unique<FetchNode>(std::move(node), testNss));
     ASSERT_TRUE(QueryPlannerAnalysis::turnIxscanIntoCount(&qs));
 }
 
 TEST(QueryPlannerAnalysis, CannotTurnIndexScanAndFetchIntoCount) {
-    auto node = std::make_unique<IndexScanNode>(buildSimpleIndexEntry(BSON("a" << 1)));
+    auto testNss = NamespaceString::createNamespaceString_forTest("testdb.coll");
+    auto node = std::make_unique<IndexScanNode>(testNss, buildSimpleIndexEntry(BSON("a" << 1)));
     OrderedIntervalList a{"a"};
     a.intervals.push_back(IndexBoundsBuilder::makeRangeInterval(
         BSON("" << 1 << "" << 10), BoundInclusion::kIncludeBothStartAndEndKeys));
     node->bounds.fields.push_back(a);
 
     // Add fetch node with filter.
-    auto fetch = std::make_unique<FetchNode>(std::move(node));
+    auto fetch = std::make_unique<FetchNode>(std::move(node), testNss);
     auto operand = BSON("$lt" << 100);
     std::unique_ptr<LTMatchExpression> expPtr =
         std::make_unique<LTMatchExpression>("a"_sd, operand["$lt"]);
