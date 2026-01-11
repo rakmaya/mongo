@@ -28,7 +28,7 @@
  */
 
 #include "mongo/db/exec/timeseries/hcindex/hcindex_collection_manager.h"
-#include "mongo/db/local_catalog/catalog_test_fixture.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_test_fixture.h"
 #include "mongo/unittest/unittest.h"
 
 namespace mongo::timeseries::hcindex {

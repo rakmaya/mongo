@@ -117,7 +117,7 @@ McDonalds in New York?")
 | Order Status | 2 | COMPLETE, FAILED
 | Order Number | XX | Unique order number per merchant
 
-### Real-World Test 1 - 10K Unique Transactions
+### Real-World Test 1 - 40K Unique Transactions
 
 This emulates a scenario where we have a large number of unique transactions,
 but each transaction is relatively small set of fields. This is a common
@@ -126,27 +126,26 @@ scenario in e-commerce.
 | Ingestion | HC Index Enabled | Regular Collection |
 |-----------|------------------|--------------------|
 | M1 (DBG) | 1.3 sec | 50.7 sec |
-| M1 (OPT) | 175 ms | 6.6 sec |
+| M1 (OPT) | 502 ms | 3.0 sec |
 
 
 | Component | HC Index Enabled | Regular Collection |
 |-----------|------------------|--------------------|
-| Symbol Dictionary size | 9,159 bytes | - |
+| Symbol Dictionary size | 16,086 bytes | - |
 | Symbol Dictionary storageSize | 24,576 bytes | - |
 | Symbol Dictionary totalSize | 24,576 bytes | - |
-| Attribute Table size | 591,047 bytes | - |
-| Attribute Table storageSize | 196,608 bytes | - |
-| Attribute Table totalSize | 196,608 bytes | - |
-| Inverted Bitmap size | 516,871 bytes | - |
-| Inverted Bitmap storageSize | 270,336 bytes | - |
-| Inverted Bitmap totalSize | 270,336 bytes | - |
-| Bucket Collection size | 57,050 bytes | 5,131,370 bytes |
-| Bucket Collection storageSize | 69,632 bytes | 569,344 bytes |
-| Bucket Collection totalSize | 69,632 bytes | 1,863,680 bytes |
-| **Total Size** | **1,174,297 bytes**  | **5,131,370 bytes**  |
-| **Total storageSize** | **561,152 bytes**  | **569,344 bytes**  |
-| **Total totalSize** | **561,152 bytes**  | **1,863,680 bytes**  |
-| **Compression Ratio** | **2.30x** | **9.01x** |
+| Attribute Table size | 2,363,553 bytes | - |
+| Attribute Table storageSize | 749,568 bytes | - |
+| Attribute Table totalSize | 749,568 bytes | - |
+| Inverted Bitmap size | 2,068,677 bytes | - |
+| Inverted Bitmap storageSize | 1,024,000  bytes | - |
+| Inverted Bitmap totalSize | 1,024,000 bytes | - |
+| Bucket Collection size | 226,966 bytes | 20,543,939 bytes |
+| Bucket Collection storageSize | 221,184 bytes | 2,244,608 bytes |
+| Bucket Collection totalSize | 221,184 bytes | 7,413,760 bytes |
+| **Total Size**            | **4,675,282 bytes**  | **0,543,939 bytes**  |
+| **Total storageSize**         | **2,019,328 bytes**  | **2,244,608 bytes**  |
+| **Total totalSize** | **2,019,328 bytes**  | **2,244,608 bytes**  |
 
 
 **<u>Key Observations</u>:**

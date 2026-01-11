@@ -858,11 +858,12 @@ StatusWith<InsertRowResult> TemporalAttributeTable::insertRow(OperationContext* 
 
         auto bitmapStatus = temporalBitmapIndex->addRow(opCtx, rowId, row, timestamp);
         if (!bitmapStatus.isOK()) {
-            LOGV2_WARNING(9999930,
+            LOGV2_WARNING(9999990,
                           "Failed to add row to bitmap index",
                           "rowId"_attr = rowId,
                           "error"_attr = bitmapStatus);
             // Continue anyway - bitmap index is an optimization, not critical
+            // TODO: Remove this log and replace with error stats?
         }
     }
 
@@ -943,10 +944,10 @@ void TemporalAttributeTable::flush()
 {
     std::unique_lock<std::shared_mutex> lock(mutex);
 
-    // Flush all tables
     for (auto& [windowStart, table] : tables) {
-        // Flush the table
-        table->flush();
+        if (table) {
+            table->flush();
+        }
     }
 }
 

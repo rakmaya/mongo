@@ -76,7 +76,7 @@ HCIndexCollectionManager::HCIndexCollectionManager(OperationContext* opCtx,
       bitmapIndex(buildMetadataIndex ? std::make_unique<TemporalBitmapIndex>(collectionUUID, period, frequency, writer.get(), reader.get()) : nullptr),
       attributeTable(std::make_unique<TemporalAttributeTable>(collectionUUID, period, frequency, symbolDictionary.get(), bitmapIndex.get(), writer.get(), reader.get()))
 {
-    LOGV2_DEBUG(9999980, 3,
+    LOGV2_DEBUG(9999990, 3,
           "HCIndex: HCIndexCollectionManager created",
           "collectionUUID"_attr = collectionUUID,
           "dbName"_attr = dbName,
@@ -106,16 +106,13 @@ Status HCIndexCollectionManager::initializeForRead(OperationContext* opCtx) {
     // Initialize the reader by acquiring collections for symbol and attribute operations
     auto readerInitStatus = reader->initializeCollections(opCtx);
     if (!readerInitStatus.isOK()) {
-        LOGV2_WARNING(9999996,
+        LOGV2_WARNING(9999990,
                       "Failed to initialize HCIndex reader collections",
                       "error"_attr = readerInitStatus);
         // Continue anyway - the reader will try to acquire collections on-demand if needed
     }
 
     initializedForRead = true;
-    LOGV2(9999997,
-          "HCIndexCollectionManager::initializedForRead ",
-          "elapsedMicros"_attr = timer.micros());
     return Status::OK();
 }
 
@@ -126,7 +123,7 @@ void HCIndexCollectionManager::close() {
         reader->close();
     }
     initializedForRead = false;
-    LOGV2(9999998,
+    LOGV2(9999990,
           "HCIndexCollectionManager::close ",
           "elapsedMicros"_attr = timer.micros());
 }
@@ -138,7 +135,7 @@ void HCIndexCollectionManager::prepareForYield() {
     if (reader) {
         reader->prepareForYield();
     }
-    LOGV2(9999999,
+    LOGV2(9999990,
           "HCIndexCollectionManager::prepareForYield ",
           "elapsedMicros"_attr = timer.micros());
 }
@@ -152,13 +149,13 @@ Status HCIndexCollectionManager::restoreForYield(OperationContext* opCtx) {
 
     auto restoreStatus = reader->restoreForYield(opCtx);
     if (!restoreStatus.isOK()) {
-        LOGV2_WARNING(9999900,
+        LOGV2_WARNING(9999990,
                       "Failed to restore HCIndex reader collections after yield",
                       "error"_attr = restoreStatus);
         return restoreStatus;
     }
 
-    LOGV2(9999901,
+    LOGV2(9999990,
           "HCIndexCollectionManager::restoreForYield ",
           "elapsedMicros"_attr = timer.micros());
     return Status::OK();
@@ -238,6 +235,7 @@ StatusWith<BSONObj> HCIndexCollectionManager::decodeMetadata(OperationContext* o
 
 Status HCIndexCollectionManager::flushPendingOperations(
     std::function<Status(const std::string&, const std::vector<InsertStatement>&)> flushCallback) {
+
     if (!writer) {
         return Status(ErrorCodes::InternalError, "HCIndex writer not initialized");
     }
@@ -338,11 +336,11 @@ StatusWith<std::vector<int64_t>> HCIndexCollectionManager::queryRows(
     if (bitmapIndex) {
         auto indexResult = bitmapIndex->getIndexForTimestamp(timestamp);
         if (!indexResult.isOK()) {
-            LOGV2_DEBUG(9999981, 3, "HCIndex: Bitmap index not in memory, trying to create/reconstruct from disk");
+            LOGV2_DEBUG(9999990, 3, "HCIndex: Bitmap index not in memory, trying to create/reconstruct from disk");
             // Index may not be in the memory. Try to get it from disk.
             indexResult = bitmapIndex->getOrCreateIndexForTimestamp(opCtx, timestamp);
             if (!indexResult.isOK()) {
-                LOGV2_WARNING(9999981, "Failed to create/reconstruct bitmap index",
+                LOGV2_WARNING(9999990, "Failed to create/reconstruct bitmap index",
                       "error"_attr = indexResult.getStatus());
                 // Continue anyway - bitmap index is an optimization, not critical
             } else {

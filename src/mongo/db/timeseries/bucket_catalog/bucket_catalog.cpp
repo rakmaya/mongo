@@ -33,7 +33,7 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/oid.h"
 #include "mongo/db/collection_crud/collection_write_path.h"
-#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
+#include "mongo/db/shard_role/shard_role.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/storage/exceptions.h"
 #include "mongo/db/storage/write_unit_of_work.h"
@@ -176,6 +176,18 @@ BucketCatalog::BucketCatalog(size_t numberOfStripes, std::function<uint64_t()> m
             getTrackingContext(trackingContexts, TrackingScope::kMiscellaneous), trackingContexts);
     });
 }
+
+BatchedInsertContext::BatchedInsertContext(
+    BucketKey& bucketKey,
+    StripeNumber stripeNumber,
+    const TimeseriesOptions& options,
+    ExecutionStatsController& stats,
+    std::vector<BatchedInsertTuple>& measurementsTimesAndIndices)
+    : key(std::move(bucketKey)),
+      stripeNumber(stripeNumber),
+      options(options),
+      stats(stats),
+      measurementsTimesAndIndices(measurementsTimesAndIndices) {};
 
 uint64_t getMemoryUsage(const BucketCatalog& catalog) {
 #ifndef MONGO_CONFIG_DEBUG_BUILD
@@ -1358,8 +1370,21 @@ std::vector<BatchedInsertContext> buildBatchedHCInsertContexts(
             }
             auto meta = std::get<BSONElement>(swTimeAndMeta.getValue());
 
+            // Convert BSONElement to BSONObj for encodeMetadata.
+            // If meta is already an object, use it directly.
+            // Otherwise, the caller's data model is incompatible with HCIndex
+            // (HCIndex expects metadata to be a document with fields).
+            BSONObj metaObj;
+            if (meta.type() == BSONType::object) {
+                metaObj = meta.Obj();
+            } else {
+                // Non-object metadata (e.g., string, number) - wrap it in an object
+                // with a synthetic field name so AttributeTable can process it.
+                metaObj = BSON("_value" << meta);
+            }
+
             // Encode metadata to rowId
-            auto swRowId = hcindexMgr->encodeMetadata(opCtx, meta.Obj(), ts);
+            auto swRowId = hcindexMgr->encodeMetadata(opCtx, metaObj, ts);
             if (!swRowId.isOK()) {
                 errorsAndIndices.push_back(
                     WriteStageErrorAndIndex{std::move(swRowId.getStatus()), index});
@@ -1393,6 +1418,7 @@ std::vector<BatchedInsertContext> buildBatchedHCInsertContexts(
             }
         }
     }
+
 
     // Transform measurements for HCIndex path and create BatchedInsertContexts
     std::vector<BatchedInsertContext> batchedInsertContexts;
@@ -1486,11 +1512,12 @@ std::vector<BatchedInsertContext> buildBatchedHCInsertContexts(
             // TODO: Big One! What is the right function to use here? The
             // _forTest for now since I went with my understanding of the code
             // from unit tests.
+
             auto nss = NamespaceString::createNamespaceString_forTest(boost::none, collName);
 
             CollectionAcquisitionRequest request{
                 nss,
-                PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
                 repl::ReadConcernArgs::kLocal,
                 AcquisitionPrerequisites::kWrite};
             auto collection = acquireCollection(opCtx, request, MODE_IX);

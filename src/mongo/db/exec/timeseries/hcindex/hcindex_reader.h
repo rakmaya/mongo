@@ -35,7 +35,7 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/exec/timeseries/hcindex/temporal_symbol_dictionary.h"
 #include "mongo/db/exec/timeseries/hcindex/temporal_attribute_table.h"
-#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
+#include "mongo/db/shard_role/shard_role.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
 #include "mongo/util/uuid.h"
 

@@ -31,9 +31,6 @@
 #include "mongo/db/exec/timeseries/hcindex/hcindex_writer.h"
 #include "mongo/db/exec/timeseries/hcindex/hcindex_reader.h"
 #include "mongo/base/error_codes.h"
-#include "mongo/logv2/log.h"
-
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 namespace mongo::timeseries::hcindex {
 
@@ -269,7 +266,7 @@ StatusWith<uint32_t> DeltaSymbolDictionary::getOrInsertSymbol(StringData word) {
         if (_baseDictionary) {
             refBaseDictionaryTime = _baseDictionary->getWindowStart();
         }
-        
+
         // Pass _nextSymbolIndex as the local index offset so the reader knows where
         // to start assigning indices for local symbols
         if (!_writer->initSymbolDictionary(_windowStart, _windowEnd, refBaseDictionaryTime, _nextSymbolIndex).isOK()) {
@@ -320,7 +317,7 @@ StatusWith<uint32_t> DeltaSymbolDictionary::getOrInsertSymbol(StringData word) {
             }
         }
     }
-    
+
     // Step 5: Not found anywhere - add to local delta
     if (_state == SymbolDictionaryState::NOP) {
         return Status(ErrorCodes::InternalError, "Dictionary is in NOP state, cannot insert symbols");
@@ -517,6 +514,11 @@ size_t DeltaSymbolDictionary::getMemoryUsageBytes() const {
     std::shared_lock<std::shared_mutex> lock(_mutex);
 
     size_t totalBytes = 0;
+
+    // Base dictionary memory (if we own it)
+    if (_baseDictionary && _baseDictionary->getWindowStart() == _windowStart) {
+        totalBytes += _baseDictionary->getMemoryUsageBytes();
+    }
 
     // Inherited delta memory
     for (const auto& [word, _] : _inheritedWordToIndex) {

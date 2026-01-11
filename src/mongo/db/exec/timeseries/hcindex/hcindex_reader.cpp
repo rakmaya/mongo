@@ -31,7 +31,7 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/exec/timeseries/hcindex/hcindex_collection_manager.h"
 #include "mongo/db/timeseries/hcindex_options.h"
-#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
+#include "mongo/db/shard_role/shard_role.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/logv2/log.h"
 
