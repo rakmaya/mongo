@@ -1,28 +1,40 @@
 # HCIndex (High Cardinality Indexing) for MongoDB Timeseries
 
-The goal is to make MongoDB competitive in the field of data analytics. OLAP
-uses a lot of high-cardinality metadata. A time/sequenced data model is one of
-the most common data models in analytics. However, MongoDB's timeseries model is
-not optimized for high-cardinality metadata. HCIndex is a proposed solution to
-this problem. The pimary characteristics of analytics are:
+The goal is to make MongoDB competitive in the field of realtime analytics,
+business insights and observability. Databases like like Clickhouse, Apache
+Pinot, Apache Druid and Apache Doris leads in these areas. Most small to medium
+enterprise teams utilizes these systems and large (Uber/Google scale) have
+their own solutions. Fundamental attribute of the data in this space is that
+users have to process and query high-cardinality dataset. Another
+characteristics is most of the user workflows has a certain time-ephimeral
+quality; orders processed over the last hour, cluster usage in the last hour,
+ai-token used in in the last minute, cpu/memory utilzation in the last 10
+seconds etc...
+
+Time parametrized high cardinality indexing strategy provides a solution to
+address high-cardinality data ingestion and simplifies user workflows when it
+comes to defining indexes and data-models. The pimary characteristics of the
+datase in these spaces are:
 
 - A large volume of data is ingested over a short span of time, usually in
-  batches.
+    batches while still operating is the 10s of millisecond space.
 - Data is extremly sparse (e.g. "clothing sold by store-X in the last hour",
-  "number of containers re-started in the last 10 seconds") and is spread out over
-  a large number of dimensions. That is **ingestion cardinality** is extremely high.
+    "number of containers restarted in the last 10 seconds") and is spread out
+    over a large number of dimensions. That is, **ingestion cardinality** is
+    extremely high.
 - When zoomed out (e.g. all clothing sold by store-X), the data is very dense
-  across some dimensions and sparse across others. The concept of "zoom out" is
-  relative to the query. And thus **query-cardinality** can be high across some
-  dimensions and low across others.
+    across some dimensions and sparse across others. The concept of "zoom out"
+    is relative to the query. And thus **query-cardinality** can be high across
+    some dimensions and low across others.
 - Two user personas:
   - Human driven Data Insight: Users don't know what they are looking for but
-    they keep querying until they find something interesting. They will pull
-    large number of data over certain time-windows. **Scan-optimized** workflow.
+      they keep querying until they find something interesting. They will pull
+      large number of data over certain time-windows. **Scan-optimized**
+      workflow.
   - Automated Systems: User will set up a system to look for a specific
-    projection of data and will query it frequently (e.g. "Alert if order failure
-    rate exceeds 5% whtin the last 5 minutes for any McDonalds in NYC").
-    **Seek-optimized** workflow.
+      projection of data and will query it frequently (e.g. "Alert if order
+      failure rate exceeds 5% whtin the last 5 minutes for any McDonalds in
+      NYC"). **Seek-optimized** workflow.
 
 One of the main user-side experience difference is that user rarely wants to
 be concerned with figuring out what schema/indexes are required. When fully
@@ -32,18 +44,20 @@ implemented, the idea is that we auto-generate the indexes.
 
 Fundamentally, time parametrized high cardinality index assumes that all index
 structure are ephimeral and all data organized for scan-optimal workflow.
-Inverted indexes are dynamically built based on the query patterns or along
-certain dimensions, but for certain time-windows only. This allows the index to
-be useful where it can be. It is not worth building any inverted incides if the
-entire dataset is unique across all dimensions since index lookup itself
-becomes a scan. Due to the time-parametrization, we can also quickly drop
-indexes when data gets older. Example e-commerce or observability space rarely
-need full metadata index beyond the most recent n-hours and this n is super
-small for observability space.
+Inverted indexes are dynamically built based on the column density and query
+patterns along certain dimensions and persists for certain time-windows only.
+This allows the index to be useful where it can be. It is not worth building
+any inverted incides if the entire dataset is unique across all dimensions
+since index lookup itself becomes a scan. Due to the time-parametrization, we
+can also quickly drop indexes when data gets older. Example e-commerce or
+observability space rarely need full metadata index beyond the most recent
+n-hours and this n is super small for observability space. It also enables
+auto rollups to be detected and optimized (More on this later).
 
-One of the major benefit that MongoDB has over Clickhouse and Apache Pinot is
-its bucketing model. This model provides enough primitives to build the the
-time-parametrized index structures. It is, to some extent easier to build-on
+One of the major benefit that MongoDB has over Clickhouse and Pinot is its
+bucketing model. This model provides enough primitives to build the the
+time-parametrized index structures. From my own personal experience through
+this reference implementation, I felt that to some extent easier to build-on
 than M3DB and Pinot. Some pushdown of predicates to the bucket level is harder
 compared to those 2 databases, but it is not terribly hard either.
 
@@ -106,12 +120,9 @@ Analytics workloads follow a **two-phase pattern**:
    - Dimensional statistics guide which fields to index within each bucket
    - For common patterns (e.g., aggregations), predicates can be pushed to bucket level, avoiding unpacking entirely
 
-This approach is superior to building all-encompassing indexes upfront because:
-
-- Indexes only exist where they are useful
-- Sparse data doesn't create bloated indexes
-- Memory usage scales linearly with data and number of hot-buckets and not total
-  cardinality
+This approach is superior to building all-encompassing indexes upfront because
+  - Indexes only exist where they are useful
+  - Sparse data doesn't create bloated indexes
 
 ## Test Case - Merchant Transactions
 
@@ -120,6 +131,7 @@ transactions across merchants. This is a scenario where most transactions are
 unique when we factor order number into account. Final writes are written in
 batches. This is reasonable assumption since in extremly high volume use-cases
 there is usually an aggregator or collector layer that batches the db writes.
+Low/Medium volume will do streaming writes (Test 2 below)
 
 ### Why is this a good test case?
 
@@ -175,7 +187,7 @@ Batch size: 1000
 
 This simulates the use-case where the user is writing to db as the events
 comes. Current implementation of bitmap index and attribute table is not
-optimized to buffer internally.
+optimized to buffer internally (More on this later).
 
 
 | Ingestion    | HC Index Enabled | Regular Collection |
@@ -323,129 +335,14 @@ db.observability_hc.find({
 });
 ```
 
-| Query Type               | Traditional | HCIndex | Improvement     |
-| ------------------------ | ----------- | ------- | --------------- |
-| **Single service (1hr)** | TODO ms     | TODO ms | TODO% faster    |
-| **Table-specific (1hr)** | TODO ms     | TODO ms | TODO% faster    |
-| **Cross-region (1hr)**   | TODO ms     | TODO ms | TODO% faster    |
-| **Memory usage**         | TODO MB     | TODO MB | TODO% reduction |
-
-### Aggregation Queries
-
-Typical observability dashboards aggregate metrics across dimensions:
-
-**Query 1: Average CPU by service**
-
-```javascript
-db.observability_hc.aggregate([
-  {
-    $match: {
-      "metadata.metric_type": "system",
-      "metadata.environment": "production",
-      timestamp: {
-        $gte: ISODate("2026-01-14T06:00:00Z"),
-        $lt: ISODate("2026-01-14T07:00:00Z"),
-      },
-    },
-  },
-  {
-    $group: {
-      _id: "$metadata.service",
-      avgCPU: {$avg: "$cpu_percent"},
-      maxCPU: {$max: "$cpu_percent"},
-    },
-  },
-]);
-```
-
-**Query 2: Database throughput by table**
-
-```javascript
-db.observability_hc.aggregate([
-  {
-    $match: {
-      "metadata.metric_type": "database",
-      "metadata.service": "postgres",
-      timestamp: {
-        $gte: ISODate("2026-01-14T06:00:00Z"),
-        $lt: ISODate("2026-01-14T07:00:00Z"),
-      },
-    },
-  },
-  {
-    $group: {
-      _id: "$metadata.table_name",
-      totalReads: {$sum: "$read_request_count"},
-      totalWrites: {$sum: "$write_request_count"},
-    },
-  },
-]);
-```
-
-| Query Type                 | Traditional | HCIndex | Improvement  |
-| -------------------------- | ----------- | ------- | ------------ |
-| **CPU by service**         | TODO ms     | TODO ms | TODO% faster |
-| **DB throughput by table** | TODO ms     | TODO ms | TODO% faster |
-| **Network by region**      | TODO ms     | TODO ms | TODO% faster |
-| **Error rate by AZ**       | TODO ms     | TODO ms | TODO% faster |
-
-### Cardinality Analysis
-
-Understanding how cardinality evolves over time is critical for HCIndex effectiveness:
-
-| Time Window | Unique Combinations | Container Churn | Notes                          |
-| ----------- | ------------------- | --------------- | ------------------------------ |
-| 10 seconds  | TODO                | 0%              | Single interval, minimal churn |
-| 1 minute    | TODO                | ~0.1%           | Some container restarts        |
-| 10 minutes  | TODO                | ~1%             | Auto-scaling events            |
-| 1 hour      | TODO                | ~5%             | Multiple restarts, scaling     |
-| 24 hours    | TODO                | ~100%+          | Full daily cycle, deployments  |
-
-**Key Insight**: HCIndex's time-parametrized dictionaries prevent cardinality explosion by maintaining separate symbol mappings per time window, avoiding global dictionary bloat from ephemeral metadata values.
-
-## Critical Design Principles
-
-### Immutability of Symbol Indices
-
-Once a symbol is assigned an index, it NEVER changes
-
-- Existing buckets remain valid forever
-- No need to rewrite bucket metadata
-- Safe concurrent access without locks
-- Enables efficient caching
-
-### Append-Only Attribute Table
-
-Rows are NEVER modified, only appended
-
-- Existing bucket references remain valid
-- No need to update bucket metadata
-- Safe concurrent access
-- Enables efficient indexing
-
-### Separation of Concerns
-
-Metadata encoding happens at write time, not query time
-
-- Cleaner architecture
-- Faster query execution
-- Better caching strategies
-- Easier to reason about correctness
-
-### Backward Compatibility
-
-Support both traditional and HCIndex metadata
-
-- Gradual migration path
-- No breaking changes
-- Can mix V3 and V4 buckets
-- Easier rollout and rollback
-
-## Time Parametrized Index Structures
+## High level design
 
 Index structures themselves are time-parametrized. There are no index snapshots.
 Instead of storing complete snapshots, HCIndex uses a **sequence of operations**
 stored in timeseries collections:
+
+**Note**: Not all the features mentioned here are coded in the reference
+implementation (see later sections).
 
 ### Operation Types
 
@@ -455,17 +352,18 @@ stored in timeseries collections:
 
 2. **opADD** - Incremental additions (two variants)
    - Symbol variant: Add new symbol-to-id mappings
-   - Attribute variant: Add new column to schema
+   - Attribute variant: Add new column to schema or add new row to the table.
+       New row in the attribute table implies a new unique row within the
+       interval.
 
 3. **FIN** - Finalize operation
    - Marks Dictionary and AttributeTable as complete/immutable
    - No more operations can be added after FIN
    - FIN is optional since during query time, system looks for INIT and
      subsequent opADDs. FIN just serves as a marker to indicate that no more
-     changes will be made even if more opADDs are requested.
+     changes will be made even if new insert is requested by the user.
 
 4. **REF** - Reference operation (optimization)
-   - Only applicable to the INIT operation
    - Only used in the Symbol Dictionary
    - Indicates this window reuses dictionary from a previous window
    - Avoids duplicating identical dictionaries
@@ -508,7 +406,7 @@ To interpret data from 09:00-09:25 in a window that runs 09:00-09:59:
   the local window does not need to be read into memory if we are not looking
   at the window.
 - Enables efficient streaming queries on partial time ranges
-- Reduces latency for early-window queries
+- Reduces latency for older-window queries
 
 ## Collection Naming Convention
 
@@ -533,7 +431,8 @@ dynamically build inverted indexes for those significant dimensions only.
 ### Indexing Model
 
 For each metadata column (except those explicitly configured as sparse or
-cardinality-exploding), we maintain a time-scoped bitmap index of the form:
+detected as cardinality-exploding), we maintain a time-scoped bitmap index of
+the form:
 
 ```scss
 (column, value, window) → bitmap(RowIDs)
@@ -541,7 +440,7 @@ cardinality-exploding), we maintain a time-scoped bitmap index of the form:
 
 RowIDs are local to the time window. The index is a write-path append-only
 structure with no per-row deletions; eviction is performed by dropping entire
-windows.
+the entire window.
 
 ### Metadata Index Options
 
@@ -587,22 +486,23 @@ window → {value → localValueID}
 Dictionaries contain only values initially observed or promoted in that
 window, except when inheritance rules apply
 
-### Dictionary Inheritance
+**Dictionary Inheritance**: We do not maintain a global dictionary. Instead, if
+symbols are references in a composition of a base dictionary+local dictionary.
+If values are observed only window-X, the symbol will be present in the local
+dictionary for that window. This ensures that extremly high cardinality data
+will not blow up global index space. Dictionary inheritince has 3 components:
 
-We do not maintain a global dictionary. Instead:
-
-- If a sparse column observes a new value in a later window,
-- The ingestion path does not build a fresh dictionary for that value,
-- The window dictionary is marked as referencing the dictionary of the window
-  where that value originated.
+1 - Base Dictionary (non-modifiable referenced dictionary from any of the previous window)
+2 - Inherited Local Symbols (non-modifianble local dictionary from any of the last 2 windows)
+3 - Local Symbols (modifiangle local dictionary for the current window)
 
 This avoids dictionary growth for sparse metadata and bounds per-window state.
 
 ### Offline Dictionary Merge
 
 As windows age out of the active write path, dictionaries may be merged offline
-into a more compact representation. This occurs outside the ingestion path and
-does not affect active windows
+into a more compact representation. This should be done outside the ingestion
+path and does not affect active windows.
 
 ### Regex Dictionary Representation
 
@@ -622,8 +522,8 @@ Inherited windows share the same dictionary representation.
 
 ### Collection Naming Convention
 
-Only bitmap is in the reference implementation. Others needs to be built
-accordingly.
+Only bitmap is implemented in the reference implementation. Others needs to be
+built accordingly.
 
 - **Bitmap Index**: `hcindex.idx.bitmap.<collectionUUID>` Bitmap index that
   corresponds to a specific windowStart to windowEnd.
@@ -631,18 +531,6 @@ accordingly.
     expressions.
 - **FST**: `hcindex.idx.fst.<collectionUUID>` for more complex regex.
 
-### Exection Summary
-
-Given predicate `(column REGEX pattern)` over time interval `[t0, t1)`:
-
-```
-1. Identify windows overlapping the interval
-2. For each window:
-     enumerate matching values via Trie/FST
-3. OR bitmaps for matched values
-4. Union bitmap results across all windows
-5. Return matching row IDs
-```
 
 ### Phase 0 Reference Implementation
 
@@ -658,41 +546,84 @@ version
 Known Bugs: Iteration of the unpack row has a bug. TODO: It doesn't evaluate
 'end' correctly.
 
+## Engineering Milestones
+
+Take this "what is there" (Phase 0) and "what we need" (Phase 1+). Owners of
+the respective stack should take "what we need" as only a suggestion and not a
+recommendation.
+
+### Phase 0 Implementation
+
+1. Basic implemenation of Dictionary and Attribute Table
+2. Compact roaring Bitmap Index
+3. Query path integration (find/match/count etc...)
+4. Expression rewrites (splits the expressions into bucket-matching vs
+   measurement matching). This needs to be moved out to proper PlatStage
+   operations.
+5. Minimum explain plan visibility.
+6. Minimal unit tests
+7. Local database only (mongos integration not tested)
+8. And you also get some bugs!
+
+Few things are also disabled, like verfication after write etc...
+
+
 ### Phase 1 Implementation
 
-1. Compact roaring/compact bitmap index and compact attribute tables
-2. Implement Trie (Prefix/Suffix expressions are relatively common in analytics)
-3. Integrate with the ingestion path
-   1. Add support for dynamic density calculation using information gain.
-   2. Add support for building the bitmap index on demand.
-4. SIMD/AVX optimizations for scanning AttributeTable
-5. Unit Tests
-6. mongos pushdowns
+A chunk of changes are required on the query side to move foward into
+production. In addition to the following, there are many TODO comments in the
+reference implementation that need to be addressed.
+
+1. PlanStage implementations that will provide better re-write/optimize the queries
+   1. Better pushdowns. (e.g. count should use the Attribute+Bitmap instead of unpack-stage)
+1. Compaction for Attribute Table and Bitmap Index for insertOne operations.
+3. Support more aggregation functions. I have only tested basic ones Phase-0
+4. Implement Trie (Prefix/Suffix expressions are relatively common in analytics)
+5. More Intelligent Indexing. 99% of the users should never have to specify
+   indexing configurations.
+   1. Auto-creation of bitmap index based on dynamic density/information gain.
+   2. Drop non-referenced dictionaries from the older timespan from the memory
+6. SIMD/AVX optimizations for scanning AttributeTable
+7. Unit Tests
+
 
 ### Phase 2 Implementation
 
 1. Implement FST (full regex support)
-2. Add support for dictionary inheritance
 3. Add support for offline dictionary merge
 4. Add support for costmodel integration
 5. Add support for explain plan visibility
 6. Implement Aggregation Buckets & Query Pushdown to use these buckets
+    1. e.g. topK, summarize queries should git the aggregations. These
+       aggregations can be created in an ephimeral concept as well.
 7. Integration Tests
 
 ### Considerations For Future Work
 
-- Value demotion under memory pressure
-- Autotuning thresholds
 - Additional compression for inherited dictionaries
 - Costmodel integration with query planner
 - Dictionary inheritance made visible in explain plans
-- Regex over free-form text ideally requires n-gram or substring indexing (future work)
-- Very dense values reduce pruning efficiency. A good problem to research on!
-- Subcluster indexing is a good future research!
+- Future research areas (if anyone is interested, let me know):
+  - Subcluster indexing is a good one to research!
+  - Very dense values reduce pruning efficiency. A good problem to research on!
 
-## A Code Doc
+## Reference Implementation Code Doc
+
 This doc is mostly generated via augment! I will do a more thorough check after
 the year-end calibration period!
+
+## File Structure/Locations
+
+Most of the code: (there are changes on multiple other files)
+```
+src/mongo/db/exec/timeseries/hcindex/
+```
+
+## Simulation Code
+
+```
+src/mongo/db/exec/timeseries/hcindex/tssim
+```
 
 ### Component Hierarchy
 
@@ -761,6 +692,22 @@ Apply event filter (if metadata predicates exist)
 Return matching measurement to query engine
 ```
 
+### TODO: Fix the read path for Dictionary to detect base vs reference.
+
+The writer (hcindex_writer) needs to write the opADD in different sections of
+the doc so that we can distinguish what belongs in the base
+dictinary and the delta dictionary. Right now, this creates a bug. This is an
+easy fix.
+
+### TODO: Could we use timeseries collection to store attribute table and index structures ?
+
+Currently, we are using the document collection. The only problem is that we
+will need some sort of batching logic to optimize for insertOne operation.
+However, if we use timeseries collection, this could come for almost free? But
+we will need PoC here... Note that in M3DB implementation using the timeseries
+implementation was used to store these structures and it proved to be the most
+efficient model.
+
 ### TODO: Remove Query Pipeline hacks
 
 MongoDB's query planner creates a match stage before the unpack bucket stage and
@@ -812,9 +759,9 @@ bucket-level filtering optimization:
 
 ### TODO: Make Verify Function Work with HCIndex
 
-**Issue**: The metadata verifier in `timeseries_write_ops_utils_internal.cpp` currently skips HCIndex batches entirely.
-**Current Workaround**: Added `!batch->isHCIndexBatch &&` checks to skip verification
-**Proper Solution**: Implement HCIndex-aware verification that validates:
+The metadata verifier in `timeseries_write_ops_utils_internal.cpp` currently
+skips HCIndex batches entirely. Implement HCIndex-aware verification that
+validates:
 
 - rowIds are valid (within bounds of attribute table)
 - rowIds correspond to valid metadata
@@ -822,33 +769,14 @@ bucket-level filtering optimization:
 
 ### TODO: Verify ExpressionContext::getUUID() is Set in All Situations
 
-**Issue**: The read path relies on `ExpressionContext::getUUID()` to retrieve
-the collection UUID for HCIndexCollectionManager lookup.
-**Current Implementation**: Used in `InternalUnpackBucketStage::doGetNext()` to get HCIndexCollectionManager
-**Concern**: Need to verify that `getUUID()` is reliably set in all query execution contexts:
+The read path relies on `ExpressionContext::getUUID()` to retrieve the
+collection UUID for HCIndexCollectionManager lookup. This is used in
+`InternalUnpackBucketStage::doGetNext()` to get HCIndexCollectionManager. Need
+to verify that `getUUID()` is reliably set in all query execution contexts:
 
-- Simple find() queries
+- All query path
 - Aggregation pipelines
 - Filtered queries
 - Sorted queries
 - Indexed queries
-  **Action Items**:
-
-1. Add assertions to verify UUID is set when HCIndex is enabled
-2. Add tests for various query types
-3. Document assumptions about UUID availability
-   **Priority**: High (correctness depends on this)
-
-## File Structure/Locations
-
-Most of the code: (there are changes on multiple other files)
-```
-src/mongo/db/exec/timeseries/hcindex/
-```
-
-## Simulation Code
-
-```
-src/mongo/db/exec/timeseries/hcindex/tssim
-```
 
