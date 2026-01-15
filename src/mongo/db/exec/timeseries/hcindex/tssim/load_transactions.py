@@ -13,6 +13,8 @@ Options:
     --uri URI       MongoDB connection URI (default: mongodb://127.0.0.1:27017)
     --csv PATH      Path to transactions.csv (default: transactions.csv)
     --rows N        Number of rows to load (default: 10, 0 = all rows)
+    --insert-mode   Insert mode: 'batch' (insert_many) or 'single' (insert_one) (default: batch)
+                    Use 'single' to simulate real-time ingestion one document at a time
 """
 
 import csv
@@ -31,6 +33,8 @@ def parse_args():
     parser.add_argument("--uri", default="mongodb://127.0.0.1:27017", help="MongoDB connection URI")
     parser.add_argument("--csv", default="transactions.csv", help="Path to transactions.csv")
     parser.add_argument("--rows", type=int, default=10, help="Number of rows to load (default: 100, 0 = all rows)")
+    parser.add_argument("--insert-mode", choices=["batch", "single"], default="batch",
+                        help="Insert mode: 'batch' (insert_many) or 'single' (insert_one) (default: batch)")
     args = parser.parse_args()
 
     # Set default collection name based on hcindex flag
@@ -74,7 +78,7 @@ def create_timeseries_collection(db, collection_name, use_hcindex=False):
         print(f"✗ Failed to create collection: {e}")
         return False
 
-def load_transactions(csv_path, db, collection_name, max_rows=0):
+def load_transactions(csv_path, db, collection_name, max_rows=0, insert_mode="batch"):
     """Load transactions from CSV into MongoDB.
 
     Args:
@@ -82,6 +86,7 @@ def load_transactions(csv_path, db, collection_name, max_rows=0):
         db: MongoDB database
         collection_name: Collection name
         max_rows: Maximum rows to load (0 = all rows)
+        insert_mode: 'batch' for insert_many, 'single' for insert_one
 
     Returns:
         Tuple of (success: bool, cardinality_stats: dict)
@@ -150,21 +155,41 @@ def load_transactions(csv_path, db, collection_name, max_rows=0):
 
     print(f"Loaded {len(documents)} documents from {csv_path}")
 
-    # Insert in batches
-    batch_size = 1000
+    # Insert based on mode
     start_perf_time = time.perf_counter()
-    for i in range(0, len(documents), batch_size):
-        batch = documents[i:i+batch_size]
-        try:
-            result = collection.insert_many(batch)
-            print(f"  Inserted batch {i//batch_size + 1}: {len(result.inserted_ids)} documents")
-        except Exception as e:
-            print(f"✗ Error inserting batch: {e}")
-            return False, {}
+
+    if insert_mode == "single":
+        # Insert one document at a time (simulates real-time ingestion)
+        print(f"Using insert_one mode (single document insertion)...")
+        inserted_count = 0
+        for i, doc in enumerate(documents):
+            try:
+                result = collection.insert_one(doc)
+                inserted_count += 1
+                # Print progress every 100 documents
+                if (i + 1) % 1000 == 0:
+                    print(f"  Inserted {i + 1} documents...")
+            except Exception as e:
+                print(f"✗ Error inserting document {i}: {e}")
+                return False, {}
+        print(f"✓ Successfully inserted {inserted_count} transactions using insert_one")
+    else:
+        # Insert in batches using insert_many (default)
+        print(f"Using insert_many mode (batch insertion)...")
+        batch_size = 1000
+        for i in range(0, len(documents), batch_size):
+            batch = documents[i:i+batch_size]
+            try:
+                result = collection.insert_many(batch)
+                print(f"  Inserted batch {i//batch_size + 1}: {len(result.inserted_ids)} documents")
+            except Exception as e:
+                print(f"✗ Error inserting batch: {e}")
+                return False, {}
+        print(f"✓ Successfully inserted {len(documents)} transactions using insert_many")
 
     end_perf_time = time.perf_counter()
     execution_time = (end_perf_time - start_perf_time) * 1000
-    print(f"✓ Successfully inserted {len(documents)} transactions ({execution_time:.3f}ms)")
+    print(f"Total insertion time: {execution_time:.3f}ms ({execution_time/len(documents):.3f}ms per document)")
 
     # Prepare cardinality statistics
     cardinality_stats = {
@@ -200,7 +225,7 @@ def main():
         sys.exit(1)
 
     # Load transactions
-    success, cardinality_stats = load_transactions(args.csv, db, args.collection, args.rows)
+    success, cardinality_stats = load_transactions(args.csv, db, args.collection, args.rows, args.insert_mode)
     if not success:
         sys.exit(1)
 

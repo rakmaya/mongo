@@ -123,7 +123,7 @@ void HCIndexCollectionManager::close() {
         reader->close();
     }
     initializedForRead = false;
-    LOGV2(9999990,
+    LOGV2_DEBUG(9999990, 3,
           "HCIndexCollectionManager::close ",
           "elapsedMicros"_attr = timer.micros());
 }
@@ -135,7 +135,7 @@ void HCIndexCollectionManager::prepareForYield() {
     if (reader) {
         reader->prepareForYield();
     }
-    LOGV2(9999990,
+    LOGV2_DEBUG(9999990, 3,
           "HCIndexCollectionManager::prepareForYield ",
           "elapsedMicros"_attr = timer.micros());
 }

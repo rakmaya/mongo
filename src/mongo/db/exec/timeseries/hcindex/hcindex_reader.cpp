@@ -30,9 +30,9 @@
 
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/exec/timeseries/hcindex/hcindex_collection_manager.h"
-#include "mongo/db/timeseries/hcindex_options.h"
-#include "mongo/db/shard_role/shard_role.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/shard_role/shard_role.h"
+#include "mongo/db/timeseries/hcindex_options.h"
 #include "mongo/logv2/log.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
@@ -45,11 +45,10 @@ HCIndexReader::HCIndexReader(const DatabaseName& dbName, const UUID& collectionU
 void HCIndexReader::acquireCollections(OperationContext* opCtx) {
     // Tries to acquire symbol operations collection WITHOUT acquiring locks
     auto symbolNss = HCIndexCollectionManager::getSymbolOperationsNamespace(dbName, collectionUUID);
-    CollectionAcquisitionRequest symbolAcquisitionRequest(
-        symbolNss,
-        PlacementConcern::kPretendUnsharded,
-        repl::ReadConcernArgs::kImplicitDefault,
-        AcquisitionPrerequisites::kRead);
+    CollectionAcquisitionRequest symbolAcquisitionRequest(symbolNss,
+                                                          PlacementConcern::kPretendUnsharded,
+                                                          repl::ReadConcernArgs::kImplicitDefault,
+                                                          AcquisitionPrerequisites::kRead);
 
     try {
         symbolOpsCollection = acquireCollectionMaybeLockFree(opCtx, symbolAcquisitionRequest);
@@ -62,7 +61,8 @@ void HCIndexReader::acquireCollections(OperationContext* opCtx) {
 
     // Acquire attribute operations collection WITHOUT acquiring locks
     // This is safe because we're just getting a snapshot of the catalog
-    auto attributeNss = HCIndexCollectionManager::getAttributeOperationsNamespace(dbName, collectionUUID);
+    auto attributeNss =
+        HCIndexCollectionManager::getAttributeOperationsNamespace(dbName, collectionUUID);
     CollectionAcquisitionRequest attributeAcquisitionRequest(
         attributeNss,
         PlacementConcern::kPretendUnsharded,
@@ -88,7 +88,8 @@ void HCIndexReader::acquireCollections(OperationContext* opCtx) {
         AcquisitionPrerequisites::kRead);
 
     try {
-        bitmapIndexCollection = acquireCollectionMaybeLockFree(opCtx, bitmapIndexAcquisitionRequest);
+        bitmapIndexCollection =
+            acquireCollectionMaybeLockFree(opCtx, bitmapIndexAcquisitionRequest);
     } catch (const std::exception& e) {
         LOGV2(9999990,
               "HCIndexReader::acquireCollections - bitmap index collection doesn't exist yet",
@@ -117,7 +118,8 @@ StatusWith<std::unique_ptr<SymbolDictionary>> HCIndexReader::constructSymbolDict
     int32_t frequency,
     const Timestamp& upToTimestamp) {
 
-    auto dict = std::make_unique<SymbolDictionary>(period, frequency, windowStart, windowEnd, nullptr);
+    auto dict =
+        std::make_unique<SymbolDictionary>(period, frequency, windowStart, windowEnd, nullptr);
 
     // Change state to Reconstruction for dictionaries being reconstructed by the reader
     auto stateStatus = dict->changeState(SymbolDictionaryState::Reconstruction);
@@ -196,7 +198,8 @@ StatusWith<SymbolDictionaryConstructionResult> HCIndexReader::constructSymbolDic
     // Use the cached collection acquisition instead of acquiring again
     if (!symbolOpsCollection || !symbolOpsCollection->exists()) {
         // Operations collection doesn't exist yet - create an empty base dictionary
-        auto dict = std::make_unique<SymbolDictionary>(period, frequency, windowStart, windowEnd, nullptr);
+        auto dict =
+            std::make_unique<SymbolDictionary>(period, frequency, windowStart, windowEnd, nullptr);
         auto stateStatus = dict->changeState(SymbolDictionaryState::ReadWrite);
         if (!stateStatus.isOK()) {
             return stateStatus;
@@ -289,7 +292,8 @@ StatusWith<SymbolDictionaryConstructionResult> HCIndexReader::constructSymbolDic
         result.deltaDictionary = std::move(deltaDict);
     } else {
         // This is a base dictionary (no REF)
-        auto dict = std::make_unique<SymbolDictionary>(period, frequency, windowStart, windowEnd, nullptr);
+        auto dict =
+            std::make_unique<SymbolDictionary>(period, frequency, windowStart, windowEnd, nullptr);
         auto stateStatus = dict->changeState(SymbolDictionaryState::Reconstruction);
         if (!stateStatus.isOK()) {
             return stateStatus;
@@ -344,7 +348,8 @@ StatusWith<std::unique_ptr<AttributeTable>> HCIndexReader::constructAttributeTab
     const Timestamp& upToTimestamp,
     ISymbolDictionary* symbolDictionary) {
 
-    auto table = std::make_unique<AttributeTable>(symbolDictionary, nullptr, period, frequency, windowStart, windowEnd);
+    auto table = std::make_unique<AttributeTable>(
+        symbolDictionary, nullptr, period, frequency, windowStart, windowEnd);
 
     // Change state to Reconstruction for tables being reconstructed by the reader
     auto stateStatus = table->changeState(AttributeTableState::Reconstruction);
@@ -469,8 +474,7 @@ StatusWith<std::unique_ptr<BitmapIndex>> HCIndexReader::constructBitmapIndex(
     const Timestamp& windowEnd,
     HCIndexPeriodEnum period,
     int32_t frequency,
-    const Timestamp& upToTimestamp)
-{
+    const Timestamp& upToTimestamp) {
     auto index = std::make_unique<BitmapIndex>(period, frequency, windowStart, windowEnd, nullptr);
 
     // Change state to Reconstruction for indexes being reconstructed by the reader
@@ -515,7 +519,8 @@ StatusWith<std::unique_ptr<BitmapIndex>> HCIndexReader::constructBitmapIndex(
 
         if (op == "INIT" || op == "opADD") {
             // Extract entries from the document
-            // Format: { "entries": [ { "col": columnIndex, "sym": symbolIndex, "rows": [rowId1, rowId2, ...] }, ... ] }
+            // Format: { "entries": [ { "col": columnIndex, "sym": symbolIndex, "rows": [rowId1,
+            // rowId2, ...] }, ... ] }
             BSONElement entriesElem = doc.getField("entries");
             if (entriesElem && entriesElem.type() == BSONType::array) {
                 auto entriesArray = entriesElem.Array();
@@ -526,14 +531,37 @@ StatusWith<std::unique_ptr<BitmapIndex>> HCIndexReader::constructBitmapIndex(
                         size_t columnIndex = static_cast<size_t>(entry.getIntField("col"));
                         uint32_t symbolIndex = static_cast<uint32_t>(entry.getIntField("sym"));
 
-                        BSONElement rowsElem = entry.getField("rows");
-                        if (rowsElem && rowsElem.type() == BSONType::array) {
-                            auto rowsArray = rowsElem.Array();
-                            for (const auto& rowIdElem : rowsArray) {
-                                int64_t rowId = rowIdElem.numberLong();
+                        // Check for compressed format (BinData) first, fall back to old format
+                        // (array of Longs)
+                        BSONElement rowIdsElem = entry.getField("rowIds");
+                        if (rowIdsElem && rowIdsElem.type() == BSONType::binData) {
+                            // New format: delta-encoded BinData
+                            int binDataLen = 0;
+                            const char* binData = rowIdsElem.binData(binDataLen);
+
+                            // Deserialize the Roaring64BTree
+                            Roaring64BTree roaringBitmap =
+                                _deserializeRoaring64BTree(binData, binDataLen);
+
+                            // Add all rowIds from the bitmap to the index
+                            for (uint64_t rowId : roaringBitmap) {
                                 auto addStatus = index->addEntry(columnIndex, symbolIndex, rowId);
                                 if (!addStatus.isOK()) {
                                     return addStatus;
+                                }
+                            }
+                        } else {
+                            // Old format: BSON array of Long values (for backward compatibility)
+                            BSONElement rowsElem = entry.getField("rows");
+                            if (rowsElem && rowsElem.type() == BSONType::array) {
+                                auto rowsArray = rowsElem.Array();
+                                for (const auto& rowIdElem : rowsArray) {
+                                    int64_t rowId = rowIdElem.numberLong();
+                                    auto addStatus =
+                                        index->addEntry(columnIndex, symbolIndex, rowId);
+                                    if (!addStatus.isOK()) {
+                                        return addStatus;
+                                    }
                                 }
                             }
                         }
@@ -557,8 +585,7 @@ StatusWith<std::unique_ptr<BitmapIndex>> HCIndexReader::constructBitmapIndex(
     return std::move(index);
 }
 
-void HCIndexReader::close()
-{
+void HCIndexReader::close() {
     symbolOpsCollection.reset();
     attributeOpsCollection.reset();
     bitmapIndexCollection.reset();
@@ -581,6 +608,64 @@ Status HCIndexReader::restoreForYield(OperationContext* opCtx) {
 
     acquireCollections(opCtx);
     return Status::OK();
+}
+
+Roaring64BTree HCIndexReader::_deserializeRoaring64BTree(const char* data, size_t size) const {
+    // Deserialize delta-encoded variable-length format
+    // Format: [count:8][delta1:varint][delta2:varint]...
+    //
+    // Variable-length encoding (varint):
+    // - Each byte stores 7 bits of data + 1 continuation bit (MSB)
+    // - If MSB is 1, more bytes follow
+    // - If MSB is 0, this is the last byte
+    //
+    // This reverses the encoding done by HCIndexWriter::_serializeRoaring64BTree()
+
+    Roaring64BTree bitmap;
+
+    if (size < 8) {
+        // Invalid or empty data
+        return bitmap;
+    }
+
+    // Read count (first 8 bytes)
+    uint64_t count;
+    std::memcpy(&count, data, sizeof(uint64_t));
+    size_t offset = 8;
+
+    if (count == 0) {
+        return bitmap;
+    }
+
+    // Decode variable-length delta-encoded values
+    uint64_t prevValue = 0;
+
+    for (uint64_t i = 0; i < count && offset < size; ++i) {
+        // Decode variable-length integer (varint)
+        uint64_t delta = 0;
+        int shift = 0;
+
+        while (offset < size) {
+            uint8_t byte = static_cast<uint8_t>(data[offset++]);
+
+            // Extract 7 bits of data
+            delta |= static_cast<uint64_t>(byte & 0x7F) << shift;
+            shift += 7;
+
+            // Check continuation bit (MSB)
+            if ((byte & 0x80) == 0) {
+                // This was the last byte for this value
+                break;
+            }
+        }
+
+        // Reconstruct absolute value from delta
+        uint64_t value = (i == 0) ? delta : (prevValue + delta);
+        bitmap.add(value);
+        prevValue = value;
+    }
+
+    return bitmap;
 }
 
 }  // namespace mongo::timeseries::hcindex

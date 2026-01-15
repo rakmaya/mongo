@@ -32,9 +32,9 @@
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/exec/timeseries/hcindex/bitmap_index.h"
-#include "mongo/db/operation_context.h"
-#include "mongo/db/exec/timeseries/hcindex/temporal_symbol_dictionary.h"
 #include "mongo/db/exec/timeseries/hcindex/temporal_attribute_table.h"
+#include "mongo/db/exec/timeseries/hcindex/temporal_symbol_dictionary.h"
+#include "mongo/db/operation_context.h"
 #include "mongo/db/shard_role/shard_role.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
 #include "mongo/util/uuid.h"
@@ -63,7 +63,9 @@ struct SymbolDictionaryConstructionResult {
     boost::optional<Timestamp> refBaseDictionaryWindowStart;
 
     // Returns true if this result contains a delta dictionary (references a base)
-    bool isDelta() const { return deltaDictionary != nullptr; }
+    bool isDelta() const {
+        return deltaDictionary != nullptr;
+    }
 
     // Returns the dictionary as an ISymbolDictionary pointer
     ISymbolDictionary* getDictionary() const {
@@ -82,7 +84,8 @@ struct SymbolDictionaryConstructionResult {
  * up to 09:25 are replayed. No need to wait for FIN at 09:59:59. This enables efficient
  * streaming queries on partial time ranges.
  *
- * Operations are read from two separate collections in the same database as the timeseries collection:
+ * Operations are read from two separate collections in the same database as the timeseries
+ * collection:
  * - Symbol operations: hcindex.ops.symbols.<collectionUUID>
  * - Attribute operations: hcindex.ops.attributes.<collectionUUID>
  */
@@ -204,13 +207,12 @@ public:
      * - period: Time-window period (hour, minute, second)
      * - frequency: Time-window frequency (1-24 for hour, 1-59 for minute/second)
      */
-    StatusWith<std::unique_ptr<BitmapIndex>> constructBitmapIndex(
-        OperationContext* opCtx,
-        const Timestamp& windowStart,
-        const Timestamp& windowEnd,
-        HCIndexPeriodEnum period,
-        int32_t frequency,
-        const Timestamp& upToTimestamp);
+    StatusWith<std::unique_ptr<BitmapIndex>> constructBitmapIndex(OperationContext* opCtx,
+                                                                  const Timestamp& windowStart,
+                                                                  const Timestamp& windowEnd,
+                                                                  HCIndexPeriodEnum period,
+                                                                  int32_t frequency,
+                                                                  const Timestamp& upToTimestamp);
 
     /**
      * Release acquired collections to allow lock release and prevent stashed transaction resource
@@ -247,6 +249,16 @@ private:
      * Used by both initializeCollections() and restoreForYield().
      */
     void acquireCollections(OperationContext* opCtx);
+
+    /**
+     * Deserialize a Roaring64BTree from delta-encoded BinData format.
+     * Reverses the encoding done by HCIndexWriter::_serializeRoaring64BTree().
+     *
+     * Format: [count:8][delta1:varint][delta2:varint]...
+     *
+     * Returns a Roaring64BTree containing all the rowIds.
+     */
+    Roaring64BTree _deserializeRoaring64BTree(const char* data, size_t size) const;
 
     DatabaseName dbName;
     UUID collectionUUID;

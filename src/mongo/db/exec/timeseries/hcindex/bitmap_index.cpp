@@ -29,8 +29,8 @@
 
 #include "mongo/db/exec/timeseries/hcindex/bitmap_index.h"
 
-#include "mongo/db/exec/timeseries/hcindex/hcindex_writer.h"
 #include "mongo/db/exec/timeseries/hcindex/hcindex_reader.h"
+#include "mongo/db/exec/timeseries/hcindex/hcindex_writer.h"
 #include "mongo/logv2/log.h"
 
 #include <algorithm>
@@ -78,7 +78,7 @@ Status BitmapIndex::addEntryHelper(size_t columnIndex, uint32_t symbolIndex, int
     auto colIt = _bitmaps.find(columnIndex);
     if (colIt != _bitmaps.end()) {
         auto symIt = colIt->second.find(symbolIndex);
-        if (symIt != colIt->second.end() && symIt->second.find(rowId) != symIt->second.end()) {
+        if (symIt != colIt->second.end() && symIt->second.contains(rowId)) {
             return Status::OK();
         }
     }
@@ -109,11 +109,11 @@ Status BitmapIndex::addEntryHelper(size_t columnIndex, uint32_t symbolIndex, int
             return status;
         }
 
-        _bitmaps[columnIndex][symbolIndex].insert(rowId);
+        _bitmaps[columnIndex][symbolIndex].add(rowId);
         _isDirty = true;
     } else {
         // Reconstruction mode, just update the in-memory index
-        _bitmaps[columnIndex][symbolIndex].insert(rowId);
+        _bitmaps[columnIndex][symbolIndex].add(rowId);
     }
 
     return Status::OK();
@@ -155,14 +155,21 @@ std::set<int64_t> BitmapIndex::getRowIds(size_t columnIndex, uint32_t symbolInde
     if (symIt == colIt->second.end()) {
         return {};
     }
-    return symIt->second;
+
+    // Convert Roaring64BTree to std::set<int64_t> for API compatibility
+    // TODO: Consider changing API to return Roaring64BTree directly for better performance
+    std::set<int64_t> result;
+    for (uint64_t rowId : symIt->second) {
+        result.insert(rowId);
+    }
+    return result;
 }
 
 std::set<int64_t> BitmapIndex::queryRowIdsAnd(const std::vector<uint32_t>& predicate) const {
     std::shared_lock lock(_mutex);
 
-    std::set<int64_t> result;
-    bool firstMatch = true;
+    // Collect pointers to all relevant Roaring64BTree bitmaps
+    std::vector<const Roaring64BTree*> bitmaps;
 
     for (size_t columnIndex = 0; columnIndex < predicate.size(); ++columnIndex) {
         uint32_t symbolIndex = predicate[columnIndex];
@@ -183,21 +190,35 @@ std::set<int64_t> BitmapIndex::queryRowIdsAnd(const std::vector<uint32_t>& predi
             return {};
         }
 
-        if (firstMatch) {
-            result = symIt->second;
-            firstMatch = false;
-        } else {
-            // Intersect with current result
-            std::set<int64_t> intersection;
-            std::set_intersection(result.begin(), result.end(),
-                                  symIt->second.begin(), symIt->second.end(),
-                                  std::inserter(intersection, intersection.begin()));
-            result = std::move(intersection);
-        }
+        bitmaps.push_back(&symIt->second);
+    }
 
-        // Early exit if result is empty
-        if (result.empty()) {
-            return {};
+    if (bitmaps.empty()) {
+        return {};
+    }
+
+    std::set<int64_t> result;
+
+    if (bitmaps.size() == 1) {
+        // Single bitmap - just convert to set
+        for (uint64_t rowId : *bitmaps[0]) {
+            result.insert(rowId);
+        }
+    } else {
+        // Multiple bitmaps - perform intersection by iterating first bitmap
+        // and checking membership in all others using contains()
+        // This is more efficient than std::set_intersection for Roaring bitmaps
+        for (uint64_t rowId : *bitmaps[0]) {
+            bool inAll = true;
+            for (size_t i = 1; i < bitmaps.size(); ++i) {
+                if (!bitmaps[i]->contains(rowId)) {
+                    inAll = false;
+                    break;
+                }
+            }
+            if (inAll) {
+                result.insert(rowId);
+            }
         }
     }
 
@@ -232,8 +253,7 @@ Status BitmapIndex::changeState(BitmapIndexState newState) {
         case BitmapIndexState::Reconstruction:
             // From Reconstruction, can transition to ReadWrite (to accept new
             // bitmaps) or ReadOnly
-            if (newState != BitmapIndexState::ReadOnly &&
-                newState != BitmapIndexState::ReadWrite) {
+            if (newState != BitmapIndexState::ReadOnly && newState != BitmapIndexState::ReadWrite) {
                 return Status(ErrorCodes::IllegalOperation,
                               "Invalid state transition from Reconstruction: can only transition "
                               "to ReadOnly");
@@ -247,8 +267,7 @@ Status BitmapIndex::changeState(BitmapIndexState newState) {
             }
             break;
         case BitmapIndexState::ReadOnly:
-            return Status(ErrorCodes::IllegalOperation,
-                          "Cannot transition from ReadOnly state");
+            return Status(ErrorCodes::IllegalOperation, "Cannot transition from ReadOnly state");
     }
 
     _state = newState;
@@ -260,20 +279,17 @@ BitmapIndexState BitmapIndex::getState() const {
     return _state;
 }
 
-bool BitmapIndex::hasIndexForColumn(size_t columnIndex) const
-{
+bool BitmapIndex::hasIndexForColumn(size_t columnIndex) const {
     std::shared_lock lock(_mutex);
     return _bitmaps.find(columnIndex) != _bitmaps.end();
 }
 
-void BitmapIndex::setExcludedColumns(std::unordered_set<std::size_t> excludedColumns)
-{
+void BitmapIndex::setExcludedColumns(std::unordered_set<std::size_t> excludedColumns) {
     std::shared_lock lock(_mutex);
     _excludedColumns = std::move(excludedColumns);
 }
 
-void BitmapIndex::setIncludedColumns(std::unordered_set<std::size_t> includedColumns)
-{
+void BitmapIndex::setIncludedColumns(std::unordered_set<std::size_t> includedColumns) {
     std::shared_lock lock(_mutex);
 
     // For now, this just overwrites.
@@ -296,8 +312,7 @@ void BitmapIndex::flush() {
     _isDirty = false;
 }
 
-bool BitmapIndex::isEmpty() const
-{
+bool BitmapIndex::isEmpty() const {
     std::shared_lock lock(_mutex);
     return _bitmaps.empty();
 }
@@ -316,8 +331,12 @@ size_t BitmapIndex::getTotalRowIdCount() const {
     std::shared_lock lock(_mutex);
     size_t total = 0;
     for (const auto& [columnIndex, symbolMap] : _bitmaps) {
-        for (const auto& [symbolIndex, rowIds] : symbolMap) {
-            total += rowIds.size();
+        for (const auto& [symbolIndex, roaringBitmap] : symbolMap) {
+            // Count elements by iterating (Roaring64BTree doesn't have O(1) cardinality)
+            // Note: Could be optimized by maintaining a cached count
+            for (auto it = roaringBitmap.begin(); it != roaringBitmap.end(); ++it) {
+                ++total;
+            }
         }
     }
     return total;
@@ -328,15 +347,16 @@ size_t BitmapIndex::getMemoryUsageBytes() const {
     // Approximate memory usage:
     // - Outer map overhead + per-column overhead
     // - Inner map overhead + per-symbol overhead
-    // - Per-element in set (8 bytes + tree node overhead)
+    // - Roaring64BTree memory (uses getApproximateSize())
     size_t usage = sizeof(BitmapIndex);
     for (const auto& [columnIndex, symbolMap] : _bitmaps) {
-        usage += sizeof(size_t);                  // Column key
-        usage += 56;                              // unordered_map overhead (approximate)
-        for (const auto& [symbolIndex, rowIds] : symbolMap) {
-            usage += sizeof(uint32_t);            // Symbol key
-            usage += 40;                          // Set overhead (approximate)
-            usage += rowIds.size() * 32;          // Each element in set (with tree node overhead)
+        usage += sizeof(size_t);  // Column key
+        usage += 56;              // unordered_map overhead (approximate)
+        for (const auto& [symbolIndex, roaringBitmap] : symbolMap) {
+            usage += sizeof(uint32_t);  // Symbol key
+            usage += 40;                // Map entry overhead (approximate)
+            // Use Roaring64BTree's built-in memory tracking
+            usage += roaringBitmap.getApproximateSize();
         }
     }
     return usage;
@@ -454,7 +474,8 @@ StatusWith<BitmapIndex*> TemporalBitmapIndex::getOrCreateIndex(OperationContext*
 
     // Create new index
     Timestamp windowEnd = calculateWindowEnd(windowStart);
-    auto index = std::make_unique<BitmapIndex>(_period, _frequency, windowStart, windowEnd, _writer);
+    auto index =
+        std::make_unique<BitmapIndex>(_period, _frequency, windowStart, windowEnd, _writer);
 
     // Change state to ReadWrite for new indexes created by TemporalBitmapIndex
     auto status = index->changeState(BitmapIndexState::ReadWrite);
@@ -514,7 +535,9 @@ std::set<int64_t> TemporalBitmapIndex::queryRowIds(const std::vector<uint32_t>& 
     return indexResult.getValue()->queryRowIdsAnd(predicate);
 }
 
-std::set<int64_t> TemporalBitmapIndex::queryRowIds(size_t columnIndex, uint32_t symbolIndex, const Timestamp& timestamp) const {
+std::set<int64_t> TemporalBitmapIndex::queryRowIds(size_t columnIndex,
+                                                   uint32_t symbolIndex,
+                                                   const Timestamp& timestamp) const {
     auto indexResult = getIndexForTimestamp(timestamp);
     if (!indexResult.isOK()) {
         return {};
@@ -538,8 +561,7 @@ Status TemporalBitmapIndex::cleanupOldIndexes(const Timestamp& beforeTimestamp) 
     return Status::OK();
 }
 
-bool TemporalBitmapIndex::hasIndexForColumn(size_t columnIndex, const Timestamp& timestamp) const
-{
+bool TemporalBitmapIndex::hasIndexForColumn(size_t columnIndex, const Timestamp& timestamp) const {
     auto indexResult = getIndexForTimestamp(timestamp);
     if (!indexResult.isOK()) {
         return false;
@@ -554,15 +576,13 @@ void TemporalBitmapIndex::flush() {
     }
 }
 
-void TemporalBitmapIndex::setExcludedColumns(std::unordered_set<std::size_t> excludedColumns)
-{
+void TemporalBitmapIndex::setExcludedColumns(std::unordered_set<std::size_t> excludedColumns) {
     std::shared_lock lock(_mutex);
     _excludedColumns = std::move(excludedColumns);
     _doRecomputeIndexedColumns = true;
 }
 
-void TemporalBitmapIndex::setIncludedColumns(std::unordered_set<std::size_t> includedColumns)
-{
+void TemporalBitmapIndex::setIncludedColumns(std::unordered_set<std::size_t> includedColumns) {
     std::shared_lock lock(_mutex);
     _includedColumns = std::move(includedColumns);
     _doRecomputeIndexedColumns = true;
