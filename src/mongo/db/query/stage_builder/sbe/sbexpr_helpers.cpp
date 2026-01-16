@@ -56,7 +56,7 @@
 #include "mongo/db/query/stage_builder/sbe/builder_data.h"
 #include "mongo/db/query/stage_builder/sbe/sbexpr.h"
 #include "mongo/db/timeseries/bucket_catalog/global_bucket_catalog.h"
-#include "mongo/db/exec/timeseries/hcindex/hcindex_collection_manager.h"
+#include "mongo/db/exec/timeseries/hcindex/collection_manager.h"
 #include "mongo/util/overloaded_visitor.h"
 
 #include <memory>

@@ -28,7 +28,7 @@
  */
 
 #include "mongo/db/exec/timeseries/bucket_unpacker.h"
-#include "mongo/db/exec/timeseries/hcindex/hcindex_collection_manager.h"
+#include "mongo/db/exec/timeseries/hcindex/collection_manager.h"
 
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"

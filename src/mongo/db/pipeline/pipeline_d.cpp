@@ -115,7 +115,7 @@
 #include "mongo/db/storage/sorted_data_interface.h"
 #include "mongo/db/timeseries/bucket_catalog/bucket_catalog.h"
 #include "mongo/db/timeseries/bucket_catalog/global_bucket_catalog.h"
-#include "mongo/db/exec/timeseries/hcindex/hcindex_collection_manager.h"
+#include "mongo/db/exec/timeseries/hcindex/collection_manager.h"
 #include "mongo/db/timeseries/timeseries_constants.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
 #include "mongo/platform/compiler.h"

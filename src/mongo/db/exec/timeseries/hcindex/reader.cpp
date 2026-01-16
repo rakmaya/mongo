@@ -26,10 +26,10 @@
  *      without specific prior written permission.
  */
 
-#include "mongo/db/exec/timeseries/hcindex/hcindex_reader.h"
+#include "mongo/db/exec/timeseries/hcindex/reader.h"
 
 #include "mongo/bson/bsonobj.h"
-#include "mongo/db/exec/timeseries/hcindex/hcindex_collection_manager.h"
+#include "mongo/db/exec/timeseries/hcindex/collection_manager.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/shard_role/shard_role.h"
 #include "mongo/db/timeseries/hcindex_options.h"

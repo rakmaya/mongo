@@ -31,7 +31,7 @@
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/exec/timeseries/hcindex/hcindex_isymbol_dictionary.h"
+#include "mongo/db/exec/timeseries/hcindex/isymbol_dictionary.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
 #include "mongo/util/uuid.h"
@@ -52,13 +52,12 @@ class HCIndexReader;
 class HCIndexWriter;
 
 /**
- * State machine for SymbolDictionary lifecycle:
  * - NOP: Initial state, no operations allowed
  * - Reconstruction: Dictionary is being reconstructed from stored operations
  * - ReadWrite: Dictionary is in normal write mode (new symbols can be added)
  * - ReadOnly: Dictionary is locked, no modifications allowed
  *
- * State transitions:
+ * Transitions:
  * - NOP -> Reconstruction (via changeState)
  * - NOP -> ReadWrite (via changeState)
  * - Reconstruction -> ReadOnly (via changeState)
@@ -89,9 +88,11 @@ class SymbolDictionary : public ISymbolDictionary {
 public:
 
     /**
-     * Create a new symbol dictionary with the specified 'writer'.
-     * The dictionary starts in NOP state. Use changeState() to transition to
-     * Reconstruction, ReadWrite, or ReadOnly states.
+     * Create a new empty symbol dictionary for the time window spanning
+     * `windowStart` to `windowEnd`. The dictionary is configured with the
+     * given `period` and `frequency`, and its persistent encoding lifecycle is
+     * managed by `writer`. The returned dictionary is initialized in the NOP
+     * state.
      */
     SymbolDictionary(
         HCIndexPeriodEnum period,
@@ -102,23 +103,22 @@ public:
 
     /**
      * Return the symbol index for the specified 'word'. If the word is not
-     * found, it is inserted and assigned a new index. Insertion will fail if the
-     * dictionary is full. Note that the index starts from 1 and 0 index is
+     * found, it is inserted and assigned a new index. Insertion will fail if
+     * the dictionary is full. Note that the index starts from 1 and 0 index is
      * reserved to represent missing values in fetch requests.
      */
     StatusWith<uint32_t> getOrInsertSymbol(StringData word) override;
 
     /**
-     * Insert a symbol directly with the specified index. This is used during
-     * reconstruction from stored operations and does not require a writer.
+     * Insert the given 'word' into the dictionary with the specified 'index'.
      * Returns an error if the word already exists or if the index is invalid.
      */
     Status insertSymbol(StringData word, uint32_t index);
 
     /**
-     * Change the state of this dictionary. Transitions are restricted:
+     * Change the state of this dictionary. Following transitions are possible:
      * - From NOP: can transition to Reconstruction or ReadWrite
-     * - From Reconstruction: can transition to ReadOnly
+     * - From Reconstruction: can transition to ReadOnly or ReadWrite
      * - From ReadWrite: can transition to ReadOnly
      * - From ReadOnly: no transitions allowed
      * Returns an error if the transition is invalid.
@@ -126,8 +126,8 @@ public:
     Status changeState(SymbolDictionaryState newState);
 
     /**
-     * Set the writer for this dictionary. This allows a dictionary
-     * to be updated later.
+     * Set the writer for this dictionary. Dictionary cannot accept new symbols
+     * unless it is in ReadWrite state and has a valid writer.
      */
     void setWriter(HCIndexWriter* writer) {
         _writer = writer;
@@ -156,26 +156,28 @@ public:
     size_t getSymbolCount() const override;
 
     /**
-     * Return the memory usage of this dictionary in bytes.
+     * Return the memory usage of this dictionary in bytes. This is an
+     * approximation and is not exact.
      */
     size_t getMemoryUsageBytes() const;
 
     /**
-     * Get the window start timestamp.
+     * Return the window start timestamp.
      */
     Timestamp getWindowStart() const {
         return _windowStart;
     }
 
     /**
-     * Get the window end timestamp.
+     * Return the window end timestamp.
      */
     Timestamp getWindowEnd() const {
         return _windowEnd;
     }
 
     /**
-     * Check if this dictionary is in a writable state (ReadWrite or Reconstruction).
+     * Return 'true' if this dictionary is in a writable. Otherwise, return
+     * 'false'.
      */
     bool isWritable() const {
         std::shared_lock<std::shared_mutex> lock(_mutex);
@@ -220,25 +222,40 @@ private:
  * 2. inheritedDelta: Symbols inherited from a recent interval's delta (lazy)
  * 3. localDelta: New symbols added in THIS interval only
  *
- * Key properties:
+ * Some operation info:
  * - Lookup order: localDelta → inheritedDelta → baseDictionary
  * - Lazy inheritance: inheritedDelta is set when first needed, not upfront
- * - Base compaction: When consecutive intervals have similar deltas, merge into new base
- * - Thread-safe: Uses shared_mutex for concurrent access
+ * - Base compaction: When consecutive intervals have similar deltas, merge into
+ *   new base
  */
 class DeltaSymbolDictionary : public ISymbolDictionary {
 public:
+
     /**
-     * Create a new delta symbol dictionary for the specified time window.
+     * Creates a new delta symbol dictionary for the time window
+     * [`windowStart`, `windowEnd`). The delta dictionary represents symbol
+     * changes relative to the specified `baseDictionary` and may lazily
+     * inherit symbols from one or more previous intervals to minimize
+     * duplication. The dictionary is configured with the given `period` and
+     * `frequency`. Persistent encoding of delta operations is handled by given
+     * `writer`.
      *
-     * @param period Time period granularity
-     * @param frequency Frequency within the period
-     * @param windowStart Start timestamp of this interval
-     * @param windowEnd End timestamp of this interval
-     * @param baseDictionary Pointer to the base dictionary (must outlive this object)
-     * @param writer Writer for persisting operations (can be nullptr for read-only)
-     * @param prevInterval1 Previous interval (N-1) for lazy inheritance (can be nullptr)
-     * @param prevInterval2 Previous interval (N-2) for lazy inheritance (can be nullptr)
+     * Inheritance model:
+     *  - `baseDictionary` provides the immutable baseline symbol set.
+     *  - `prevInterval1` (N-1), if provided, is consulted first for inherited symbols.
+     *  - `prevInterval2` (N-2), if provided, is consulted next.
+     *  - Symbols not found in these sources are treated as absent. Two previous
+     *    intervals are used to avoid the flip-flop effect in certain high volume
+     *    workloads.
+     *
+     * Ownership and lifetime:
+     *  - `baseDictionary` must outlive this dictionary.
+     *  - `prevInterval1` and `prevInterval2`, if provided, must outlive this dictionary.
+     *  - If `writer` is nullptr, the dictionary operates in read-only mode.
+     *
+     * Postconditions:
+     *  - The dictionary is initialized in the NOP state.
+     *  - No delta operations are applied at construction time.
      */
     DeltaSymbolDictionary(HCIndexPeriodEnum period,
                           int32_t frequency,

@@ -28,7 +28,7 @@
  */
 
 #include "mongo/db/exec/timeseries/hcindex/bitmap_index.h"
-#include "mongo/db/exec/timeseries/hcindex/hcindex_writer.h"
+#include "mongo/db/exec/timeseries/hcindex/writer.h"
 #include "mongo/db/database_name.h"
 #include "mongo/unittest/unittest.h"
 

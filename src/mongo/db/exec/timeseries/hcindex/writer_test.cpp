@@ -27,7 +27,7 @@
  *    it in the license file.
  */
 
-#include "mongo/db/exec/timeseries/hcindex/hcindex_writer.h"
+#include "mongo/db/exec/timeseries/hcindex/writer.h"
 #include "mongo/db/shard_role/shard_catalog/catalog_test_fixture.h"
 #include "mongo/unittest/unittest.h"
 

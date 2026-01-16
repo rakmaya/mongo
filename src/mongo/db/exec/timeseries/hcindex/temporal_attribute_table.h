@@ -33,7 +33,7 @@
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/exec/timeseries/hcindex/hcindex_isymbol_dictionary.h"
+#include "mongo/db/exec/timeseries/hcindex/isymbol_dictionary.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
 #include "mongo/util/uuid.h"

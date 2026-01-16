@@ -28,7 +28,7 @@
  */
 
 #include "mongo/db/exec/timeseries/hcindex/temporal_symbol_dictionary.h"
-#include "mongo/db/exec/timeseries/hcindex/hcindex_writer.h"
+#include "mongo/db/exec/timeseries/hcindex/writer.h"
 #include "mongo/unittest/unittest.h"
 
 namespace mongo::timeseries::hcindex {

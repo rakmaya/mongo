@@ -20,7 +20,7 @@
  * the Server Side Public License, version 1, as published by MongoDB, Inc.
  */
 
-#include "mongo/db/exec/timeseries/hcindex/hcindex_collection_manager.h"
+#include "mongo/db/exec/timeseries/hcindex/collection_manager.h"
 
 #include "mongo/db/namespace_string.h"
 #include "mongo/util/timer.h"

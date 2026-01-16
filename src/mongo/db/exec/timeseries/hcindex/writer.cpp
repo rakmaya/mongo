@@ -26,7 +26,7 @@
  *      without specific prior written permission.
  */
 
-#include "mongo/db/exec/timeseries/hcindex/hcindex_writer.h"
+#include "mongo/db/exec/timeseries/hcindex/writer.h"
 
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/oid.h"

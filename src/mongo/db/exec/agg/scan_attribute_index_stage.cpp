@@ -32,7 +32,7 @@
 #include "mongo/db/exec/agg/document_source_to_stage_registry.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/value.h"
-#include "mongo/db/exec/timeseries/hcindex/hcindex_collection_manager.h"
+#include "mongo/db/exec/timeseries/hcindex/collection_manager.h"
 #include "mongo/db/exec/timeseries/hcindex/temporal_attribute_table.h"
 #include "mongo/db/pipeline/document_source_scan_attribute_index.h"
 #include "mongo/db/timeseries/bucket_catalog/global_bucket_catalog.h"

@@ -28,8 +28,8 @@
  */
 
 #include "mongo/db/exec/timeseries/hcindex/temporal_symbol_dictionary.h"
-#include "mongo/db/exec/timeseries/hcindex/hcindex_writer.h"
-#include "mongo/db/exec/timeseries/hcindex/hcindex_reader.h"
+#include "mongo/db/exec/timeseries/hcindex/writer.h"
+#include "mongo/db/exec/timeseries/hcindex/reader.h"
 #include "mongo/base/error_codes.h"
 
 namespace mongo::timeseries::hcindex {
