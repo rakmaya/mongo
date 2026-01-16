@@ -156,12 +156,13 @@ StatusWith<std::unique_ptr<SymbolDictionary>> HCIndexReader::constructSymbolDict
 
         StringData op = doc.getStringField("op");
 
+        // Only process INIT and opADD for base dictionary construction
+        // opADD_LOCAL is for delta dictionaries and handled separately
         if (op == "INIT" || op == "opADD") {
             // Extract and insert symbols
             BSONObj symbolsObj = doc.getObjectField("symbols");
             for (const auto& elem : symbolsObj) {
                 std::string word = elem.fieldName();
-                uint32_t index = static_cast<uint32_t>(elem.numberInt());
 
                 auto status = dict->getOrInsertSymbol(StringData(word));
                 if (!status.isOK()) {
@@ -245,6 +246,7 @@ StatusWith<SymbolDictionaryConstructionResult> HCIndexReader::constructSymbolDic
         // This is a delta dictionary - references a base
         result.refBaseDictionaryWindowStart = refBaseDictionaryWindowStart;
 
+        // Create delta dictionary (base will be set by the caller after constructing the base)
         auto deltaDict = std::make_unique<DeltaSymbolDictionary>(
             period, frequency, windowStart, windowEnd, baseDictionary, nullptr);
         auto stateStatus = deltaDict->changeState(SymbolDictionaryState::Reconstruction);
@@ -252,10 +254,12 @@ StatusWith<SymbolDictionaryConstructionResult> HCIndexReader::constructSymbolDic
             return stateStatus;
         }
 
-        // Local index offset is the next symbol index to assign
+        // Local index offset is the next symbol index to assign for local symbols
         deltaDict->setNextSymbolIndex(localIndexOffset);
 
-        // Second pass: replay operations to populate the delta dictionary
+        // Second pass: replay opADD_LOCAL operations to populate the delta's local dictionary
+        // Note: INIT/opADD symbols belong to the base dictionary, which should be constructed
+        // separately and set via setBaseDictionary() by the caller
         cursor = symbolOpsCollection->getCollectionPtr()->getCursor(opCtx);
         while (auto record = cursor->next()) {
             BSONObj doc = record->data.toBson();
@@ -272,13 +276,16 @@ StatusWith<SymbolDictionaryConstructionResult> HCIndexReader::constructSymbolDic
             }
 
             StringData op = doc.getStringField("op");
-            if (op == "INIT" || op == "opADD") {
+            // Only process opADD_LOCAL for delta's local dictionary
+            // INIT/opADD symbols are for the base dictionary (handled separately)
+            if (op == "opADD_LOCAL") {
                 BSONObj symbolsObj = doc.getObjectField("symbols");
                 for (const auto& elem : symbolsObj) {
                     std::string word = elem.fieldName();
-                    auto status = deltaDict->getOrInsertSymbol(StringData(word));
+                    uint32_t index = static_cast<uint32_t>(elem.numberInt());
+                    auto status = deltaDict->insertLocalSymbolDirect(StringData(word), index);
                     if (!status.isOK()) {
-                        return status.getStatus();
+                        return status;
                     }
                 }
             }
@@ -300,6 +307,7 @@ StatusWith<SymbolDictionaryConstructionResult> HCIndexReader::constructSymbolDic
         }
 
         // Second pass: replay operations to populate the base dictionary
+        // Only process INIT and opADD (base symbols) - opADD_LOCAL should not exist for base dictionaries
         cursor = symbolOpsCollection->getCollectionPtr()->getCursor(opCtx);
         while (auto record = cursor->next()) {
             BSONObj doc = record->data.toBson();
@@ -316,6 +324,7 @@ StatusWith<SymbolDictionaryConstructionResult> HCIndexReader::constructSymbolDic
             }
 
             StringData op = doc.getStringField("op");
+            // Only process INIT and opADD for base dictionary
             if (op == "INIT" || op == "opADD") {
                 BSONObj symbolsObj = doc.getObjectField("symbols");
                 for (const auto& elem : symbolsObj) {

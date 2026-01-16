@@ -62,6 +62,14 @@ namespace mongo::timeseries::hcindex {
 class HCIndexWriter {
 public:
     /**
+     * Indicates whether a symbol is part of the base dictionary or local/delta dictionary.
+     */
+    enum class SymbolType {
+        Base,   // Symbol in the base dictionary (shared across windows)
+        Local   // Symbol in the local/delta dictionary (window-specific)
+    };
+
+    /**
      * Represents a pending operation to be inserted.
      */
     struct PendingOperation {
@@ -99,11 +107,17 @@ public:
      * Add a symbol to the accumulation buffer for the specified window.
      * Can be used for both INIT and opADD operations.
      * Multiple calls accumulate symbols that will be flushed together.
+     *
+     * @param symbolType Indicates whether the symbol is part of the base dictionary
+     *                   or the local/delta dictionary. This affects the operation type
+     *                   written to the ops collection: Base symbols use "opADD",
+     *                   Local symbols use "opADD_LOCAL".
      */
     Status addSymbol(const Timestamp& windowStart,
                      const Timestamp& windowEnd,
                      const std::string& word,
-                     uint32_t index);
+                     uint32_t index,
+                     SymbolType symbolType);
 
     /**
      * Add a row to the accumulation buffer for the specified window.
@@ -317,8 +331,15 @@ private:
     std::vector<InsertStatement> pendingAttributeOperations;
     std::vector<InsertStatement> pendingBitmapOperations;
 
+    // Symbol entry: (word, index, symbolType)
+    struct SymbolEntry {
+        std::string word;
+        uint32_t index;
+        SymbolType type;
+    };
+
     // Accumulation buffers for incremental building, keyed by window (windowStart, windowEnd)
-    std::map<WindowKey, std::vector<std::pair<std::string, uint32_t>>> accumulatedSymbols;
+    std::map<WindowKey, std::vector<SymbolEntry>> accumulatedSymbols;
     std::map<WindowKey, std::vector<std::string>> accumulatedSchema;
     std::map<WindowKey, std::vector<std::vector<uint32_t>>> accumulatedRows;
     std::map<WindowKey, std::vector<std::pair<std::string, size_t>>> accumulatedAttributes;

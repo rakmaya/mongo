@@ -577,6 +577,8 @@ reference implementation that need to be addressed.
 1. PlanStage implementations that will provide better re-write/optimize the queries
    1. Better pushdowns. (e.g. count should use the Attribute+Bitmap instead of unpack-stage)
 1. Compaction for Attribute Table and Bitmap Index for insertOne operations.
+   1. Also create BitmapIndex summaries. This can void us requiring a full read
+      of the index to serve aggregations (e.g. count)
 3. Support more aggregation functions. I have only tested basic ones Phase-0
 4. Implement Trie (Prefix/Suffix expressions are relatively common in analytics)
 5. More Intelligent Indexing. 99% of the users should never have to specify

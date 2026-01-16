@@ -65,9 +65,10 @@ Status HCIndexWriter::initBitmapIndex(const Timestamp& windowStart, const Timest
 Status HCIndexWriter::addSymbol(const Timestamp& windowStart,
                                 const Timestamp& windowEnd,
                                 const std::string& word,
-                                uint32_t index) {
+                                uint32_t index,
+                                SymbolType symbolType) {
     WindowKey key = std::make_pair(windowStart, windowEnd);
-    accumulatedSymbols[key].emplace_back(word, index);
+    accumulatedSymbols[key].push_back(SymbolEntry{word, index, symbolType});
     return Status::OK();
 }
 
@@ -139,31 +140,70 @@ Status HCIndexWriter::_flushSymbols(const Timestamp& windowStart,
         return Status::OK();
     }
 
-    BSONObjBuilder symbolsBuilder;
-    for (const auto& [word, id] : it->second) {
-        symbolsBuilder.append(word, static_cast<int>(id));
+    // Separate base symbols from local symbols
+    std::vector<SymbolEntry> baseSymbols;
+    std::vector<SymbolEntry> localSymbols;
+    for (const auto& entry : it->second) {
+        if (entry.type == SymbolType::Local) {
+            localSymbols.push_back(entry);
+        } else {
+            baseSymbols.push_back(entry);
+        }
     }
 
     bool isInitMode = isSymbolInitMode[key];
-    BSONObjBuilder docBuilder;
-    docBuilder.append("_id", OID::gen());
-    docBuilder.append("timestamp", isInitMode ? windowStart : Timestamp());
-    docBuilder.append("windowStart", windowStart);
-    docBuilder.append("windowEnd", windowEnd);
-    docBuilder.append("period", static_cast<int>(period));
-    docBuilder.append("frequency", frequency);
 
-    // If there is a base dictionary referenced, add a REF operation.
-    if (isInitMode && symbolInitParams[key].refBaseDictionary) {
-        docBuilder.append("REF", symbolInitParams[key].refBaseDictionary.get());
-        docBuilder.append("localIndexOffset",
-                          static_cast<long long>(symbolInitParams[key].localIndexOffset));
+    // Flush base symbols (if any)
+    if (!baseSymbols.empty()) {
+        BSONObjBuilder symbolsBuilder;
+        for (const auto& entry : baseSymbols) {
+            symbolsBuilder.append(entry.word, static_cast<int>(entry.index));
+        }
+
+        BSONObjBuilder docBuilder;
+        docBuilder.append("_id", OID::gen());
+        docBuilder.append("timestamp", isInitMode ? windowStart : Timestamp());
+        docBuilder.append("windowStart", windowStart);
+        docBuilder.append("windowEnd", windowEnd);
+        docBuilder.append("period", static_cast<int>(period));
+        docBuilder.append("frequency", frequency);
+
+        // If there is a base dictionary referenced, add a REF operation.
+        if (isInitMode && symbolInitParams[key].refBaseDictionary) {
+            docBuilder.append("REF", symbolInitParams[key].refBaseDictionary.get());
+            docBuilder.append("localIndexOffset",
+                              static_cast<long long>(symbolInitParams[key].localIndexOffset));
+        }
+
+        docBuilder.append("op", isInitMode ? "INIT" : "opADD");
+        docBuilder.append("symbols", symbolsBuilder.obj());
+
+        _addPendingOperation(docBuilder.obj(), OpType::Symbol);
     }
 
-    docBuilder.append("op", isInitMode ? "INIT" : "opADD");
-    docBuilder.append("symbols", symbolsBuilder.obj());
+    // Flush local symbols (if any) - these are delta dictionary symbols
+    if (!localSymbols.empty()) {
+        BSONObjBuilder symbolsBuilder;
+        for (const auto& entry : localSymbols) {
+            symbolsBuilder.append(entry.word, static_cast<int>(entry.index));
+        }
 
-    _addPendingOperation(docBuilder.obj(), OpType::Symbol);
+        BSONObjBuilder docBuilder;
+        docBuilder.append("_id", OID::gen());
+        // Local symbols don't set timestamp (they're always ADD operations to the delta)
+        docBuilder.append("timestamp", Timestamp());
+        docBuilder.append("windowStart", windowStart);
+        docBuilder.append("windowEnd", windowEnd);
+        docBuilder.append("period", static_cast<int>(period));
+        docBuilder.append("frequency", frequency);
+
+        // Local symbols use "opADD_LOCAL" to distinguish from base dictionary adds
+        docBuilder.append("op", "opADD_LOCAL");
+        docBuilder.append("symbols", symbolsBuilder.obj());
+
+        _addPendingOperation(docBuilder.obj(), OpType::Symbol);
+    }
+
     accumulatedSymbols[key].clear();
 
     // Reset to ADD mode after flush

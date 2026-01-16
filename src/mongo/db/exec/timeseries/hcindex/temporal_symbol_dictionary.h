@@ -361,11 +361,22 @@ public:
 
     /**
      * Set the next symbol index to assign.
-     * 
+     *
      */
     void setNextSymbolIndex(uint32_t nextSymbolIndex) {
         _nextSymbolIndex = nextSymbolIndex;
     }
+
+    /**
+     * Insert a symbol directly into the local dictionary with a specific index.
+     * Used during reconstruction from disk where symbols are read with their stored indices.
+     * Does not write to the persistence layer (assumes we're reconstructing from persisted data).
+     *
+     * @param word The symbol to insert
+     * @param index The symbol index to use
+     * @return Status::OK() on success, error if symbol already exists with different index
+     */
+    Status insertLocalSymbolDirect(StringData word, uint32_t index);
 
     /**
      * Change the state of this dictionary.

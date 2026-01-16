@@ -136,8 +136,8 @@ StatusWith<uint32_t> SymbolDictionary::getOrInsertSymbol(StringData word) {
         _wordToIndex[wordStr] = symbolIndex;
         _indexToWord.push_back(wordStr);
 
-        // Add the symbol to the writer
-        if (!_writer->addSymbol(_windowStart, _windowEnd, wordStr, symbolIndex).isOK()) {
+        // Add the symbol to the writer (Base symbol since this is a SymbolDictionary)
+        if (!_writer->addSymbol(_windowStart, _windowEnd, wordStr, symbolIndex, HCIndexWriter::SymbolType::Base).isOK()) {
             return Status(ErrorCodes::InternalError, "Could not add symbol to writer");
         }
 
@@ -333,8 +333,9 @@ StatusWith<uint32_t> DeltaSymbolDictionary::getOrInsertSymbol(StringData word) {
     _isDirty = true;
 
     // Write to persistence layer if in ReadWrite mode
+    // Mark as local symbol since this is in the delta dictionary
     if (_state == SymbolDictionaryState::ReadWrite && _writer) {
-        if (!_writer->addSymbol(_windowStart, _windowEnd, wordStr, symbolIndex).isOK()) {
+        if (!_writer->addSymbol(_windowStart, _windowEnd, wordStr, symbolIndex, HCIndexWriter::SymbolType::Local).isOK()) {
             return Status(ErrorCodes::InternalError, "Could not add symbol to writer");
         }
     }
@@ -450,6 +451,57 @@ std::set<std::string> DeltaSymbolDictionary::getEffectiveDelta() const {
     }
 
     return result;
+}
+
+Status DeltaSymbolDictionary::insertLocalSymbolDirect(StringData word, uint32_t index) {
+    std::unique_lock<std::shared_mutex> lock(_mutex);
+
+    std::string wordStr(word);
+
+    // Check if symbol already exists in local dictionary
+    auto it = _localWordToIndex.find(wordStr);
+    if (it != _localWordToIndex.end()) {
+        if (it->second != index) {
+            return Status(ErrorCodes::InternalError,
+                          str::stream() << "Symbol '" << wordStr
+                                        << "' already exists with different index: " << it->second
+                                        << " vs " << index);
+        }
+        // Already exists with same index, nothing to do
+        return Status::OK();
+    }
+
+    // Insert into local dictionary with the specified index
+    _localWordToIndex[wordStr] = index;
+
+    // Ensure _localIndexToWord is large enough
+    // The index is absolute, so we need to calculate the local offset
+    size_t baseSize = _baseDictionary ? _baseDictionary->getSymbolCount() : 0;
+    size_t inheritedSize = _hasInheritedDelta ? _inheritedIndexToWord.size() : 0;
+
+    // For local symbols, the index should be > baseSize + inheritedSize
+    // The local offset is: index - baseSize - inheritedSize - 1 (since indices are 1-based)
+    if (index <= baseSize + inheritedSize) {
+        return Status(ErrorCodes::InternalError,
+                      str::stream() << "Local symbol index " << index
+                                    << " should be greater than base + inherited size ("
+                                    << baseSize + inheritedSize << ")");
+    }
+
+    size_t localOffset = index - baseSize - inheritedSize - 1;
+
+    // Ensure vector is large enough
+    if (localOffset >= _localIndexToWord.size()) {
+        _localIndexToWord.resize(localOffset + 1);
+    }
+    _localIndexToWord[localOffset] = wordStr;
+
+    // Update next symbol index if needed
+    if (index >= _nextSymbolIndex) {
+        _nextSymbolIndex = index + 1;
+    }
+
+    return Status::OK();
 }
 
 Status DeltaSymbolDictionary::changeState(SymbolDictionaryState newState) {
