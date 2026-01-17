@@ -5,21 +5,23 @@ package(default_visibility = ["//visibility:public"])
 mongo_cc_library(
     name = "hcindex",
     srcs = [
+        "attribute_table.cpp",
         "bitmap_index.cpp",
         "collection_manager.cpp",
         "reader.cpp",
-        "writer.cpp",
         "temporal_attribute_table.cpp",
         "temporal_symbol_dictionary.cpp",
+        "writer.cpp",
     ],
     hdrs = [
+        "attribute_table.h",
         "bitmap_index.h",
         "collection_manager.h",
         "isymbol_dictionary.h",
         "reader.h",
-        "writer.h",
         "temporal_attribute_table.h",
         "temporal_symbol_dictionary.h",
+        "writer.h",
     ],
     private_hdrs = [
         "//src/mongo/db/timeseries:hcindex_options.h",
