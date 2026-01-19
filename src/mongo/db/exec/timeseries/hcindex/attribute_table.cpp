@@ -39,9 +39,9 @@
 
 namespace mongo::timeseries::hcindex {
 
-// ============================================================================
-// AttributeTable Implementation
-// ============================================================================
+
+//- CONSTRUCTORS
+
 
 AttributeTable::AttributeTable(ISymbolDictionary* symbolDictionary,
                                HCIndexWriter* writer,
@@ -57,42 +57,257 @@ AttributeTable::AttributeTable(ISymbolDictionary* symbolDictionary,
       _windowEnd(windowEnd),
       _isDirty(false) {}
 
-Status AttributeTable::changeState(AttributeTableState newState) {
-    std::unique_lock<std::shared_mutex> lock(_mutex);
 
-    // Once in ReadOnly state, no transitions are allowed
-    if (_state == AttributeTableState::ReadOnly) {
-        return Status(ErrorCodes::InternalError, "Cannot change state of read-only table");
+//- ACCESSORS
+
+
+boost::optional<std::vector<uint32_t>> AttributeTable::getRow(int64_t rowId) const {
+    std::shared_lock<std::shared_mutex> lock(_mutex);
+
+    // Check if rowId is valid
+    if (_columns.empty() || rowId < 0 || rowId >= static_cast<int64_t>(_columns[0].size())) {
+        return boost::none;
     }
 
-    // Validate state transitions
-    if (_state == AttributeTableState::NOP) {
-        if (newState != AttributeTableState::Reconstruction &&
-            newState != AttributeTableState::ReadWrite) {
-            return Status(ErrorCodes::InternalError,
-                          "Invalid state transition from NOP to " +
-                              std::to_string(static_cast<int>(newState)));
-        }
-    } else if (_state == AttributeTableState::Reconstruction) {
-        // From Reconstruction, can transition to ReadWrite (to accept new data) or ReadOnly
-        if (newState != AttributeTableState::ReadWrite &&
-            newState != AttributeTableState::ReadOnly) {
-            return Status(ErrorCodes::InternalError,
-                          "Invalid state transition from Reconstruction to " +
-                              std::to_string(static_cast<int>(newState)));
-        }
-    } else if (_state == AttributeTableState::ReadWrite) {
-        // From ReadWrite, can only transition to ReadOnly
-        if (newState != AttributeTableState::ReadOnly) {
-            return Status(ErrorCodes::InternalError,
-                          "Invalid state transition from ReadWrite to " +
-                              std::to_string(static_cast<int>(newState)));
-        }
+    // Reconstruct row from columns
+    std::vector<uint32_t> row;
+    for (const auto& column : _columns) {
+        row.push_back(column[rowId]);
     }
 
-    _state = newState;
-    return Status::OK();
+    return row;
 }
+
+
+std::vector<int64_t> AttributeTable::queryRows(const AttributeTablePredicate& predicate,
+                                               BitmapIndex* bitmapIndex) const {
+    std::shared_lock<std::shared_mutex> lock(_mutex);
+
+    // At a leeaf
+    if (predicate.isLeaf()) {
+        return queryRowsLeaf(predicate.refRowVec, bitmapIndex);
+    }
+
+    // At a node. Handle OR (union) and AND (intersection) reccursively.
+
+    if (predicate.isOr()) {
+        std::set<int64_t> uniqueMatches;
+        for (const auto& child : predicate.children) {
+            auto childResults = queryRows(child, bitmapIndex);
+            for (auto rowId : childResults) {
+                uniqueMatches.insert(rowId);
+            }
+        }
+        std::vector<int64_t> result(uniqueMatches.begin(), uniqueMatches.end());
+        return result;
+    }
+
+    if (predicate.isAnd()) {
+        if (predicate.children.empty()) {
+            return {};
+        }
+
+        // Create a combined result that contains rows that appear in both left and
+        // right expressions.
+
+        auto result = queryRows(predicate.children[0], bitmapIndex);
+        for (size_t i = 1; i < predicate.children.size(); ++i) {
+            auto childResults = queryRows(predicate.children[i], bitmapIndex);
+
+            std::set<int64_t> childSet(childResults.begin(), childResults.end());
+            std::vector<int64_t> intersection;
+            for (auto rowId : result) {
+                if (childSet.count(rowId) > 0) {
+                    intersection.push_back(rowId);
+                }
+            }
+            result = intersection;
+
+            if (result.empty()) {
+                break;
+            }
+        }
+        return result;
+    }
+
+    // Defense: should never reach here
+    return {};
+}
+
+
+StatusWith<AttributeTablePredicate> AttributeTable::convertMatchExpressionToPredicate(
+    const ::mongo::MatchExpression* matchExpr) const {
+
+    // TODO: Some of the errors are absorbed since the PoC implementation does not make these
+    // parsing into a separate PlanStage. This is an area that need to be changed.
+
+    if (!matchExpr) {
+        return Status(ErrorCodes::BadValue, "matchExpr cannot be null");
+    }
+
+    // Handle OR expressions: create an OR node with children
+    if (matchExpr->matchType() == ::mongo::MatchExpression::OR) {
+        AttributeTablePredicate orPredicate;
+        orPredicate.type = AttributeTablePredicate::OR;
+
+        for (size_t i = 0; i < matchExpr->numChildren(); ++i) {
+            auto branchResult = convertMatchExpressionToPredicate(matchExpr->getChild(i));
+            if (!branchResult.isOK()) {
+                // Failed! skip it. TODO: this should be an error!
+                continue;
+            }
+            orPredicate.children.push_back(branchResult.getValue());
+        }
+
+        if (!orPredicate.children.empty()) {
+            return orPredicate;
+        }
+        return AttributeTablePredicate();
+    }
+
+    // Handle AND expressions: create an AND node with children
+    if (matchExpr->matchType() == ::mongo::MatchExpression::AND) {
+        AttributeTablePredicate andPredicate;
+        andPredicate.type = AttributeTablePredicate::AND;
+
+        for (size_t i = 0; i < matchExpr->numChildren(); ++i) {
+            auto branchResult = convertMatchExpressionToPredicate(matchExpr->getChild(i));
+            if (!branchResult.isOK()) {
+                // Failed! skip it. TODO: this should be an error!
+                continue;
+            }
+            andPredicate.children.push_back(branchResult.getValue());
+        }
+
+        if (!andPredicate.children.empty()) {
+            return andPredicate;
+        }
+        return AttributeTablePredicate();
+    }
+
+    // Now we are at a leaf of the expression tree.
+
+    mongo::pathsupport::EqualityMatches equalities;
+    auto status = mongo::pathsupport::extractEqualityMatches(*matchExpr, &equalities);
+    if (!status.isOK()) {
+        return status;
+    }
+
+    // Normalize the reference vector by padding missing columns with 0s up to the highest column
+    // index used in the expression (no padding beyond that).
+
+    std::vector<uint32_t> refRowVec;
+    size_t maxColumnIndex = 0;
+
+    // First maximum index necessary.
+    for (const auto& [fieldPath, eqExpr] : equalities) {
+        std::string schemaFieldPath = std::string(fieldPath);
+        if (schemaFieldPath.find("metadata.") == 0) {
+            schemaFieldPath = schemaFieldPath.substr(9);
+        }
+
+        auto it = _fieldToColumnIndex.find(schemaFieldPath);
+        if (it != _fieldToColumnIndex.end()) {
+            maxColumnIndex = std::max(maxColumnIndex, it->second);
+        }
+    }
+
+    refRowVec.resize(maxColumnIndex + 1, 0);
+    // Fill in the symbol indices for matching fields
+    for (const auto& [fieldPath, eqExpr] : equalities) {
+        std::string schemaFieldPath = std::string(fieldPath);
+        if (schemaFieldPath.find("metadata.") == 0) {
+            schemaFieldPath = schemaFieldPath.substr(9);
+        }
+
+        auto fieldIt = _fieldToColumnIndex.find(schemaFieldPath);
+        if (fieldIt == _fieldToColumnIndex.end()) {
+            // Field not in schema - no rows will match
+            // TODO Handle NULL and NotPresent distinctly.
+            return AttributeTablePredicate();
+        }
+
+        const BSONElement& data = eqExpr->getData();
+
+        if (data.eoo()) {
+            return Status(ErrorCodes::BadValue,
+                          "HCIndex: Predicate value for field '" + std::string(fieldPath) +
+                              "' is invalid (EOO element)");
+        }
+
+        if (data.type() != BSONType::string) {
+            return Status(ErrorCodes::BadValue,
+                          "HCIndex: Predicate value for field '" + std::string(fieldPath) +
+                              "' must be a string, got: " + typeName(data.type()));
+        }
+
+        StringData value = data.valueStringData();
+
+        auto symbolIndex = _symbolDictionary->getSymbolIndex(value);
+        if (!symbolIndex) {
+            // Return empty predicate (no rows will match)
+            return AttributeTablePredicate();
+        }
+        refRowVec[fieldIt->second] = *symbolIndex;
+    }
+
+    // Trim trailing zeros.
+    while (!refRowVec.empty() && refRowVec.back() == 0) {
+        refRowVec.pop_back();
+    }
+
+    AttributeTablePredicate leafPredicate;
+    leafPredicate.type = AttributeTablePredicate::LEAF;
+    leafPredicate.refRowVec = refRowVec;
+    return leafPredicate;
+}
+
+const std::vector<std::string>& AttributeTable::getSchema() const {
+    std::shared_lock<std::shared_mutex> lock(_mutex);
+    return _schema;
+}
+
+const std::map<std::string, size_t>& AttributeTable::getFieldToColumnIndexMap() const {
+    std::shared_lock<std::shared_mutex> lock(_mutex);
+    return _fieldToColumnIndex;
+}
+
+size_t AttributeTable::getRowCount() const {
+    std::shared_lock<std::shared_mutex> lock(_mutex);
+    return _columns.empty() ? 0 : _columns[0].size();
+}
+
+size_t AttributeTable::getMemoryUsageBytes() const {
+    std::shared_lock<std::shared_mutex> lock(_mutex);
+
+    size_t totalBytes = 0;
+
+    // Schema memory
+    for (const auto& fieldName : _schema) {
+        totalBytes += fieldName.size();
+    }
+    totalBytes += _schema.capacity() * sizeof(std::string);
+
+    // Columns memory
+    for (const auto& column : _columns) {
+        totalBytes += column.capacity() * sizeof(uint32_t);
+    }
+    totalBytes += _columns.capacity() * sizeof(std::vector<uint32_t>);
+
+    // columnAddedAtRowId memory
+    totalBytes += _columnAddedAtRowId.capacity() * sizeof(int64_t);
+
+    // Field to column index map
+    for (const auto& [fieldName, colIdx] : _fieldToColumnIndex) {
+        totalBytes += fieldName.size();
+    }
+
+    return totalBytes;
+}
+
+
+//- MODIFIERS
+
 
 StatusWith<InsertRowResult> AttributeTable::insertRow(const BSONObj& metadata) {
     std::unique_lock<std::shared_mutex> lock(_mutex);
@@ -153,305 +368,6 @@ StatusWith<int64_t> AttributeTable::insertRowDirect(const std::vector<uint32_t>&
     return rowId;
 }
 
-boost::optional<std::vector<uint32_t>> AttributeTable::getRow(int64_t rowId) const {
-    std::shared_lock<std::shared_mutex> lock(_mutex);
-
-    // Check if rowId is valid
-    if (_columns.empty() || rowId < 0 || rowId >= static_cast<int64_t>(_columns[0].size())) {
-        return boost::none;
-    }
-
-    // Reconstruct row from columns
-    std::vector<uint32_t> row;
-    for (const auto& column : _columns) {
-        row.push_back(column[rowId]);
-    }
-
-    return row;
-}
-
-
-
-std::vector<int64_t> AttributeTable::queryRowsLeaf(const std::vector<uint32_t>& refRowVec,
-                                                   BitmapIndex* bitmapIndex) const {
-    std::vector<int64_t> matchingRowIds;
-
-    // If refRowVec is empty or no columns, no predicates to match
-    if (refRowVec.empty() || _columns.empty()) {
-        return matchingRowIds;
-    }
-
-    // Fallback: Full scan when no bitmap index is available
-    // Get row count from first column
-    size_t rowCount = _columns[0].size();
-
-    // Initialize a bitmap to track which rows match all predicates
-    // Start with all rows as potential matches
-    std::vector<bool> rowMatches(rowCount, true);
-
-    // Iterate through each column with a predicate (column-major order for better vectorization)
-    for (size_t colIdx = 0; colIdx < refRowVec.size(); ++colIdx) {
-        uint32_t expectedSymbol = refRowVec[colIdx];
-
-        // 0 means this field is not part of the predicate, skip it
-        if (expectedSymbol == 0) {
-            continue;
-        }
-
-        // Check if column exists
-        if (colIdx >= _columns.size()) {
-            // Column doesn't exist, treat all rows as missing (0)
-            // Since expectedSymbol != 0, no rows can match
-            std::fill(rowMatches.begin(), rowMatches.end(), false);
-            break;
-        }
-
-        // columnAddedAtRowId[colIdx] is the rowId where the column was added
-        // and we will treat all earlier rows as missing (0)
-        // TODO: We should allow null-check/fill operation.
-        size_t firstValidRow = static_cast<size_t>(_columnAddedAtRowId[colIdx]);
-        std::fill(rowMatches.begin(), rowMatches.begin() + firstValidRow, false);
-
-        // If bitmap index exists for this column, then use it.
-        if (bitmapIndex != nullptr && bitmapIndex->hasIndexForColumn(colIdx)) {
-            auto columnRowIds = bitmapIndex->getRowIds(colIdx, expectedSymbol);
-
-            // Mark rows not in columnRowIds as non-matching
-            for (size_t rowIdx = firstValidRow; rowIdx < rowCount; ++rowIdx) {
-                if (rowMatches[rowIdx] &&
-                    columnRowIds.find(static_cast<int64_t>(rowIdx)) == columnRowIds.end()) {
-                    rowMatches[rowIdx] = false;
-                }
-            }
-            continue;
-        }
-
-        // We need a full scan for this column
-
-        auto& column = _columns[colIdx];
-        // For this column, check each row (inner loop is now vectorizable)
-        for (size_t rowIdx = firstValidRow; rowIdx < rowCount; ++rowIdx) {
-            // Skip rows that already don't match
-            if (!rowMatches[rowIdx]) {
-                continue;
-            }
-
-            // Check if the row's symbol at this column matches
-            if (column[rowIdx] != expectedSymbol) {
-                rowMatches[rowIdx] = false;
-            }
-        }
-    }
-
-    // Collect all rows that matched all predicates
-    for (size_t rowIdx = 0; rowIdx < rowCount; ++rowIdx) {
-        if (rowMatches[rowIdx]) {
-            matchingRowIds.push_back(rowIdx);
-        }
-    }
-
-    return matchingRowIds;
-}
-
-std::vector<int64_t> AttributeTable::queryRows(const AttributeTablePredicate& predicate,
-                                               BitmapIndex* bitmapIndex) const {
-    std::shared_lock<std::shared_mutex> lock(_mutex);
-
-    // Handle LEAF predicates: simple equality matching
-    if (predicate.isLeaf()) {
-        return queryRowsLeaf(predicate.refRowVec, bitmapIndex);
-    }
-
-    // Handle OR predicates: union of all child results
-    if (predicate.isOr()) {
-        std::set<int64_t> uniqueMatches;
-        for (const auto& child : predicate.children) {
-            auto childResults = queryRows(child, bitmapIndex);
-            for (auto rowId : childResults) {
-                uniqueMatches.insert(rowId);
-            }
-        }
-        std::vector<int64_t> result(uniqueMatches.begin(), uniqueMatches.end());
-        return result;
-    }
-
-    // Handle AND predicates: intersection of all child results
-    if (predicate.isAnd()) {
-        if (predicate.children.empty()) {
-            return {};
-        }
-
-        // Start with results from first child
-        auto result = queryRows(predicate.children[0], bitmapIndex);
-
-        // Intersect with results from remaining children
-        for (size_t i = 1; i < predicate.children.size(); ++i) {
-            auto childResults = queryRows(predicate.children[i], bitmapIndex);
-
-            // Convert to set for efficient intersection
-            std::set<int64_t> childSet(childResults.begin(), childResults.end());
-
-            // Keep only rows that are in both sets
-            std::vector<int64_t> intersection;
-            for (auto rowId : result) {
-                if (childSet.count(rowId) > 0) {
-                    intersection.push_back(rowId);
-                }
-            }
-            result = intersection;
-
-            // Early exit if no matches
-            if (result.empty()) {
-                break;
-            }
-        }
-        return result;
-    }
-
-    // Should not reach here
-    return {};
-}
-
-
-StatusWith<AttributeTablePredicate> AttributeTable::convertMatchExpressionToPredicate(
-    const ::mongo::MatchExpression* matchExpr) const {
-
-    if (!matchExpr) {
-        return Status(ErrorCodes::BadValue, "matchExpr cannot be null");
-    }
-
-    // Handle OR expressions: create an OR node with children
-    if (matchExpr->matchType() == ::mongo::MatchExpression::OR) {
-        AttributeTablePredicate orPredicate;
-        orPredicate.type = AttributeTablePredicate::OR;
-
-        for (size_t i = 0; i < matchExpr->numChildren(); ++i) {
-            auto branchResult = convertMatchExpressionToPredicate(matchExpr->getChild(i));
-            if (!branchResult.isOK()) {
-                // If any branch fails to convert, skip it
-                continue;
-            }
-            orPredicate.children.push_back(branchResult.getValue());
-        }
-
-        // If we collected any children, return the OR predicate
-        if (!orPredicate.children.empty()) {
-            return orPredicate;
-        }
-        // If no children were collected, return empty predicate
-        return AttributeTablePredicate();
-    }
-
-    // Handle AND expressions: create an AND node with children
-    if (matchExpr->matchType() == ::mongo::MatchExpression::AND) {
-        AttributeTablePredicate andPredicate;
-        andPredicate.type = AttributeTablePredicate::AND;
-
-        for (size_t i = 0; i < matchExpr->numChildren(); ++i) {
-            auto branchResult = convertMatchExpressionToPredicate(matchExpr->getChild(i));
-            if (!branchResult.isOK()) {
-                // If any branch fails to convert, skip it
-                continue;
-            }
-            andPredicate.children.push_back(branchResult.getValue());
-        }
-
-        // If we collected any children, return the AND predicate
-        if (!andPredicate.children.empty()) {
-            return andPredicate;
-        }
-        // If no children were collected, return empty predicate
-        return AttributeTablePredicate();
-    }
-
-    // Extract equality matches from the MatchExpression (for AND expressions)
-    mongo::pathsupport::EqualityMatches equalities;
-    auto status = mongo::pathsupport::extractEqualityMatches(*matchExpr, &equalities);
-    if (!status.isOK()) {
-        return status;
-    }
-
-    // Build reference row vector: symbol indices in schema order
-    // 0 means field is not part of predicate, non-zero means match this symbol
-    std::vector<uint32_t> refRowVec;
-    size_t maxColumnIndex = 0;
-
-    // First pass: find the maximum column index needed
-    for (const auto& [fieldPath, eqExpr] : equalities) {
-        // Strip the metadata field prefix if present
-        // The schema only contains the field names without the metadata prefix
-        std::string schemaFieldPath = std::string(fieldPath);
-        if (schemaFieldPath.find("metadata.") == 0) {
-            schemaFieldPath = schemaFieldPath.substr(9);  // Remove "metadata." prefix
-        }
-
-        auto it = _fieldToColumnIndex.find(schemaFieldPath);
-        if (it != _fieldToColumnIndex.end()) {
-            maxColumnIndex = std::max(maxColumnIndex, it->second);
-        }
-    }
-
-    // Initialize refRowVec with 0s up to maxColumnIndex
-    refRowVec.resize(maxColumnIndex + 1, 0);
-
-    // Second pass: fill in the symbol indices for matching fields
-    for (const auto& [fieldPath, eqExpr] : equalities) {
-        // Strip the metadata field prefix if present
-        std::string schemaFieldPath = std::string(fieldPath);
-        if (schemaFieldPath.find("metadata.") == 0) {
-            schemaFieldPath = schemaFieldPath.substr(9);  // Remove "metadata." prefix
-        }
-
-        auto fieldIt = _fieldToColumnIndex.find(schemaFieldPath);
-        if (fieldIt == _fieldToColumnIndex.end()) {
-            // Field not in schema - no rows will match
-            return AttributeTablePredicate();
-        }
-
-        // Get the symbol value from the BSON element
-        const BSONElement& data = eqExpr->getData();
-
-        if (data.eoo()) {
-            // Element is EOO (end of object), which means it's invalid
-            return Status(ErrorCodes::BadValue,
-                          "HCIndex: Predicate value for field '" + std::string(fieldPath) +
-                              "' is invalid (EOO element)");
-        }
-
-        if (data.type() != BSONType::string) {
-            return Status(ErrorCodes::BadValue,
-                          "HCIndex: Predicate value for field '" + std::string(fieldPath) +
-                              "' must be a string, got: " + typeName(data.type()));
-        }
-
-        StringData value = data.valueStringData();
-
-        // Look up the symbol index in the dictionary
-        auto symbolIndex = _symbolDictionary->getSymbolIndex(value);
-
-        if (!symbolIndex) {
-            // Symbol not found in dictionary - this field value doesn't exist in this table
-            // Return empty predicate (no rows will match)
-            return AttributeTablePredicate();
-        }
-
-        // Set the symbol index at the appropriate column position
-        refRowVec[fieldIt->second] = *symbolIndex;
-    }
-
-    // Trim trailing zeros from refRowVec (don't pad at the end)
-    while (!refRowVec.empty() && refRowVec.back() == 0) {
-        refRowVec.pop_back();
-    }
-
-    // Create a LEAF predicate with the refRowVec
-    AttributeTablePredicate leafPredicate;
-    leafPredicate.type = AttributeTablePredicate::LEAF;
-    leafPredicate.refRowVec = refRowVec;
-    return leafPredicate;
-}
-
-
 Status AttributeTable::addColumn(StringData fieldName) {
     std::unique_lock<std::shared_mutex> lock(_mutex);
 
@@ -485,6 +401,48 @@ Status AttributeTable::addColumn(StringData fieldName) {
     return Status::OK();
 }
 
+Status AttributeTable::changeState(AttributeTableState newState) {
+    std::unique_lock<std::shared_mutex> lock(_mutex);
+
+    // Once in ReadOnly state, no transitions are allowed
+    if (_state == AttributeTableState::ReadOnly) {
+        return Status(ErrorCodes::InternalError, "Cannot change state of read-only table");
+    }
+
+    // Validate state transitions
+    if (_state == AttributeTableState::NOP) {
+        if (newState != AttributeTableState::Reconstruction &&
+            newState != AttributeTableState::ReadWrite) {
+            return Status(ErrorCodes::InternalError,
+                          "Invalid state transition from NOP to " +
+                              std::to_string(static_cast<int>(newState)));
+        }
+    } else if (_state == AttributeTableState::Reconstruction) {
+        // From Reconstruction, can transition to ReadWrite (to accept new data) or ReadOnly
+        if (newState != AttributeTableState::ReadWrite &&
+            newState != AttributeTableState::ReadOnly) {
+            return Status(ErrorCodes::InternalError,
+                          "Invalid state transition from Reconstruction to " +
+                              std::to_string(static_cast<int>(newState)));
+        }
+    } else if (_state == AttributeTableState::ReadWrite) {
+        // From ReadWrite, can only transition to ReadOnly
+        if (newState != AttributeTableState::ReadOnly) {
+            return Status(ErrorCodes::InternalError,
+                          "Invalid state transition from ReadWrite to " +
+                              std::to_string(static_cast<int>(newState)));
+        }
+    }
+
+    _state = newState;
+    return Status::OK();
+}
+
+void AttributeTable::setWriter(HCIndexWriter* writer) {
+    std::unique_lock<std::shared_mutex> lock(_mutex);
+    _writer = writer;
+}
+
 void AttributeTable::flush() {
     std::unique_lock<std::shared_mutex> lock(_mutex);
 
@@ -501,56 +459,125 @@ void AttributeTable::flush() {
     _isDirty = false;
 }
 
-const std::vector<std::string>& AttributeTable::getSchema() const {
-    std::shared_lock<std::shared_mutex> lock(_mutex);
-    return _schema;
-}
 
-const std::map<std::string, size_t>& AttributeTable::getFieldToColumnIndexMap() const {
-    std::shared_lock<std::shared_mutex> lock(_mutex);
-    return _fieldToColumnIndex;
-}
+//- PRIVATE METHODS
 
-size_t AttributeTable::getRowCount() const {
-    std::shared_lock<std::shared_mutex> lock(_mutex);
-    return _columns.empty() ? 0 : _columns[0].size();
-}
 
-size_t AttributeTable::getMemoryUsageBytes() const {
-    std::shared_lock<std::shared_mutex> lock(_mutex);
+std::vector<int64_t> AttributeTable::queryRowsLeaf(const std::vector<uint32_t>& refRowVec,
+                                                   BitmapIndex* bitmapIndex) const {
+    std::vector<int64_t> matchingRowIds;
 
-    size_t totalBytes = 0;
-
-    // Schema memory
-    for (const auto& fieldName : _schema) {
-        totalBytes += fieldName.size();
-    }
-    totalBytes += _schema.capacity() * sizeof(std::string);
-
-    // Columns memory
-    for (const auto& column : _columns) {
-        totalBytes += column.capacity() * sizeof(uint32_t);
-    }
-    totalBytes += _columns.capacity() * sizeof(std::vector<uint32_t>);
-
-    // columnAddedAtRowId memory
-    totalBytes += _columnAddedAtRowId.capacity() * sizeof(int64_t);
-
-    // Field to column index map
-    for (const auto& [fieldName, colIdx] : _fieldToColumnIndex) {
-        totalBytes += fieldName.size();
+    // No columns or no predicates to match
+    if (refRowVec.empty() || _columns.empty()) {
+        return matchingRowIds;
     }
 
-    return totalBytes;
+    // Iterate through each column with a predicate (column-major order) and
+    // use bitmapIndex whereever possible to filter rows.
+    // TODO: Depending on the size of the table, density of the column and
+    // previous query statistics, an SIMD/AVX optimized full-scan would be
+    // much faster than bitmap index lookups.
+
+    size_t rowCount = _columns[0].size();
+    std::vector<bool> rowMatches(rowCount, true);
+
+    for (size_t colIdx = 0; colIdx < refRowVec.size(); ++colIdx) {
+        uint32_t expectedSymbol = refRowVec[colIdx];
+
+        // 0 <==> not part of the predicate, skip it
+        if (expectedSymbol == 0) {
+            continue;
+        }
+
+        // If required column does exist, no rows can match.
+        // TODO: NULL and NotAvailable distinction.
+        if (colIdx >= _columns.size()) {
+            std::fill(rowMatches.begin(), rowMatches.end(), false);
+            break;
+        }
+
+        // columnAddedAtRowId[colIdx] is the rowId where the column was added
+        // and we will treat all earlier rows as missing (0)
+        // TODO: NULL and NotAvailable distinction.
+        size_t firstValidRow = static_cast<size_t>(_columnAddedAtRowId[colIdx]);
+        std::fill(rowMatches.begin(), rowMatches.begin() + firstValidRow, false);
+
+        // If bitmap index exists for this column, then use it.
+        if (bitmapIndex != nullptr && bitmapIndex->hasIndexForColumn(colIdx)) {
+            auto columnRowIds = bitmapIndex->getRowIds(colIdx, expectedSymbol);
+
+            // Mark rows not in columnRowIds as non-matching
+            for (size_t rowIdx = firstValidRow; rowIdx < rowCount; ++rowIdx) {
+                if (rowMatches[rowIdx] &&
+                    columnRowIds.find(static_cast<int64_t>(rowIdx)) == columnRowIds.end()) {
+                    rowMatches[rowIdx] = false;
+                }
+            }
+            continue;
+        }
+
+        // We are here ==> No index could be used. Do a full scan.
+
+        auto& column = _columns[colIdx];
+        for (size_t rowIdx = firstValidRow; rowIdx < rowCount; ++rowIdx) {
+            if (!rowMatches[rowIdx]) {
+                continue;
+            }
+            if (column[rowIdx] != expectedSymbol) {
+                rowMatches[rowIdx] = false;
+            }
+        }
+    }
+
+    // Collect all rows that matched all predicates
+    for (size_t rowIdx = 0; rowIdx < rowCount; ++rowIdx) {
+        if (rowMatches[rowIdx]) {
+            matchingRowIds.push_back(rowIdx);
+        }
+    }
+
+    return matchingRowIds;
 }
 
+boost::optional<int64_t> AttributeTable::findDuplicateRow(
+    const std::vector<uint32_t>& row) const {
+
+    // TODO: This could use a good number of optimizations. A partitioned hashing could be simple
+    // one.
+
+    if (_columns.empty()) {
+        return boost::none;
+    }
+
+    // Get row count from first column
+    size_t rowCount = _columns[0].size();
+
+    // Linear search through existing rows
+    for (size_t rowIdx = 0; rowIdx < rowCount; ++rowIdx) {
+        bool matches = true;
+        for (size_t colIdx = 0; colIdx < row.size() && colIdx < _columns.size(); ++colIdx) {
+            if (_columns[colIdx][rowIdx] != row[colIdx]) {
+                matches = false;
+                break;
+            }
+        }
+
+        if (matches) {
+            return rowIdx;
+        }
+    }
+
+    return boost::none;
+}
 
 StatusWith<std::vector<uint32_t>> AttributeTable::metadataToRow(const BSONObj& metadata) {
-    // First pass: identify all fields in metadata and add new ones to schema
+
+    // First, evolve the schema if necessary. Then build the row vector that meets the
+    // ordered-schema.
+
     for (const auto& elem : metadata) {
         std::string fieldName = elem.fieldName();
 
-        // Extract string value from BSON element
         if (elem.type() != BSONType::string) {
             return Status(ErrorCodes::BadValue,
                           "Metadata field '" + fieldName +
@@ -560,7 +587,7 @@ StatusWith<std::vector<uint32_t>> AttributeTable::metadataToRow(const BSONObj& m
         // Check if field is in schema
         auto it = _fieldToColumnIndex.find(fieldName);
         if (it == _fieldToColumnIndex.end()) {
-            // New field - add to schema
+            // Add to schema
             _fieldToColumnIndex[fieldName] = _schema.size();
             _schema.push_back(fieldName);
 
@@ -577,22 +604,20 @@ StatusWith<std::vector<uint32_t>> AttributeTable::metadataToRow(const BSONObj& m
         }
     }
 
-    // Second pass: build row according to schema order
+    // Build row according to schema order
     std::vector<uint32_t> row;
     for (const auto& fieldName : _schema) {
         auto elem = metadata[StringData(fieldName)];
 
         if (elem.eoo()) {
-            // Field not in metadata - use missing value sentinel
+            // Field not in metadata - use 0 to indicate.
             row.push_back(0);
         } else {
-            // Look up value in symbol dictionary
             std::string fieldValue = elem.String();
             auto symbolResult = _symbolDictionary->getOrInsertSymbol(fieldValue);
             if (!symbolResult.isOK()) {
                 return symbolResult.getStatus();
             }
-
             uint32_t symbolIndex = symbolResult.getValue();
             row.push_back(symbolIndex);
         }
@@ -607,52 +632,18 @@ StatusWith<std::vector<uint32_t>> AttributeTable::metadataToRow(const BSONObj& m
     return row;
 }
 
-boost::optional<int64_t> AttributeTable::findDuplicateRow(
-    const std::vector<uint32_t>& row) const {
-    // If no columns, no rows to search
-    if (_columns.empty()) {
-        return boost::none;
-    }
-
-    // Get row count from first column
-    size_t rowCount = _columns[0].size();
-
-    // Linear search through existing rows
-    for (size_t rowIdx = 0; rowIdx < rowCount; ++rowIdx) {
-        bool matches = true;
-
-        // Compare each column value
-        for (size_t colIdx = 0; colIdx < row.size() && colIdx < _columns.size(); ++colIdx) {
-            if (_columns[colIdx][rowIdx] != row[colIdx]) {
-                matches = false;
-                break;
-            }
-        }
-
-        if (matches) {
-            return rowIdx;
-        }
-    }
-
-    return boost::none;
-}
 
 Status AttributeTable::writeSchema(const std::string& fieldName, size_t columnIndex) {
-    // Check state: modifications only allowed in Reconstruction or ReadWrite modes
+
     if (_state == AttributeTableState::NOP) {
         return Status(ErrorCodes::InternalError, "Table is in NOP state, cannot add schema");
     }
-    if (_state == AttributeTableState::ReadOnly) {
-        return Status(ErrorCodes::InternalError, "Table is read-only, cannot add schema");
+    else if (_state == AttributeTableState::ReadOnly) {
+        return Status(ErrorCodes::InternalError, "Table is ReadOnly, cannot add schema");
     }
-
-    // In ReadWrite mode, writer must be set for modifications
-    if (_state == AttributeTableState::ReadWrite && _writer == nullptr) {
+    else if (_state == AttributeTableState::ReadWrite && _writer == nullptr) {
         return Status(ErrorCodes::InternalError, "Table in ReadWrite mode requires a writer");
     }
-
-    // In Reconstruction mode, we don't need a writer
-    // In ReadWrite mode, we need to call the writer
 
     if (_state == AttributeTableState::ReadWrite) {
         // If this is the first schema field, we need to initialize the attribute table.
@@ -671,31 +662,27 @@ Status AttributeTable::writeSchema(const std::string& fieldName, size_t columnIn
         }
 
         _isDirty = true;
-
         auto attrStat = _writer->addAttribute(_windowStart, _windowEnd, fieldName, columnIndex);
         if (!attrStat.isOK()) {
             return attrStat;
         }
     }
 
+    // Defense: should never reach here
     return Status::OK();
 }
 
 Status AttributeTable::writeRow(const std::vector<uint32_t>& row) {
-    // Check state: modifications only allowed in Reconstruction or ReadWrite modes
     if (_state == AttributeTableState::NOP) {
         return Status(ErrorCodes::InternalError, "Table is in NOP state, cannot add row");
     }
-    if (_state == AttributeTableState::ReadOnly) {
-        return Status(ErrorCodes::InternalError, "Table is read-only, cannot add row");
+    else if (_state == AttributeTableState::ReadOnly) {
+        return Status(ErrorCodes::InternalError, "Table is ReadOnly, cannot add row");
     }
-
-    // In ReadWrite mode, writer must be set for modifications
-    if (_state == AttributeTableState::ReadWrite && _writer == nullptr) {
+    else if (_state == AttributeTableState::ReadWrite && _writer == nullptr) {
         return Status(ErrorCodes::InternalError, "Table in ReadWrite mode requires a writer");
     }
 
-    // In ReadWrite mode, notify writer of the new row
     if (_state == AttributeTableState::ReadWrite) {
         // If this is the first row, we need to initialize the attribute table.
         bool isFirstRow = _columns.empty() || _columns[0].empty();
@@ -710,7 +697,9 @@ Status AttributeTable::writeRow(const std::vector<uint32_t>& row) {
         return _writer->addAttributeRow(_windowStart, _windowEnd, row);
     }
 
+    // Defense: should never reach here
     return Status::OK();
 }
+
 
 }  // namespace mongo::timeseries::hcindex
