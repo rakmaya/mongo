@@ -385,7 +385,7 @@ void CollectionImpl::init(OperationContext* opCtx) {
                         LOGV2(9999990, "HCIndex: [INIT COLLECTION] Failed to store manager during collection init for {ns}: {error}",
                               "ns"_attr = ns().toStringForErrorMsg(), "error"_attr = setStatus);
                     }
-                } catch (const std::exception& e) {
+                } catch (const std::exception&) {
                     // TODO:
                 }
             }

@@ -61,7 +61,6 @@ bool requiresViewlessTimeseriesTranslation(OperationContext* const opCtx, const 
     bool isRaw = isRawDataOperation(opCtx);
     bool isTimeseries = coll.isTimeseriesCollection();
     bool isNewWithoutView = coll.isNewTimeseriesWithoutView();
-    bool isBucketsCollection = coll.ns().isTimeseriesBucketsCollection();
     return !isRaw && isTimeseries && isNewWithoutView;
 }
 

@@ -212,7 +212,6 @@ StatusWith<SymbolDictionaryConstructionResult> HCIndexReader::constructSymbolDic
     // First pass: scan for INIT operation to determine if this is a delta or base
     boost::optional<Timestamp> refBaseDictionaryWindowStart;
     uint32_t localIndexOffset = 0;
-    bool foundInit = false;
 
     auto cursor = symbolOpsCollection->getCollectionPtr()->getCursor(opCtx);
     while (auto record = cursor->next()) {
@@ -231,7 +230,6 @@ StatusWith<SymbolDictionaryConstructionResult> HCIndexReader::constructSymbolDic
 
         StringData op = doc.getStringField("op");
         if (op == "INIT") {
-            foundInit = true;
             // Check for REF field indicating this references a base dictionary
             if (doc.hasField("REF")) {
                 refBaseDictionaryWindowStart = doc.getField("REF").timestamp();
@@ -379,7 +377,6 @@ StatusWith<std::unique_ptr<AttributeTable>> HCIndexReader::constructAttributeTab
     }
 
     auto cursor = attributeOpsCollection->getCollectionPtr()->getCursor(opCtx);
-    int operationCount = 0;
     while (auto record = cursor->next()) {
         BSONObj doc = record->data.toBson();
 
@@ -396,7 +393,6 @@ StatusWith<std::unique_ptr<AttributeTable>> HCIndexReader::constructAttributeTab
         }
 
         StringData op = doc.getStringField("op");
-        Timestamp docTimestamp = doc.getField("timestamp").timestamp();
 
         if (op == "INIT") {
             // Extract schema and rows from INIT operation
@@ -430,7 +426,6 @@ StatusWith<std::unique_ptr<AttributeTable>> HCIndexReader::constructAttributeTab
                     }
                 }
             }
-            operationCount++;
         } else if (op == "opADD") {
             // Extract attributes from ADD operation
             BSONObj attrsObj = doc.getObjectField("attributes");
@@ -507,7 +502,6 @@ StatusWith<std::unique_ptr<BitmapIndex>> HCIndexReader::constructBitmapIndex(
     // Read and replay operations
 
     auto cursor = bitmapIndexCollection->getCollectionPtr()->getCursor(opCtx);
-    int operationCount = 0;
     while (auto record = cursor->next()) {
         BSONObj doc = record->data.toBson();
 
@@ -524,7 +518,6 @@ StatusWith<std::unique_ptr<BitmapIndex>> HCIndexReader::constructBitmapIndex(
         }
 
         StringData op = doc.getStringField("op");
-        Timestamp docTimestamp = doc.getField("timestamp").timestamp();
 
         if (op == "INIT" || op == "opADD") {
             // Extract entries from the document
@@ -577,7 +570,6 @@ StatusWith<std::unique_ptr<BitmapIndex>> HCIndexReader::constructBitmapIndex(
                     }
                 }
             }
-            operationCount++;
         }
     }
 

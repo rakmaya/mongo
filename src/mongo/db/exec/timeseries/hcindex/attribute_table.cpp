@@ -53,9 +53,10 @@ AttributeTable::AttributeTable(ISymbolDictionary* symbolDictionary,
       _writer(writer),
       _period(period),
       _frequency(frequency),
+      _isDirty(false),
       _windowStart(windowStart),
-      _windowEnd(windowEnd),
-      _isDirty(false) {}
+      _windowEnd(windowEnd) {
+}
 
 
 //- ACCESSORS

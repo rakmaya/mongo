@@ -78,7 +78,7 @@ GetNextResult ScanAttributeIndexStage::doGetNext() {
         // Get the HCIndexCollectionManager from the GlobalBucketCatalog
         auto& bucketCatalog = timeseries::bucket_catalog::GlobalBucketCatalog::get(
             opCtx->getServiceContext());
-        auto hcindexMgr = timeseries::bucket_catalog::getHCIndexManager(bucketCatalog, *collUUID);
+        auto hcindexMgr = timeseries::bucket_catalog::getHCIndexManager(bucketCatalog, *collUUID); 
 
         if (!hcindexMgr) {
             return GetNextResult::makeEOF();
@@ -104,7 +104,7 @@ GetNextResult ScanAttributeIndexStage::doGetNext() {
 
     // Emit the next rowId as a document
     int64_t rowId = _matchingRowIds[_rowIdIndex++];
-    Document doc{{"rowId", rowId}};
+    Document doc{{"rowId", Value(static_cast<long long>(rowId))}};
 
     return GetNextResult(std::move(doc));
 }
