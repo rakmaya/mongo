@@ -50,6 +50,7 @@ class HCIndexWriter;
                         // ===========================
                         // class DeltaSymbolDictionary
                         // ===========================
+
 /**
  * Represents a delta-based symbol dictionary for a specific time window.
  *
@@ -58,7 +59,7 @@ class HCIndexWriter;
  * 2. inheritedDelta: Symbols inherited from a recent interval's delta (lazy)
  * 3. localDelta: New symbols added in THIS interval only
  *
- * Some operation info:
+ * Operational aspects:
  * - Lookup order: baseDictionary -> inheritedDelta -> localDelta
  * - Lazy inheritance: inheritedDelta is set when first needed, not upfront
  * - Base compaction: When consecutive intervals have similar deltas, merge into

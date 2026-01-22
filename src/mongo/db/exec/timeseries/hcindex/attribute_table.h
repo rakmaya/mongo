@@ -282,7 +282,8 @@ public:
     Status addColumn(StringData fieldName);
 
     /**
-     * Only the following transitions are allowed:
+     * Change the state of this bitmap index. Returns an error if transition is invalid. Valid
+     * transition are:
      * - From NOP: can transition to Reconstruction or ReadWrite
      * - From Reconstruction: can transition to ReadOnly or ReadWrite
      * - From ReadWrite: can transition to ReadOnly

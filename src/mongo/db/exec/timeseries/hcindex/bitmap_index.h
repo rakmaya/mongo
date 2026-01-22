@@ -52,6 +52,10 @@ class HCIndexReader;
 class HCIndexWriter;
 class AttributeTable;
 
+                        // =====================
+                        // enum BitmapIndexState
+                        // =====================
+
 /**
  * State machine for BitmapIndex lifecycle:
  * - NOP: Initial state, no operations allowed
@@ -60,36 +64,39 @@ class AttributeTable;
  * - ReadOnly: Index is locked, no modifications allowed
  *
  * State transitions:
- * - NOP -> Reconstruction (via changeState)
- * - NOP -> ReadWrite (via changeState)
- * - Reconstruction -> ReadOnly (via changeState)
- * - Reconstruction -> ReadWrite (only if the map is empty)
- * - ReadWrite -> ReadOnly (via changeState)
+ * - NOP -> Reconstruction or ReadWrite
+ * - Reconstruction -> ReadWrite - to accept new data after reconstruction
+ * - Reconstruction -> ReadOnly
+ * - ReadWrite -> ReadOnly
  * - ReadOnly -> (no transitions allowed)
  */
-enum class BitmapIndexState { NOP, Reconstruction, ReadWrite, ReadOnly };
+enum class BitmapIndexState {
+    NOP,
+    Reconstruction,
+    ReadWrite,
+    ReadOnly
+};
+
+                        // =================
+                        // class BitmapIndex
+                        // =================
 
 /**
- * Represents a bitmap index for a specific time window.
- *
- * The bitmap index maps (columnIndex, symbolIndex) -> set of RowIDs.
- * This enables fast lookup of all rows that have a specific value in a specific column.
- *
- * Key properties:
- * - Append-only: Entries are only added, never removed (except via window eviction)
- * - Thread-safe: Uses shared_mutex for concurrent access
- * - Column-value indexed: Each unique (column, value) pair has its own bitmap
- *
- * Implementation note: Uses Roaring64BTree for memory-efficient bitmap storage.
- * Roaring bitmaps provide significant memory savings (20-65x) and performance
- * improvements (10-50x) compared to std::set<int64_t> for typical cardinalities.
+ * Represents an append-only bitmap index for a specific time window. The bitmap index maps
+ * (columnIndex, symbolIndex) -> set of RowIDs and facilites inverted index operations for
+ * exact match queries.
  */
 class BitmapIndex {
+
 public:
+
+    //- CONSTRUCTORS
+
+
     /**
-     * Create a new bitmap index for the specified time window.
-     * The index starts in NOP state. Use changeState() to transition to
-     * Reconstruction, ReadWrite, or ReadOnly states.
+     * Constructs a bitmap index for the time window [`windowStart`, `windowEnd`),
+     * configured with the given `period` and `frequency`, optionally persisting
+     * updates via `writer`. The index is initialized in the NOP state.
      */
     BitmapIndex(HCIndexPeriodEnum period,
                 int32_t frequency,
@@ -97,84 +104,40 @@ public:
                 Timestamp windowEnd,
                 HCIndexWriter* writer = nullptr);
 
-    /**
-     * Add a rowId to the bitmap for the specified (columnIndex, symbolIndex) pair.
-     * If the bitmap doesn't exist, it is created.
-     * Returns an error if the index is not in ReadWrite or Reconstruction state.
-     */
-    Status addEntry(size_t columnIndex, uint32_t symbolIndex, int64_t rowId);
+
+    //- ACCESSORS
+
 
     /**
-     * Add all entries for a row. For each column in the row vector, if the
-     * symbol index is non-zero (not missing), add the rowId to that (column, value) bitmap.
-     * Returns an error if the index is not in ReadWrite or Reconstruction state.
+     * Return all rowIds that have the specified symbol in the given column.
      */
-    Status addRow(int64_t rowId, const std::vector<uint32_t>& row);
+    std::set<int64_t> getRowIds(size_t column, uint32_t symbol) const;
 
     /**
-     * Get all rowIds that have the specified symbolIndex in the specified column.
-     * Returns an empty set if no matching entries exist.
-     */
-    std::set<int64_t> getRowIds(size_t columnIndex, uint32_t symbolIndex) const;
-
-    /**
-     * Get all rowIds that match ALL of the specified (columnIndex, symbolIndex) pairs.
-     * This performs an intersection of all matching bitmaps.
-     * The predicate is a vector where predicate[columnIndex] = symbolIndex to match.
-     * A symbolIndex of 0 means "don't care" (skip this column in the intersection).
-     * Returns an empty set if any required bitmap doesn't exist.
+     * Return all rowIds that match ALL non-zero values of respective columns indices of the
+     * specified predicate. This performs an intersection of all matching bitmaps. Behavior is
+     * undefined unless the predicate is a vector where predicate[columnIndex] = symbolIndex to
+     * match. A symbolIndex of 0 means "skip this column in the intersection".
      */
     std::set<int64_t> queryRowIdsAnd(const std::vector<uint32_t>& predicate) const;
 
     /**
-     * Get all rowIds that match ANY of the specified predicates.
-     * This performs a union of the AND results for each predicate.
-     * Each predicate is a vector where predicate[columnIndex] = symbolIndex to match.
+     * Return all rowIds that match ANY of the specified predicates. This performs a union of the
+     * AND results for each predicate. Behavior is undefined unless the predicate is a vector where
+     * predicate[columnIndex] = symbolIndex to match.
      */
     std::set<int64_t> queryRowIdsOr(const std::vector<std::vector<uint32_t>>& predicates) const;
 
     /**
-     * Change the state of this bitmap index. Transitions are restricted:
-     * - From NOP: can transition to Reconstruction or ReadWrite
-     * - From Reconstruction: can transition to ReadOnly
-     * - From ReadWrite: can transition to ReadOnly
-     * - From ReadOnly: no transitions allowed
-     * Returns an error if the transition is invalid.
-     */
-    Status changeState(BitmapIndexState newState);
-
-    /**
-     * Get the current state of this bitmap index.
+     * Return the current state of this bitmap index.
      */
     BitmapIndexState getState() const;
 
     /**
-     * Set the writer for this index.
-     */
-    void setWriter(HCIndexWriter* writer) {
-        _writer = writer;
-    }
-
-    /**
-     * Returns true if there is an index for column at the specified
-     * columnIndex. Otherwise, return false.
+     * Returns true if there is an index for column at the specified columnIndex. Otherwise,
+     * return false.
      */
     bool hasIndexForColumn(size_t columnIndex) const;
-
-    /**
-     * Set Excluded columns
-     */
-    void setExcludedColumns(std::unordered_set<std::size_t> excludedColumns);
-
-    /**
-     * Set Included columns
-     */
-    void setIncludedColumns(std::unordered_set<std::size_t> includedColumns);
-
-    /**
-     * Flush any pending operations to the database via the writer.
-     */
-    void flush();
 
     /**
      * Return true if the bitmap is empty. Otherwise, return false.
@@ -210,21 +173,62 @@ public:
         return _windowEnd;
     }
 
+
+    //- MODIFIERS
+
+
+    /**
+     * Add a bitmap entry for the specified (columnIndex, symbolIndex) pair with the given rowId.
+     * If the bitmap doesn't exist, it is created. Returns an error if the index is not in
+     * ReadWrite or Reconstruction state.
+     */
+    Status addEntry(size_t columnIndex, uint32_t symbolIndex, int64_t rowId);
+
+    /**
+     * Add all entries for a row. For each column in the row vector, if the symbol index is
+     * non-zero (not missing), add the rowId to that column. Returns an error if the index is not
+     * in ReadWrite or Reconstruction state.
+     */
+    Status addRow(int64_t rowId, const std::vector<uint32_t>& row);
+
+    /**
+     * Change the state of this bitmap index. Returns an error if transition is invalid. Valid
+     * transition are:
+     * - From NOP: can transition to Reconstruction or ReadWrite
+     * - From Reconstruction: can transition to ReadOnly
+     * - From ReadWrite: can transition to ReadOnly
+     * - From ReadOnly: no transitions allowed
+     */
+    Status changeState(BitmapIndexState newState);
+
+    /**
+     * Set the writer for this index.
+     */
+    void setWriter(HCIndexWriter* writer) {
+        _writer = writer;
+    }
+
+    /**
+     * Set Excluded columns
+     */
+    void setExcludedColumns(std::unordered_set<std::size_t> excludedColumns);
+
+    /**
+     * Set Included columns
+     */
+    void setIncludedColumns(std::unordered_set<std::size_t> includedColumns);
+
+    /**
+     * Flush any pending operations to the database via the writer.
+     */
+    void flush();
+
 private:
     Status addEntryHelper(size_t columnIndex, uint32_t symbolIndex, int64_t rowId);
 
     // Two-level bitmap structure:
     // First level: columnIndex -> inner map
     // Second level: symbolIndex -> Roaring64BTree of RowIDs
-    // This structure enables efficient column-based scans and eliminates the need
-    // for a separate _indexedColumns set.
-    //
-    // Uses Roaring64BTree (MongoDB's wrapper around CRoaring) for memory-efficient
-    // bitmap storage. Roaring64BTree internally uses:
-    // - B-tree map of 32-bit Roaring bitmaps (splits 64-bit rowIds into high/low 32 bits)
-    // - Adaptive containers (array/bitmap/run) based on data density
-    // - Provides 20-65x memory reduction vs std::set<int64_t>
-    // - Provides 10-50x faster operations (add, contains, intersection)
     using SymbolBitmaps = std::unordered_map<uint32_t, Roaring64BTree>;
     std::unordered_map<size_t, SymbolBitmaps> _bitmaps;
 
@@ -236,7 +240,7 @@ private:
     Timestamp _windowStart;
     Timestamp _windowEnd;
 
-    // Writer (can be nullptr if not persisting)
+    // Writer
     HCIndexWriter* _writer = nullptr;
 
     // Current state of the index
@@ -255,180 +259,6 @@ private:
     mutable std::shared_mutex _mutex;
 };
 
-/**
- * Manages temporal bitmap indexes for a timeseries collection.
- *
- * Creates and maintains separate bitmap indexes for each time window,
- * allowing for efficient time-scoped queries and bounded memory usage.
- *
- * Key features:
- * - Time-window scoped: Each window has its own bitmap index
- * - Configurable period and frequency: Hour/Minute/Second with custom frequencies
- * - Automatic window management: Creates indexes on-demand
- * - Cleanup support: Can remove old indexes to free memory
- * - Thread-safe: Safe for concurrent access from multiple threads
- */
-class TemporalBitmapIndex {
-public:
-    /**
-     * Create a new temporal bitmap index manager for managing bitmap indexes
-     * for timeseries collections having the specified 'collectionUUID' with the
-     * given 'period' and 'frequency'.
-     * The 'writer' can be nullptr if this index is being constructed by a reader.
-     * The 'reader' can be nullptr if reconstruction from disk is not needed.
-     */
-    TemporalBitmapIndex(const UUID& collectionUUID,
-                        HCIndexPeriodEnum period,
-                        int32_t frequency,
-                        HCIndexWriter* writer = nullptr,
-                        HCIndexReader* reader = nullptr);
-
-    /**
-     * Returns a pointer to the bitmap index covering the time window that
-     * includes the specified 'timestamp' if found. Otherwise, create a new
-     * index for the time window covering the 'timestamp' and return a pointer
-     * to that index. Note that the returned pointer is valid for the lifetime
-     * of this TemporalBitmapIndex. Returns an error if the index for the time
-     * window covering the 'timestamp' cannot be created.
-     */
-    StatusWith<BitmapIndex*> getOrCreateIndexForTimestamp(OperationContext* opCtx,
-                                                          const Timestamp& timestamp);
-
-    /**
-     * Returns a pointer to the bitmap index covering the time window that
-     * includes the specified 'timestamp' if found. Otherwise, return an error.
-     */
-    StatusWith<BitmapIndex*> getIndexForTimestamp(const Timestamp& timestamp) const;
-
-    /**
-     * Add all entries for a row to the bitmap index for the appropriate time window.
-     * For each column in the row vector, if the symbol index is non-zero,
-     * add the rowId to that (column, value) bitmap.
-     */
-    Status addRow(OperationContext* opCtx,
-                  int64_t rowId,
-                  const std::vector<uint32_t>& row,
-                  const Timestamp& timestamp);
-
-    /**
-     * Query rowIds that match the predicate in the time window containing timestamp.
-     * The predicate is a vector where predicate[columnIndex] = symbolIndex to match.
-     * A symbolIndex of 0 means "don't care" (skip this column).
-     */
-    std::set<int64_t> queryRowIds(const std::vector<uint32_t>& predicate,
-                                  const Timestamp& timestamp) const;
-
-
-    /**
-     * Get all rowIds that have the specified symbolIndex in the specified column.
-     * Returns an empty set if no matching entries exist.
-     */
-    std::set<int64_t> queryRowIds(size_t columnIndex,
-                                  uint32_t symbolIndex,
-                                  const Timestamp& timestamp) const;
-
-    /**
-     * Return the time window boundaries for a given 'timestamp'.
-     */
-    std::pair<Timestamp, Timestamp> getWindowForTimestamp(const Timestamp& timestamp) const;
-
-    /**
-     * Remove indexes serving time windows older than the specified
-     * 'beforeTimestamp'. This is used for cleanup to free memory from old indexes.
-     */
-    Status cleanupOldIndexes(const Timestamp& beforeTimestamp);
-
-    /**
-     * Returns true if the bitmap index for the time window containing
-     * 'timestamp' has an index for the specified columnInde. Otherwise, return
-     * false.
-     */
-    bool hasIndexForColumn(size_t columnIndex, const Timestamp& timestamp) const;
-
-    /**
-     * Flush all pending operations to the database.
-     */
-    void flush();
-
-    /**
-     * Set Excluded columns
-     */
-    void setExcludedColumns(std::unordered_set<std::size_t> excludedColumns);
-
-    /**
-     * Set Included columns
-     */
-    void setIncludedColumns(std::unordered_set<std::size_t> includedColumns);
-
-    /**
-     * Statistics about this temporal bitmap index.
-     */
-    struct Stats {
-        size_t totalIndexes;
-        size_t totalEntries;
-        size_t memoryUsageBytes;
-    };
-
-    /**
-     * Return the usage statistics.
-     */
-    Stats getStats() const;
-
-private:
-    /**
-     * Create or fetch the bitmap index for the time window that starts at the
-     * specified 'windowStart' timestamp.
-     */
-    StatusWith<BitmapIndex*> getOrCreateIndex(OperationContext* opCtx,
-                                              const Timestamp& windowStart);
-
-    /**
-     * Return the window start timestamp for the time window that includes the
-     * specified 'timestamp'.
-     */
-    Timestamp calculateWindowStart(const Timestamp& timestamp) const;
-
-    /**
-     * Return the window end timestamp for the time window that starts at the
-     * specified 'windowStart' timestamp.
-     */
-    Timestamp calculateWindowEnd(const Timestamp& windowStart) const;
-
-    // Map: windowStart → BitmapIndex
-    std::map<Timestamp, std::unique_ptr<BitmapIndex>> _indexes;
-
-    // Collection UUID for this temporal bitmap index
-    UUID _collectionUUID;
-
-    // Period (hour, minute, second)
-    HCIndexPeriodEnum _period;
-
-    // Frequency (1-24 for hour, 1-59 for minute/second)
-    int32_t _frequency;
-
-    // Writer (can be nullptr if constructed by reader)
-    HCIndexWriter* _writer = nullptr;
-
-    // Reader (can be nullptr if reconstruction from disk is not needed)
-    HCIndexReader* _reader = nullptr;
-
-    // Bitmap index options
-    bool _buildMetadataIndex;
-    double _sparseIndexThreshold;
-    double _denseIndexThreshold;
-    bool _dynamicIndexBuild;
-
-    bool _doRecomputeIndexedColumns;
-
-    // Columns that are excluded according to user preference
-    std::unordered_set<std::size_t> _excludedColumns;
-
-    // Columns that are included according to user preference
-    std::unordered_set<std::size_t> _includedColumns;
-
-    // Synchronization
-    mutable std::shared_mutex _mutex;
-};
 
 }  // namespace mongo::timeseries::hcindex
 

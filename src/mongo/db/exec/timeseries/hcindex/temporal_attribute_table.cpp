@@ -31,6 +31,7 @@
 
 #include "mongo/base/error_codes.h"
 #include "mongo/db/exec/timeseries/hcindex/bitmap_index.h"
+#include "mongo/db/exec/timeseries/hcindex/temporal_bitmap_index.h"
 #include "mongo/db/exec/timeseries/hcindex/reader.h"
 #include "mongo/db/exec/timeseries/hcindex/temporal_symbol_dictionary.h"
 #include "mongo/db/exec/timeseries/hcindex/writer.h"

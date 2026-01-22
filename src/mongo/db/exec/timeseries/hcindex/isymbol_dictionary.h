@@ -31,55 +31,43 @@
 
 namespace mongo::timeseries::hcindex {
 
+                        // =======================
+                        // class ISymbolDictionary
+                        // =======================
+
 /**
- * Interface for symbol dictionaries used by AttributeTable.
- *
- * This interface abstracts the symbol encoding/decoding operations,
- * allowing AttributeTable to work with different dictionary implementations:
- * - SymbolDictionary: Simple per-interval dictionary
- * - DeltaSymbolDictionary: Delta-based dictionary with base + inherited + local layers
- *
- * Key properties:
- * - Symbol indices start from 1 (0 is reserved for missing values)
- * - Once assigned, symbol indices never change
- * - Thread-safety is implementation-specific
+ * Interface for symbol dictionaries. This interface abstracts the symbol encoding/decoding
+ * operations, allowing AttributeTable to work with differen dictionary implementations. Also
+ * see SymbolDictionary and DeltaSymbolDictionary
  */
 class ISymbolDictionary {
 public:
     virtual ~ISymbolDictionary() = default;
 
     /**
-     * Look up or insert a symbol.
-     *
-     * If the symbol exists, returns its index.
-     * If the symbol doesn't exist, inserts it and returns the new index.
-     *
-     * @param word The symbol string to look up or insert
-     * @return The symbol index (>= 1) or an error status
+     * Look up or insert the specified 'word' in the dictionary. If the symbol exists, returns its
+     * index. If the symbol doesn't exist, inserts it and returns the new index. Returns a symbol
+     * index >= 1 on success. Otherwise, returns an error status.
      */
     virtual StatusWith<uint32_t> getOrInsertSymbol(StringData word) = 0;
 
     /**
-     * Look up a symbol (read-only, no insertion).
-     *
-     * @param word The symbol string to look up
-     * @return The symbol index if found, boost::none otherwise
+     * Look up the specified 'word' in the dictionary and if found, return the symbol index.
+     * Otherwise, return boost::none.
      */
     virtual boost::optional<uint32_t> getSymbolIndex(StringData word) const = 0;
 
     /**
-     * Decode a symbol index back to its string value.
-     *
-     * @param index The symbol index to decode
-     * @return The symbol string if found, boost::none otherwise
+     * Return the decoded string value associated with the specified symbol 'index' if found.
+     * Otherwise, return boost::none.
      */
     virtual boost::optional<StringData> getSymbol(uint32_t index) const = 0;
 
     /**
      * Return the total number of symbols in this dictionary.
-     * For delta dictionaries, this includes base + inherited + local symbols.
      */
     virtual size_t getSymbolCount() const = 0;
 };
+
 
 }  // namespace mongo::timeseries::hcindex

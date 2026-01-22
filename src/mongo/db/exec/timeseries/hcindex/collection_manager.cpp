@@ -31,6 +31,13 @@
 
 namespace mongo::timeseries::hcindex {
 
+                        // ------------------------------
+                        // class HCIndexCollectionManager
+                        // ------------------------------
+
+//- CLASS METHODS
+
+
 NamespaceString HCIndexCollectionManager::getSymbolOperationsNamespace(const DatabaseName& dbName, const UUID& collectionUUID) {
     std::string collName = "hcindex.ops.symbols." + collectionUUID.toString();
     std::string fullNs = str::stream() << dbName.toStringForErrorMsg() << "." << collName;
@@ -48,6 +55,10 @@ NamespaceString HCIndexCollectionManager::getBitmapIndexNamespace(const Database
     std::string fullNs = str::stream() << dbName.toStringForErrorMsg() << "." << collName;
     return NamespaceString::createNamespaceString_forTest(fullNs);
 }
+
+
+//- CONSTRUCTORS
+
 
 HCIndexCollectionManager::HCIndexCollectionManager(OperationContext* opCtx,
                                                    const DatabaseName& dbName,
@@ -91,6 +102,10 @@ HCIndexCollectionManager::HCIndexCollectionManager(OperationContext* opCtx,
     attributeTable->setExcludedIndexColumns(
         std::unordered_set<std::string>(_excludedColumns.begin(), _excludedColumns.end()));
 }
+
+
+//- MODIFIERS
+
 
 Status HCIndexCollectionManager::initializeForRead(OperationContext* opCtx) {
     Timer timer;

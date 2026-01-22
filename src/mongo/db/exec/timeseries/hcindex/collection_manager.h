@@ -31,6 +31,7 @@
 #include "mongo/db/exec/timeseries/hcindex/temporal_symbol_dictionary.h"
 #include "mongo/db/exec/timeseries/hcindex/temporal_attribute_table.h"
 #include "mongo/db/exec/timeseries/hcindex/bitmap_index.h"
+#include "mongo/db/exec/timeseries/hcindex/temporal_bitmap_index.h"
 #include "mongo/db/exec/timeseries/hcindex/writer.h"
 #include "mongo/db/exec/timeseries/hcindex/reader.h"
 #include "mongo/db/repl/oplog.h"
@@ -45,67 +46,49 @@
 
 namespace mongo::timeseries::hcindex {
 
+                        // ==============================
+                        // class HCIndexCollectionManager
+                        // ==============================
+
 /**
- * Manages the lifecycle and operations of HCIndex structures for a single timeseries collection.
- *
- * This manager coordinates the creation, initialization, and usage of:
- * - TemporalSymbolDictionary: Maps metadata values to integer indices
- * - TemporalAttributeTable: Stores metadata as rows of integer indices
- * - HCIndexWriter: Writes operations to timeseries collections
- * - HCIndexReader: Reads and reconstructs structures from operations
- *
- * The manager is responsible for:
- * - Initializing HCIndex structures when a collection is created with HCIndex enabled
- * - Encoding metadata to rowIds during write operations
- * - Decoding rowIds back to metadata during read operations
- * - Cleaning up resources when the collection is dropped
- *
- * Thread-safe: Safe for concurrent access from multiple threads.
+ * Manages the lifecycle and operation of HCIndex components for a single timeseries collection,
+ * coordinating the creation and use of the temporal symbol dictionary, attribute table, and index
+ * reader/writer to support metadata encoding, decoding, and write operations.
  */
 class HCIndexCollectionManager {
+
 public:
+
+    //- CLASS METHODS
+
     /**
-     * Get the namespace for the symbol operations collection.
-     *
      * Returns the NamespaceString for the symbol operations collection that should be created
-     * for the given collection UUID in the specified database.
+     * for the given `collectionUUID` in the specified database.
      */
     static NamespaceString getSymbolOperationsNamespace(const DatabaseName& dbName, const UUID& collectionUUID);
 
     /**
-     * Get the namespace for the attribute operations collection.
-     *
      * Returns the NamespaceString for the attribute operations collection that should be created
-     * for the given collection UUID in the specified database.
+     * for the given `collectionUUID` in the specified database.
      */
     static NamespaceString getAttributeOperationsNamespace(const DatabaseName& dbName, const UUID& collectionUUID);
 
     /**
-     * Get the namespace for the bitmap index collection.
-     *
      * Returns the NamespaceString for the bitmap index collection that should be created
-     * for the given collection UUID in the specified database.
+     * for the given `collectionUUID` in the specified database.
      */
     static NamespaceString getBitmapIndexNamespace(const DatabaseName& dbName, const UUID& collectionUUID);
 
+
+    //- CONSTRUCTORS
+
+
     /**
-     * Create a new HCIndex manager for the specified collection.
-     *
-     * The manager will manage HCIndex structures for the collection identified by
-     * collectionUUID in the specified database, using the specified period and frequency for time-window scoping.
-     *
-     * Parameters:
-     * - opCtx: Operation context for database operations
-     * - dbName: Database name where the timeseries collection resides
-     * - collectionUUID: UUID of the timeseries collection
-     * - period: Time-window period (hour, minute, second)
-     * - frequency: Time-window frequency (1-24 for hour, 1-59 for minute/second)
-     * - buildMetadataIndex: Enable/disable bitmap metadata indexing (default: true)
-     * - sparseIndexThreshold: Values occurring < X% treated as sparse (default: 1.0)
-     * - denseIndexThreshold: Values occurring > Y% always indexed (default: 10.0)
-     * - dynamicIndexBuild: Values between thresholds may be indexed on demand (default: false)
-     * - excludedColumns: List of columns to never index (default: empty)
-     * - includedColumns: List of columns to always index (default: empty)
+     * Constructs an HCIndex collection manager for the specified timeseries collection,
+     * configuring time-window scoping, metadata bitmap indexing behavior, and column
+     * inclusion/exclusion policies for index construction and maintenance.
+     * TODO: Allow some of these to be changed dynamically (e.g. excluded/included
+     * columns and other timeseries options).
      */
     HCIndexCollectionManager(OperationContext* opCtx,
                             const DatabaseName& dbName,
@@ -119,132 +102,86 @@ public:
                             std::vector<std::string> excludedColumns,
                             std::vector<std::string> includedColumns);
 
+
+    //- MODIFIERS
+
+
     /**
-     * Initialize the reader for read operations by acquiring collections.
-     *
-     * This acquires collections for symbol and attribute operations and caches them
-     * for reuse in all subsequent reconstruction operations, avoiding lock cycles during
-     * query execution.
-     *
-     * This is called lazily on first use (e.g., during queryRows()) to avoid issues with
-     * stashed transaction resources during pipeline cleanup.
-     *
-     * Parameters:
-     * - opCtx: Operation context for database operations
-     *
-     * Returns Status::OK() on success, or an error status if initialization fails.
+     * Initialize the reader for read operations by acquiring collections. This acquires
+     * collections for symbol and attribute operations and caches them for reuse in all
+     * subsequent reconstruction operations, avoiding lock cycles during query execution.
+     * Note that we call this function on-demand if the collection has not been initialized
+     * on first use (e.g., during queryRows()) to avoid issues with stashed transaction
+     * resources during pipeline cleanup. Returns Status::OK() on success, or an error
+     * if initialization fails.
      */
     Status initializeForRead(OperationContext* opCtx);
 
     /**
-     * Close and release acquired collections.
-     *
-     * Resets the acquired collections and clears the initialization flag, allowing
-     * the manager to be re-initialized if needed.
+     * Close and release acquired collections. Resets the acquired collections and clears
+     * the initialization flag, allowing the manager to be reinitialized if needed.
      */
     void close();
 
     /**
-     * Prepare for yielding by releasing collection pointers.
-     *
-     * Called during doSaveState() before a yield point. This releases the collection
-     * pointers held by the reader, allowing locks to be yielded safely.
-     *
+     * Prepare for yielding by releasing collection pointers. Called during doSaveState()
+     * before a yield point. This releases the collection pointers held by the reader.
      * The collections can be restored later by calling restoreForYield().
      */
     void prepareForYield();
 
     /**
-     * Restore collection pointers after yielding.
-     *
-     * Called during doRestoreState() after a yield point. This re-acquires the
-     * collection pointers that were released by prepareForYield().
-     *
-     * Parameters:
-     * - opCtx: Operation context for database operations
-     *
-     * Returns Status::OK() on success, or an error status if restoration fails.
+     * Restore collection pointers after yielding. Called during doRestoreState() after a
+     * yield point. This re-acquires the collection pointers that were released by
+     * prepareForYield(). Returns Status::OK() on success, or an error status if
+     * restoration fails.
      */
     Status restoreForYield(OperationContext* opCtx);
 
     /**
-     * Encode metadata to a rowId.
-     *
-     * Extracts fields from the metadata BSONObj, encodes them using the
+     * Encode metadata to a rowId and returns rowId on success, or an error if encoding
+     * fails. We extract the fields from the metadata BSONObj, encodes them using the
      * TemporalSymbolDictionary, and inserts a row into the TemporalAttributeTable.
-     * Returns the rowId for the encoded metadata.
-     *
-     * If the same metadata is encoded multiple times, the same rowId is returned
-     * (deduplication).
-     *
-     * Parameters:
-     * - opCtx: Operation context for database operations
-     * - metadata: The metadata BSONObj to encode
-     * - timestamp: The timestamp for this operation
-     *
-     * Returns StatusWith<int64_t> containing the rowId on success, or an error
-     * status if encoding fails.
+     * Returns the rowId for the encoded metadata. If the same metadata is encoded
+     * multiple times, the same rowId is returned (deduplication).
      */
     StatusWith<int64_t> encodeMetadata(OperationContext* opCtx, const BSONObj& metadata, const Timestamp& timestamp);
 
     /**
-     * Decode a rowId back to full metadata.
-     *
-     * Reconstructs the TemporalSymbolDictionary and TemporalAttributeTable from
-     * operations up to the specified timestamp, then retrieves the metadata for
-     * the given rowId.
-     *
-     * Parameters:
-     * - opCtx: Operation context for database operations
-     * - rowId: The rowId to decode
-     * - timestamp: The timestamp for this operation
-     *
-     * Returns StatusWith<BSONObj> containing the decoded metadata on success, or
-     * an error status if decoding fails.
+     * Returns the BSONObj containing the decoded the data in a row at the specified `rowId` back
+     * to full metadata. Internally, the function will reconstructs the TemporalSymbolDictionary
+     * and TemporalAttributeTable from operations up to the specified timestamp, then retrieves
+     * the metadata for the given rowId. Returns an error status if the rowId does not exist or
+     * decoding fails.
      */
     StatusWith<BSONObj> decodeMetadata(OperationContext* opCtx, int64_t rowId, const Timestamp& timestamp);
 
     /**
-     * Clean up HCIndex structures for this collection.
-     *
-     * Drops the operations collections and releases all resources. Should be
-     * called when the collection is dropped.
-     *
-     * Returns Status::OK() on success, or an error status if cleanup fails.
+     * Clean up HCIndex structures for this collection. Drops the operations collections and
+     * releases all resources.
      */
     Status cleanup();
 
     /**
-     * Query the attribute table for rows matching a predicate at a given timestamp.
-     *
-     * This method converts a MatchExpression to an AttributeTablePredicate and queries
-     * the attribute table for the time window containing the specified timestamp.
-     *
-     * Parameters:
-     * - opCtx: Operation context for database operations
-     * - matchExpr: The MatchExpression predicate to match (can be null for empty predicate)
-     * - timestamp: The timestamp for determining which time window to query
-     *
-     * Returns StatusWith<std::vector<int64_t>> containing the matching rowIds on success,
-     * or an error status if the query fails.
+     * Query the attribute table for rows matching a predicate at a given timestamp and returns
+     * StatusWith<std::vector<int64_t>> containing the matching rowIds on success, or an error
+     * status if the query fails.
      */
     StatusWith<std::vector<int64_t>> queryRows(OperationContext* opCtx,
                                                const ::mongo::MatchExpression* matchExpr,
                                                const Timestamp& timestamp);
 
     /**
-     * Flush pending operations accumulated by the writer.
-     *
-     * This method retrieves all pending operations from the writer and invokes the
-     * provided callback for each collection type (symbol and attribute operations).
+     * Flush pending operations accumulated by the writer. This method retrieves all pending
+     * operations from the writer and invokes the provided callback for each collection type
+     * (symbol, attribute, bitmap-index operations).
      *
      * The callback function receives:
-     * - collectionName: The target collection name (hcindex.ops.symbols.* or hcindex.ops.attributes.*)
-     * - operations: Vector of InsertStatement objects to be flushed
+     * - collectionName: The target collection name (hcindex.ops.symbols.*, hcindex.ops.attributes.*,...)
+     * - operations: Vector of InsertStatement representing the operations to be flushed.
      *
-     * The caller is responsible for implementing the actual database insert logic
-     * in the callback. This design allows maximum flexibility in how operations
-     * are persisted (e.g., batching, transaction handling, etc.).
+     * The caller is responsible for implementing the actual database insert logic in the
+     * callback.
      *
      * Callback signature:
      *   std::function<Status(const std::string& collectionName, const std::vector<InsertStatement>& operations)>
@@ -255,19 +192,22 @@ public:
         std::function<Status(const std::string&, const std::vector<InsertStatement>&)> flushCallback);
 
 private:
+
+    //- DATA
+
+
     // Database name where the timeseries collection resides
     DatabaseName dbName;
 
-    // Collection UUID for this manager
+    // Collection UUID
     UUID collectionUUID;
 
-    // Period (hour, minute, second)
+    // Period
     HCIndexPeriodEnum period;
 
-    // Frequency (1-24 for hour, 1-59 for minute/second)
+    // Frequency
     int32_t frequency;
 
-    // Bitmap index options
     bool _buildMetadataIndex;
     double _sparseIndexThreshold;
     double _denseIndexThreshold;
@@ -275,10 +215,10 @@ private:
     std::vector<std::string> _excludedColumns;
     std::vector<std::string> _includedColumns;
 
-    // Writer for operations
+    // Writer
     std::unique_ptr<HCIndexWriter> writer;
 
-    // Reader for operations
+    // Reader
     std::unique_ptr<HCIndexReader> reader;
 
     // Temporal symbol dictionary for encoding metadata values
@@ -290,7 +230,7 @@ private:
     // Temporal attribute table for storing metadata rows
     std::unique_ptr<TemporalAttributeTable> attributeTable;
 
-    // Flag to track if we've initialized the reader for read operations
+    // Init tracker
     bool initializedForRead = false;
 };
 
