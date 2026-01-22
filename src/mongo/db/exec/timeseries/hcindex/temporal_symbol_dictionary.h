@@ -52,83 +52,18 @@ namespace mongo::timeseries::hcindex {
 class HCIndexReader;
 class HCIndexWriter;
 
+                        // ==============================
+                        // class TemporalSymbolDictionary
+                        // ==============================
+
 /**
- * Manages temporal symbol dictionaries for a timeseries collection.
- *
- * Creates and maintains separate symbol dictionaries for each time window,
- * allowing for natural schema evolution and bounded memory usage.
- *
- * Key features:
- * - Time-window scoped: Each window has its own dictionary
- * - Configurable period and frequency: Hour/Minute/Second with custom frequencies
- * - Automatic window management: Creates dictionaries on-demand
- * - Cleanup support: Can remove old dictionaries to free memory
- * - Delta-based storage: Uses base + inherited + local for space efficiency
- * - Thread-safe: Safe for concurrent access from multiple threads
+ * Creates and maintains separate symbol dictionaries for each time window.
  */
 class TemporalSymbolDictionary {
+
 public:
-    /**
-     * Create a new temporal symbol dictionary manager for managing symbol
-     * dictionaries for timeseries collections having the specified
-     * 'collectionUUID' with the given 'period' and 'frequency'. Behavior is undefined
-     * unless the 'collectionUUID' is valid through the lifetime of this object.
-     * The 'writer' can be nullptr if this dictionary is being constructed by a
-     * reader (in which case no new operations will be written).
-     * The 'reader' can be nullptr if reconstruction from disk is not needed.
-     */
-    TemporalSymbolDictionary(const UUID& collectionUUID,
-                             HCIndexPeriodEnum period,
-                             int32_t frequency,
-                             HCIndexWriter *writer,
-                             class HCIndexReader *reader = nullptr);
 
-    /**
-     * Returns a pointer to the symbol dictionary covering the time window that
-     * includes the specified 'timestamp' if found. Otherwise, create a new
-     * dictionary for the time window covering the 'timestamp' and return a
-     * pointer to that dictionary. Note that the returned pointer is valid for
-     * the lifetime of this TemporalSymbolDictionary. Returns an error if the
-     * dictionary for the time window covering the 'timestamp' cannot be
-     * created. opCtx is required for reconstruction from disk if the dictionary
-     * is not in memory.
-     */
-    StatusWith<ISymbolDictionary*> getOrCreateDictionaryForTimestamp(OperationContext* opCtx,
-                                                                     const Timestamp& ts);
-
-    /**
-     * Returns a pointer to the symbol dictionary covering the time window
-     * that includes the specified 'timestamp' if found. Otherwise, return an
-     * error. Note that the returned pointer is valid for the lifetime of this
-     * TemporalSymbolDictionary.
-     */
-    StatusWith<ISymbolDictionary*> getDictionaryForTimestamp(const Timestamp& ts) const;
-
-    /**
-     * Encode the specified 'word' for the time window that includes the
-     * specified 'timestamp' and reuturn the symbol index. If fails, return an
-     * error. Note that symbols start from index 1.
-     */
-    StatusWith<uint32_t> encodeSymbol(StringData word, const Timestamp& timestamp);
-
-    /**
-     * Decode the word at the specified 'index' in the dictionary covering the
-     * time window that includes the specified 'timestamp' and return the word.
-     * If fails, return boost::none.
-     */
-    boost::optional<StringData> decodeSymbol(uint32_t index, const Timestamp& timestamp) const;
-
-    /**
-     * Return the time window boundaries for a given 'timestamp'.
-     */
-    std::pair<Timestamp, Timestamp> getWindowForTimestamp(const Timestamp& timestamp) const;
-
-    /**
-     * Remove dictionaries serving time windows older than the specified
-     * 'beforeTimestamp'. This is used for cleanup to free memory from old
-     * dictionaries.
-     */
-    Status cleanupOldDictionaries(const Timestamp& beforeTimestamp);
+    //- PUBLIC TYPES
 
     /**
      * Statistics about this temporal dictionary.
@@ -141,6 +76,83 @@ public:
         size_t memoryUsageBytes;
     };
 
+
+public:
+
+    //- CONSTRUCTORS
+
+
+    /**
+     * Create an instance of TemporalSymbolDictionary to manage all dictionaries
+     * for dictionaries for timeseries collections having the specified
+     * 'collectionUUID' with the given 'period' and 'frequency' represeting the
+     * dictionary intervals and its persistent encoding lifecycle is mnaged by
+     * the 'writer'. Behavior is undefined unless the 'collectionUUID' is valid
+     * through the lifetime of this object. The 'writer' can be nullptr if the
+     * dictionaries are being created in a ReadOnly model. The 'reader' can be
+     * nullptr if reconstruction from disk is not needed.
+     */
+    TemporalSymbolDictionary(const UUID& collectionUUID,
+                             HCIndexPeriodEnum period,
+                             int32_t frequency,
+                             HCIndexWriter *writer,
+                             class HCIndexReader *reader = nullptr);
+
+    //- ACCESSORS
+
+
+    /**
+     * Returns a pointer to the symbol dictionary covering the time window
+     * that includes the specified 'timestamp' if found. Otherwise, return an
+     * error. Note that the returned pointer is valid for the lifetime of this
+     * TemporalSymbolDictionary.
+     */
+    StatusWith<ISymbolDictionary*> getDictionaryForTimestamp(const Timestamp& ts) const;
+
+    /**
+     * Decode the word at the specified 'index' in the dictionary covering the
+     * time window that includes the specified 'timestamp' and return the word.
+     * If fails, return boost::none.
+     */
+    boost::optional<StringData> decodeSymbol(uint32_t index, const Timestamp& timestamp) const;
+
+
+    /**
+     * Return the time window boundaries for a given 'timestamp'.
+     */
+    std::pair<Timestamp, Timestamp> getWindowForTimestamp(const Timestamp& timestamp) const;
+
+
+    //- MODIFIERS
+
+
+    /**
+     * Returns a pointer to the symbol dictionary covering the time window that
+     * includes the specified 'timestamp' if found. Otherwise, create a new
+     * dictionary for the time window covering the 'timestamp' and return a
+     * pointer to that dictionary. Note that the returned pointer is valid for
+     * the lifetime of this TemporalSymbolDictionary. Returns an error if the
+     * dictionary for the time window covering the 'timestamp' cannot be
+     * created. opCtx is required for reconstruction from disk if the dictionary
+     * is not in memory.
+     */
+    StatusWith<ISymbolDictionary*> getOrCreateDictionaryForTimestamp(OperationContext* opCtx,
+                                                                     const Timestamp& timestamp);
+
+    /**
+     * Encode the specified 'word' for the time window that includes the
+     * specified 'timestamp' and reuturn the symbol index. If fails, return an
+     * error. Note that symbols start from index 1.
+     */
+    StatusWith<uint32_t> encodeSymbol(StringData word, const Timestamp& timestamp);
+
+    /**
+     * Remove dictionaries serving time windows older than the specified
+     * 'beforeTimestamp'. This is used for cleanup to free memory from old
+     * dictionaries.
+     */
+    Status cleanupOldDictionaries(const Timestamp& beforeTimestamp);
+
     /**
      * Return the usage statistics.
      */
@@ -152,6 +164,27 @@ public:
     void flush();
 
 private:
+
+    //- PRIVATE METHODS
+
+
+    /**
+     * Return the window start timestamp for the time window that includes the specified
+     * `timestamp`.
+     */
+    Timestamp calculateWindowStart(const Timestamp& timestamp) const;
+
+    /**
+     * Return the window end timestamp for the time window that starts at the specified
+     * `windowStart` timestamp.
+     */
+    Timestamp calculateWindowEnd(const Timestamp& windowStart) const;
+
+    /**
+     * Return the previous window start timestamp.
+     */
+    Timestamp calculatePreviousWindowStart(const Timestamp& windowStart) const;
+
     /**
      * Create or Fetch the dictionary for the time window that starts at the
      * specified 'windowStart' timestamp. opCtx is required for reconstruction
@@ -165,38 +198,48 @@ private:
      * specified 'windowStart' timestamp.
      */
     StatusWith<DeltaSymbolDictionary*> getOrCreateDeltaDictionary(OperationContext* opCtx,
-                                                                   const Timestamp& windowStart);
+                                                                  const Timestamp& windowStart);
 
     /**
-     * Check if the previous two intervals have similar deltas, and if so,
-     * create a new base dictionary by merging the old base with those deltas.
-     * Returns the new base (or the existing base if no merge happened).
+     * Try to reconstruct a delta dictionary from disk for the given window and return the
+     * the reconstructed delta dictionary pointer on success. Otherwise return an error.
+     */
+    StatusWith<DeltaSymbolDictionary*> tryReconstructDeltaFromDisk(OperationContext* opCtx,
+                                                                   const Timestamp& windowStart,
+                                                                   const Timestamp& windowEnd);
+
+    /**
+     * Ensure that a base dictionary exists for the time window [`windowStart`, `windowEnd`) and
+     * return that dictionary. Create an empty one if a dictionary does not exist for the time
+     * window.
+     */
+    SymbolDictionary* ensureBaseDictionary(const Timestamp& windowStart, const Timestamp& windowEnd);
+
+    /**
+     * Return a new delta dictionary for the time window [`windowStart`, `windowEnd`). The
+     * dictionary is also stored in the _deltaDictionaries for future reference.
+     */
+    StatusWith<DeltaSymbolDictionary*> createNewDeltaDictionary(const Timestamp& windowStart,
+                                                                const Timestamp& windowEnd,
+                                                                SymbolDictionary* base);
+
+    /**
+     * Check if the previous two intervals relative to the specified `widowStart` has similar deltas
+     * and if so, create a new base dictionary by merging the old base with those deltas. Returns
+     * the new base (or the existing base if no merge happened) dictionary.
      */
     SymbolDictionary* maybeCreateNewBase(const Timestamp& windowStart);
 
     /**
-     * Get the previous two delta intervals relative to the given windowStart.
-     * Returns nullptrs if the intervals don't exist.
+     * Get the previous two delta intervals relative to the given `windowStart`. Returns a pair of
+     * nullptr if the intervals don't exist.
      */
     std::pair<DeltaSymbolDictionary*, DeltaSymbolDictionary*> getPreviousTwoIntervals(
         const Timestamp& windowStart);
 
-    /**
-     * Return the window start timestamp for the time window that includes the
-     * specified 'timestamp'.
-     */
-    Timestamp calculateWindowStart(const Timestamp& timestamp) const;
 
-    /**
-     * Return the window end timestamp for the time window that starts at the
-     * specified 'windowStart' timestamp.
-     */
-    Timestamp calculateWindowEnd(const Timestamp& windowStart) const;
+    //- DATA
 
-    /**
-     * Return the previous window start timestamp.
-     */
-    Timestamp calculatePreviousWindowStart(const Timestamp& windowStart) const;
 
     // Map: windowStart → SymbolDictionary
     // Stores base dictionaries that delta dictionaries reference.
@@ -233,5 +276,6 @@ private:
     // Synchronization
     mutable std::shared_mutex _mutex;
 };
+
 
 }  // namespace mongo::timeseries::hcindex

@@ -35,6 +35,14 @@
 
 namespace mongo::timeseries::hcindex {
 
+                        // ---------------------------
+                        // class DeltaSymbolDictionary
+                        // ---------------------------
+
+
+//- CONSTRUCTORS
+
+
 DeltaSymbolDictionary::DeltaSymbolDictionary(HCIndexPeriodEnum period,
                                               int32_t frequency,
                                               Timestamp windowStart,
@@ -56,135 +64,10 @@ DeltaSymbolDictionary::DeltaSymbolDictionary(HCIndexPeriodEnum period,
 {
 }
 
-StatusWith<uint32_t> DeltaSymbolDictionary::getOrInsertSymbol(StringData word) {
 
-    std::unique_lock<std::shared_mutex> lock(_mutex);
+//- ACCESSORS
 
-    if (_state != SymbolDictionaryState::ReadWrite && _state != SymbolDictionaryState::Reconstruction) {
-        // This is an error.
-        return Status(ErrorCodes::InternalError, "Cannot insert symbols in ReadOnly state");
-    }
 
-    // Do we write to the base dictionary or the local dictionary? If we own the
-    // base, then we write to base. We own the base if base dictionary interval
-    // and our interval are the same AND the base is in a writable state.
-    if (_baseDictionary && _baseDictionary->getWindowStart() == _windowStart &&
-        _baseDictionary->isWritable()) {
-        _numEncodedSymbols++;
-        return _baseDictionary->getOrInsertSymbol(word);
-    }
-
-    // Ok, we can't touch the base dictionary. We are referencing it.
-
-    if (_state == SymbolDictionaryState::ReadWrite && _numEncodedSymbols == 0) {
-        // Write the INIT operation via the writer
-        // Pass the base dictionary's window start as REF if we have a base dictionary
-        boost::optional<Timestamp> refBaseDictionaryTime;
-        if (_baseDictionary) {
-            refBaseDictionaryTime = _baseDictionary->getWindowStart();
-        }
-
-        // Pass _nextSymbolIndex as the local index offset so the reader knows where
-        // to start assigning indices for local symbols
-        if (!_writer->initSymbolDictionary(_windowStart, _windowEnd, refBaseDictionaryTime, _nextSymbolIndex).isOK()) {
-            return Status(ErrorCodes::InternalError, "Could not initialize symbol dictionary");
-        }
-        _numEncodedSymbols++;
-    }
-
-    std::string wordStr = std::string(word);
-
-    // Step 1: Check base dictionary
-    if (_baseDictionary) {
-        auto baseIdx = _baseDictionary->getSymbolIndex(word);
-        if (baseIdx) {
-            return *baseIdx;
-        }
-    }
-
-    // Step 2: Check inherited delta (if set)
-    if (_hasInheritedDelta) {
-        auto it = _inheritedWordToIndex.find(wordStr);
-        if (it != _inheritedWordToIndex.end()) {
-            return it->second;
-        }
-    }
-
-    // Step 3: Check local delta
-    auto localIt = _localWordToIndex.find(wordStr);
-    if (localIt != _localWordToIndex.end()) {
-        return localIt->second;
-    }
-
-    // Step 4: Lazy inheritance - if not inherited yet, try to inherit from N-1 or N-2
-    if (!_hasInheritedDelta) {
-        // Try N-1 first (more recent)
-        if (_prevInterval1 && tryInheritFrom(_prevInterval1)) {
-            // Check if we now have the symbol
-            auto it = _inheritedWordToIndex.find(wordStr);
-            if (it != _inheritedWordToIndex.end()) {
-                return it->second;
-            }
-        }
-        // Try N-2 if N-1 didn't have it
-        if (!_hasInheritedDelta && _prevInterval2 && tryInheritFrom(_prevInterval2)) {
-            auto it = _inheritedWordToIndex.find(wordStr);
-            if (it != _inheritedWordToIndex.end()) {
-                return it->second;
-            }
-        }
-    }
-
-    // Step 5: Not found anywhere - add to local delta
-    if (_state == SymbolDictionaryState::NOP) {
-        return Status(ErrorCodes::InternalError, "Dictionary is in NOP state, cannot insert symbols");
-    }
-    if (_state == SymbolDictionaryState::ReadOnly) {
-        return Status(ErrorCodes::InternalError, "Dictionary is read-only, cannot insert symbols");
-    }
-
-    // Assign new symbol index
-    uint32_t symbolIndex = _nextSymbolIndex++;
-    _localWordToIndex[wordStr] = symbolIndex;
-    _localIndexToWord.push_back(wordStr);
-    _isDirty = true;
-
-    // Write to persistence layer if in ReadWrite mode
-    // Mark as local symbol since this is in the delta dictionary
-    if (_state == SymbolDictionaryState::ReadWrite && _writer) {
-        if (!_writer->addSymbol(_windowStart, _windowEnd, wordStr, symbolIndex, HCIndexWriter::SymbolType::Local).isOK()) {
-            return Status(ErrorCodes::InternalError, "Could not add symbol to writer");
-        }
-    }
-
-    return symbolIndex;
-}
-
-bool DeltaSymbolDictionary::tryInheritFrom(DeltaSymbolDictionary* prevInterval) {
-    // Get the effective delta from the previous interval
-    auto effectiveDelta = prevInterval->getEffectiveDelta();
-
-    if (effectiveDelta.empty()) {
-        return false;
-    }
-
-    // Copy all symbols from the previous interval's effective delta
-    // We need to renumber them starting from our current _nextSymbolIndex
-    for (const auto& symbol : effectiveDelta) {
-        // Check if symbol is already in our base
-        if (_baseDictionary && _baseDictionary->getSymbolIndex(StringData(symbol))) {
-            continue;  // Skip symbols already in base
-        }
-
-        uint32_t newIndex = _nextSymbolIndex++;
-        _inheritedWordToIndex[symbol] = newIndex;
-        _inheritedIndexToWord.push_back(symbol);
-    }
-
-    _hasInheritedDelta = true;
-    _inheritedFromWindowStart = prevInterval->getWindowStart();
-    return true;
-}
 
 boost::optional<uint32_t> DeltaSymbolDictionary::getSymbolIndex(StringData word) const {
     std::shared_lock<std::shared_mutex> lock(_mutex);
@@ -270,12 +153,159 @@ std::set<std::string> DeltaSymbolDictionary::getEffectiveDelta() const {
     return result;
 }
 
+size_t DeltaSymbolDictionary::getSymbolCount() const {
+    std::shared_lock<std::shared_mutex> lock(_mutex);
+
+    size_t count = 0;
+    if (_baseDictionary) {
+        count += _baseDictionary->getSymbolCount();
+    }
+    count += _inheritedWordToIndex.size();
+    count += _localWordToIndex.size();
+    return count;
+}
+
+size_t DeltaSymbolDictionary::getMemoryUsageBytes() const {
+    std::shared_lock<std::shared_mutex> lock(_mutex);
+
+    size_t totalBytes = 0;
+
+    // Base dictionary memory (if we own it)
+    if (_baseDictionary && _baseDictionary->getWindowStart() == _windowStart) {
+        totalBytes += _baseDictionary->getMemoryUsageBytes();
+    }
+
+    // Inherited delta memory
+    for (const auto& [word, _] : _inheritedWordToIndex) {
+        totalBytes += word.size() + sizeof(uint32_t);
+    }
+    for (const auto& word : _inheritedIndexToWord) {
+        totalBytes += word.size();
+    }
+
+    // Local delta memory
+    for (const auto& [word, _] : _localWordToIndex) {
+        totalBytes += word.size() + sizeof(uint32_t);
+    }
+    for (const auto& word : _localIndexToWord) {
+        totalBytes += word.size();
+    }
+
+    return totalBytes;
+}
+
+
+//- MODIFIERS
+
+
+StatusWith<uint32_t> DeltaSymbolDictionary::getOrInsertSymbol(StringData word) {
+
+    std::unique_lock<std::shared_mutex> lock(_mutex);
+
+    if (_state != SymbolDictionaryState::ReadWrite && _state != SymbolDictionaryState::Reconstruction) {
+        // This is an error.
+        return Status(ErrorCodes::InternalError, "Cannot insert symbols in ReadOnly state");
+    }
+
+    // Do we write to the base dictionary or the local dictionary? If we own the
+    // base, then we write to base. We own the base if base dictionary interval
+    // and our interval are the same AND the base is in a writable state.
+    if (_baseDictionary && _baseDictionary->getWindowStart() == _windowStart &&
+        _baseDictionary->isWritable()) {
+        _numEncodedSymbols++;
+        return _baseDictionary->getOrInsertSymbol(word);
+    }
+
+    // Ok, we can't touch the base dictionary. We are referencing it.
+
+    if (_state == SymbolDictionaryState::ReadWrite && _numEncodedSymbols == 0) {
+        // Write the INIT operation via the writer
+        // Pass the base dictionary's window start as REF if we have a base dictionary
+        boost::optional<Timestamp> refBaseDictionaryTime;
+        if (_baseDictionary) {
+            refBaseDictionaryTime = _baseDictionary->getWindowStart();
+        }
+
+        // Pass _nextSymbolIndex as the local index offset so the reader knows where
+        // to start assigning indices for local symbols
+        if (!_writer->initSymbolDictionary(_windowStart, _windowEnd, refBaseDictionaryTime, _nextSymbolIndex).isOK()) {
+            return Status(ErrorCodes::InternalError, "Could not initialize symbol dictionary");
+        }
+        _numEncodedSymbols++;
+    }
+
+    std::string wordStr = std::string(word);
+
+    // Check base, then inherited and then finally local.
+
+    if (_baseDictionary) {
+        auto baseIdx = _baseDictionary->getSymbolIndex(word);
+        if (baseIdx) {
+            return *baseIdx;
+        }
+    }
+
+    if (_hasInheritedDelta) {
+        auto it = _inheritedWordToIndex.find(wordStr);
+        if (it != _inheritedWordToIndex.end()) {
+            return it->second;
+        }
+    }
+
+    auto localIt = _localWordToIndex.find(wordStr);
+    if (localIt != _localWordToIndex.end()) {
+        return localIt->second;
+    }
+
+    // Ok, we are here means we need to insert this. If inherited structure is not set
+    // then lets adopt one and check in the inherited section again.
+    if (!_hasInheritedDelta) {
+        // Try N-1 first (most recent) and then the N-2.
+
+        if (_prevInterval1 && tryInheritFrom(_prevInterval1)) {
+            auto it = _inheritedWordToIndex.find(wordStr);
+            if (it != _inheritedWordToIndex.end()) {
+                return it->second;
+            }
+        }
+
+        if (!_hasInheritedDelta && _prevInterval2 && tryInheritFrom(_prevInterval2)) {
+            auto it = _inheritedWordToIndex.find(wordStr);
+            if (it != _inheritedWordToIndex.end()) {
+                return it->second;
+            }
+        }
+    }
+
+    // All lookups for the symbol failed. We need to add to the local delta.
+    if (_state == SymbolDictionaryState::NOP) {
+        return Status(ErrorCodes::InternalError, "Dictionary is in NOP state, cannot insert symbols");
+    }
+    if (_state == SymbolDictionaryState::ReadOnly) {
+        return Status(ErrorCodes::InternalError, "Dictionary is read-only, cannot insert symbols");
+    }
+
+    // Assign new symbol index
+    uint32_t symbolIndex = _nextSymbolIndex++;
+    _localWordToIndex[wordStr] = symbolIndex;
+    _localIndexToWord.push_back(wordStr);
+    _isDirty = true;
+
+    // Write to persistence layer if in ReadWrite mode
+    if (_state == SymbolDictionaryState::ReadWrite && _writer) {
+        if (!_writer->addSymbol(_windowStart, _windowEnd, wordStr, symbolIndex, HCIndexWriter::SymbolType::Local).isOK()) {
+            return Status(ErrorCodes::InternalError, "Could not add symbol to writer");
+        }
+    }
+
+    return symbolIndex;
+}
+
 Status DeltaSymbolDictionary::insertLocalSymbolDirect(StringData word, uint32_t index) {
     std::unique_lock<std::shared_mutex> lock(_mutex);
 
     std::string wordStr(word);
 
-    // Check if symbol already exists in local dictionary
     auto it = _localWordToIndex.find(wordStr);
     if (it != _localWordToIndex.end()) {
         if (it->second != index) {
@@ -291,8 +321,8 @@ Status DeltaSymbolDictionary::insertLocalSymbolDirect(StringData word, uint32_t 
     // Insert into local dictionary with the specified index
     _localWordToIndex[wordStr] = index;
 
-    // Ensure _localIndexToWord is large enough
-    // The index is absolute, so we need to calculate the local offset
+    // Ensure _localIndexToWord is large enough. The index is absolute, so we need to
+    // calculate the local offset
     size_t baseSize = _baseDictionary ? _baseDictionary->getSymbolCount() : 0;
     size_t inheritedSize = _hasInheritedDelta ? _inheritedIndexToWord.size() : 0;
 
@@ -308,12 +338,12 @@ Status DeltaSymbolDictionary::insertLocalSymbolDirect(StringData word, uint32_t 
     size_t localOffset = index - baseSize - inheritedSize - 1;
 
     // Ensure vector is large enough
+    // TODO: Based on density prediction, reserve early on!
     if (localOffset >= _localIndexToWord.size()) {
         _localIndexToWord.resize(localOffset + 1);
     }
     _localIndexToWord[localOffset] = wordStr;
 
-    // Update next symbol index if needed
     if (index >= _nextSymbolIndex) {
         _nextSymbolIndex = index + 1;
     }
@@ -367,62 +397,18 @@ void DeltaSymbolDictionary::flush() {
     _isDirty = false;
 }
 
-size_t DeltaSymbolDictionary::getSymbolCount() const {
-    std::shared_lock<std::shared_mutex> lock(_mutex);
-
-    size_t count = 0;
-    if (_baseDictionary) {
-        count += _baseDictionary->getSymbolCount();
-    }
-    count += _inheritedWordToIndex.size();
-    count += _localWordToIndex.size();
-    return count;
-}
-
-size_t DeltaSymbolDictionary::getMemoryUsageBytes() const {
-    std::shared_lock<std::shared_mutex> lock(_mutex);
-
-    size_t totalBytes = 0;
-
-    // Base dictionary memory (if we own it)
-    if (_baseDictionary && _baseDictionary->getWindowStart() == _windowStart) {
-        totalBytes += _baseDictionary->getMemoryUsageBytes();
-    }
-
-    // Inherited delta memory
-    for (const auto& [word, _] : _inheritedWordToIndex) {
-        totalBytes += word.size() + sizeof(uint32_t);
-    }
-    for (const auto& word : _inheritedIndexToWord) {
-        totalBytes += word.size();
-    }
-
-    // Local delta memory
-    for (const auto& [word, _] : _localWordToIndex) {
-        totalBytes += word.size() + sizeof(uint32_t);
-    }
-    for (const auto& word : _localIndexToWord) {
-        totalBytes += word.size();
-    }
-
-    return totalBytes;
-}
-
-// ===============
-// Local Functions
-// ===============
-
 double computeDeltaSimilarity(const std::set<std::string>& delta1,
                                const std::set<std::string>& delta2) {
     if (delta1.empty() && delta2.empty()) {
-        return 1.0;  // Both empty = identical
+        return 1.0;
     }
 
     if (delta1.empty() || delta2.empty()) {
-        return 0.0;  // One empty, one not = no similarity
+        return 0.0;
     }
 
     // Compute Jaccard similarity: |A ∩ B| / |A ∪ B|
+    // TODO: Find the library that does this within the mongodb code!
     size_t intersectionSize = 0;
     for (const auto& s : delta1) {
         if (delta2.count(s) > 0) {
@@ -433,6 +419,36 @@ double computeDeltaSimilarity(const std::set<std::string>& delta1,
     size_t unionSize = delta1.size() + delta2.size() - intersectionSize;
     return static_cast<double>(intersectionSize) / static_cast<double>(unionSize);
 }
+
+
+//- PRIVATE METHODS
+
+
+bool DeltaSymbolDictionary::tryInheritFrom(DeltaSymbolDictionary* prevInterval) {
+    // Get the effective delta from the previous interval
+    auto effectiveDelta = prevInterval->getEffectiveDelta();
+
+    if (effectiveDelta.empty()) {
+        return false;
+    }
+
+    // Copy all symbols from the previous interval's effective delta
+    // We need to renumber them though!
+    for (const auto& symbol : effectiveDelta) {
+        if (_baseDictionary && _baseDictionary->getSymbolIndex(StringData(symbol))) {
+            continue;
+        }
+
+        uint32_t newIndex = _nextSymbolIndex++;
+        _inheritedWordToIndex[symbol] = newIndex;
+        _inheritedIndexToWord.push_back(symbol);
+    }
+
+    _hasInheritedDelta = true;
+    _inheritedFromWindowStart = prevInterval->getWindowStart();
+    return true;
+}
+
 
 }  // namespace mongo::timeseries::hcindex
 

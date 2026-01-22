@@ -35,6 +35,13 @@
 
 namespace mongo::timeseries::hcindex {
 
+                        // ----------------------
+                        // class SymbolDictionary
+                        // ----------------------
+
+//- CONSTRUCTORS
+
+
 SymbolDictionary::SymbolDictionary(
     HCIndexPeriodEnum period,
     int32_t frequency,
@@ -51,164 +58,9 @@ SymbolDictionary::SymbolDictionary(
 {
 }
 
-Status SymbolDictionary::insertSymbol(StringData word, uint32_t index) {
-    std::unique_lock<std::shared_mutex> lock(_mutex);
 
-    // Check state: modifications only allowed in Reconstruction mode for direct insertion
-    if (_state != SymbolDictionaryState::Reconstruction) {
-        return Status(ErrorCodes::InternalError,
-            "Direct symbol insertion only allowed in Reconstruction state");
-    }
+//- ACCESSORS
 
-    std::string wordStr = std::string(word);
-
-    // Check if word already exists
-    auto it = _wordToIndex.find(wordStr);
-    if (it != _wordToIndex.end()) {
-        if (it->second != index) {
-            return Status(ErrorCodes::InternalError,
-                str::stream() << "Symbol '" << wordStr
-                              << "' already exists with different index: " << it->second
-                              << " vs " << index);
-        }
-        // Already exists with same index, nothing to do
-        return Status::OK();
-    }
-
-    // Check if index is valid (not 0, which is reserved)
-    if (index == 0) {
-        return Status(ErrorCodes::BadValue, "Symbol index 0 is reserved for missing values");
-    }
-
-    // Ensure _indexToWord is large enough
-    if (index > _indexToWord.size()) {
-        _indexToWord.resize(index);
-    }
-
-    // Insert the symbol
-    _wordToIndex[wordStr] = index;
-    _indexToWord[index - 1] = wordStr;  // indexToWord is 0-indexed
-
-    // Update next symbol index if needed
-    if (index >= _nextSymbolIndex) {
-        _nextSymbolIndex = index + 1;
-    }
-
-    return Status::OK();
-}
-
-Status SymbolDictionary::changeState(SymbolDictionaryState newState) {
-    std::unique_lock<std::shared_mutex> lock(_mutex);
-
-    // Once in ReadOnly state, no transitions are allowed
-    if (_state == SymbolDictionaryState::ReadOnly) {
-        return Status(ErrorCodes::InternalError, "Cannot change state of read-only dictionary");
-    }
-
-    // Validate state transitions
-    if (_state == SymbolDictionaryState::NOP) {
-        if (newState != SymbolDictionaryState::Reconstruction &&
-            newState != SymbolDictionaryState::ReadWrite) {
-            return Status(ErrorCodes::InternalError,
-                "Invalid state transition from NOP to " + std::to_string(static_cast<int>(newState)));
-        }
-    } else if (_state == SymbolDictionaryState::Reconstruction) {
-        // From Reconstruction, can transition to ReadWrite (to accept new symbols) or ReadOnly
-        if (newState != SymbolDictionaryState::ReadWrite &&
-            newState != SymbolDictionaryState::ReadOnly) {
-            return Status(ErrorCodes::InternalError,
-                "Invalid state transition from Reconstruction to " + std::to_string(static_cast<int>(newState)));
-        }
-    } else if (_state == SymbolDictionaryState::ReadWrite) {
-        // From ReadWrite, can only transition to ReadOnly
-        if (newState != SymbolDictionaryState::ReadOnly) {
-            return Status(ErrorCodes::InternalError,
-                "Invalid state transition from ReadWrite to " + std::to_string(static_cast<int>(newState)));
-        }
-    }
-
-    _state = newState;
-    return Status::OK();
-}
-
-StatusWith<uint32_t> SymbolDictionary::getOrInsertSymbol(StringData word) {
-    std::unique_lock<std::shared_mutex> lock(_mutex);
-
-    std::string wordStr = std::string(word);
-
-    // Check if word already exists
-    auto it = _wordToIndex.find(wordStr);
-    if (it != _wordToIndex.end()) {
-        return it->second;
-    }
-
-    // Check state: modifications only allowed in Reconstruction or ReadWrite modes
-    if (_state == SymbolDictionaryState::NOP) {
-        return Status(ErrorCodes::InternalError, "Dictionary is in NOP state, cannot insert symbols");
-    }
-    if (_state == SymbolDictionaryState::ReadOnly) {
-        return Status(ErrorCodes::InternalError, "Dictionary is read-only, cannot insert symbols");
-    }
-
-    // Check if dictionary is full (max uint32_t is 2^32 - 1, but 0 is reserved)
-    if (_nextSymbolIndex == 0) {
-        return Status(ErrorCodes::BadValue, "Symbol dictionary is full");
-    }
-
-    // In ReadWrite mode, writer must be set for modifications
-    if (_state == SymbolDictionaryState::ReadWrite && _writer == nullptr) {
-        return Status(ErrorCodes::InternalError, "Dictionary in ReadWrite mode requires a writer");
-    }
-
-    // In Reconstruction mode, we don't need a writer
-    // In ReadWrite mode, we need to call the writer
-
-    if (_state == SymbolDictionaryState::ReadWrite) {
-        // If this is an empty dictionary, we need to do an INIT operation
-        if (_indexToWord.empty()) {
-            // For base dictionaries: no REF, local index offset starts at 1
-            if (!_writer->initSymbolDictionary(_windowStart, _windowEnd, boost::none, 1).isOK()) {
-                return Status(ErrorCodes::InternalError, "Could not initialize symbol dictionary");
-            }
-        }
-
-        _isDirty = true;
-
-        // Insert new symbol
-        uint32_t symbolIndex = _nextSymbolIndex++;
-        _wordToIndex[wordStr] = symbolIndex;
-        _indexToWord.push_back(wordStr);
-
-        // Add the symbol to the writer (Base symbol since this is a SymbolDictionary)
-        if (!_writer->addSymbol(_windowStart, _windowEnd, wordStr, symbolIndex, HCIndexWriter::SymbolType::Base).isOK()) {
-            return Status(ErrorCodes::InternalError, "Could not add symbol to writer");
-        }
-
-        return symbolIndex;
-    } else {
-        // Reconstruction mode: just insert without writer
-        uint32_t symbolIndex = _nextSymbolIndex++;
-        _wordToIndex[wordStr] = symbolIndex;
-        _indexToWord.push_back(wordStr);
-        return symbolIndex;
-    }
-}
-
-void SymbolDictionary::flush()
-{
-    std::unique_lock<std::shared_mutex> lock(_mutex);
-
-    if (!_isDirty || _writer == nullptr) {
-        return;  // Nothing to flush
-    }
-
-    // Flush pending operations via the writer
-    if (!_writer->flush(_windowStart, _windowEnd, _period, _frequency, true).isOK()) {
-        return;  // Could not flush
-    }
-
-    _isDirty = false;
-}
 
 boost::optional<uint32_t> SymbolDictionary::getSymbolIndex(StringData word) const {
     std::shared_lock<std::shared_mutex> lock(_mutex);
@@ -229,7 +81,6 @@ boost::optional<StringData> SymbolDictionary::getSymbol(uint32_t index) const {
         return boost::none;
     }
 
-    // indexToWord is 0-indexed, but symbols start from 1
     return StringData(_indexToWord[index - 1]);
 }
 
@@ -243,12 +94,10 @@ size_t SymbolDictionary::getMemoryUsageBytes() const {
 
     size_t totalBytes = 0;
 
-    // Memory for wordToIndex map
     for (const auto& [word, index] : _wordToIndex) {
         totalBytes += word.size() + sizeof(uint32_t);
     }
 
-    // Memory for indexToWord vector
     for (const auto& word : _indexToWord) {
         totalBytes += word.size();
     }
@@ -256,5 +105,154 @@ size_t SymbolDictionary::getMemoryUsageBytes() const {
 
     return totalBytes;
 }
+
+
+//- MODIFIERS
+
+
+Status SymbolDictionary::insertSymbol(StringData word, uint32_t index) {
+    std::unique_lock<std::shared_mutex> lock(_mutex);
+
+    if (_state != SymbolDictionaryState::Reconstruction) {
+        return Status(ErrorCodes::InternalError,
+            "Direct symbol insertion only allowed in Reconstruction state");
+    }
+
+    std::string wordStr = std::string(word);
+
+    auto it = _wordToIndex.find(wordStr);
+    if (it != _wordToIndex.end()) {
+        if (it->second != index) {
+            return Status(ErrorCodes::InternalError,
+                str::stream() << "Symbol '" << wordStr
+                              << "' already exists with different index: " << it->second
+                              << " vs " << index);
+        }
+        // Already exists with same index, nothing to do
+        return Status::OK();
+    }
+
+    if (index == 0) {
+        return Status(ErrorCodes::BadValue, "Symbol index 0 is reserved for missing values");
+    }
+
+    if (index > _indexToWord.size()) {
+        _indexToWord.resize(index);
+    }
+
+    // Insert the symbol
+    _wordToIndex[wordStr] = index;
+    _indexToWord[index - 1] = wordStr;  // indexToWord is 0-indexed
+
+    if (index >= _nextSymbolIndex) {
+        _nextSymbolIndex = index + 1;
+    }
+
+    return Status::OK();
+}
+
+Status SymbolDictionary::changeState(SymbolDictionaryState newState) {
+    std::unique_lock<std::shared_mutex> lock(_mutex);
+
+    // Once in ReadOnly state, no transitions are allowed
+    if (_state == SymbolDictionaryState::ReadOnly) {
+        return Status(ErrorCodes::InternalError, "Cannot change state of read-only dictionary");
+    }
+
+    if (_state == SymbolDictionaryState::NOP) {
+        if (newState != SymbolDictionaryState::Reconstruction &&
+            newState != SymbolDictionaryState::ReadWrite) {
+            return Status(ErrorCodes::InternalError,
+                "Invalid state transition from NOP to " + std::to_string(static_cast<int>(newState)));
+        }
+    } else if (_state == SymbolDictionaryState::Reconstruction) {
+        if (newState != SymbolDictionaryState::ReadWrite &&
+            newState != SymbolDictionaryState::ReadOnly) {
+            return Status(ErrorCodes::InternalError,
+                "Invalid state transition from Reconstruction to " + std::to_string(static_cast<int>(newState)));
+        }
+    } else if (_state == SymbolDictionaryState::ReadWrite) {
+        if (newState != SymbolDictionaryState::ReadOnly) {
+            return Status(ErrorCodes::InternalError,
+                "Invalid state transition from ReadWrite to " + std::to_string(static_cast<int>(newState)));
+        }
+    }
+
+    _state = newState;
+    return Status::OK();
+}
+
+StatusWith<uint32_t> SymbolDictionary::getOrInsertSymbol(StringData word) {
+    std::unique_lock<std::shared_mutex> lock(_mutex);
+
+    std::string wordStr = std::string(word);
+
+    auto it = _wordToIndex.find(wordStr);
+    if (it != _wordToIndex.end()) {
+        return it->second;
+    }
+
+    // Check state: modifications only allowed in Reconstruction or ReadWrite modes
+    if (_state == SymbolDictionaryState::NOP) {
+        return Status(ErrorCodes::InternalError, "Dictionary is in NOP state, cannot insert symbols");
+    }
+    if (_state == SymbolDictionaryState::ReadOnly) {
+        return Status(ErrorCodes::InternalError, "Dictionary is read-only, cannot insert symbols");
+    }
+
+    // Check if dictionary is full (max is 2^32 - 1, but 0 is reserved. ie. we shouldn't wrap)
+    if (_nextSymbolIndex == 0) {
+        return Status(ErrorCodes::BadValue, "Symbol dictionary is full");
+    }
+
+    if (_state == SymbolDictionaryState::ReadWrite && _writer == nullptr) {
+        return Status(ErrorCodes::InternalError, "Dictionary in ReadWrite mode requires a writer");
+    }
+
+    // In Reconstruction mode, we don't need a writer. In ReadWrite mode, we need to call the writer
+
+    if (_state == SymbolDictionaryState::ReadWrite) {
+        // If this is an empty dictionary, we need to do an INIT operation
+        if (_indexToWord.empty()) {
+            if (!_writer->initSymbolDictionary(_windowStart, _windowEnd, boost::none, 1).isOK()) {
+                return Status(ErrorCodes::InternalError, "Could not initialize symbol dictionary");
+            }
+        }
+
+        _isDirty = true;
+
+        uint32_t symbolIndex = _nextSymbolIndex++;
+        _wordToIndex[wordStr] = symbolIndex;
+        _indexToWord.push_back(wordStr);
+
+        if (!_writer->addSymbol(_windowStart, _windowEnd, wordStr, symbolIndex, HCIndexWriter::SymbolType::Base).isOK()) {
+            return Status(ErrorCodes::InternalError, "Could not add symbol to writer");
+        }
+
+        return symbolIndex;
+    } else {
+        // Reconstruction mode: just insert without invoking the writer
+        uint32_t symbolIndex = _nextSymbolIndex++;
+        _wordToIndex[wordStr] = symbolIndex;
+        _indexToWord.push_back(wordStr);
+        return symbolIndex;
+    }
+}
+
+void SymbolDictionary::flush()
+{
+    std::unique_lock<std::shared_mutex> lock(_mutex);
+
+    if (!_isDirty || _writer == nullptr) {
+        return;
+    }
+
+    if (!_writer->flush(_windowStart, _windowEnd, _period, _frequency, true).isOK()) {
+        return;
+    }
+
+    _isDirty = false;
+}
+
 
 }  // namespace mongo::timeseries::hcindex

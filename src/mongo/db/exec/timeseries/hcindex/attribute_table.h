@@ -56,6 +56,10 @@ class HCIndexWriter;
 class BitmapIndex;
 class AttributeTable;
 
+                        // ======================
+                        // struct InsertRowResult
+                        // ======================
+
 /**
  * Result of inserting a row into an attribute table. Contains the row ID,
  * a flag indicating whether this is a new row (true) or a duplicate (false),
@@ -68,6 +72,10 @@ struct InsertRowResult {
     AttributeTable* table;
     std::vector<uint32_t> row;  // Symbol indices for each column
 };
+
+                        // ========================
+                        // enum AttributeTableState
+                        // ========================
 
 /**
  * State machine for AttributeTable lifecycle:
@@ -90,6 +98,10 @@ enum class AttributeTableState {
     ReadWrite,
     ReadOnly
 };
+
+                        // ==============================
+                        // struct AttributeTablePredicate
+                        // ==============================
 
 /**
  * Represents a hierarchical prdicate structure for filtering rows.
@@ -144,6 +156,9 @@ struct AttributeTablePredicate {
     }
 };
 
+                        // ====================
+                        // class AttributeTable
+                        // ====================
 
 /**
  * Table of just integer values represents a single attribute table for a
@@ -267,23 +282,17 @@ public:
     Status addColumn(StringData fieldName);
 
     /**
-     * Change the state of this table.
-     * - NOP: Initial state, no operations allowed
-     * - Reconstruction: Table was reconstructed from stored operations
-     * - ReadWrite: Table is in the read+write mode (new rows can be added)
-     * - ReadOnly: Table is locked, no modifications allowed
-     *
      * Only the following transitions are allowed:
-     * - NOP -> Reconstruction or ReadWrite
-     * - Reconstruction -> ReadWrite - to accept new data after reconstruction
-     * - Reconstruction -> ReadOnly (indicates table from from immutable source)
-     * - ReadWrite -> ReadOnly
-     * - ReadOnly -> (no transitions allowed)
+     * - From NOP: can transition to Reconstruction or ReadWrite
+     * - From Reconstruction: can transition to ReadOnly or ReadWrite
+     * - From ReadWrite: can transition to ReadOnly
+     * - From ReadOnly: no transitions allowed
      */
     Status changeState(AttributeTableState newState);
 
     /**
-     * Set the writer for this table. This allows a table to be updated later.
+     * Set the writer for this table. Table cannot accept new symbols
+     * unless it is in ReadWrite state and has a valid writer.
      */
     void setWriter(HCIndexWriter* w);
 

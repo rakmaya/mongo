@@ -45,6 +45,9 @@ namespace mongo::timeseries::hcindex {
 //- FORWARD DECLARATIONS
 class HCIndexWriter;
 
+                        // ============================
+                        // struct SymbolDictionaryState
+                        // ============================
 /**
  * - NOP: Initial state, no operations allowed
  * - Reconstruction: Dictionary is being reconstructed from stored operations
@@ -52,10 +55,10 @@ class HCIndexWriter;
  * - ReadOnly: Dictionary is locked, no modifications allowed
  *
  * Transitions:
- * - NOP -> Reconstruction (via changeState)
- * - NOP -> ReadWrite (via changeState)
- * - Reconstruction -> ReadOnly (via changeState)
- * - ReadWrite -> ReadOnly (via changeState)
+ * - NOP -> Reconstruction or ReadWrite
+ * - Reconstruction -> ReadWrite - to accept new data after reconstruction
+ * - Reconstruction -> ReadOnly
+ * - ReadWrite -> ReadOnly
  * - ReadOnly -> (no transitions allowed)
  */
 enum class SymbolDictionaryState {
@@ -65,21 +68,23 @@ enum class SymbolDictionaryState {
     ReadOnly
 };
 
+                        // ======================
+                        // class SymbolDictionary
+                        // ======================
+
 /**
- * Represents a single symbol dictionary for a specific time window.
- *
- * Symbols are encoded as 32-bit unsigned integers (uint32_t):
- * - Valid symbols: 1 to 4,294,967,295 (2^32 - 1)
- * - Reserved value: 0 (used to denote missing values)
- *
- * Key properties:
+ * Represents a single symbol dictionary for a specific time window. Symbols are encoded as 32-bit
+ * unsigned integers (uint32_t). Valid symbols: 1 to (2^32 - 1) and 0 is reserved to denote missing
+ * values. Some operational aspects are:
  * - Immutable: Once a symbol is assigned an index, it never changes
- * - Append-only: New symbols always get new indices
- * - Thread-safe: Uses shared_mutex for concurrent access
+ * - Append only: New symbols always get new indices
  */
 class SymbolDictionary : public ISymbolDictionary {
 
 public:
+
+    //- CONSTRUCTORS
+
 
     /**
      * Create a new empty symbol dictionary for the time window spanning
@@ -94,6 +99,53 @@ public:
         Timestamp windowStart,
         Timestamp windowEnd,
         HCIndexWriter *writer);
+
+
+    //- ACCESSORS
+
+
+    /**
+     * Return the symbol index for the specified 'word' if found. Otherwise,
+     * return boost::none.
+     */
+    boost::optional<uint32_t> getSymbolIndex(StringData word) const override;
+
+    /**
+     * Return the word at tht specified 'index' if found. Otherwise, return
+     * boost::none.
+     */
+    boost::optional<StringData> getSymbol(uint32_t index) const override;
+
+    /**
+     * Return the total number of symbols in this dictionary.
+     */
+    size_t getSymbolCount() const override;
+
+    /**
+     * Return the memory usage of this dictionary in bytes. This is an
+     * approximation and is not exact.
+     */
+    size_t getMemoryUsageBytes() const;
+
+    /**
+     * Return the window start timestamp.
+     */
+    Timestamp getWindowStart() const;
+
+    /**
+     * Return the window end timestamp.
+     */
+    Timestamp getWindowEnd() const;
+
+    /**
+     * Return 'true' if this dictionary is in a writable. Otherwise, return
+     * 'false'.
+     */
+    bool isWritable() const;
+
+
+    //- MODIFIERS
+
 
     /**
      * Return the symbol index for the specified 'word'. If the word is not
@@ -123,63 +175,18 @@ public:
      * Set the writer for this dictionary. Dictionary cannot accept new symbols
      * unless it is in ReadWrite state and has a valid writer.
      */
-    void setWriter(HCIndexWriter* writer) {
-        _writer = writer;
-    }
+    void setWriter(HCIndexWriter* writer);
 
     /**
      * Flush any pending operations to the database via the writer.
      */
     void flush();
 
-    /**
-     * Return the symbol index for the specified 'word' if found. Otherwise,
-     * return boost::none.
-     */
-    boost::optional<uint32_t> getSymbolIndex(StringData word) const override;
-
-    /**
-     * Return the word at tht specified 'index' if found. Otherwise, return
-     * boost::none.
-     */
-    boost::optional<StringData> getSymbol(uint32_t index) const override;
-
-    /**
-     * Return the total number of symbols in this dictionary.
-     */
-    size_t getSymbolCount() const override;
-
-    /**
-     * Return the memory usage of this dictionary in bytes. This is an
-     * approximation and is not exact.
-     */
-    size_t getMemoryUsageBytes() const;
-
-    /**
-     * Return the window start timestamp.
-     */
-    Timestamp getWindowStart() const {
-        return _windowStart;
-    }
-
-    /**
-     * Return the window end timestamp.
-     */
-    Timestamp getWindowEnd() const {
-        return _windowEnd;
-    }
-
-    /**
-     * Return 'true' if this dictionary is in a writable. Otherwise, return
-     * 'false'.
-     */
-    bool isWritable() const {
-        std::shared_lock<std::shared_mutex> lock(_mutex);
-        return _state == SymbolDictionaryState::ReadWrite ||
-               _state == SymbolDictionaryState::Reconstruction;
-    }
-
 private:
+
+    //- DATA
+
+
     // Bidirectional mapping for symbols
     std::unordered_map<std::string, uint32_t> _wordToIndex;
     std::vector<std::string> _indexToWord;
@@ -207,5 +214,42 @@ private:
     // Synchronization
     mutable std::shared_mutex _mutex;
 };
+
+
+// ============================================================================
+//                          INLINE DEFINITIONS
+// ============================================================================
+
+                        // ----------------------
+                        // class SymbolDictionary
+                        // ----------------------
+
+//- ACCESSORS
+
+inline
+Timestamp SymbolDictionary::getWindowStart() const {
+    return _windowStart;
+}
+
+inline
+Timestamp SymbolDictionary::getWindowEnd() const {
+    return _windowEnd;
+}
+
+inline
+bool SymbolDictionary::isWritable() const {
+    std::shared_lock<std::shared_mutex> lock(_mutex);
+    return _state == SymbolDictionaryState::ReadWrite ||
+        _state == SymbolDictionaryState::Reconstruction;
+}
+
+
+//- MODIFIERS
+
+
+inline
+void SymbolDictionary::setWriter(HCIndexWriter* writer) {
+    _writer = writer;
+}
 
 }  // namespace mongo::timeseries::hcindex

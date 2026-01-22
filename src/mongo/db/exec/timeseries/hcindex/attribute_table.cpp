@@ -39,6 +39,9 @@
 
 namespace mongo::timeseries::hcindex {
 
+                        // --------------------
+                        // class AttributeTable
+                        // --------------------
 
 //- CONSTRUCTORS
 
