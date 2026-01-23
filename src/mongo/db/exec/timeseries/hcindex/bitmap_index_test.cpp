@@ -35,8 +35,6 @@
 
 namespace mongo::timeseries::hcindex {
 
-// Helper function to create a BitmapIndex for testing
-// Uses Reconstruction state since no writer is provided
 std::unique_ptr<BitmapIndex> createTestBitmapIndex() {
     Timestamp windowStart(1000, 0);
     Timestamp windowEnd(2000, 0);
@@ -47,10 +45,6 @@ std::unique_ptr<BitmapIndex> createTestBitmapIndex() {
     index->setIncludedColumns({0, 1, 2, 3});
     return index;
 }
-
-// ============================================================================
-// BitmapIndex State Machine Tests
-// ============================================================================
 
 TEST(BitmapIndexTest, InitialStateIsNOP) {
     Timestamp windowStart(1000, 0);
@@ -103,10 +97,6 @@ TEST(BitmapIndexTest, CannotTransitionFromNOPToReadOnly) {
     BitmapIndex index(HCIndexPeriodEnum::Hour, 1, windowStart, windowEnd, nullptr);
     ASSERT_NOT_OK(index.changeState(BitmapIndexState::ReadOnly));
 }
-
-// ============================================================================
-// BitmapIndex Add Entry Tests
-// ============================================================================
 
 TEST(BitmapIndexTest, AddEntrySucceeds) {
     auto index = createTestBitmapIndex();
@@ -162,10 +152,6 @@ TEST(BitmapIndexTest, AddRowSkipsMissingValues) {
     ASSERT_OK(index->addRow(100, row));
     ASSERT_EQ(2u, index->getEntryCount());  // Only 2 entries (column0 and column2)
 }
-
-// ============================================================================
-// BitmapIndex Query Tests
-// ============================================================================
 
 TEST(BitmapIndexTest, GetRowIdsReturnsEmptyForNonExistentKey) {
     auto index = createTestBitmapIndex();
@@ -241,10 +227,6 @@ TEST(BitmapIndexTest, QueryRowIdsOrReturnsUnion) {
     ASSERT_TRUE(rowIds.count(102) == 1);
 }
 
-// ============================================================================
-// BitmapIndex Statistics Tests
-// ============================================================================
-
 TEST(BitmapIndexTest, GetTotalRowIdCount) {
     auto index = createTestBitmapIndex();
     ASSERT_OK(index->addEntry(0, 1, 100));
@@ -274,17 +256,12 @@ TEST(BitmapIndexTest, GetWindowBoundaries) {
     ASSERT_EQ(windowEnd, index.getWindowEnd());
 }
 
-// ============================================================================
-// TemporalBitmapIndex Tests
-// ============================================================================
-
-// Helper struct to hold both TemporalBitmapIndex and writer for testing
+// a helper construct to hold both TemporalBitmapIndex and writer for testing
 struct TestTemporalBitmapIndexContext {
     std::unique_ptr<HCIndexWriter> writer;
     std::unique_ptr<TemporalBitmapIndex> index;
 };
 
-// Helper function to create a TemporalBitmapIndex for testing with a writer
 TestTemporalBitmapIndexContext createTestTemporalBitmapIndexWithWriter() {
     UUID collectionUUID = UUID::gen();
     DatabaseName dbName = DatabaseName::createDatabaseName_forTest(boost::none, "test");

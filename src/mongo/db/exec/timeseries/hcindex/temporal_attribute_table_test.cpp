@@ -37,11 +37,11 @@
 #include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/matcher/extensions_callback_noop.h"
 
-namespace mongo::timeseries::hcindex {
+// TODO Break this test up into multiple files. I started with one file and used AI
+// to write various tests. It was having problems when the tests were split up into
+// multiple files.
 
-// ============================================================================
-// AttributeTable Tests
-// ============================================================================
+namespace mongo::timeseries::hcindex {
 
 class AttributeTableTest : public unittest::Test {
 protected:
@@ -250,10 +250,6 @@ TEST_F(AttributeTableTest, QueryRowsWithPredicate) {
     ASSERT_EQ(2u, queryResult.size());
 }
 
-// ============================================================================
-// TemporalAttributeTable Tests
-// ============================================================================
-
 class TemporalAttributeTableTest : public ServiceContextTest {
 protected:
     void setUp() override {
@@ -400,10 +396,6 @@ TEST_F(TemporalAttributeTableTest, QueryRowsWithTimestamp) {
     ASSERT_GTE(queryResult.size(), 0u);
 }
 
-// ============================================================================
-// MatchExpression Conversion Tests
-// ============================================================================
-
 class MatchExpressionConversionTest : public unittest::Test {
 protected:
     void setUp() override {
@@ -508,10 +500,6 @@ TEST_F(MatchExpressionConversionTest, ConvertPredicateWithNonExistentField) {
     // This may succeed or fail depending on implementation
     // The important thing is it doesn't crash
 }
-
-// ============================================================================
-// QueryRows Tests
-// ============================================================================
 
 class QueryRowsTest : public unittest::Test {
 protected:
@@ -706,10 +694,6 @@ TEST_F(QueryRowsTest, QueryRowsDuplicateMetadata) {
     auto result = table->queryRows(predicate);
     ASSERT_EQ(result.size(), 1u);
 }
-
-// ============================================================================
-// Complex MatchExpression Tests (Boolean Operations)
-// ============================================================================
 
 class ComplexMatchExpressionTest : public unittest::Test {
 protected:
@@ -938,10 +922,6 @@ TEST_F(ComplexMatchExpressionTest, ConvertEmptyAndExpression) {
     auto predicateResult = table->convertMatchExpressionToPredicate(matchExpr.getValue().get());
     // May succeed or fail depending on implementation
 }
-
-// ============================================================================
-// Nested Expression Tests: (a & b) or (c & d)
-// ============================================================================
 
 class NestedExpressionTest : public unittest::Test {
 protected:
@@ -1235,6 +1215,7 @@ TEST_F(NestedExpressionTest, ComplexMixedNesting_AndOrAnd) {
         ASSERT_GT(queryResult.size(), 0u);
     }
 }
+
 
 }  // namespace mongo::timeseries::hcindex
 

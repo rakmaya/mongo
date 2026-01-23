@@ -36,8 +36,51 @@
 
 namespace mongo::timeseries::hcindex {
 
+
+                        // -------------------
+                        // class HCIndexWriter
+                        // -------------------
+
+//- CONSTRUCTORS
+
+
 HCIndexWriter::HCIndexWriter(const UUID& collectionUUID, const DatabaseName& dbName)
     : collectionUUID(collectionUUID), dbName(dbName) {}
+
+
+//- ACCESSORS
+
+
+std::vector<InsertStatement> HCIndexWriter::getPendingSymbolOperations() const {
+    return pendingSymbolOperations;
+}
+
+std::vector<InsertStatement> HCIndexWriter::getPendingAttributeOperations() const {
+    return pendingAttributeOperations;
+}
+
+std::vector<InsertStatement> HCIndexWriter::getPendingBitmapOperations() const {
+    return pendingBitmapOperations;
+}
+
+std::string HCIndexWriter::getSymbolOperationsCollectionName() const {
+    return str::stream() << dbName.toStringForErrorMsg() << ".hcindex.ops.symbols."
+                         << collectionUUID.toString();
+}
+
+std::string HCIndexWriter::getAttributeOperationsCollectionName() const {
+    return str::stream() << dbName.toStringForErrorMsg() << ".hcindex.ops.attributes."
+                         << collectionUUID.toString();
+}
+
+std::string HCIndexWriter::getBitmapOperationsCollectionName() const {
+    return str::stream() << dbName.toStringForErrorMsg() << ".hcindex.idx.bitmaps."
+                         << collectionUUID.toString();
+}
+
+
+//- MODIFIERS
+
 
 Status HCIndexWriter::initSymbolDictionary(const Timestamp& windowStart,
                                            const Timestamp& windowEnd,
@@ -127,7 +170,144 @@ Status HCIndexWriter::addBitmapEntryRoaring(const Timestamp& windowStart,
     return Status::OK();
 }
 
-Status HCIndexWriter::_flushSymbols(const Timestamp& windowStart,
+Status HCIndexWriter::flush(const Timestamp& windowStart,
+                            const Timestamp& windowEnd,
+                            HCIndexPeriodEnum period,
+                            int32_t frequency,
+                            bool isSymbolOps) {
+    if (isSymbolOps) {
+        return flushSymbols(windowStart, windowEnd, period, frequency);
+    } else {
+        return flushAttributes(windowStart, windowEnd, period, frequency);
+    }
+    // Note: isSymbolInitMode or isAttributeInitMode is reset to false at the end of
+    // flushSymbols or flushAttributes respectively
+}
+
+Status HCIndexWriter::flushBitmaps(const Timestamp& windowStart,
+                                   const Timestamp& windowEnd,
+                                   HCIndexPeriodEnum period,
+                                   int32_t frequency) {
+    return flushBitmapsImpl(windowStart, windowEnd, period, frequency);
+}
+
+Status HCIndexWriter::buildFin(const Timestamp& windowStart,
+                               const Timestamp& windowEnd,
+                               HCIndexPeriodEnum period,
+                               int32_t frequency,
+                               bool isSymbolOps) {
+    BSONObjBuilder docBuilder;
+    docBuilder.append("_id", OID::gen());
+    docBuilder.append("timestamp", windowEnd);
+    docBuilder.append("windowStart", windowStart);
+    docBuilder.append("windowEnd", windowEnd);
+    docBuilder.append("period", static_cast<int>(period));
+    docBuilder.append("frequency", frequency);
+    docBuilder.append("op", "FIN");
+
+    addPendingOperation(docBuilder.obj(), isSymbolOps ? OpType::Symbol : OpType::Attribute);
+    return Status::OK();
+}
+
+Status HCIndexWriter::buildRef(const Timestamp& windowStart,
+                               const Timestamp& windowEnd,
+                               HCIndexPeriodEnum period,
+                               int32_t frequency,
+                               const Timestamp& refWindowStart) {
+    BSONObjBuilder docBuilder;
+    docBuilder.append("_id", OID::gen());
+    docBuilder.append("timestamp", windowStart);
+    docBuilder.append("windowStart", windowStart);
+    docBuilder.append("windowEnd", windowEnd);
+    docBuilder.append("period", static_cast<int>(period));
+    docBuilder.append("frequency", frequency);
+    docBuilder.append("op", "REF");
+    docBuilder.append("refWindowStart", refWindowStart);
+
+    addPendingOperation(docBuilder.obj(), OpType::Symbol);
+    return Status::OK();
+}
+
+
+void HCIndexWriter::clearPendingOperations() {
+    pendingSymbolOperations.clear();
+    pendingAttributeOperations.clear();
+    pendingBitmapOperations.clear();
+}
+
+
+//- PRIVATE METHODS
+
+
+void HCIndexWriter::addPendingOperation(const BSONObj& doc, OpType opType) {
+    switch (opType) {
+        case OpType::Symbol:
+            pendingSymbolOperations.emplace_back(InsertStatement(doc));
+            break;
+        case OpType::Attribute:
+            pendingAttributeOperations.emplace_back(InsertStatement(doc));
+            break;
+        case OpType::Bitmap:
+            pendingBitmapOperations.emplace_back(InsertStatement(doc));
+            break;
+    }
+}
+
+std::vector<char> HCIndexWriter::serializeRoaring64BTree(const Roaring64BTree& bitmap) const {
+    // Serialize Roaring64BTree using delta encoding for efficient storage
+    // Format: [count:8][delta1:varint][delta2:varint]...
+    //
+    // Delta encoding: Instead of storing absolute values [0, 1, 5, 100],
+    // store differences [0, 1, 4, 95]. Small deltas compress well.
+    //
+    // Variable-length encoding: Small numbers use fewer bytes
+    // - 0-127: 1 byte
+    // - 128-16383: 2 bytes
+    // - etc.
+    //
+    // Typical compression: 10-80x better than BSON array of Longs
+
+    std::vector<char> buffer;
+
+    // Count elements
+    uint64_t count = 0;
+    for (auto it = bitmap.begin(); it != bitmap.end(); ++it) {
+        ++count;
+    }
+
+    // Reserve space (estimate: 2 bytes per element on average for delta encoding)
+    buffer.reserve(8 + count * 2);
+
+    // Write count (8 bytes)
+    buffer.resize(8);
+    std::memcpy(buffer.data(), &count, sizeof(uint64_t));
+
+    if (count == 0) {
+        return buffer;
+    }
+
+    // Write delta-encoded values using variable-length encoding
+    uint64_t prevValue = 0;
+    bool first = true;
+
+    for (uint64_t value : bitmap) {
+        uint64_t delta = first ? value : (value - prevValue);
+        first = false;
+        prevValue = value;
+
+        // Variable-length encoding (similar to Protocol Buffers varint)
+        // Each byte stores 7 bits of data + 1 continuation bit
+        while (delta >= 0x80) {
+            buffer.push_back(static_cast<char>((delta & 0x7F) | 0x80));
+            delta >>= 7;
+        }
+        buffer.push_back(static_cast<char>(delta));
+    }
+
+    return buffer;
+}
+
+Status HCIndexWriter::flushSymbols(const Timestamp& windowStart,
                                     const Timestamp& windowEnd,
                                     HCIndexPeriodEnum period,
                                     int32_t frequency) {
@@ -178,7 +358,7 @@ Status HCIndexWriter::_flushSymbols(const Timestamp& windowStart,
         docBuilder.append("op", isInitMode ? "INIT" : "opADD");
         docBuilder.append("symbols", symbolsBuilder.obj());
 
-        _addPendingOperation(docBuilder.obj(), OpType::Symbol);
+        addPendingOperation(docBuilder.obj(), OpType::Symbol);
     }
 
     // Flush local symbols (if any) - these are delta dictionary symbols
@@ -201,7 +381,7 @@ Status HCIndexWriter::_flushSymbols(const Timestamp& windowStart,
         docBuilder.append("op", "opADD_LOCAL");
         docBuilder.append("symbols", symbolsBuilder.obj());
 
-        _addPendingOperation(docBuilder.obj(), OpType::Symbol);
+        addPendingOperation(docBuilder.obj(), OpType::Symbol);
     }
 
     accumulatedSymbols[key].clear();
@@ -211,7 +391,7 @@ Status HCIndexWriter::_flushSymbols(const Timestamp& windowStart,
     return Status::OK();
 }
 
-Status HCIndexWriter::_flushAttributes(const Timestamp& windowStart,
+Status HCIndexWriter::flushAttributes(const Timestamp& windowStart,
                                        const Timestamp& windowEnd,
                                        HCIndexPeriodEnum period,
                                        int32_t frequency) {
@@ -275,7 +455,7 @@ Status HCIndexWriter::_flushAttributes(const Timestamp& windowStart,
         docBuilder.append("attributes", attrsBuilder.obj());
     }
 
-    _addPendingOperation(docBuilder.obj(), OpType::Attribute);
+    addPendingOperation(docBuilder.obj(), OpType::Attribute);
     accumulatedSchema[key].clear();
     accumulatedRows[key].clear();
     accumulatedAttributes[key].clear();
@@ -285,10 +465,10 @@ Status HCIndexWriter::_flushAttributes(const Timestamp& windowStart,
     return Status::OK();
 }
 
-Status HCIndexWriter::_flushBitmaps(const Timestamp& windowStart,
-                                    const Timestamp& windowEnd,
-                                    HCIndexPeriodEnum period,
-                                    int32_t frequency) {
+Status HCIndexWriter::flushBitmapsImpl(const Timestamp& windowStart,
+                                       const Timestamp& windowEnd,
+                                       HCIndexPeriodEnum period,
+                                       int32_t frequency) {
     WindowKey key = std::make_pair(windowStart, windowEnd);
 
     auto it = accumulatedBitmaps.find(key);
@@ -313,7 +493,7 @@ Status HCIndexWriter::_flushBitmaps(const Timestamp& windowStart,
         // - Variable-length encoding for small deltas
         // - Typical compression: 10-80x better than BSON array of Longs
 
-        std::vector<char> buffer = _serializeRoaring64BTree(roaringBitmap);
+        std::vector<char> buffer = serializeRoaring64BTree(roaringBitmap);
 
         // Store as BinData (subtype 0 = generic binary)
         entryBuilder.appendBinData("rowIds", buffer.size(), BinDataGeneral, buffer.data());
@@ -331,7 +511,7 @@ Status HCIndexWriter::_flushBitmaps(const Timestamp& windowStart,
     docBuilder.append("op", isInitMode ? "INIT" : "opADD");
     docBuilder.append("entries", entriesBuilder.arr());
 
-    _addPendingOperation(docBuilder.obj(), OpType::Bitmap);
+    addPendingOperation(docBuilder.obj(), OpType::Bitmap);
     accumulatedBitmaps[key].clear();
 
     // Reset to ADD mode after flush
@@ -339,164 +519,6 @@ Status HCIndexWriter::_flushBitmaps(const Timestamp& windowStart,
     return Status::OK();
 }
 
-Status HCIndexWriter::flush(const Timestamp& windowStart,
-                            const Timestamp& windowEnd,
-                            HCIndexPeriodEnum period,
-                            int32_t frequency,
-                            bool isSymbolOps) {
-    if (isSymbolOps) {
-        return _flushSymbols(windowStart, windowEnd, period, frequency);
-    } else {
-        return _flushAttributes(windowStart, windowEnd, period, frequency);
-    }
-    // Note: isSymbolInitMode or isAttributeInitMode is reset to false at the end of
-    // _flushSymbols or _flushAttributes respectively
-}
-
-Status HCIndexWriter::flushBitmaps(const Timestamp& windowStart,
-                                   const Timestamp& windowEnd,
-                                   HCIndexPeriodEnum period,
-                                   int32_t frequency) {
-    return _flushBitmaps(windowStart, windowEnd, period, frequency);
-}
-
-Status HCIndexWriter::buildFin(const Timestamp& windowStart,
-                               const Timestamp& windowEnd,
-                               HCIndexPeriodEnum period,
-                               int32_t frequency,
-                               bool isSymbolOps) {
-    BSONObjBuilder docBuilder;
-    docBuilder.append("_id", OID::gen());
-    docBuilder.append("timestamp", windowEnd);
-    docBuilder.append("windowStart", windowStart);
-    docBuilder.append("windowEnd", windowEnd);
-    docBuilder.append("period", static_cast<int>(period));
-    docBuilder.append("frequency", frequency);
-    docBuilder.append("op", "FIN");
-
-    _addPendingOperation(docBuilder.obj(), isSymbolOps ? OpType::Symbol : OpType::Attribute);
-    return Status::OK();
-}
-
-Status HCIndexWriter::buildRef(const Timestamp& windowStart,
-                               const Timestamp& windowEnd,
-                               HCIndexPeriodEnum period,
-                               int32_t frequency,
-                               const Timestamp& refWindowStart) {
-    BSONObjBuilder docBuilder;
-    docBuilder.append("_id", OID::gen());
-    docBuilder.append("timestamp", windowStart);
-    docBuilder.append("windowStart", windowStart);
-    docBuilder.append("windowEnd", windowEnd);
-    docBuilder.append("period", static_cast<int>(period));
-    docBuilder.append("frequency", frequency);
-    docBuilder.append("op", "REF");
-    docBuilder.append("refWindowStart", refWindowStart);
-
-    _addPendingOperation(docBuilder.obj(), OpType::Symbol);
-    return Status::OK();
-}
-
-std::vector<InsertStatement> HCIndexWriter::getPendingSymbolOperations() const {
-    return pendingSymbolOperations;
-}
-
-std::vector<InsertStatement> HCIndexWriter::getPendingAttributeOperations() const {
-    return pendingAttributeOperations;
-}
-
-std::vector<InsertStatement> HCIndexWriter::getPendingBitmapOperations() const {
-    return pendingBitmapOperations;
-}
-
-void HCIndexWriter::clearPendingOperations() {
-    pendingSymbolOperations.clear();
-    pendingAttributeOperations.clear();
-    pendingBitmapOperations.clear();
-}
-
-std::string HCIndexWriter::getSymbolOperationsCollectionName() const {
-    return str::stream() << dbName.toStringForErrorMsg() << ".hcindex.ops.symbols."
-                         << collectionUUID.toString();
-}
-
-std::string HCIndexWriter::getAttributeOperationsCollectionName() const {
-    return str::stream() << dbName.toStringForErrorMsg() << ".hcindex.ops.attributes."
-                         << collectionUUID.toString();
-}
-
-std::string HCIndexWriter::getBitmapOperationsCollectionName() const {
-    return str::stream() << dbName.toStringForErrorMsg() << ".hcindex.idx.bitmaps."
-                         << collectionUUID.toString();
-}
-
-void HCIndexWriter::_addPendingOperation(const BSONObj& doc, OpType opType) {
-    switch (opType) {
-        case OpType::Symbol:
-            pendingSymbolOperations.emplace_back(InsertStatement(doc));
-            break;
-        case OpType::Attribute:
-            pendingAttributeOperations.emplace_back(InsertStatement(doc));
-            break;
-        case OpType::Bitmap:
-            pendingBitmapOperations.emplace_back(InsertStatement(doc));
-            break;
-    }
-}
-
-std::vector<char> HCIndexWriter::_serializeRoaring64BTree(const Roaring64BTree& bitmap) const {
-    // Serialize Roaring64BTree using delta encoding for efficient storage
-    // Format: [count:8][delta1:varint][delta2:varint]...
-    //
-    // Delta encoding: Instead of storing absolute values [0, 1, 5, 100],
-    // store differences [0, 1, 4, 95]. Small deltas compress well.
-    //
-    // Variable-length encoding: Small numbers use fewer bytes
-    // - 0-127: 1 byte
-    // - 128-16383: 2 bytes
-    // - etc.
-    //
-    // Typical compression: 10-80x better than BSON array of Longs
-
-    std::vector<char> buffer;
-
-    // Count elements
-    uint64_t count = 0;
-    for (auto it = bitmap.begin(); it != bitmap.end(); ++it) {
-        ++count;
-    }
-
-    // Reserve space (estimate: 2 bytes per element on average for delta encoding)
-    buffer.reserve(8 + count * 2);
-
-    // Write count (8 bytes)
-    buffer.resize(8);
-    std::memcpy(buffer.data(), &count, sizeof(uint64_t));
-
-    if (count == 0) {
-        return buffer;
-    }
-
-    // Write delta-encoded values using variable-length encoding
-    uint64_t prevValue = 0;
-    bool first = true;
-
-    for (uint64_t value : bitmap) {
-        uint64_t delta = first ? value : (value - prevValue);
-        first = false;
-        prevValue = value;
-
-        // Variable-length encoding (similar to Protocol Buffers varint)
-        // Each byte stores 7 bits of data + 1 continuation bit
-        while (delta >= 0x80) {
-            buffer.push_back(static_cast<char>((delta & 0x7F) | 0x80));
-            delta >>= 7;
-        }
-        buffer.push_back(static_cast<char>(delta));
-    }
-
-    return buffer;
-}
 
 }  // namespace mongo::timeseries::hcindex
 

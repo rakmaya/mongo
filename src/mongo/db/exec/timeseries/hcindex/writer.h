@@ -46,50 +46,94 @@
 
 namespace mongo::timeseries::hcindex {
 
+                        // ===================
+                        // class HCIndexWriter
+                        // ===================
+
 /**
- * Builds operations for the time-parametrized index structure timeseries collections.
- * Accumulates INIT, opADD, FIN, and REF operations as InsertStatements.
- *
- * Operations are stored in two separate collections in the same database as the timeseries
- * collection:
- * - Symbol operations: hcindex.ops.symbols.<collectionUUID>
- * - Attribute operations: hcindex.ops.attributes.<collectionUUID>
- *
- * This class does NOT perform actual inserts. Instead, it builds InsertStatement objects
- * that can be flushed by the caller through HCIndexCollectionManager. This design avoids
- * circular dependencies by keeping HCIndexWriter independent of collection_crud.
+ * Builds operations for the time-parametrized index structure timeseries collections. Accumulates
+ * INIT, opADD, FIN, and REF operations as InsertStatements. This component does NOT perform actual
+ * inserts. Instead, it builds InsertStatement objects that can be flushed by the user.
  */
 class HCIndexWriter {
 public:
+
+    //- PUBLIC TYPES
+
     /**
      * Indicates whether a symbol is part of the base dictionary or local/delta dictionary.
      */
     enum class SymbolType {
-        Base,   // Symbol in the base dictionary (shared across windows)
-        Local   // Symbol in the local/delta dictionary (window-specific)
+        // Symbol is from base disctionay
+        Base,
+
+        // Symbol is from local disctionay
+        Local
     };
 
     /**
-     * Represents a pending operation to be inserted.
+     * Represents a pending operation.
      */
     struct PendingOperation {
         InsertStatement statement;
-        bool isSymbolOps;  // true for symbol ops, false for attribute ops
+        bool isSymbolOps;
     };
 
+
+    //- CONSTRUCTORS
+
+
     /**
-     * Create a new operations writer for the specified collection.
-     *
-     * Parameters:
-     * - collectionUUID: UUID of the timeseries collection
-     * - dbName: Database name where the timeseries collection resides
+     * Constructs an HCIndex operations writer for the specified timeseries collection.
      */
     HCIndexWriter(const UUID& collectionUUID, const DatabaseName& dbName);
 
+
+    //- ACCESSORS
+
+
     /**
-     * Mark the beginning of symbol dictionary initialization for the specified window.
-     * Sets the writer to INIT mode for symbol operations for this window.
-     * After flush() is called, the writer automatically returns to ADD mode for this window.
+     * Return all pending symbol operations accumulated so far.
+     */
+    std::vector<InsertStatement> getPendingSymbolOperations() const;
+
+    /**
+     * Return all pending attribute operations accumulated so far.
+     */
+    std::vector<InsertStatement> getPendingAttributeOperations() const;
+
+    /**
+     * Return all pending bitmap operations accumulated so far.
+     */
+    std::vector<InsertStatement> getPendingBitmapOperations() const;
+
+    /**
+     * Get the namespace string for symbol operations collection.
+     * Format: hcindex.ops.symbols.<collectionUUID>
+     */
+    std::string getSymbolOperationsCollectionName() const;
+
+    /**
+     * Get the namespace string for attribute operations collection.
+     * Format: hcindex.ops.attributes.<collectionUUID>
+     */
+    std::string getAttributeOperationsCollectionName() const;
+
+    /**
+     * Get the namespace string for bitmap operations collection.
+     * Format: hcindex.ops.bitmaps.<collectionUUID>
+     */
+    std::string getBitmapOperationsCollectionName() const;
+
+
+    //- MODIFIERS
+
+
+    /**
+     * Enters INIT mode for symbol dictionary operations for the window
+     * [`windowStart`, `windowEnd`), optionally referencing a base dictionary (`refBaseDictionary`)
+     * and setting the local index offset (`localIndexOffset`). After flush() is called, the writer
+     * automatically transitions back to ADD mode for this window.
      */
     Status initSymbolDictionary(const Timestamp& windowStart,
                                 const Timestamp& windowEnd,
@@ -97,21 +141,16 @@ public:
                                 uint32_t localIndexOffset);
 
     /**
-     * Mark the beginning of attribute table initialization for the specified window.
-     * Sets the writer to INIT mode for attribute operations for this window.
-     * After flush() is called, the writer automatically returns to ADD mode for this window.
+     * Enters INIT mode for attribute table operations for the window [`windowStart`, `windowEnd`).
+     * After flush() is called, the writer automatically transitions back to ADD mode for this
+     * window.
      */
-    Status initAttributeTable(const Timestamp& windowStart, const Timestamp& windowEnd);
+    Status initAttributeTable(const Timestamp& windowstart, const Timestamp& windowend);
 
     /**
-     * Add a symbol to the accumulation buffer for the specified window.
-     * Can be used for both INIT and opADD operations.
-     * Multiple calls accumulate symbols that will be flushed together.
-     *
-     * @param symbolType Indicates whether the symbol is part of the base dictionary
-     *                   or the local/delta dictionary. This affects the operation type
-     *                   written to the ops collection: Base symbols use "opADD",
-     *                   Local symbols use "opADD_LOCAL".
+     * Accumulates a symbol for the window [`windowStart`, `windowEnd`) by adding the specified
+     * `word` at given `index`, using `symbolType` to determine whether the symbol is written as
+     * a base or local (delta) add operation, to be flushed later.
      */
     Status addSymbol(const Timestamp& windowStart,
                      const Timestamp& windowEnd,
@@ -120,27 +159,24 @@ public:
                      SymbolType symbolType);
 
     /**
-     * Add a row to the accumulation buffer for the specified window.
+     * Accumulates the specified attribute table `row` for the window [`windowStart`, `windowEnd`).
      * Can be used for both INIT and opADD operations.
-     * Multiple calls accumulate rows that will be flushed together.
      */
     Status addAttributeRow(const Timestamp& windowStart,
                            const Timestamp& windowEnd,
                            const std::vector<uint32_t>& row);
 
     /**
-     * Add a schema field to the accumulation buffer for the specified window.
-     * Can be used for both INIT and opADD operations.
-     * Multiple calls accumulate schema fields that will be flushed together.
+     * Accumulates the specified schema field for the window [`windowStart`, `windowEnd`). Can be
+     * used for both INIT and opADD operations.
      */
     Status addSchemaField(const Timestamp& windowStart,
                           const Timestamp& windowEnd,
                           const std::string& fieldName);
 
     /**
-     * Add an attribute (field name and column index) to the accumulation buffer for the specified
-     * window. Can be used for both INIT and opADD operations. Multiple calls accumulate attributes
-     * that will be flushed together.
+     * Accumulates an attribute mapping from `fieldName` to `columnIndex` for the window
+     * [`windowStart`, `windowEnd`). Can be used for both INIT and opADD operations.
      */
     Status addAttribute(const Timestamp& windowStart,
                         const Timestamp& windowEnd,
@@ -155,9 +191,8 @@ public:
     Status initBitmapIndex(const Timestamp& windowStart, const Timestamp& windowEnd);
 
     /**
-     * Add a bitmap entry to the accumulation buffer for the specified window.
-     * Each entry maps (columnIndex, symbolIndex) → set of rowIds.
-     * Can be used for both INIT and opADD operations.
+     * Add a bitmap entry to the accumulation buffer for the specified window. Each entry maps
+     * (columnIndex, symbolIndex) -> set of rowIds. Can be used for both INIT and opADD operations.
      * Multiple calls accumulate entries that will be flushed together.
      */
     Status addBitmapEntry(const Timestamp& windowStart,
@@ -167,8 +202,8 @@ public:
                           const std::set<int64_t>& rowIds);
 
     /**
-     * Add a bitmap entry using Roaring64BTree directly (more efficient).
-     * This avoids the std::set intermediate representation.
+     * Add a bitmap entry using Roaring64BTree directly. This avoids the std::set intermediate
+     * representation. TODO: A strongly typed RowIdSet could be the way to go here.
      */
     Status addBitmapEntryRoaring(const Timestamp& windowStart,
                                  const Timestamp& windowEnd,
@@ -177,17 +212,10 @@ public:
                                  const Roaring64BTree& roaringBitmap);
 
     /**
-     * Flush accumulated operations grouped by time window.
-     * Creates BSON documents for INIT or opADD operations and adds them to pendingOperations.
-     * The operation type (INIT or opADD) is determined by the internal state set by
-     * initSymbolDictionary() or initAttributeTable(). After flush(), the writer returns to ADD
-     * mode.
-     *
-     * @param windowStart Start timestamp of the time window
-     * @param windowEnd End timestamp of the time window
-     * @param period Time-window period (hour, minute, second)
-     * @param frequency Time-window frequency (1-24 for hour, 1-59 for minute/second)
-     * @param isSymbolOps true for symbol operations, false for attribute operations
+     * Flush accumulated operations grouped by time window. Creates BSON documents for INIT or
+     * opADD operations and adds them to pendingOperations. The operation type (INIT or opADD)
+     * is determined by the internal state set by initSymbolDictionary() or initAttributeTable().
+     * After flush(), the writer returns to ADD mode.
      */
     Status flush(const Timestamp& windowStart,
                  const Timestamp& windowEnd,
@@ -196,15 +224,10 @@ public:
                  bool isSymbolOps);
 
     /**
-     * Flush accumulated bitmap operations grouped by time window.
-     * Creates BSON documents for INIT or opADD operations and adds them to pendingBitmapOperations.
-     * The operation type (INIT or opADD) is determined by the internal state set by
-     * initBitmapIndex(). After flushBitmaps(), the writer returns to ADD mode.
-     *
-     * @param windowStart Start timestamp of the time window
-     * @param windowEnd End timestamp of the time window
-     * @param period Time-window period (hour, minute, second)
-     * @param frequency Time-window frequency (1-24 for hour, 1-59 for minute/second)
+     * Flush accumulated bitmap operations grouped by time window. Creates BSON documents for INIT
+     * or opADD operations and adds them to pendingBitmapOperations. The operation type
+     * (INIT or opADD) is determined by the internal state set by initBitmapIndex(). After
+     * flushBitmaps(), the writer returns to ADD mode.
      */
     Status flushBitmaps(const Timestamp& windowStart,
                         const Timestamp& windowEnd,
@@ -230,100 +253,83 @@ public:
                     const Timestamp& refWindowStart);
 
     /**
-     * Get all pending symbol operations accumulated so far.
-     * Returns a vector of InsertStatement objects ready to be flushed.
-     */
-    std::vector<InsertStatement> getPendingSymbolOperations() const;
-
-    /**
-     * Get all pending attribute operations accumulated so far.
-     * Returns a vector of InsertStatement objects ready to be flushed.
-     */
-    std::vector<InsertStatement> getPendingAttributeOperations() const;
-
-    /**
-     * Get all pending bitmap operations accumulated so far.
-     * Returns a vector of InsertStatement objects ready to be flushed.
-     */
-    std::vector<InsertStatement> getPendingBitmapOperations() const;
-
-    /**
-     * Clear all pending operations (symbol, attribute, and bitmap).
+     * Clear all pending operations for symbol, attribute, and bitmap.
      */
     void clearPendingOperations();
 
-    /**
-     * Get the namespace string for symbol operations collection.
-     * Format: hcindex.ops.symbols.<collectionUUID>
-     */
-    std::string getSymbolOperationsCollectionName() const;
-
-    /**
-     * Get the namespace string for attribute operations collection.
-     * Format: hcindex.ops.attributes.<collectionUUID>
-     */
-    std::string getAttributeOperationsCollectionName() const;
-
-    /**
-     * Get the namespace string for bitmap operations collection.
-     * Format: hcindex.ops.bitmaps.<collectionUUID>
-     */
-    std::string getBitmapOperationsCollectionName() const;
-
 private:
-    /**
-     * Window key for accumulation buffers: (windowStart, windowEnd) pair
-     */
-    using WindowKey = std::pair<Timestamp, Timestamp>;
 
-    /**
-     * Key for bitmap entries: (columnIndex, symbolIndex) pair
-     */
+    //- PRIVATE TYPES
+
+
+    using WindowKey = std::pair<Timestamp, Timestamp>;
     using BitmapKey = std::pair<size_t, uint32_t>;
 
-    /**
-     * Enum to indicate operation type for _addPendingOperation.
-     */
-    enum class OpType { Symbol, Attribute, Bitmap };
+    // Symbol entry
+    struct SymbolEntry {
+        std::string word;
+        uint32_t index;
+        SymbolType type;
+    };
+
+    // Init Mode Parameters
+    struct SymbolInitParams {
+        boost::optional<Timestamp> refBaseDictionary;
+        uint32_t localIndexOffset = 0;
+    };
 
     /**
-     * Helper method to build an operation document and add it to pending operations.
+     * Operation type
      */
-    void _addPendingOperation(const BSONObj& doc, OpType opType);
+    enum class OpType {
+        Symbol,
+        Attribute,
+        Bitmap
+    };
+
+
+    //- PRIVATE METHODS
+
 
     /**
-     * Helper method to build and flush accumulated symbols as an operation.
+     * Build an operation document and add it to pending operations.
      */
-    Status _flushSymbols(const Timestamp& windowStart,
+    void addPendingOperation(const BSONObj& doc, OpType opType);
+
+    /**
+     * Serialize a Roaring64BTree to binary format for storage. Returns a vector containing
+     * the serialized data.
+     */
+    std::vector<char> serializeRoaring64BTree(const Roaring64BTree& bitmap) const;
+
+    /**
+     * Build and flush accumulated symbols as an operation.
+     */
+    Status flushSymbols(const Timestamp& windowStart,
                          const Timestamp& windowEnd,
                          HCIndexPeriodEnum period,
                          int32_t frequency);
 
     /**
-     * Helper method to build and flush accumulated attributes as an operation.
+     * Build and flush accumulated attributes as an operation.
      */
-    Status _flushAttributes(const Timestamp& windowStart,
+    Status flushAttributes(const Timestamp& windowStart,
                             const Timestamp& windowEnd,
                             HCIndexPeriodEnum period,
                             int32_t frequency);
 
-    /**
-     * Serialize a Roaring64BTree to portable binary format for storage.
-     * Returns a vector containing the serialized data.
-     *
-     * Format: [numBitmaps:4][highBits:4 size:4 data:*]...
-     * This uses Roaring's portable format which provides excellent compression
-     * via run-length encoding, delta encoding, and adaptive containers.
-     */
-    std::vector<char> _serializeRoaring64BTree(const Roaring64BTree& bitmap) const;
 
     /**
-     * Helper method to build and flush accumulated bitmap entries as an operation.
+     * Build and flush accumulated bitmap entries as an operation.
      */
-    Status _flushBitmaps(const Timestamp& windowStart,
-                         const Timestamp& windowEnd,
-                         HCIndexPeriodEnum period,
-                         int32_t frequency);
+    Status flushBitmapsImpl(const Timestamp& windowStart,
+                            const Timestamp& windowEnd,
+                            HCIndexPeriodEnum period,
+                            int32_t frequency);
+
+
+    //- DATA
+
 
     UUID collectionUUID;
     DatabaseName dbName;
@@ -331,22 +337,17 @@ private:
     std::vector<InsertStatement> pendingAttributeOperations;
     std::vector<InsertStatement> pendingBitmapOperations;
 
-    // Symbol entry: (word, index, symbolType)
-    struct SymbolEntry {
-        std::string word;
-        uint32_t index;
-        SymbolType type;
-    };
 
     // Accumulation buffers for incremental building, keyed by window (windowStart, windowEnd)
     std::map<WindowKey, std::vector<SymbolEntry>> accumulatedSymbols;
     std::map<WindowKey, std::vector<std::string>> accumulatedSchema;
     std::map<WindowKey, std::vector<std::vector<uint32_t>>> accumulatedRows;
     std::map<WindowKey, std::vector<std::pair<std::string, size_t>>> accumulatedAttributes;
-    // Bitmap entries: (columnIndex, symbolIndex) → Roaring64BTree of rowIds
+    // Bitmap entries: (columnIndex, symbolIndex) -> Roaring64BTree of rowIds
     // Using Roaring64BTree directly for efficient delta encoding during serialization
     std::map<WindowKey, std::map<BitmapKey, Roaring64BTree>> accumulatedBitmaps;
 
+    // TODO: ugly! need to refactor this!
     // State tracking for INIT vs ADD mode, keyed by window
     // Separate maps for symbol, attribute, and bitmap operations since they can be in different
     // modes. Defaults to ADD mode. Set to INIT by initSymbolDictionary(), initAttributeTable(), or
@@ -354,15 +355,6 @@ private:
     std::map<WindowKey, bool> isSymbolInitMode;
     std::map<WindowKey, bool> isAttributeInitMode;
     std::map<WindowKey, bool> isBitmapInitMode;
-
-    // Init Mode Parameters
-    struct SymbolInitParams {
-        // If this window has a base dictionary referenced from another window.
-        boost::optional<Timestamp> refBaseDictionary;
-        // Local symbol index offset
-        uint32_t localIndexOffset = 0;
-    };
-
     std::map<WindowKey, SymbolInitParams> symbolInitParams;
 };
 

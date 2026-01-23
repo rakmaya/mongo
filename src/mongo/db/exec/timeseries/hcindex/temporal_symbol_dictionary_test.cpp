@@ -33,15 +33,11 @@
 
 namespace mongo::timeseries::hcindex {
 
-// Helper struct to hold both dictionary and writer for testing
 struct TestSymbolDictionaryContext {
     std::unique_ptr<HCIndexWriter> writer;
     SymbolDictionary* dict;
 };
 
-// Helper function to create a SymbolDictionary for testing
-// Creates a dictionary with a writer so it can be modified
-// Note: The caller must keep the returned context alive for the duration of the test
 TestSymbolDictionaryContext createTestSymbolDictionaryWithWriter() {
     auto collectionUUID = UUID::gen();
     Timestamp windowStart(1, 0);
@@ -52,10 +48,6 @@ TestSymbolDictionaryContext createTestSymbolDictionaryWithWriter() {
     ASSERT_OK(dict->changeState(SymbolDictionaryState::ReadWrite));
     return {std::move(writer), dict};
 }
-
-// ============================================================================
-// SymbolDictionary Tests
-// ============================================================================
 
 TEST(SymbolDictionaryTest, GetOrInsertSymbolReturnsNewIndex) {
     auto ctx = createTestSymbolDictionaryWithWriter();
@@ -167,18 +159,12 @@ TEST(SymbolDictionaryTest, GetMemoryUsageBytesReturnsPositiveValue) {
     delete ctx.dict;
 }
 
-// ============================================================================
-// DeltaSymbolDictionary Tests
-// ============================================================================
-
-// Helper struct to hold DeltaSymbolDictionary and its dependencies for testing
 struct TestDeltaSymbolDictionaryContext {
     std::unique_ptr<HCIndexWriter> writer;
     std::unique_ptr<SymbolDictionary> baseDictionary;
     std::unique_ptr<DeltaSymbolDictionary> deltaDictionary;
 };
 
-// Helper function to create a DeltaSymbolDictionary for testing
 TestDeltaSymbolDictionaryContext createTestDeltaSymbolDictionaryWithWriter() {
     auto collectionUUID = UUID::gen();
     Timestamp windowStart(0, 0);
@@ -421,10 +407,6 @@ TEST(DeltaSymbolDictionaryTest, ComputeDeltaSimilarityOneEmptySet) {
     ASSERT_EQ(0.0, similarity);
 }
 
-// ============================================================================
-// TemporalSymbolDictionary Tests
-// ============================================================================
-
 // Helper struct to hold both TemporalSymbolDictionary and writer for testing
 struct TestTemporalSymbolDictionaryContext {
     std::unique_ptr<HCIndexWriter> writer;
@@ -464,8 +446,6 @@ TEST(TemporalSymbolDictionaryTest, EncodeSameSymbolReturnsSameIndex) {
     delete ctx.tempDict;
 }
 
-
-
 TEST(TemporalSymbolDictionaryTest, DecodeSymbol) {
     auto ctx = createTestTemporalSymbolDictionaryWithWriter();
     Timestamp ts(1000, 0);
@@ -487,8 +467,6 @@ TEST(TemporalSymbolDictionaryTest, DecodeSymbolReturnsNoneForInvalidIndex) {
     ASSERT_FALSE(result);
     delete ctx.tempDict;
 }
-
-
 
 TEST(TemporalSymbolDictionaryTest, GetWindowForTimestamp) {
     auto ctx = createTestTemporalSymbolDictionaryWithWriter();
@@ -574,6 +552,7 @@ TEST(TemporalSymbolDictionaryTest, DifferentWindowsHaveSeparateDictionaries) {
     ASSERT_EQ(1u, result1.getValue());
     ASSERT_EQ(1u, result2.getValue());  // Both start from 1 in their own dictionaries
 }
+
 
 }  // namespace mongo::timeseries::hcindex
 
