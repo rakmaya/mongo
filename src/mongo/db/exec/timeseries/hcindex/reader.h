@@ -43,87 +43,68 @@
 
 namespace mongo::timeseries::hcindex {
 
+                        // ========================================
+                        // class SymbolDictionaryConstructionResult
+                        // ========================================
+
 /**
- * Result of constructing a symbol dictionary from operations.
- * Contains either:
- * - A SymbolDictionary (base dictionary with no reference)
- * - A DeltaSymbolDictionary (references a base dictionary from another window)
- *
- * The caller is responsible for storing these in the appropriate maps
- * in TemporalSymbolDictionary.
+ * Result of constructing a symbol dictionary from operations. It will
+ * either contain a base dictionary or a delta dictionary.
+ * TODO: Construction semantics for Dictionary could be eiether completely
+ * moved into the Reader or the Dictionary.
  */
 struct SymbolDictionaryConstructionResult {
-    // The base dictionary - only set if this is a new base (INIT without REF)
+    // The base dictionary
     std::unique_ptr<SymbolDictionary> baseDictionary;
 
-    // The delta dictionary - only set if this references a base (INIT with REF)
+    // The delta dictionary
     std::unique_ptr<DeltaSymbolDictionary> deltaDictionary;
 
-    // The window start of the referenced base dictionary (if deltaDictionary is set)
+    // The window start of the referenced base dictionary
     boost::optional<Timestamp> refBaseDictionaryWindowStart;
 
-    // Returns true if this result contains a delta dictionary (references a base)
-    bool isDelta() const {
-        return deltaDictionary != nullptr;
-    }
+    // Returns true if this result contains a delta dictionary
+    bool isDelta() const;
 
     // Returns the dictionary as an ISymbolDictionary pointer
-    ISymbolDictionary* getDictionary() const {
-        if (deltaDictionary) {
-            return deltaDictionary.get();
-        }
-        return baseDictionary.get();
-    }
+    ISymbolDictionary* getDictionary();
 };
 
+
 /**
- * Reads and constructs time-parametrized index structures from operations timeseries.
- * Replays operations to construct dictionaries and attribute tables for specific windows.
- *
- * Supports partial construction: to interpret data from 09:00-09:25, only operations
- * up to 09:25 are replayed. No need to wait for FIN at 09:59:59. This enables efficient
- * streaming queries on partial time ranges.
- *
- * Operations are read from two separate collections in the same database as the timeseries
- * collection:
- * - Symbol operations: hcindex.ops.symbols.<collectionUUID>
- * - Attribute operations: hcindex.ops.attributes.<collectionUUID>
+ * Reads and constructs time-parametrized index structures from operations timeseries. Replays
+ * operations to construct dictionaries, attribute tables and bitmap index for specific windows.
+ * Supports partial construction functions to interpret data from 09:00-09:25, only operations up
+ * to 09:25 are replayed. Note that the implementation of the read assumes that the data is
+ * written using the HCIndexWriter.
  */
 class HCIndexReader {
 public:
+
+    //- CONSTRUCTORS
+
+
     /**
-     * Create a new operations reader for the specified collection.
-     *
-     * Parameters:
-     * - dbName: Database name where the timeseries collection resides
-     * - collectionUUID: UUID of the timeseries collection
+     * Constructs an HCIndex operations reader for the specified timeseries collection.
      */
     HCIndexReader(const DatabaseName& dbName, const UUID& collectionUUID);
 
+
+    //- MODIFIERS
+
+
     /**
-     * Initialize the reader by acquiring collections for symbol and attribute operations.
-     * This must be called once before calling constructSymbolDictionary or constructAttributeTable.
-     * This acquires locks on the ops collections, which are then reused for all subsequent
-     * reconstruction operations, avoiding lock cycles during query execution.
-     *
-     * Parameters:
-     * - opCtx: Operation context for database operations
-     *
-     * Returns OK if initialization succeeds, or an error status if collection acquisition fails.
+     * Initializes the reader by acquiring and holding the required ops collections, and must be
+     * called once before any reconstruction methods are used. Returns OK if initialization
+     * succeeds, or an error status if collection acquisition fails.
      */
     Status initializeCollections(OperationContext* opCtx);
 
     /**
-     * Construct a SymbolDictionary by replaying operations up to the specified timestamp.
-     * Only reads operations up to the given timestamp, enabling partial construction.
-     *
-     * This allows efficient queries on partial time ranges without waiting for window
-     * completion (FIN operation).
-     *
-     * Parameters:
-     * - opCtx: Operation context for database operations
-     * - period: Time-window period (hour, minute, second)
-     * - frequency: Time-window frequency (1-24 for hour, 1-59 for minute/second)
+     * Reconstructs a symbol dictionary for the window [`windowStart`, `windowEnd`) by replaying
+     * persisted operations up to `upToTimestamp`. `period` and `frequency` are forwarded to the
+     * constructed dictionary. Behavior is undefined unless `opCtx` remain valid for the duration
+     * of the read.
      */
     StatusWith<std::unique_ptr<SymbolDictionary>> constructSymbolDictionary(
         OperationContext* opCtx,
@@ -134,32 +115,10 @@ public:
         const Timestamp& upToTimestamp);
 
     /**
-     * Construct a symbol dictionary (either base or delta) by replaying operations.
-     *
-     * This is the preferred method for constructing symbol dictionaries as it handles
-     * both base dictionaries (INIT without REF) and delta dictionaries (INIT with REF).
-     *
-     * The result contains:
-     * - baseDictionary: Set if INIT has no REF (this is a new base dictionary)
-     * - deltaDictionary: Set if INIT has REF (references a base from another window)
-     * - refBaseDictionaryWindowStart: The window start of the referenced base
-     *
-     * The caller (TemporalSymbolDictionary) is responsible for:
-     * 1. Looking up the referenced base dictionary if refBaseDictionaryWindowStart is set
-     * 2. Setting the base dictionary pointer on the delta dictionary
-     * 3. Storing the dictionaries in the appropriate maps
-     *
-     * Parameters:
-     * - opCtx: Operation context for database operations
-     * - windowStart: Start timestamp of the time window
-     * - windowEnd: End timestamp of the time window
-     * - period: Time-window period (hour, minute, second)
-     * - frequency: Time-window frequency (1-24 for hour, 1-59 for minute/second)
-     * - upToTimestamp: Only replay operations up to this timestamp
-     * - baseDictionary: Optional base dictionary to use for delta construction.
-     *                   If provided and INIT has REF, this base will be used.
-     *                   If nullptr and INIT has REF, a delta will be created without base
-     *                   (caller must set base later).
+     * Reconstructs a symbol dictionary for the window [`windowStart`, `windowEnd`) by replaying
+     * operations up to `upToTimestamp`. Specified `period` and `frequency` are forwarded to the
+     * constructed dictionary. Returns either a base dictionary or a delta dictionary (with
+     * optional reference metadata). Uses the the specified `baseDictionary` if provided.
      */
     StatusWith<SymbolDictionaryConstructionResult> constructSymbolDictionaryWithDelta(
         OperationContext* opCtx,
@@ -171,19 +130,10 @@ public:
         SymbolDictionary* baseDictionary = nullptr);
 
     /**
-     * Construct an AttributeTable by replaying operations up to the specified timestamp.
-     * Only reads operations up to the given timestamp, enabling partial construction.
-     *
-     * This allows efficient queries on partial time ranges without waiting for window
-     * completion (FIN operation).
-     *
-     * The symbolDictionary parameter is required to convert string values to symbol indices
-     * during construction.
-     *
-     * Parameters:
-     * - opCtx: Operation context for database operations
-     * - period: Time-window period (hour, minute, second)
-     * - frequency: Time-window frequency (1-24 for hour, 1-59 for minute/second)
+     * Reconstructs an AttributeTable for the window [`windowStart`, `windowEnd`) by replaying
+     * operations up to `upToTimestamp`. Specified `period`, `prequency` and `symbolDictionary`
+     * are forwarded to the AttributeTable. Behavior is undefined unless `opCtx` is valid for
+     * the duration of the construction.
      */
     StatusWith<std::unique_ptr<AttributeTable>> constructAttributeTable(
         OperationContext* opCtx,
@@ -195,17 +145,10 @@ public:
         ISymbolDictionary* symbolDictionary);
 
     /**
-     * Construct a BitmapIndex by replaying operations up to the specified timestamp.
-     * Only reads operations up to the given timestamp, enabling partial construction.
-     *
-     * This allows efficient queries on partial time ranges without waiting for window
-     * completion (FIN operation).
-     *
-     *
-     * Parameters:
-     * - opCtx: Operation context for database operations
-     * - period: Time-window period (hour, minute, second)
-     * - frequency: Time-window frequency (1-24 for hour, 1-59 for minute/second)
+     * Reconstructs a BitmapIndex for the window [`windowStart`, `windowEnd`) by replaying
+     * operations up to `upToTimestamp`. `period` and `frequency` is forwarded to the
+     * constructed BitmapIndex. Behavior is undefined unless `opCtx` remains valid for the
+     * duration of the construction.
      */
     StatusWith<std::unique_ptr<BitmapIndex>> constructBitmapIndex(OperationContext* opCtx,
                                                                   const Timestamp& windowStart,
@@ -221,44 +164,33 @@ public:
     void close();
 
     /**
-     * Prepare for yielding by releasing collection pointers.
-     *
-     * Called during doSaveState() before a yield point. This releases the collection
-     * pointers held by the acquisitions, allowing locks to be yielded safely.
-     *
-     * The collections can be restored later by calling restoreForYield().
+     * Releases acquired collection pointers prior to a yield. Collections restorable via
+     * `restoreForYield()`.
      */
     void prepareForYield();
 
     /**
-     * Restore collection pointers after yielding.
-     *
-     * Called during doRestoreState() after a yield point. This re-acquires the
-     * collection pointers that were released by prepareForYield().
-     *
-     * Parameters:
-     * - opCtx: Operation context for database operations
-     *
-     * Returns Status::OK() on success, or an error status if restoration fails.
+     * Re-acquires collection pointers after a yield using the given `opCtx`, restoring the state
+     * released by `prepareForYield()`.
      */
     Status restoreForYield(OperationContext* opCtx);
 
 private:
+
+    //- PRIVATE METHODS
+
+
     /**
-     * Helper method to acquire both symbol and attribute operations collections.
-     * Used by both initializeCollections() and restoreForYield().
+     * Helper method to acquire both symbol and attribute operations collections. Used by both
+     * initializeCollections() and restoreForYield().
      */
     void acquireCollections(OperationContext* opCtx);
 
     /**
-     * Deserialize a Roaring64BTree from delta-encoded BinData format.
-     * Reverses the encoding done by HCIndexWriter::_serializeRoaring64BTree().
-     *
-     * Format: [count:8][delta1:varint][delta2:varint]...
-     *
-     * Returns a Roaring64BTree containing all the rowIds.
+     * Deserialize a Roaring64BTree from delta-encoded BinData format. Reverses the encoding done
+     * by HCIndexWriter::serializeRoaring64BTree().
      */
-    Roaring64BTree _deserializeRoaring64BTree(const char* data, size_t size) const;
+    Roaring64BTree deserializeRoaring64BTree(const char* data, size_t size) const;
 
     DatabaseName dbName;
     UUID collectionUUID;

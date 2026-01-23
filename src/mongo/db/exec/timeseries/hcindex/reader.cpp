@@ -39,8 +39,35 @@
 
 namespace mongo::timeseries::hcindex {
 
+                        // ----------------------------------------
+                        // class SymbolDictionaryConstructionResult
+                        // ----------------------------------------
+
+bool SymbolDictionaryConstructionResult::isDelta() const {
+    return deltaDictionary != nullptr;
+}
+
+ISymbolDictionary* SymbolDictionaryConstructionResult::getDictionary() const {
+    if (deltaDictionary) {
+        return deltaDictionary.get();
+    }
+    return baseDictionary.get();
+}
+
+                        // -------------------
+                        // class HCIndexReader
+                        // -------------------
+
+//- CONSTRUCTORS
+
+
 HCIndexReader::HCIndexReader(const DatabaseName& dbName, const UUID& collectionUUID)
-    : dbName(dbName), collectionUUID(collectionUUID) {}
+    : dbName(dbName), collectionUUID(collectionUUID) {
+}
+
+
+//- MODIFIERS
+
 
 void HCIndexReader::acquireCollections(OperationContext* opCtx) {
     // Tries to acquire symbol operations collection WITHOUT acquiring locks
@@ -78,8 +105,8 @@ void HCIndexReader::acquireCollections(OperationContext* opCtx) {
         // TODO: Raise it?
     }
 
-    // Acquire bitmap index collection WITHOUT acquiring locks
-    // This is safe because we're just getting a snapshot of the catalog
+    // Try to acquire bitmap index collection without acquiring locks
+    // This is ok since we just need a snapshot of the catalog
     auto bitmapIndexNss = HCIndexCollectionManager::getBitmapIndexNamespace(dbName, collectionUUID);
     CollectionAcquisitionRequest bitmapIndexAcquisitionRequest(
         bitmapIndexNss,
@@ -172,16 +199,16 @@ StatusWith<std::unique_ptr<SymbolDictionary>> HCIndexReader::constructSymbolDict
         }
     }
 
-    // Transition the dictionary to ReadWrite after reconstruction is complete.
-    // This allows the dictionary to accept new symbols as the timeseries collection continues to
-    // receive new measurements with new metadata values. The dictionary was in Reconstruction mode
-    // during the replay of operations, and now it's ready to accept new writes.
+    // Transition the dictionary to ReadWrite after reconstruction is complete. This allows the
+    // dictionary to accept new symbols as the timeseries collection continues to receive new
+    // measurements with new metadata values. We leave it to the called to change the state to
+    // anything else as necessary.
     auto readWriteStatus = dict->changeState(SymbolDictionaryState::ReadWrite);
     if (!readWriteStatus.isOK()) {
         return readWriteStatus;
     }
 
-    // Return the dictionary (may be empty if no operations were found for this window)
+    // Return the (empty) dictionary
     return std::move(dict);
 }
 
@@ -296,7 +323,7 @@ StatusWith<SymbolDictionaryConstructionResult> HCIndexReader::constructSymbolDic
 
         result.deltaDictionary = std::move(deltaDict);
     } else {
-        // This is a base dictionary (no REF)
+        // This is a base dictionary, i.e not a REF
         auto dict =
             std::make_unique<SymbolDictionary>(period, frequency, windowStart, windowEnd, nullptr);
         auto stateStatus = dict->changeState(SymbolDictionaryState::Reconstruction);
@@ -306,6 +333,7 @@ StatusWith<SymbolDictionaryConstructionResult> HCIndexReader::constructSymbolDic
 
         // Second pass: replay operations to populate the base dictionary
         // Only process INIT and opADD (base symbols) - opADD_LOCAL should not exist for base dictionaries
+        // TODO: Add negative test case to check the presence of opADD_LOCAL
         cursor = symbolOpsCollection->getCollectionPtr()->getCursor(opCtx);
         while (auto record = cursor->next()) {
             BSONObj doc = record->data.toBson();
@@ -365,10 +393,9 @@ StatusWith<std::unique_ptr<AttributeTable>> HCIndexReader::constructAttributeTab
     }
 
     // Use the cached collection acquisition instead of acquiring again
-    // This avoids lock cycles during query execution
     if (!attributeOpsCollection || !attributeOpsCollection->exists()) {
-        // Operations collection doesn't exist yet - this is expected on first load after restart
-        // Return an empty table in ReadWrite state so new rows can be added
+        // Operations collection doesn't exist yet. Return an empty table in ReadWrite state so
+        // new rows can be added
         auto readWriteStatus = table->changeState(AttributeTableState::ReadWrite);
         if (!readWriteStatus.isOK()) {
             return readWriteStatus;
@@ -460,15 +487,11 @@ StatusWith<std::unique_ptr<AttributeTable>> HCIndexReader::constructAttributeTab
     }
 
     // Transition the table to ReadWrite after reconstruction is complete.
-    // This allows the table to accept new data as the timeseries collection continues to receive
-    // new measurements. The table was in Reconstruction mode during the replay of operations,
-    // and now it's ready to accept new writes.
     auto readWriteStatus = table->changeState(AttributeTableState::ReadWrite);
     if (!readWriteStatus.isOK()) {
         return readWriteStatus;
     }
 
-    // Return the table (may be empty if no operations were found for this window)
     return std::move(table);
 }
 
@@ -488,10 +511,8 @@ StatusWith<std::unique_ptr<BitmapIndex>> HCIndexReader::constructBitmapIndex(
     }
 
     // Use the cached collection acquisition instead of acquiring again
-    // This avoids lock cycles during query execution
     if (!bitmapIndexCollection || !bitmapIndexCollection->exists()) {
-        // Bitmap index collection doesn't exist yet - this is expected on first load after restart
-        // Return an empty index in ReadWrite state so new entries can be added
+        // Bitmap index collection doesn't exist yet
         auto readWriteStatus = index->changeState(BitmapIndexState::ReadWrite);
         if (!readWriteStatus.isOK()) {
             return readWriteStatus;
@@ -534,7 +555,8 @@ StatusWith<std::unique_ptr<BitmapIndex>> HCIndexReader::constructBitmapIndex(
                         uint32_t symbolIndex = static_cast<uint32_t>(entry.getIntField("sym"));
 
                         // Check for compressed format (BinData) first, fall back to old format
-                        // (array of Longs)
+                        // (array of Longs). TODO remove the fallback once we have some unit/performance tests.
+                        // I needed this since I am comparing various index implementations.
                         BSONElement rowIdsElem = entry.getField("rowIds");
                         if (rowIdsElem && rowIdsElem.type() == BSONType::binData) {
                             // New format: delta-encoded BinData
@@ -543,7 +565,7 @@ StatusWith<std::unique_ptr<BitmapIndex>> HCIndexReader::constructBitmapIndex(
 
                             // Deserialize the Roaring64BTree
                             Roaring64BTree roaringBitmap =
-                                _deserializeRoaring64BTree(binData, binDataLen);
+                                deserializeRoaring64BTree(binData, binDataLen);
 
                             // Add all rowIds from the bitmap to the index
                             for (uint64_t rowId : roaringBitmap) {
@@ -574,9 +596,6 @@ StatusWith<std::unique_ptr<BitmapIndex>> HCIndexReader::constructBitmapIndex(
     }
 
     // Transition the index to ReadWrite after reconstruction is complete.
-    // This allows the index to accept new entries as the timeseries collection continues to
-    // receive new measurements. The index was in Reconstruction mode during the replay of
-    // operations, and now it's ready to accept new writes.
     auto readWriteStatus = index->changeState(BitmapIndexState::ReadWrite);
     if (!readWriteStatus.isOK()) {
         return readWriteStatus;
@@ -611,7 +630,7 @@ Status HCIndexReader::restoreForYield(OperationContext* opCtx) {
     return Status::OK();
 }
 
-Roaring64BTree HCIndexReader::_deserializeRoaring64BTree(const char* data, size_t size) const {
+Roaring64BTree HCIndexReader::deserializeRoaring64BTree(const char* data, size_t size) const {
     // Deserialize delta-encoded variable-length format
     // Format: [count:8][delta1:varint][delta2:varint]...
     //
@@ -620,7 +639,7 @@ Roaring64BTree HCIndexReader::_deserializeRoaring64BTree(const char* data, size_
     // - If MSB is 1, more bytes follow
     // - If MSB is 0, this is the last byte
     //
-    // This reverses the encoding done by HCIndexWriter::_serializeRoaring64BTree()
+    // This reverses the encoding done by HCIndexWriter::serializeRoaring64BTree()
 
     Roaring64BTree bitmap;
 

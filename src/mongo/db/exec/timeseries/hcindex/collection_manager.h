@@ -234,5 +234,6 @@ private:
     bool initializedForRead = false;
 };
 
+
 }  // namespace mongo::timeseries::hcindex
 
