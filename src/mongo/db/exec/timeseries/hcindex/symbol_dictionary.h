@@ -40,6 +40,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "mongo/util/string_map.h"
+
 namespace mongo::timeseries::hcindex {
 
 //- FORWARD DECLARATIONS
@@ -187,8 +189,8 @@ private:
     //- DATA
 
 
-    // Bidirectional mapping for symbols
-    std::unordered_map<std::string, uint32_t> _wordToIndex;
+    // Bidirectional mapping for symbols.
+    StringMap<uint32_t> _wordToIndex;
     std::vector<std::string> _indexToWord;
 
     // Next symbol index to assign (starts at 1, 0 is reserved)

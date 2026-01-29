@@ -306,6 +306,12 @@ size_t AttributeTable::getMemoryUsageBytes() const {
         totalBytes += fieldName.size();
     }
 
+    // Row hash map.
+    for (const auto& [hash, rowIds] : _rowHashToRowIds) {
+        totalBytes += sizeof(size_t) + rowIds.capacity() * sizeof(int64_t);
+    }
+    totalBytes += _rowHashToRowIds.bucket_count() * sizeof(void*);
+
     return totalBytes;
 }
 
@@ -368,6 +374,10 @@ StatusWith<int64_t> AttributeTable::insertRowDirect(const std::vector<uint32_t>&
         }
         _columns[colIdx].push_back(paddedRow[colIdx]);
     }
+
+    // Add to hash map for fast duplicate detection
+    size_t rowHash = computeRowHash(paddedRow);
+    _rowHashToRowIds[rowHash].push_back(rowId);
 
     return rowId;
 }
@@ -543,31 +553,41 @@ std::vector<int64_t> AttributeTable::queryRowsLeaf(const std::vector<uint32_t>& 
     return matchingRowIds;
 }
 
+size_t AttributeTable::computeRowHash(const std::vector<uint32_t>& row) {
+    // FNV-1a hash - fast and good distribution for integer sequences
+    size_t hash = 14695981039346656037ULL;  // FNV offset basis
+    for (uint32_t val : row) {
+        hash ^= static_cast<size_t>(val);
+        hash *= 1099511628211ULL;  // FNV prime
+    }
+    return hash;
+}
+
 boost::optional<int64_t> AttributeTable::findDuplicateRow(
     const std::vector<uint32_t>& row) const {
-
-    // TODO: This could use a good number of optimizations. A partitioned hashing could be simple
-    // one.
 
     if (_columns.empty()) {
         return boost::none;
     }
 
-    // Get row count from first column
-    size_t rowCount = _columns[0].size();
+    size_t rowHash = computeRowHash(row);
+    auto it = _rowHashToRowIds.find(rowHash);
+    if (it == _rowHashToRowIds.end()) {
+        return boost::none;
+    }
 
-    // Linear search through existing rows
-    for (size_t rowIdx = 0; rowIdx < rowCount; ++rowIdx) {
+    // Check each candidate row ID (handle hash collisions)
+    for (int64_t candidateRowId : it->second) {
         bool matches = true;
         for (size_t colIdx = 0; colIdx < row.size() && colIdx < _columns.size(); ++colIdx) {
-            if (_columns[colIdx][rowIdx] != row[colIdx]) {
+            if (_columns[colIdx][candidateRowId] != row[colIdx]) {
                 matches = false;
                 break;
             }
         }
 
         if (matches) {
-            return rowIdx;
+            return candidateRowId;
         }
     }
 

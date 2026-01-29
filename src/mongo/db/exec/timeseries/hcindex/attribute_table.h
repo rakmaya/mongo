@@ -35,6 +35,7 @@
 #include <map>
 #include <shared_mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "mongo/base/status_with.h"
@@ -318,9 +319,15 @@ private:
 
     /**
      * Internal method to check if a row with the same symbol indices already exists. Returns the
-     * row ID if found, or boost::none if not found.
+     * row ID if found, or boost::none if not found. Uses hash-based lookup for O(1) average case.
      */
     boost::optional<int64_t> findDuplicateRow(const std::vector<uint32_t>& row) const;
+
+    /**
+     * Return the computed hash value for a row vector. Used for fast duplicate detection.
+     * TODO: Add column index into the hash.
+     */
+    static size_t computeRowHash(const std::vector<uint32_t>& row);
 
     /**
      * Convert metadata BSON object to a row vector. For each field in the metadata, looks up the
@@ -375,6 +382,10 @@ private:
 
     // Map: field name -> column index (for fast lookups)
     std::map<std::string, size_t> _fieldToColumnIndex;
+
+    // Hash-based duplicate detection: maps row hash -> list of row IDs with that hash.
+    // Multiple row IDs per hash handle collisions (different rows with same hash).
+    std::unordered_map<size_t, std::vector<int64_t>> _rowHashToRowIds;
 
     // TODO: Allow exclusive and shared access mode. Currenly, we just do a full lock regardless of
     // the operation type.

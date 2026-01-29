@@ -65,7 +65,8 @@ SymbolDictionary::SymbolDictionary(
 boost::optional<uint32_t> SymbolDictionary::getSymbolIndex(StringData word) const {
     std::shared_lock<std::shared_mutex> lock(_mutex);
 
-    auto it = _wordToIndex.find(std::string(word));
+    // StringMap supports heterogeneous lookup with StringData - no allocation needed
+    auto it = _wordToIndex.find(word);
     if (it != _wordToIndex.end()) {
         return it->second;
     }
@@ -183,11 +184,16 @@ Status SymbolDictionary::changeState(SymbolDictionaryState newState) {
 }
 
 StatusWith<uint32_t> SymbolDictionary::getOrInsertSymbol(StringData word) {
+    {
+        std::shared_lock<std::shared_mutex> readLock(_mutex);
+        auto it = _wordToIndex.find(word);
+        if (it != _wordToIndex.end()) {
+            return it->second;
+        }
+    }
     std::unique_lock<std::shared_mutex> lock(_mutex);
-
-    std::string wordStr = std::string(word);
-
-    auto it = _wordToIndex.find(wordStr);
+    // Double-check after acquiring exclusive lock (another thread may have inserted)
+    auto it = _wordToIndex.find(word);
     if (it != _wordToIndex.end()) {
         return it->second;
     }
@@ -209,6 +215,8 @@ StatusWith<uint32_t> SymbolDictionary::getOrInsertSymbol(StringData word) {
         return Status(ErrorCodes::InternalError, "Dictionary in ReadWrite mode requires a writer");
     }
 
+    std::string wordStr{word};
+
     // In Reconstruction mode, we don't need a writer. In ReadWrite mode, we need to call the writer
 
     if (_state == SymbolDictionaryState::ReadWrite) {
@@ -223,9 +231,9 @@ StatusWith<uint32_t> SymbolDictionary::getOrInsertSymbol(StringData word) {
 
         uint32_t symbolIndex = _nextSymbolIndex++;
         _wordToIndex[wordStr] = symbolIndex;
-        _indexToWord.push_back(wordStr);
+        _indexToWord.push_back(std::move(wordStr));
 
-        if (!_writer->addSymbol(_windowStart, _windowEnd, wordStr, symbolIndex, HCIndexWriter::SymbolType::Base).isOK()) {
+        if (!_writer->addSymbol(_windowStart, _windowEnd, _indexToWord.back(), symbolIndex, HCIndexWriter::SymbolType::Base).isOK()) {
             return Status(ErrorCodes::InternalError, "Could not add symbol to writer");
         }
 
@@ -234,7 +242,7 @@ StatusWith<uint32_t> SymbolDictionary::getOrInsertSymbol(StringData word) {
         // Reconstruction mode: just insert without invoking the writer
         uint32_t symbolIndex = _nextSymbolIndex++;
         _wordToIndex[wordStr] = symbolIndex;
-        _indexToWord.push_back(wordStr);
+        _indexToWord.push_back(std::move(wordStr));
         return symbolIndex;
     }
 }
