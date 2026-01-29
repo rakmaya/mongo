@@ -50,8 +50,8 @@ namespace mongo::timeseries::hcindex {
 /**
  * Result of constructing a symbol dictionary from operations. It will
  * either contain a base dictionary or a delta dictionary.
- * TODO: Construction semantics for Dictionary could be eiether completely
- * moved into the Reader or the Dictionary.
+ * TODO: Construction semantics for Dictionary could be moved either completely
+ * into the Reader or into the Dictionary.
  */
 struct SymbolDictionaryConstructionResult {
     // The base dictionary
@@ -67,7 +67,7 @@ struct SymbolDictionaryConstructionResult {
     bool isDelta() const;
 
     // Returns the dictionary as an ISymbolDictionary pointer
-    ISymbolDictionary* getDictionary();
+    ISymbolDictionary* getDictionary() const;
 };
 
 
