@@ -47,7 +47,7 @@ bool SymbolDictionaryConstructionResult::isDelta() const {
     return deltaDictionary != nullptr;
 }
 
-ISymbolDictionary* SymbolDictionaryConstructionResult::getDictionary() {
+ISymbolDictionary* SymbolDictionaryConstructionResult::getDictionary() const {
     if (deltaDictionary) {
         return deltaDictionary.get();
     }

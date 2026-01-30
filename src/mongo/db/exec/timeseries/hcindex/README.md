@@ -124,216 +124,107 @@ This approach is superior to building all-encompassing indexes upfront because
   - Indexes only exist where they are useful
   - Sparse data doesn't create bloated indexes
 
-## Test Case - Merchant Transactions
+## Performance Tests - Time Series Benchmark Suite
 
-Merchant Transactions dataset contains generated synthetic data for
-transactions across merchants. This is a scenario where most transactions are
-unique when we factor order number into account. Final writes are written in
-batches. This is reasonable assumption since in extremly high volume use-cases
-there is usually an aggregator or collector layer that batches the db writes.
-Low/Medium volume will do streaming writes (Test 2 below)
+Time Series Benchmark Suite is a set of performance tests that are designed to
+emulate real-world workloads. It is used by many teams that deals with
+timeseries data to justify the technology choices to their CTO/CIO.
 
-### Why is this a good test case?
+### Ingestion Throughput (Rows/second)
+Each row will have a number of metrics depending on the test cases.
 
-- High cardinality metadata
-- Large number of unique transactions
-- Use of Dimensional analytics (e.g. "What is the total sales for all
-  McDonalds in New York?")
+**Ingester Settings**
+Using 1 worker/1 shard
+Insert Batch Size: 1000
 
-| Parameter    | Unique Values | Notes                                   |
-| ------------ | ------------- | --------------------------------------- |
-| Chains       | 10            | McDonals etc..                          |
-| Merchant Id  | 10            | Denotes a specific store within a chain |
-| Cities       | 12            | New York, San Francisco etc..           |
-| Product Type | 4             | Sandwiches, Drinks, Combos, Dessert     |
-| Product Item | 10            | Chicken Sandwich, Coke etc..            |
-| Order Status | 2             | COMPLETE, FAILED                        |
-| Order Number | XX            | Unique order number per merchant        |
+| Test Case | System | MongoDB TS | MongoDB TS + HCIndex | TimescaleDB | Clickhouse |
+| --- | --- | --- | --- | --- | --- |
+| DevOps | M1 Max | 28.3K - 28.7K | 72.2-72.8K | 68.9K - 82.2K | 26.2K - 26.8K |
+| E-Commerce | M1 Max | 8.9K - 9.4K | 31.4 - 31.6K | 26.6K - 27.0K | 57.1K - 61.2K|
 
+Notes: - TimescaleDB does a unique-data indexing across all the tags (similar to
+MongoDB's timeseries). It also generates rudimentary indexes for exact match
+lookups. This maps squarely to what HCIndex does. TimescaleDB scales well across
+reasonably useful cardinality size, but does poorly as cardinality gets into the
+high range. Clickhouse is the exact opposite (in most cases). It does extremly
+well for extreme high-cardinality cases, but does poorly for high volume
+datasets that falls into a small number of "chunks" (buckets).  The MergeTree
+optimization in Clickhouse shows its power here since it does not have to sort
+the high-cardinality data during ingestion. This is very similar to what HCIndex
+does since it excludes all indexing for data that falls on both density
+extremes. Note that this is purely from the single-node perspective. Behaviors
+change when we move to multi-node clusters where TimescaleDB closes the gap with
+Clickhouse on the extreme high-cardinality from the ingestion side. However it
+does so by sacrificing query fan-out performance.
 
-### Test 1 - 40K Unique Transactions - Batched
+#### E-Commerce Dataset ####
+Simulates a random user's order being ingested into the database where there is
+at least 1 order every 50ms.
 
-This emulates a scenario where we have a large number of unique transactions,
-but each transaction is relatively small set of fields. This is a common
-scenario in e-commerce.
-
-Batch size: 1000
-
-| Ingestion    | HC Index Enabled | Regular Collection |
-| ------------ | ---------------- | ------------------ |
-| M1 Max (OPT) | 502 ms           | 3.0 sec            |
-| M3 Max (OPT) | 352 ms           | 2.1 sec            |
-
-| Component                     | HC Index Enabled    | Regular Collection   |
-| ----------------------------- | ------------------- | -------------------- |
-| Symbol Dictionary size        | 16,086 bytes        | -                    |
-| Symbol Dictionary storageSize | 24,576 bytes        | -                    |
-| Symbol Dictionary totalSize   | 24,576 bytes        | -                    |
-| Attribute Table size          | 2,363,553 bytes     | -                    |
-| Attribute Table storageSize   | 749,568 bytes       | -                    |
-| Attribute Table totalSize     | 749,568 bytes       | -                    |
-| Inverted Bitmap size          | 334,122 bytes       | -                    |
-| Inverted Bitmap storageSize   | 237,568 bytes       | -                    |
-| Inverted Bitmap totalSize     | 237,568 bytes       | -                    |
-| Bucket Collection size        | 226,966 bytes       | 20,543,939 bytes     |
-| Bucket Collection storageSize | 221,184 bytes       | 2,244,608 bytes      |
-| Bucket Collection totalSize   | 221,184 bytes       | 7,413,760 bytes      |
-| **Total Size**                | **2,940,966 bytes** | **20,543,939 bytes** |
-| **Total storageSize**         | **1,232,896 bytes** | **2,244,608 bytes**  |
-| **Total totalSize**           | **1,232,896 bytes** | **2,244,608 bytes**  |
-
-
-### Test 2 - 40K Unique Transactions - Streaming
-
-This simulates the use-case where the user is writing to db as the events
-comes. Current implementation of bitmap index and attribute table is not
-optimized to buffer internally (More on this later).
-
-
-| Ingestion    | HC Index Enabled | Regular Collection |
-| ------------ | ---------------- | ------------------ |
-| M1 Max (OPT) | 5.5 sec           | 7.66 sec            |
-| M3 Max (OPT) | TBD sec           | TBD sec            |
-
-
-
-| Component                     | HC Index Enabled    | Regular Collection   |
-| ----------------------------- | ------------------- | -------------------- |
-| Symbol Dictionary size        | 138,486 bytes        | -                    |
-| Symbol Dictionary storageSize | 40,960 bytes        | -                    |
-| Symbol Dictionary totalSize   | 40,960 bytes        | -                    |
-| Attribute Table size          | 7,602,313 bytes     | -                    |
-| Attribute Table storageSize   | 1,376,256 bytes       | -                    |
-| Attribute Table totalSize     | 1,376,256 bytes       | -                    |
-| Inverted Bitmap size          | 13,275,383 bytes       | -                    |
-| Inverted Bitmap storageSize   | 1,945,600 bytes       | -                    |
-| Inverted Bitmap totalSize     | 1,945,600 bytes       | -                    |
-| Bucket Collection size        | 160,923 bytes       | 20,543,939 bytes     |
-| Bucket Collection storageSize | 155,648 bytes       | 2,244,608 bytes      |
-| Bucket Collection totalSize   | 155,648 bytes       | 7,421,952 bytes      |
-| **Total Size**                | **21,177,105 bytes** | **20,543,989 bytes** |
-| **Total storageSize**         | **3,518,464 bytes** | **2,244,608 bytes**  |
-| **Total totalSize**           | **3,518,464 bytes** | **7,421,952 bytes**  |
-
-
-
-
-## Test Case - Observability Metrics - Platform Metrics
-
-Observability metrics represent one of the highest-volume workloads in modern infrastructure monitoring. This test case simulates a realistic cloud platform deployment with metrics from multiple subsystems (compute, network, disk, application, database) across a distributed infrastructure.
-
-### Why is this a good test case?
-
-**Volume Characteristics:**
-
-- **Burst writes**: Metrics arrive in synchronized bursts every 10 seconds from all hosts
-- **Multiple metric streams**: Each host emits 4-5 separate metric documents per interval (system, disk, network_rx, network_tx, and optionally application/database)
-- **Batch ingestion**: All metrics for a time interval are written together, mimicking real-world aggregation pipelines (Prometheus, Datadog, etc.)
-
-**Cardinality Characteristics:**
-
-- **Moderate per-interval cardinality**: When examining a 10-second window, cardinality is manageable (~500-2000 unique combinations)
-- **Exploding temporal cardinality**: Over hours/days, cardinality explodes due to:
-  - Container restarts generating new container IDs
-  - Auto-scaling creating/destroying pods
-  - Rolling deployments changing pod names
-  - Database table metrics (25 tables × N postgres instances)
-- **Multi-dimensional filtering**: Queries often filter on combinations like `region=us-east-1 AND service=api-gateway AND environment=production`
-
-**Real-World Patterns:**
-
-- **Ephemeral infrastructure**: Kubernetes pods and containers are short-lived, causing continuous churn in metadata values
-- **Table-level database metrics**: Postgres service emits per-table metrics (read/write requests, row counts) for 25 tables, significantly increasing cardinality
-- **Time-of-day patterns**: CPU and request metrics vary by hour (business hours vs off-hours)
-- **Service-specific metadata**: Different namespaces and services have different metric patterns
-
-### Dataset Configuration
-
-| Dimension              | Unique Values | Notes                                                          |
-| ---------------------- | ------------- | -------------------------------------------------------------- |
-| **Regions**            | 3             | us-east-1, us-west-2, eu-west-1                                |
-| **Availability Zones** | 9             | 3 per region (e.g., us-east-1a, us-east-1b, us-east-1c)        |
-| **Environments**       | 3             | production, staging, development                               |
-| **Services**           | 16            | api-gateway, user-service, postgres, redis, etc.               |
-| **Namespaces**         | 7             | default, backend, database, cache, messaging, ingress, logging |
-| **Hosts**              | ~470          | 3-10 replicas per service (simulates auto-scaling)             |
-| **Containers**         | Dynamic       | New ID on each restart (5% chance per hour)                    |
-| **Clusters**           | 9             | Generated from region + environment (e.g., prod-cluster-01)    |
-| **Metric Types**       | 6             | system, disk, network_rx, network_tx, application, database    |
-| **Database Tables**    | 25            | users, orders, products, etc. (postgres only)                  |
-
-**Estimated Documents per Interval (10s):**
-
-- Base metrics (system, disk, network_rx, network_tx): `470 hosts × 4 = 1,880 docs`
-- Application metrics (default/backend/ingress namespaces): `~150 hosts × 1 = 150 docs`
-- Database metrics (postgres service with 25 tables): `~N postgres hosts × 25 = 25N docs`
-- **Total**: ~2,030+ documents per 10-second interval
-
-**Data Generation:**
-
-```sh
-# Generate 1 hour of metrics (360 intervals)
-python load_observability.py --hours 1 --interval 10 --hcindex
-
-# Dry-run to preview data structure
-python load_observability.py --dry-run --hours 0.1 --interval 10
+```text
+Number of rows: 71,980
+Number of total metrics: 1,223,660
+Simulation Parameters:
+  - seed: 123
+  - scale: 1,000,000
+  - interval: 50ms
+  - window: 1 hour (2025-01-23 09:00:00 to 2025-01-23 09:59:59)
 ```
 
+1. IDENTIFICATION TAGS (Unique per order)
+   - order_id: 71,980 unique
+   - session_id: 71,980 unique
+   - cart_id: 71,980 unique
+2. CUSTOMER TAGS
+   - user_id: 63,567 unique (out of scale=1,000,000 possible)
+   - Only ~6.4% of users made purchases in this 1-hour window
+   - user_segment: 5 (VIP, at_risk, dormant, new, returning)
+   - customer_tier: 4 (bronze, gold, platinum, silver)
+   - is_first_order: 2 (true, false)
+3. TEMPORAL TAGS
+   - order_date: 1 (only 2025-01-23) - ( b/c of 1-hour simulation range)
+   - order_hour: 1 (only hour 9) - (b/c of 1-hour simulation range)
+   - day_of_week: 1 (only Friday) - (b/c of 1-hour simulationrange)
+   - is_weekend: 1 (only false) - (b/c of 1-hour simulation range)
+   - is_holiday: 2 (true, false)
+   - fiscal_quarter: 1 (only Q1) - (b/c of 1-hour simulation range)
+   - season: 1 (only winter) (b/c of 1-hour simulation time range)
+4. GEOGRAPHIC TAGS
+   - country: 7 (AU, CA, DE, FR, JP, UK, US)
+   - region: 7 (east, midwest, northeast, pacific, south, southwest, west)
+5. CHANNEL TAGS
+   - sales_channel: 5 (in_store, marketplace, mobile_app, phone, web)
+   - platform: 4 (Android, iOS, web_desktop, web_mobile)
+   - device_type: 3 (desktop, mobile, tablet)
+   - browser: 5 (Chrome, Edge, Firefox, Opera, Safari)
+   - referral_source: 6 (affiliate, direct, email, organic, paid_search, social)
+   - campaign_id: 50 (campaign_0 to campaign_49)
+6. PRODUCT TAGS
+   - primary_category: 10 (automotive, beauty, books, clothing, electronics, grocery, health, home, sports, toys)
+   - primary_subcategory: 100 (subcat_0 to subcat_99)
+   - primary_brand: 200 (brand_0 to brand_199)
+   - primary_product_id: 71,443
+   - product_count: 5 (1-5 products per order)
+   - has_multiple_categories: 2 (true, false)
+7. STATUS TAGS
+   - order_status: 7 (cancelled, confirmed, delivered, pending, processing, returned, shipped)
 
-## Test Case - Financial Market Data
-
-Record Count: 1,340,000 (rounded down to nearest 10k since simulation
-randomizes parameters)
-
-
-| Ingestion    | HC Index Enabled | Regular Collection |
-| ------------ | ---------------- | ------------------ |
-| M1 Max (OPT) | 14.4 sec           | 36.8 sec            |
-| M3 Max (OPT) | TBD sec           | TBD sec            |
-
-
-Common observability queries that filter on metadata dimensions:
-
-**Query 1: Single service health**
-
-```javascript
-db.observability_hc.find({
-  "metadata.service": "api-gateway",
-  "metadata.region": "us-east-1",
-  "metadata.environment": "production",
-  timestamp: {
-    $gte: ISODate("2026-01-14T06:00:00Z"),
-    $lt: ISODate("2026-01-14T07:00:00Z"),
-  },
-});
+#### DevOps Dataset ####
+Simulates a number of metrics across various dimensions generated, every 30 seconds.
+```text
+Number of rows: 107,100
+Number of total metrics: 1,201,900
+Simulation Parameters:
+  - seed: 123
+  - scale: 100
+  - interval: 30s
+  - window: 1 hour (2025-01-23 09:00:00 to 2025-01-23 09:59:59)
 ```
 
-**Query 2: Database table-specific metrics**
+### Query Performance
+**TODO**: Once we have the PlanStage extraction. Reference implementation does not have
+the optimization to scan the AttributeTable (needs to unpack the buckets).
 
-```javascript
-db.observability_hc.find({
-  "metadata.service": "postgres",
-  "metadata.table_name": "users",
-  "metadata.metric_type": "database",
-  timestamp: {
-    $gte: ISODate("2026-01-14T06:00:00Z"),
-    $lt: ISODate("2026-01-14T07:00:00Z"),
-  },
-});
-```
-
-**Query 3: Cross-region application metrics**
-
-```javascript
-db.observability_hc.find({
-  "metadata.metric_type": "application",
-  "metadata.environment": "production",
-  timestamp: {
-    $gte: ISODate("2026-01-14T06:00:00Z"),
-    $lt: ISODate("2026-01-14T07:00:00Z"),
-  },
-});
-```
 
 ## High level design
 
