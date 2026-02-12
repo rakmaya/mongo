@@ -29,15 +29,24 @@
 
 #include "mongo/db/exec/timeseries/hcindex/attribute_table.h"
 
+#include <chrono>
+#include <cstdlib>
 #include <set>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/db/exec/timeseries/hcindex/bitmap_index.h"
+#include "mongo/db/exec/timeseries/hcindex/gpu/gpu_attribute_table.h"
 #include "mongo/db/exec/timeseries/hcindex/writer.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/update/path_support.h"
+#include "mongo/logv2/log.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 namespace mongo::timeseries::hcindex {
+
+// Static variable definition - force CPU path for benchmarking
+bool AttributeTable::_forceCpuPath = (std::getenv("MONGO_HCINDEX_FORCE_CPU") != nullptr);
 
                         // --------------------
                         // class AttributeTable
@@ -60,6 +69,8 @@ AttributeTable::AttributeTable(ISymbolDictionary* symbolDictionary,
       _windowStart(windowStart),
       _windowEnd(windowEnd) {
 }
+
+AttributeTable::~AttributeTable() = default;
 
 
 //- ACCESSORS
@@ -343,6 +354,9 @@ StatusWith<InsertRowResult> AttributeTable::insertRow(const BSONObj& metadata) {
         return insertResult.getStatus();
     }
 
+    // Mark GPU data as stale since we've added a new row
+    _gpuDataStale = true;
+
     return InsertRowResult{
         insertResult.getValue(), true, prevSchemaSize != _schema.size(), this, row};
 }
@@ -486,13 +500,86 @@ std::vector<int64_t> AttributeTable::queryRowsLeaf(const std::vector<uint32_t>& 
         return matchingRowIds;
     }
 
-    // Iterate through each column with a predicate (column-major order) and
-    // use bitmapIndex whereever possible to filter rows.
-    // TODO: Depending on the size of the table, density of the column and
-    // previous query statistics, an SIMD/AVX optimized full-scan would be
-    // much faster than bitmap index lookups.
-
     size_t rowCount = _columns[0].size();
+
+    // Count non-zero predicates
+    size_t numPredicates = 0;
+    for (uint32_t sym : refRowVec) {
+        if (sym != 0) {
+            ++numPredicates;
+        }
+    }
+
+    // First, identify which predicate columns lack a bitmap index (need full scan)
+    // These are candidates for GPU acceleration
+    std::vector<size_t> columnsNeedingScan;
+    for (size_t colIdx = 0; colIdx < refRowVec.size(); ++colIdx) {
+        uint32_t expectedSymbol = refRowVec[colIdx];
+        if (expectedSymbol == 0) {
+            continue;  // Not part of predicate
+        }
+        if (colIdx >= _columns.size()) {
+            continue;  // Column doesn't exist
+        }
+        // Check if this column has a bitmap index
+        if (bitmapIndex == nullptr || !bitmapIndex->hasIndexForColumn(colIdx)) {
+            columnsNeedingScan.push_back(colIdx);
+        }
+    }
+
+    bool gpuWouldHelp = !columnsNeedingScan.empty() && shouldUseGpu(rowCount, numPredicates);
+
+    /*
+    LOGV2(9999992, "HCIndex: GPU check",
+          "columnsNeedingScan"_attr = columnsNeedingScan.size(),
+          "gpuWouldHelp"_attr = gpuWouldHelp,
+          "forceCpuPath"_attr = _forceCpuPath,
+          "rowCount"_attr = rowCount,
+          "numPredicates"_attr = numPredicates,
+          "hasGpuTable"_attr = (_gpuTable != nullptr),
+          "gpuAvailable"_attr = (_gpuTable ? _gpuTable->isGpuAvailable() : false),
+          "gpuDataStale"_attr = _gpuDataStale);
+    */
+
+    // GPU acceleration: Only use GPU if:
+    // 1. There are columns without bitmap indexes (need full scan)
+    // 2. GPU would help (table large enough, reasonable predicate count)
+    // 3. GPU data is ALREADY uploaded (to avoid blocking during query)
+    // 4. Not forcing CPU path for benchmarking
+    if (gpuWouldHelp && !_forceCpuPath) {
+        if (_gpuTable && _gpuTable->isGpuAvailable() && !_gpuDataStale) {
+            /*
+            LOGV2(9999992, "HCIndex: OPTIMIZATION - using GPU for query",
+                  "rowCount"_attr = rowCount,
+                  "numPredicates"_attr = numPredicates,
+                  "columnsNeedingScan"_attr = columnsNeedingScan.size());
+            */
+
+            // Time GPU execution
+            auto gpuStart = std::chrono::high_resolution_clock::now();
+            auto gpuResult = queryRowsLeafGpu(refRowVec);
+            auto gpuEnd = std::chrono::high_resolution_clock::now();
+            auto gpuMicros = std::chrono::duration_cast<std::chrono::microseconds>(gpuEnd - gpuStart).count();
+
+            LOGV2(9999991, "HCIndex: GPU query completed",
+                  "durationMicros"_attr = gpuMicros,
+                  "rowCount"_attr = rowCount,
+                  "matchCount"_attr = gpuResult.size());
+
+            return gpuResult;
+        }
+        // GPU not ready - fall through to CPU path
+        // Mark that GPU upload should be triggered after query completes
+        LOGV2(9999992, "HCIndex: GPU not ready, marking for deferred upload",
+              "columnsNeedingScan"_attr = columnsNeedingScan.size());
+        _gpuUploadNeeded = true;
+    }
+
+    // Time CPU execution
+    auto cpuStart = std::chrono::high_resolution_clock::now();
+
+    // CPU path: Iterate through each column with a predicate (column-major order)
+    // and use bitmapIndex wherever possible to filter rows.
     std::vector<bool> rowMatches(rowCount, true);
 
     for (size_t colIdx = 0; colIdx < refRowVec.size(); ++colIdx) {
@@ -549,6 +636,15 @@ std::vector<int64_t> AttributeTable::queryRowsLeaf(const std::vector<uint32_t>& 
             matchingRowIds.push_back(rowIdx);
         }
     }
+
+    auto cpuEnd = std::chrono::high_resolution_clock::now();
+    auto cpuMicros = std::chrono::duration_cast<std::chrono::microseconds>(cpuEnd - cpuStart).count();
+
+    LOGV2(9999991, "HCIndex: CPU query completed",
+          "durationMicros"_attr = cpuMicros,
+          "rowCount"_attr = rowCount,
+          "matchCount"_attr = matchingRowIds.size(),
+          "usedBitmapIndex"_attr = (bitmapIndex != nullptr));
 
     return matchingRowIds;
 }
@@ -723,6 +819,123 @@ Status AttributeTable::writeRow(const std::vector<uint32_t>& row) {
 
     // Defense: should never reach here
     return Status::OK();
+}
+
+
+//- GPU ACCELERATION
+
+
+bool AttributeTable::prepareGpuTable() const {
+    // This is the public method to be called during initialization/idle time
+    ensureGpuTableUploaded();
+    return _gpuTable && _gpuTable->isGpuAvailable() && !_gpuDataStale;
+}
+
+
+void AttributeTable::triggerDeferredGpuUploadIfNeeded() const {
+    // Check if GPU upload was requested during a query
+    if (_gpuUploadNeeded) {
+        _gpuUploadNeeded = false;  // Reset flag
+        LOGV2(9999991, "HCIndex: Triggering deferred GPU upload after query completion");
+        ensureGpuTableUploaded();
+    }
+}
+
+
+void AttributeTable::ensureGpuTableUploaded() const {
+    // Only attempt upload once
+    if (_gpuUploadAttempted && !_gpuDataStale) {
+        LOGV2(9999991, "HCIndex: GPU upload already attempted, skipping");
+        return;
+    }
+
+    _gpuUploadAttempted = true;
+
+    // Create GPU table if not exists
+    if (!_gpuTable) {
+        _gpuTable = std::make_unique<gpu::GpuAttributeTable>();
+        LOGV2(9999991, "HCIndex: Created GPU table",
+              "backendName"_attr = _gpuTable->getDeviceInfo().name);
+    }
+
+    // Check if GPU is available
+    if (!_gpuTable->isGpuAvailable()) {
+        LOGV2(9999991, "HCIndex: GPU not available, skipping upload",
+              "backendName"_attr = _gpuTable->getDeviceInfo().name);
+        return;
+    }
+
+    // Upload current data to GPU
+    LOGV2(9999991, "HCIndex: Uploading data to GPU...",
+          "rowCount"_attr = _columns.empty() ? 0 : _columns[0].size(),
+          "columnCount"_attr = _columns.size());
+
+    _gpuTable->uploadFromCpu(_columns);
+    _gpuDataStale = false;
+
+    LOGV2(9999991,
+          "HCIndex: Successfully uploaded AttributeTable to GPU",
+          "rowCount"_attr = _columns.empty() ? 0 : _columns[0].size(),
+          "columnCount"_attr = _columns.size(),
+          "device"_attr = _gpuTable->getDeviceInfo().name);
+}
+
+
+bool AttributeTable::shouldUseGpu(size_t rowCount, size_t numPredicates) const {
+    // Heuristics for when GPU is beneficial:
+    // 1. Table must be large enough to amortize GPU overhead
+    // 2. Simple predicates work best (equality on single columns)
+    // 3. Not too many predicates (GPU AND chain has overhead)
+
+    // Minimum rows to consider GPU (tunable based on benchmarks)
+    constexpr size_t kMinRowsForGpu = 10000;
+
+    // Maximum predicates for GPU (beyond this, CPU may be faster)
+    constexpr size_t kMaxPredicatesForGpu = 10;
+
+    // Must have predicates and rows
+    if (numPredicates == 0 || rowCount == 0) {
+        return false;
+    }
+
+    // GPU beneficial for large tables with reasonable predicate count
+    return rowCount >= kMinRowsForGpu && numPredicates <= kMaxPredicatesForGpu;
+}
+
+
+std::vector<int64_t> AttributeTable::queryRowsLeafGpu(
+    const std::vector<uint32_t>& refRowVec) const {
+
+    // Convert AttributeTablePredicate format to GPU predicate format
+    std::vector<gpu::GpuColumnPredicate> gpuPredicates;
+
+    for (size_t colIdx = 0; colIdx < refRowVec.size(); ++colIdx) {
+        uint32_t expectedSymbol = refRowVec[colIdx];
+
+        // 0 means not part of predicate
+        if (expectedSymbol == 0) {
+            continue;
+        }
+
+        // Skip if column doesn't exist (no rows can match)
+        if (colIdx >= _columns.size()) {
+            return {};  // No matches possible
+        }
+
+        // Add equality predicate for this column
+        gpuPredicates.push_back({
+            colIdx,
+            gpu::PredicateOp::EQ,
+            expectedSymbol
+        });
+    }
+
+    if (gpuPredicates.empty()) {
+        return {};
+    }
+
+    // Execute filter on GPU
+    return _gpuTable->filter(gpuPredicates);
 }
 
 

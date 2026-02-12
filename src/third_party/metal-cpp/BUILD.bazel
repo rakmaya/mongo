@@ -1,0 +1,28 @@
+load("//bazel:mongo_src_rules.bzl", "mongo_cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+# Apple's Metal-cpp is a header-only C++ wrapper for Metal.
+# It provides C++ interfaces to the Metal, Foundation, and QuartzCore frameworks.
+#
+# This library is only usable on macOS/iOS.
+# See: https://developer.apple.com/metal/cpp/
+
+mongo_cc_library(
+    name = "metal_cpp",
+    hdrs = glob([
+        "Foundation/*.hpp",
+        "Metal/*.hpp",
+        "MetalFX/*.hpp",
+        "QuartzCore/*.hpp",
+    ]),
+    copts = [
+        "-std=c++17",
+    ],
+    includes = ["."],
+    linkopts = [
+        "-framework", "Metal",
+        "-framework", "Foundation",
+    ],
+)
+

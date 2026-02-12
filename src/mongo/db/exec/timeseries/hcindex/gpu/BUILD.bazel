@@ -1,0 +1,101 @@
+load("//bazel:mongo_src_rules.bzl", "mongo_cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+# GPU support is optional and controlled via build flags.
+# To enable GPU support, build with: --define=gpu=hip or --define=gpu=cuda
+#
+# When GPU is disabled (default), this library provides stub implementations.
+
+config_setting(
+    name = "gpu_hip",
+    define_values = {"gpu": "hip"},
+)
+
+config_setting(
+    name = "gpu_cuda",
+    define_values = {"gpu": "cuda"},
+)
+
+config_setting(
+    name = "gpu_disabled",
+    define_values = {"gpu": ""},
+)
+
+# Header-only GPU abstraction layer (always available)
+mongo_cc_library(
+    name = "gpu_headers",
+    hdrs = [
+        "gpu_backend.h",
+        "gpu_buffer.h",
+        "gpu_common.h",
+        "gpu_device.h",
+        "gpu_error.h",
+    ],
+    deps = [
+        "//src/mongo:base",
+    ],
+)
+
+# GPU backend abstraction - provides factory for creating backends
+# On macOS, includes the Metal backend using Metal-cpp (pure C++ wrapper)
+mongo_cc_library(
+    name = "gpu_backend",
+    srcs = [
+        "gpu_backend.cpp",
+    ],
+    hdrs = [
+        "gpu_backend.h",
+    ],
+    copts = [
+        "-DMONGO_CONFIG_GPU_METAL",
+    ],
+    deps = [
+        ":gpu_headers",
+        "//src/mongo/db/exec/timeseries/hcindex/gpu/backends:null_backend",
+        "//src/mongo/db/exec/timeseries/hcindex/gpu/backends:metal_backend",
+    ],
+)
+
+# GPU AttributeTable implementation
+# When GPU is disabled, this provides stub implementations
+mongo_cc_library(
+    name = "gpu_attribute_table",
+    srcs = [
+        "gpu_attribute_table.cpp",
+    ],
+    hdrs = [
+        "gpu_attribute_table.h",
+    ],
+    copts = [
+        "-DMONGO_CONFIG_GPU_METAL",
+    ],
+    deps = [
+        ":gpu_backend",
+        ":gpu_headers",
+    ],
+)
+
+# Combined GPU library for HCIndex
+mongo_cc_library(
+    name = "hcindex_gpu",
+    deps = [
+        ":gpu_attribute_table",
+        ":gpu_backend",
+        ":gpu_headers",
+    ],
+)
+
+# NOTE: The HIP kernel file (kernels/filter_kernels.hip) requires a custom
+# build rule that invokes hipcc. This is not yet integrated into MongoDB's
+# Bazel build system.
+#
+# To build with GPU support on AMD:
+#   1. Install ROCm and ensure hipcc is in PATH
+#   2. Compile kernels manually or add custom HIP rules to Bazel
+#   3. Link the compiled kernel object files
+#
+# Example manual compilation:
+#   hipcc -c kernels/filter_kernels.hip -o filter_kernels.o \
+#         -I/path/to/mongo -DMONGO_CONFIG_GPU_HIP
+

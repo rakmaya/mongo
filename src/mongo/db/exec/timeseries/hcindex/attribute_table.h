@@ -33,6 +33,7 @@
 
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <shared_mutex>
 #include <string>
 #include <unordered_map>
@@ -49,6 +50,11 @@
 namespace mongo {
 class MatchExpression;
 }  // namespace mongo
+
+// Forward declaration for GPU support
+namespace mongo::timeseries::hcindex::gpu {
+class GpuAttributeTable;
+}  // namespace mongo::timeseries::hcindex::gpu
 
 namespace mongo::timeseries::hcindex {
 
@@ -197,6 +203,12 @@ public:
                    const Timestamp& windowStart = Timestamp(),
                    const Timestamp& windowEnd = Timestamp());
 
+    /**
+     * Destructor - must be declared here and defined in .cpp because of unique_ptr
+     * to forward-declared GpuAttributeTable.
+     */
+    ~AttributeTable();
+
 
     //- ACCESSORS
 
@@ -303,6 +315,20 @@ public:
      */
     void flush();
 
+    /**
+     * Prepares the GPU table for accelerated queries by uploading data to GPU memory.
+     * This should be called during initialization or idle time, NOT during query execution.
+     * Returns true if GPU is available and data was uploaded successfully.
+     */
+    bool prepareGpuTable() const;
+
+    /**
+     * Checks if GPU upload was requested during a query (because GPU would be beneficial
+     * but data wasn't uploaded yet). If so, triggers the upload for future queries.
+     * This should be called AFTER query execution completes (outside of lock scope).
+     */
+    void triggerDeferredGpuUploadIfNeeded() const;
+
 
 private:
 
@@ -390,6 +416,43 @@ private:
     // TODO: Allow exclusive and shared access mode. Currenly, we just do a full lock regardless of
     // the operation type.
     mutable std::shared_mutex _mutex;
+
+    //- GPU ACCELERATION
+
+    // GPU-accelerated table (optional, created on-demand when beneficial).
+    // Uses Metal on Apple Silicon, HIP on AMD/NVIDIA, or NullBackend if no GPU.
+    mutable std::unique_ptr<gpu::GpuAttributeTable> _gpuTable;
+
+    // Whether we've attempted to upload to GPU (to avoid repeated failed attempts)
+    mutable bool _gpuUploadAttempted = false;
+
+    // Whether GPU data is stale and needs re-upload (set when rows are inserted)
+    mutable bool _gpuDataStale = true;
+
+    // Whether GPU upload should be triggered after query completes (set during query
+    // when GPU would be beneficial but data isn't uploaded yet)
+    mutable bool _gpuUploadNeeded = false;
+
+    // Force CPU path for benchmarking (set via MONGO_HCINDEX_FORCE_CPU env var)
+    static bool _forceCpuPath;
+
+    /**
+     * Ensures GPU table is uploaded with current data if GPU is available and beneficial.
+     * This is a lazy initialization - only uploads on first query that would benefit.
+     */
+    void ensureGpuTableUploaded() const;
+
+    /**
+     * Returns true if GPU should be used for the given query parameters.
+     * Uses heuristics based on row count and predicate complexity.
+     */
+    bool shouldUseGpu(size_t rowCount, size_t numPredicates) const;
+
+    /**
+     * GPU-accelerated version of queryRowsLeaf. Returns row IDs matching the predicate.
+     * Caller must ensure GPU table is uploaded before calling.
+     */
+    std::vector<int64_t> queryRowsLeafGpu(const std::vector<uint32_t>& refRowVec) const;
 };
 
 

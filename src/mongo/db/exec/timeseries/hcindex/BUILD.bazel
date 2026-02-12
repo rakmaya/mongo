@@ -37,6 +37,7 @@ mongo_cc_library(
         "//src/mongo/bson:bson_validate",
         "//src/mongo/db:service_context",
         "//src/mongo/db:shard_role_api",
+        "//src/mongo/db/exec/timeseries/hcindex/gpu:gpu_attribute_table",
         "//src/mongo/db/timeseries:timeseries_options",
     ],
 )

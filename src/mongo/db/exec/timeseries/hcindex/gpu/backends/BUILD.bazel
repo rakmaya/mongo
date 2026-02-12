@@ -1,0 +1,55 @@
+load("//bazel:mongo_src_rules.bzl", "mongo_cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+# Null backend (stub implementation when no GPU is available)
+# Header-only library - no dependencies on gpu_headers to avoid cycles
+mongo_cc_library(
+    name = "null_backend",
+    hdrs = [
+        "null_backend.h",
+    ],
+    deps = [
+        "//src/mongo:base",
+    ],
+)
+
+# HIP backend for AMD GPUs (ROCm)
+# This library is only built when GPU support is enabled
+# and requires the HIP SDK to be installed
+mongo_cc_library(
+    name = "hip_backend",
+    hdrs = [
+        "hip_backend.h",
+    ],
+    # srcs conditionally included when building with HIP support
+    # srcs = ["hip_backend.cpp"],
+    deps = [
+        "//src/mongo/db/exec/timeseries/hcindex/gpu:gpu_headers",
+    ],
+)
+
+# Metal backend for Apple Silicon using Metal-cpp (C++ wrapper)
+# This is a pure C++ implementation that uses Apple's Metal-cpp header-only library
+mongo_cc_library(
+    name = "metal_backend",
+    srcs = [
+        "metal_backend.cpp",
+    ],
+    hdrs = [
+        "metal_backend.h",
+    ],
+    copts = [
+        "-DMONGO_CONFIG_GPU_METAL",
+        "-std=c++17",
+    ],
+    linkopts = [
+        "-framework", "Metal",
+        "-framework", "Foundation",
+    ],
+    deps = [
+        "//src/mongo/db/exec/timeseries/hcindex/gpu:gpu_headers",
+        "//src/third_party/metal-cpp:metal_cpp",
+    ],
+)
+

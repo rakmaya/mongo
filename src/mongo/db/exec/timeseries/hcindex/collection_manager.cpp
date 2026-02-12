@@ -23,6 +23,7 @@
 #include "mongo/db/exec/timeseries/hcindex/collection_manager.h"
 
 #include "mongo/db/namespace_string.h"
+#include "mongo/util/scopeguard.h"
 #include "mongo/util/timer.h"
 #include "mongo/util/str.h"
 #include "mongo/logv2/log.h"
@@ -196,25 +197,72 @@ StatusWith<int64_t> HCIndexCollectionManager::encodeMetadata(OperationContext* o
 StatusWith<BSONObj> HCIndexCollectionManager::decodeMetadata(OperationContext* opCtx,
                                                              int64_t rowId,
                                                              const Timestamp& timestamp) {
+    LOGV2_DEBUG(9999992, 3, "HCIndex: [DECODE_METADATA] Called",
+                "rowId"_attr = rowId,
+                "timestamp"_attr = timestamp.toString());
+
+    // Lazy initialization: if not initialized for read, do it now
+    // This is needed after server restart when structures need to be rebuilt from disk.
+    // Unlike the SBE path where initializeForRead() is called explicitly and locks are
+    // managed via prepareForYield()/restoreForYield(), the lazy path needs to release
+    // locks when the operation completes. We use a ScopeGuard to ensure close() is
+    // called on all exit paths.
+    bool didLazyInit = false;
+    if (!initializedForRead) {
+        LOGV2_DEBUG(9999992, 3, "HCIndex: [DECODE_METADATA] Not initialized, initializing for read");
+        auto initStatus = initializeForRead(opCtx);
+        if (!initStatus.isOK()) {
+            LOGV2_WARNING(9999992, "HCIndex: [DECODE_METADATA] Failed to initialize for read",
+                          "error"_attr = initStatus);
+            // Continue anyway - structures might already be populated
+        } else {
+            didLazyInit = true;
+        }
+    }
+
+    // Scope guard to release locks on all exit paths if we lazily initialized
+    ScopeGuard cleanupGuard([&] {
+        if (didLazyInit) {
+            LOGV2_DEBUG(9999992, 3, "HCIndex: [DECODE_METADATA] Releasing lazy-init locks via close()");
+            close();
+        }
+    });
+
     if (!symbolDictionary || !attributeTable) {
+        LOGV2_WARNING(9999992, "HCIndex: [DECODE_METADATA] Structures not initialized",
+                      "hasSymbolDict"_attr = (symbolDictionary != nullptr),
+                      "hasAttrTable"_attr = (attributeTable != nullptr));
         return Status(ErrorCodes::InternalError, "HCIndex structures not initialized");
     }
 
     // Get the attribute table for this timestamp
     auto tableResult = attributeTable->getTableForTimestamp(timestamp);
     if (!tableResult.isOK()) {
+        LOGV2_DEBUG(9999992, 3, "HCIndex: [DECODE_METADATA] Table not in memory, reconstructing from disk",
+                    "timestamp"_attr = timestamp.toString());
         // Table doesn't exist in memory. Try to create/reconstruct it from disk.
         auto createResult = attributeTable->getOrCreateTableForTimestamp(opCtx, timestamp);
         if (!createResult.isOK()) {
+            LOGV2_WARNING(9999992, "HCIndex: [DECODE_METADATA] Failed to reconstruct table from disk",
+                          "error"_attr = createResult.getStatus());
             return createResult.getStatus();
         }
+        LOGV2_DEBUG(9999992, 3, "HCIndex: [DECODE_METADATA] Successfully reconstructed table from disk",
+                    "rowCount"_attr = createResult.getValue()->getRowCount());
         tableResult = createResult;
     }
     auto* table = tableResult.getValue();
 
+    LOGV2_DEBUG(9999992, 3, "HCIndex: [DECODE_METADATA] Got table",
+                "rowCount"_attr = table->getRowCount(),
+                "schemaSize"_attr = table->getSchema().size());
+
     // Get the row from the attribute table (returns vector of symbol indices)
     auto rowIndices = attributeTable->getRow(rowId, timestamp);
     if (!rowIndices) {
+        LOGV2_WARNING(9999992, "HCIndex: [DECODE_METADATA] Row not found",
+                      "rowId"_attr = rowId,
+                      "tableRowCount"_attr = table->getRowCount());
         return Status(ErrorCodes::NoSuchKey,
                       str::stream() << "Row not found for rowId: " << rowId);
     }
@@ -237,6 +285,9 @@ StatusWith<BSONObj> HCIndexCollectionManager::decodeMetadata(OperationContext* o
         // Decode the symbol
         auto symbolOpt = symbolDictionary->decodeSymbol(symbolIndex, timestamp);
         if (!symbolOpt) {
+            LOGV2_WARNING(9999992, "HCIndex: [DECODE_METADATA] Invalid symbol index",
+                          "symbolIndex"_attr = symbolIndex,
+                          "fieldName"_attr = schema[i]);
             return Status(ErrorCodes::BadValue,
                           str::stream() << "Invalid symbol index: " << symbolIndex);
         }
@@ -245,6 +296,9 @@ StatusWith<BSONObj> HCIndexCollectionManager::decodeMetadata(OperationContext* o
         builder.append(schema[i], symbolOpt.value());
     }
 
+    LOGV2_DEBUG(9999992, 3, "HCIndex: [DECODE_METADATA] Successfully decoded",
+                "rowId"_attr = rowId,
+                "fieldCount"_attr = indices.size());
     return builder.obj();
 }
 
@@ -315,10 +369,10 @@ StatusWith<std::vector<int64_t>> HCIndexCollectionManager::queryRows(
     // NOTE: Initialization should be done by the caller (e.g., TsBucketToCellBlockStage::open())
     // to avoid repeated initialization/close cycles per query.
     // The caller should call initializeForRead() once at the start and close() at the end.
+    // For lazy initialization (e.g., after server restart), we need to release locks when done
+    // since there's no yield/restore cycle to manage lock lifetime.
+    bool didLazyInit = false;
     if (!initializedForRead) {
-        LOGV2_WARNING(9999990,
-                      "HCIndexCollectionManager::queryRows called but not initialized. "
-                      "Caller should call initializeForRead() before queryRows()");
         // Try to initialize anyway as a fallback
         auto initStatus = initializeForRead(opCtx);
         if (!initStatus.isOK()) {
@@ -326,8 +380,28 @@ StatusWith<std::vector<int64_t>> HCIndexCollectionManager::queryRows(
                           "Failed to initialize reader for read operations",
                           "error"_attr = initStatus);
             // Continue anyway - the reader will try to acquire collections on-demand if needed
+        } else {
+            didLazyInit = true;
         }
     }
+
+    // Pointer to the table used in query (for deferred GPU upload)
+    AttributeTable* queryTable = nullptr;
+
+    // Scope guard to release locks on all exit paths if we lazily initialized,
+    // and trigger deferred GPU upload if needed
+    ScopeGuard cleanupGuard([&] {
+        // Trigger deferred GPU upload BEFORE releasing locks
+        // (GPU upload doesn't need locks, but we want to do it while table is still valid)
+        if (queryTable) {
+            queryTable->triggerDeferredGpuUploadIfNeeded();
+        }
+
+        if (didLazyInit) {
+            LOGV2_DEBUG(9999990, 3, "HCIndex: [QUERY_ROWS] Releasing lazy-init locks via close()");
+            close();
+        }
+    });
 
     if (!attributeTable) {
         return Status(ErrorCodes::InternalError, "HCIndex attribute table not initialized");
@@ -367,6 +441,7 @@ StatusWith<std::vector<int64_t>> HCIndexCollectionManager::queryRows(
     }
 
     auto table = tableResult.getValue();
+    queryTable = table;  // Store for deferred GPU upload in cleanup guard
 
     // Convert the MatchExpression to an AttributeTablePredicate
     auto predicateResult = table->convertMatchExpressionToPredicate(matchExpr);
