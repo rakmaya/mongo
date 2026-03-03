@@ -40,7 +40,8 @@ representation. But, it is not terribly hard either.
 
 # 2. Status of This Document
 
-This document defines a research and implementation proposal.
+This document defines a research and implementation phases. Document also provides
+relevant links to a reference implementation.
 
 **Status**: Complete
 
@@ -503,9 +504,9 @@ valueFrequency > denseThreshold → always indexed for small and high-cardinalit
 otherwise → indexed dynamically based on observed ingestion and query statistics.
 ```
 
-7 Proposed Implementation Phases
+# 7 Proposed Implementation Phases
 
-### 7.1 Phase 0 Reference Implementation - DONE
+## 7.1 Phase 0 Reference Implementation - DONE
 This Code.
 - Basic implemenation of Dictionary and Attribute Table
 - ompact roaring Bitmap Index
@@ -543,7 +544,7 @@ A chunk of changes are required on the query side to move foward into production
 - Integration Tests
 
 
-# References
+# 8. References
 
 Reference Implementation In MongoDB: https://github.com/rakmaya/mongo/tree/tsrefimpl/src/mongo/db/exec/timeseries/hcindex
 
@@ -553,7 +554,7 @@ Initial RFC: https://docs.google.com/document/d/1FCaXGIuEtUtW3GrZ_xgCeCqZ5sXcEHS
 
 Early Implementation in M3DB: https://github.com/rmravindran/boostdb
 
-# Appendix: Reference Implementation - Developer Documentation
+# 9. Appendix: Reference Implementation - Developer Documentation
 
 I am calling the reference implementation as  "Phase-0" since this is not a production-grade implementation.
 I have outlined what is needed at the minimum in the Phase-1 and subsequent possibilities in other phases, if the proposal is to be funded.
