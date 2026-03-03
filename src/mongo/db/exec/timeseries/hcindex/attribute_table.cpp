@@ -36,6 +36,7 @@
 #include "mongo/base/error_codes.h"
 #include "mongo/db/exec/timeseries/hcindex/bitmap_index.h"
 #include "mongo/db/exec/timeseries/hcindex/gpu/gpu_attribute_table.h"
+#include "mongo/db/exec/timeseries/hcindex/gpu/gpu_attribute_table_manager.h"
 #include "mongo/db/exec/timeseries/hcindex/writer.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/update/path_support.h"
@@ -555,6 +556,11 @@ std::vector<int64_t> AttributeTable::queryRowsLeaf(const std::vector<uint32_t>& 
                   "columnsNeedingScan"_attr = columnsNeedingScan.size());
             */
 
+            // Record access for LAL ordering
+            if (!_gpuTableId.empty()) {
+                gpu::GpuAttributeTableManager::instance().recordAccess(_gpuTableId);
+            }
+
             // Time GPU execution
             auto gpuStart = std::chrono::high_resolution_clock::now();
             auto gpuResult = queryRowsLeafGpu(refRowVec);
@@ -851,30 +857,58 @@ void AttributeTable::ensureGpuTableUploaded() const {
 
     _gpuUploadAttempted = true;
 
-    // Create GPU table if not exists
+    // Get the GPU table manager
+    auto& manager = gpu::GpuAttributeTableManager::instance();
+
+    // Check if GPU is available at all
+    if (!manager.isGpuAvailable()) {
+        LOGV2(9999991, "HCIndex: GPU not available via manager, skipping upload");
+        return;
+    }
+
+    // Build unique table ID from collection UUID + window timestamps
+    if (_gpuTableId.empty() && _writer) {
+        _gpuTableId = _writer->getCollectionUUID().toString() + "_" +
+                      _windowStart.toString() + "_" + _windowEnd.toString();
+    } else if (_gpuTableId.empty()) {
+        // Fallback: use window timestamps only (less unique but works without writer)
+        _gpuTableId = "table_" + _windowStart.toString() + "_" + _windowEnd.toString();
+    }
+
+    // Get or create GPU table from manager
     if (!_gpuTable) {
-        _gpuTable = std::make_unique<gpu::GpuAttributeTable>();
-        LOGV2(9999991, "HCIndex: Created GPU table",
+        _gpuTable = manager.getOrCreate(_gpuTableId);
+        if (!_gpuTable) {
+            LOGV2(9999991, "HCIndex: Failed to get GPU table from manager");
+            return;
+        }
+        LOGV2(9999991, "HCIndex: Got GPU table from manager",
+              "tableId"_attr = _gpuTableId,
               "backendName"_attr = _gpuTable->getDeviceInfo().name);
     }
 
-    // Check if GPU is available
+    // Check if GPU is available for this table
     if (!_gpuTable->isGpuAvailable()) {
-        LOGV2(9999991, "HCIndex: GPU not available, skipping upload",
+        LOGV2(9999991, "HCIndex: GPU not available for table, skipping upload",
               "backendName"_attr = _gpuTable->getDeviceInfo().name);
         return;
     }
 
     // Upload current data to GPU
     LOGV2(9999991, "HCIndex: Uploading data to GPU...",
+          "tableId"_attr = _gpuTableId,
           "rowCount"_attr = _columns.empty() ? 0 : _columns[0].size(),
           "columnCount"_attr = _columns.size());
 
     _gpuTable->uploadFromCpu(_columns);
     _gpuDataStale = false;
 
+    // Record access for LAL ordering
+    manager.recordAccess(_gpuTableId);
+
     LOGV2(9999991,
           "HCIndex: Successfully uploaded AttributeTable to GPU",
+          "tableId"_attr = _gpuTableId,
           "rowCount"_attr = _columns.empty() ? 0 : _columns[0].size(),
           "columnCount"_attr = _columns.size(),
           "device"_attr = _gpuTable->getDeviceInfo().name);

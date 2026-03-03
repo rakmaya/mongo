@@ -30,6 +30,7 @@
 #include "mongo/db/exec/timeseries/hcindex/gpu/gpu_attribute_table.h"
 
 #include "mongo/db/exec/timeseries/hcindex/attribute_table.h"
+#include "mongo/db/exec/timeseries/hcindex/gpu/execution_frame.h"
 
 namespace mongo::timeseries::hcindex::gpu {
 
@@ -38,29 +39,25 @@ namespace mongo::timeseries::hcindex::gpu {
 
 
 GpuAttributeTable::GpuAttributeTable()
-    : _backend(createDefaultBackend()) {}
+    : _context(createExecutionContext(createDefaultBackend())) {}
 
 GpuAttributeTable::GpuAttributeTable(std::unique_ptr<GpuBackend> backend)
-    : _backend(std::move(backend)) {
-    if (!_backend) {
-        _backend = createDefaultBackend();
+    : _context(createExecutionContext(std::move(backend))) {
+    if (!_context) {
+        _context = createExecutionContext(createDefaultBackend());
     }
 }
 
 GpuAttributeTable::GpuAttributeTable(GpuAttributeTable&& other) noexcept
-    : _backend(std::move(other._backend)),
+    : _context(std::move(other._context)),
       _gpuColumns(std::move(other._gpuColumns)),
-      _filterResultBitmap(other._filterResultBitmap),
-      _matchingRowIds(other._matchingRowIds),
       _rowCount(other._rowCount),
       _columnCount(other._columnCount),
-      _bitmapSizeBytes(other._bitmapSizeBytes),
-      _rowIdsSizeBytes(other._rowIdsSizeBytes),
       _isUploaded(other._isUploaded) {
-    // Clear the moved-from object's handles to prevent double-free
-    other._filterResultBitmap = nullptr;
-    other._matchingRowIds = nullptr;
+    // Clear the moved-from object's state
     other._gpuColumns.clear();
+    other._rowCount = 0;
+    other._columnCount = 0;
     other._isUploaded = false;
 }
 
@@ -79,19 +76,15 @@ GpuAttributeTable::~GpuAttributeTable() {
 GpuAttributeTable& GpuAttributeTable::operator=(GpuAttributeTable&& other) noexcept {
     if (this != &other) {
         release();
-        _backend = std::move(other._backend);
+        _context = std::move(other._context);
         _gpuColumns = std::move(other._gpuColumns);
-        _filterResultBitmap = other._filterResultBitmap;
-        _matchingRowIds = other._matchingRowIds;
         _rowCount = other._rowCount;
         _columnCount = other._columnCount;
-        _bitmapSizeBytes = other._bitmapSizeBytes;
-        _rowIdsSizeBytes = other._rowIdsSizeBytes;
         _isUploaded = other._isUploaded;
 
-        other._filterResultBitmap = nullptr;
-        other._matchingRowIds = nullptr;
         other._gpuColumns.clear();
+        other._rowCount = 0;
+        other._columnCount = 0;
         other._isUploaded = false;
     }
     return *this;
@@ -102,12 +95,12 @@ GpuAttributeTable& GpuAttributeTable::operator=(GpuAttributeTable&& other) noexc
 
 
 bool GpuAttributeTable::isGpuAvailable() const {
-    return _backend && _backend->isAvailable();
+    return _context && _context->getBackend() && _context->getBackend()->isAvailable();
 }
 
 DeviceInfo GpuAttributeTable::getDeviceInfo() const {
-    if (_backend) {
-        return _backend->getDeviceInfo();
+    if (_context && _context->getBackend()) {
+        return _context->getBackend()->getDeviceInfo();
     }
     return DeviceInfo{};
 }
@@ -115,14 +108,34 @@ DeviceInfo GpuAttributeTable::getDeviceInfo() const {
 std::vector<int64_t> GpuAttributeTable::filter(
     const std::vector<GpuColumnPredicate>& predicates) const {
 
-    if (!_isUploaded || !_backend || predicates.empty() || _rowCount == 0) {
+    if (!_isUploaded || !_context || predicates.empty() || _rowCount == 0) {
         return {};
     }
 
-    size_t bitmapWords = (_rowCount + 31) / 32;
+    // Acquire a frame for this filter operation
+    auto frame = _context->acquireFrame();
+    frame->begin();
 
-    // Process predicates using the backend
+    // Calculate sizes
+    size_t bitmapWords = (_rowCount + 31) / 32;
+    size_t bitmapSizeBytes = bitmapWords * sizeof(uint32_t);
+    size_t rowIdsSizeBytes = _rowCount * sizeof(int64_t);
+
+    // Allocate transient buffers for this operation
+    FrameBufferHandle resultBitmap = frame->allocateTransient(bitmapSizeBytes);
+    FrameBufferHandle rowIdsBuffer = frame->allocateTransient(rowIdsSizeBytes);
+
+    // Register external column buffers
+    std::vector<FrameBufferHandle> columnHandles;
+    columnHandles.reserve(_columnCount);
+    size_t columnSizeBytes = _rowCount * sizeof(uint32_t);
+    for (size_t i = 0; i < _columnCount; ++i) {
+        columnHandles.push_back(frame->registerExternalBuffer(_gpuColumns[i], columnSizeBytes));
+    }
+
+    // Process predicates
     bool firstPredicate = true;
+    FrameBufferHandle tempBitmap = kInvalidFrameBuffer;
 
     for (const auto& pred : predicates) {
         if (pred.columnIndex >= _columnCount) {
@@ -131,33 +144,41 @@ std::vector<int64_t> GpuAttributeTable::filter(
 
         if (firstPredicate) {
             // First predicate: write directly to result bitmap
-            _backend->filterColumn(_gpuColumns[pred.columnIndex],
-                                   _rowCount,
-                                   pred.op,
-                                   pred.value,
-                                   _filterResultBitmap);
+            frame->filterColumn(columnHandles[pred.columnIndex],
+                                _rowCount,
+                                pred.op,
+                                pred.value,
+                                resultBitmap);
             firstPredicate = false;
         } else {
-            // Subsequent predicates: create temp bitmap and AND with result
-            GpuBufferHandle tempBitmap = _backend->allocate(_bitmapSizeBytes);
-            _backend->filterColumn(_gpuColumns[pred.columnIndex],
-                                   _rowCount,
-                                   pred.op,
-                                   pred.value,
-                                   tempBitmap);
-            _backend->andBitmaps(_filterResultBitmap, tempBitmap, bitmapWords);
-            _backend->free(tempBitmap);
+            // Subsequent predicates: use temp bitmap and AND with result
+            if (tempBitmap == kInvalidFrameBuffer) {
+                tempBitmap = frame->allocateTransient(bitmapSizeBytes);
+            }
+            frame->filterColumn(columnHandles[pred.columnIndex],
+                                _rowCount,
+                                pred.op,
+                                pred.value,
+                                tempBitmap);
+            frame->andBitmaps(resultBitmap, tempBitmap, bitmapWords);
         }
     }
 
+    // Submit and wait for completion
+    frame->submit();
+    frame->waitUntilCompleted();
+
     // Compact matching row IDs
-    size_t matchCount = _backend->compactRowIds(_filterResultBitmap, _rowCount, _matchingRowIds);
+    size_t matchCount = frame->compactRowIds(resultBitmap, _rowCount, rowIdsBuffer);
 
     // Copy results back to host
     std::vector<int64_t> result(matchCount);
     if (matchCount > 0) {
-        _backend->copyToHost(result.data(), _matchingRowIds, matchCount * sizeof(int64_t));
+        frame->copyToHost(result.data(), rowIdsBuffer, matchCount * sizeof(int64_t));
     }
+
+    // Release frame back to the pool
+    _context->releaseFrame(std::move(frame));
 
     return result;
 }
@@ -175,7 +196,7 @@ std::vector<int64_t> GpuAttributeTable::filterColumn(size_t columnIndex,
 void GpuAttributeTable::uploadFromCpu(const AttributeTable& cpuTable) {
     release();
 
-    if (!_backend || !_backend->isAvailable()) {
+    if (!_context || !_context->getBackend() || !_context->getBackend()->isAvailable()) {
         return;
     }
 
@@ -191,9 +212,13 @@ void GpuAttributeTable::uploadFromCpu(const AttributeTable& cpuTable) {
         return;
     }
 
-    // Allocate and upload each column
+    // Allocate and upload each column using persistent buffers
     _gpuColumns.resize(_columnCount, nullptr);
     size_t columnSizeBytes = _rowCount * sizeof(uint32_t);
+
+    // Use a frame for the upload operations
+    auto frame = _context->acquireFrame();
+    frame->begin();
 
     for (size_t colIdx = 0; colIdx < _columnCount; ++colIdx) {
         // Extract column data by iterating rows
@@ -209,19 +234,15 @@ void GpuAttributeTable::uploadFromCpu(const AttributeTable& cpuTable) {
             }
         }
 
-        // Allocate GPU buffer and upload
-        _gpuColumns[colIdx] = _backend->allocate(columnSizeBytes);
-        _backend->copyToDevice(_gpuColumns[colIdx], columnData.data(), columnSizeBytes);
+        // Allocate persistent GPU buffer and upload
+        _gpuColumns[colIdx] = _context->allocatePersistent(columnSizeBytes);
+        auto colHandle = frame->registerExternalBuffer(_gpuColumns[colIdx], columnSizeBytes);
+        frame->copyToDevice(colHandle, columnData.data(), columnSizeBytes);
     }
 
-    // Allocate filter result bitmap (1 bit per row, rounded up to uint32_t words)
-    size_t bitmapWords = (_rowCount + 31) / 32;
-    _bitmapSizeBytes = bitmapWords * sizeof(uint32_t);
-    _filterResultBitmap = _backend->allocate(_bitmapSizeBytes);
-
-    // Allocate space for matching row IDs (worst case: all rows match)
-    _rowIdsSizeBytes = _rowCount * sizeof(int64_t);
-    _matchingRowIds = _backend->allocate(_rowIdsSizeBytes);
+    frame->submit();
+    frame->waitUntilCompleted();
+    _context->releaseFrame(std::move(frame));
 
     _isUploaded = true;
 }
@@ -230,7 +251,7 @@ void GpuAttributeTable::uploadFromCpu(const std::vector<std::vector<uint32_t>>& 
     // Release any existing GPU resources
     release();
 
-    if (!_backend || !_backend->isAvailable()) {
+    if (!_context || !_context->getBackend() || !_context->getBackend()->isAvailable()) {
         return;
     }
 
@@ -245,67 +266,53 @@ void GpuAttributeTable::uploadFromCpu(const std::vector<std::vector<uint32_t>>& 
         return;
     }
 
-    // Allocate and upload each column directly (already in columnar format)
+    // Allocate and upload each column using persistent buffers
     _gpuColumns.resize(_columnCount, nullptr);
     size_t columnSizeBytes = _rowCount * sizeof(uint32_t);
+
+    // Use a frame for the upload operations
+    auto frame = _context->acquireFrame();
+    frame->begin();
 
     for (size_t colIdx = 0; colIdx < _columnCount; ++colIdx) {
         const auto& column = columns[colIdx];
 
-        // Allocate GPU buffer and upload
-        _gpuColumns[colIdx] = _backend->allocate(columnSizeBytes);
+        // Allocate persistent GPU buffer
+        _gpuColumns[colIdx] = _context->allocatePersistent(columnSizeBytes);
+        auto colHandle = frame->registerExternalBuffer(_gpuColumns[colIdx], columnSizeBytes);
 
         // Handle columns that are shorter (schema evolution)
         if (column.size() >= _rowCount) {
-            _backend->copyToDevice(_gpuColumns[colIdx], column.data(), columnSizeBytes);
+            frame->copyToDevice(colHandle, column.data(), columnSizeBytes);
         } else {
             // Pad with zeros for missing values
             std::vector<uint32_t> paddedColumn(column);
             paddedColumn.resize(_rowCount, 0);
-            _backend->copyToDevice(_gpuColumns[colIdx], paddedColumn.data(), columnSizeBytes);
+            frame->copyToDevice(colHandle, paddedColumn.data(), columnSizeBytes);
         }
     }
 
-    // Allocate filter result bitmap (1 bit per row, rounded up to uint32_t words)
-    size_t bitmapWords = (_rowCount + 31) / 32;
-    _bitmapSizeBytes = bitmapWords * sizeof(uint32_t);
-    _filterResultBitmap = _backend->allocate(_bitmapSizeBytes);
-
-    // Allocate space for matching row IDs (worst case: all rows match)
-    _rowIdsSizeBytes = _rowCount * sizeof(int64_t);
-    _matchingRowIds = _backend->allocate(_rowIdsSizeBytes);
+    frame->submit();
+    frame->waitUntilCompleted();
+    _context->releaseFrame(std::move(frame));
 
     _isUploaded = true;
 }
 
 void GpuAttributeTable::release() {
-    if (_backend) {
-        // Free column buffers
+    if (_context) {
+        // Free persistent column buffers
         for (auto& col : _gpuColumns) {
             if (col) {
-                _backend->free(col);
+                _context->freePersistent(col);
                 col = nullptr;
             }
         }
         _gpuColumns.clear();
-
-        // Free bitmap buffer
-        if (_filterResultBitmap) {
-            _backend->free(_filterResultBitmap);
-            _filterResultBitmap = nullptr;
-        }
-
-        // Free row IDs buffer
-        if (_matchingRowIds) {
-            _backend->free(_matchingRowIds);
-            _matchingRowIds = nullptr;
-        }
     }
 
     _rowCount = 0;
     _columnCount = 0;
-    _bitmapSizeBytes = 0;
-    _rowIdsSizeBytes = 0;
     _isUploaded = false;
 }
 

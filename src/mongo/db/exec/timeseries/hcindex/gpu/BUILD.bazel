@@ -26,6 +26,7 @@ config_setting(
 mongo_cc_library(
     name = "gpu_headers",
     hdrs = [
+        "execution_frame.h",
         "gpu_backend.h",
         "gpu_buffer.h",
         "gpu_common.h",
@@ -34,6 +35,21 @@ mongo_cc_library(
     ],
     deps = [
         "//src/mongo:base",
+    ],
+)
+
+# ExecutionFrame - frame-based GPU command management
+mongo_cc_library(
+    name = "execution_frame",
+    srcs = [
+        "execution_frame.cpp",
+    ],
+    hdrs = [
+        "execution_frame.h",
+    ],
+    deps = [
+        ":gpu_headers",
+        ":gpu_backend",
     ],
 )
 
@@ -71,7 +87,27 @@ mongo_cc_library(
         "-DMONGO_CONFIG_GPU_METAL",
     ],
     deps = [
+        ":execution_frame",
         ":gpu_backend",
+        ":gpu_headers",
+    ],
+)
+
+# GPU AttributeTable Manager - manages lifecycle of GPU tables
+mongo_cc_library(
+    name = "gpu_attribute_table_manager",
+    srcs = [
+        "gpu_attribute_table_manager.cpp",
+    ],
+    hdrs = [
+        "gpu_attribute_table_manager.h",
+    ],
+    copts = [
+        "-DMONGO_CONFIG_GPU_METAL",
+    ],
+    deps = [
+        ":execution_frame",
+        ":gpu_attribute_table",
         ":gpu_headers",
     ],
 )
@@ -80,7 +116,9 @@ mongo_cc_library(
 mongo_cc_library(
     name = "hcindex_gpu",
     deps = [
+        ":execution_frame",
         ":gpu_attribute_table",
+        ":gpu_attribute_table_manager",
         ":gpu_backend",
         ":gpu_headers",
     ],

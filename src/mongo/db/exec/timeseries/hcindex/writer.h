@@ -125,6 +125,16 @@ public:
      */
     std::string getBitmapOperationsCollectionName() const;
 
+    /**
+     * Get the collection UUID this writer is associated with.
+     */
+    const UUID& getCollectionUUID() const { return collectionUUID; }
+
+    /**
+     * Get the database name this writer is associated with.
+     */
+    const DatabaseName& getDbName() const { return dbName; }
+
 
     //- MODIFIERS
 

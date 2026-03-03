@@ -54,6 +54,7 @@ class MatchExpression;
 // Forward declaration for GPU support
 namespace mongo::timeseries::hcindex::gpu {
 class GpuAttributeTable;
+class GpuAttributeTableManager;
 }  // namespace mongo::timeseries::hcindex::gpu
 
 namespace mongo::timeseries::hcindex {
@@ -204,8 +205,7 @@ public:
                    const Timestamp& windowEnd = Timestamp());
 
     /**
-     * Destructor - must be declared here and defined in .cpp because of unique_ptr
-     * to forward-declared GpuAttributeTable.
+     * Destructor.
      */
     ~AttributeTable();
 
@@ -419,9 +419,13 @@ private:
 
     //- GPU ACCELERATION
 
-    // GPU-accelerated table (optional, created on-demand when beneficial).
+    // Unique identifier for this table in the GPU manager (collection UUID + window).
+    mutable std::string _gpuTableId;
+
+    // GPU-accelerated table (managed by GpuAttributeTableManager singleton).
     // Uses Metal on Apple Silicon, HIP on AMD/NVIDIA, or NullBackend if no GPU.
-    mutable std::unique_ptr<gpu::GpuAttributeTable> _gpuTable;
+    // NOTE: This is a non-owning pointer; the manager owns the table.
+    mutable gpu::GpuAttributeTable* _gpuTable = nullptr;
 
     // Whether we've attempted to upload to GPU (to avoid repeated failed attempts)
     mutable bool _gpuUploadAttempted = false;

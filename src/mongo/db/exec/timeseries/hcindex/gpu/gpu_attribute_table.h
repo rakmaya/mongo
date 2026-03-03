@@ -33,6 +33,7 @@
 #include <memory>
 #include <vector>
 
+#include "mongo/db/exec/timeseries/hcindex/gpu/execution_frame.h"
 #include "mongo/db/exec/timeseries/hcindex/gpu/gpu_backend.h"
 
 namespace mongo::timeseries::hcindex {
@@ -187,23 +188,16 @@ public:
     GpuAttributeTable& operator=(const GpuAttributeTable&) = delete;
 
 private:
-    // GPU backend (HIP, Metal, or Null)
-    std::unique_ptr<GpuBackend> _backend;
+    // Execution context for GPU operations (owns the backend and frame pool)
+    std::unique_ptr<ExecutionContext> _context;
 
     // GPU buffer is a columnar layout for coalesced memory access.
     // Changing this layout will have significant performance impact.
+    // These are persistent buffers allocated through the context.
     std::vector<GpuBufferHandle> _gpuColumns;
-
-    // Temporary buffer for filter results (bitmap: 1 bit per row)
-    mutable GpuBufferHandle _filterResultBitmap = nullptr;
-
-    // Buffer for compacted row IDs
-    mutable GpuBufferHandle _matchingRowIds = nullptr;
 
     size_t _rowCount = 0;
     size_t _columnCount = 0;
-    size_t _bitmapSizeBytes = 0;
-    size_t _rowIdsSizeBytes = 0;
     bool _isUploaded = false;
 };
 

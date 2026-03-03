@@ -19,8 +19,35 @@ work onto the GPU command buffer. Game engines does this pipelining most
 efficiently. To get to that level, there is a good chunk of changes requied
 in our query engine. More on this later.
 
-First goal of PoC is to prove the performance advantage compared to the CPU.
+`Execution Frame` manages a set of contexts. A frame is tied to a device and a
+device may only ever have 1-frame. In system with multiple gpu devices, there
+will be multiple execution frames. Within a device, parallel execution is
+achieved by having different `Execution Contexts`. A given collection's GPU
+memory structures are owned by a specific context. This mapping is determined by
+the hash-id of the collection-uuid. Context owns GPUBuffers, Fences and other
+Async operational constructs.  Complex (nested or aggregation queries) can
+leverage two parallel knobs:
+1. multiple command buffers where each command
+buffer operates independently wherever possible (e.g. window aggregations).
+2. multiple commands pushed onto the same command buffer and let gpu handle task
+level parallelism wherever possible (e.g nested queries parallel sub-queries).
 
+When a device is reset (by OS or other kernel events), all resources in the
+frame is re-created. Data is re-uploaded to the GPU memory during such reset.
+Parameters like `uploadStrategyOnReset` controls how aggresively the data
+re-upload happens. When `uploadStrategyOnReset=="Balanced"` implies that the
+system will auto balance the upload depending on the usage pattern and when this
+is set of `"Lazy"`, no upload takes place until the first usage of the memory
+happens. Setting this to `"All"` will force a reload of all data.
+
+`Segmented GPU Memory` is another important concept used to partition the
+GPU memory.
+* L0 Segment: For tables that are actively being written to or queried frequently.
+  * Higher priority, not evicted unless memory is critically low.
+* L1 Segment: For tables that are read-only and less frequently accessed.
+  * Subject to LAL eviction when memory pressure is high.
+
+First goal of PoC is to prove the performance advantage compared to the CPU.
 
 ## Architecture
 
