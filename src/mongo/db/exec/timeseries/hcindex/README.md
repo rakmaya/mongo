@@ -1,4 +1,4 @@
-# HCIndex (High Cardinality Indexing) for MongoDB Timeseries
+# Time parametrized high cardinality indexing (HCIndex)
 
 # 1. Abstract
 
@@ -20,7 +20,7 @@ is expected to unlock emerging analytical workloads and position the database
 as a primary system of record for event-driven architectures, thereby
 simplifying data stacks and improving developer experience.
 
-The prosed idea is provided along with a [reference implementation](https://github.com/10gen/mongo/tree/rravindr/hcrefimpl/src/mongo/db/exec/timeseries/hcindex)
+The prosed idea is provided along with a [reference implementation](https://github.com/rakmaya/mongo/tree/tsrefimpl/src/mongo/db/exec/timeseries/hcindex)
 in the MongoDB database code and is located in the same branch where this RFC
 is. See Reference section for more information.
 
